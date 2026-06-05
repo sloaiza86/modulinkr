@@ -1,0 +1,33 @@
+{
+    "folders": [
+        {
+            "name": "ModuLinkr (monorepo)",
+            "path": "."
+        },
+        {
+            "name": "nodo",
+            "path": "nodo"
+        }
+    ],
+    "settings": {
+        "files.exclude": {
+            "**/.pio": true,
+            "**/.DS_Store": true
+        },
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "editor.rulers": [100],
+        "editor.tabSize": 4,
+        "[cpp]": {
+            "editor.tabSize": 4,
+            "editor.detectIndentation": false
+        }
+    },
+    "extensions": {
+        "recommendations": [
+            "platformio.platformio-ide",
+            "eamodio.gitlens",
+            "ms-vscode.cpptools"
+        ]
+    }
+}
