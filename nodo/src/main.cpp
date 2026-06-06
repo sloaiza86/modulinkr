@@ -1,4 +1,4 @@
-// ModuLinkr — Firmware del nodo (V1)
+// ModuLinkr, firmware del nodo (V1)
 // H1: lectura periódica del XY-MD02 por Modbus RTU a través del bus RS-485
 // del Atom DTU LoRaWAN. Sin LoRa ni NB-IoT todavía.
 //
@@ -69,7 +69,7 @@ void setup() {
     Serial.println(F("=============================================="));
     Serial.printf ("  %s  v%s\n", kFirmwareName, kFirmwareVersion);
     Serial.printf ("  region=%s  modem=%s\n", kRegionLabel, kModemLabel);
-    Serial.println(F("  H1 — lectura XY-MD02 cada 1 s vía Modbus RTU"));
+    Serial.println(F("  H1: lectura XY-MD02 cada 1 s vía Modbus RTU"));
     Serial.printf ("  RS-485: %lu 8N1  pin_rx=%d pin_tx=%d\n",
                    kRs485Baud,
                    static_cast<int>(kRs485RxPin),

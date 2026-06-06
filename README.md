@@ -1,6 +1,6 @@
 # ModuLinkr
 
-Arquitectura híbrida y redundante para IoT industrial: lectura de dispositivos **Modbus RTU** por RS-485 y publicación de los datos por dos caminos inalámbricos en paralelo — **LoRa** local multi-salto y **NB-IoT / LTE-M** como contingencia celular.
+Arquitectura híbrida y redundante para IoT industrial: lectura de dispositivos **Modbus RTU** por RS-485 y publicación de los datos por dos caminos inalámbricos en paralelo, **LoRa** local multi-salto y **NB-IoT** como respaldo celular.
 
 El nombre captura los tres ejes del sistema: **Modu** (Modbus), **Link** (enlace inalámbrico), y el sufijo final como guiño a la cultura de software open-source.
 
@@ -9,8 +9,8 @@ El nombre captura los tres ejes del sistema: **Modu** (Modbus), **Link** (enlace
 ```
 firmware/
 ├── nodo/         Firmware del nodo (Atom Lite + DTU LoRa + NB-IoT2 + Modbus)
-├── supernodo/    Firmware del supernodo (Pi Zero 2W) — pendiente
-├── gateway/      Firmware del gateway (Pi 5) — pendiente
+├── supernodo/    Firmware del supernodo (Pi Zero 2W), pendiente
+├── gateway/      Firmware del gateway (Pi 5), pendiente
 └── shared/       Especificaciones y librerías comunes a varios roles
     └── protocol/   Formato de tramas, jerarquía MQTT, etc.
 ```

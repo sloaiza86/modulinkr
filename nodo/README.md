@@ -1,4 +1,4 @@
-# ModuLinkr — Nodo (V1)
+# ModuLinkr, nodo (V1)
 
 Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las medidas por dos canales redundantes: LoRa P2P (cadencia rápida, local) y NB-IoT (cadencia baja, contingencia con respaldo en la nube).
 
@@ -41,21 +41,22 @@ Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las med
 
 | Hito | Descripción | Estado |
 | --- | --- | --- |
-| H0 | Estructura inicial del repo, stub compilable | En curso |
-| H1 | Modbus → consola: lectura XY-MD02 cada 1 s, volcado por `Serial` | Pendiente |
+| H0 | Estructura inicial del repo, stub compilable | Completado (tag `v0.0.1-h0`) |
+| H1 | Modbus → consola: lectura XY-MD02 cada 1 s, volcado por `Serial` | Completado (tag `v0.0.2-h1`) |
 | H2 | LoRa P2P en aislamiento: envío de payload mínimo cada N s al canal de prueba | Pendiente |
 | H3 | NB-IoT en aislamiento: attach + 1 publish MQTT manual | Pendiente |
 | H4 | H1 + H2 integrados en una sola tarea | Pendiente |
-| H5 | Añadir `taskNbiot` con cola FreeRTOS compartida y batch JSON cada 5 min | Pendiente |
+| H5 | Añadir tarea NB-IoT con cola FreeRTOS compartida y batch JSON periódico (modo prueba de concepto cada 5 min) | Pendiente |
 | H6 | Consola estructurada con timestamps, LED de estado, manejo de errores | Pendiente |
 
 ## Cadencia de envío y duty cycle
 
 | Canal | Cadencia objetivo | Notas |
 | --- | --- | --- |
-| LoRa | cada 1 s (US915 en banco), cada 1 s (EU868 g3 869.525 MHz al portar) | SF7 BW125, payload mínimo 4 B → ToA ≈ 41 ms |
-| NB-IoT | cada 5 min | Batch con las ~300 muestras anteriores serializadas como JSON |
-| Consola | continua, formato append con timestamp | Sin cadencia fija — cada evento imprime una línea |
+| LoRa | cada 1 s, US915 en banco; cada 1 s en EU868 g3 (869.525 MHz) al portar | SF7 BW125. Trama TELEMETRY con 2 reads = 16 bytes (ver `shared/protocol/frame-format.md` §6), ToA ≈ 57 ms |
+| NB-IoT, fase prueba de concepto (actual) | cada 5 min | Publica un batch periódico para validar que LoRa y NB-IoT conviven sin interferirse |
+| NB-IoT, fase operacional (post-validación) | respaldo selectivo | Se activa solo cuando una racha de ACKs LoRa falla. Mecanismo en `shared/protocol/node-config.md` §4.3 |
+| Consola | continua, formato append con timestamp | Sin cadencia fija. Cada evento imprime una línea |
 
 ## Compilar y flashear
 
@@ -74,16 +75,15 @@ Atajos en VS Code: `PlatformIO: Build`, `PlatformIO: Upload`, `PlatformIO: Monit
 
 ```
 nodo/
-├── platformio.ini          Configuración del proyecto
+├── platformio.ini          Configuración del proyecto (incluye REGION_*, MODEM_*)
 ├── src/
-│   ├── main.cpp            Punto de entrada, setup + tareas
-│   ├── region.h            Constantes regionales (LoRa freq, potencia, etc.)
-│   ├── modbus.{cpp,h}      Driver Modbus RTU sobre AT del DTU
-│   ├── lora.{cpp,h}        Driver LoRa P2P sobre AT del DTU
-│   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028
-│   ├── buffer.{cpp,h}      Cola circular FreeRTOS para muestras
-│   └── console.{cpp,h}     Logging estructurado por Serial
+│   ├── main.cpp            Punto de entrada, setup + tareas (existe)
+│   ├── modbus.{cpp,h}      Driver Modbus RTU sobre RS-485 (existe)
+│   ├── lora.{cpp,h}        Driver LoRa P2P sobre AT del DTU (pendiente, H2)
+│   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028 (pendiente, H3)
+│   ├── buffer.{cpp,h}      Cola circular FreeRTOS para muestras (pendiente, H4-H5)
+│   └── console.{cpp,h}     Logging estructurado por Serial (pendiente, H6)
 └── lib/                    Librerías propias específicas del nodo
 ```
 
-Los archivos `.cpp/.h` se irán creando conforme avancemos por los hitos. Para H0 solo existe `main.cpp` como stub.
+Las constantes regionales (`REGION_US915` / `REGION_EU868`) viven en `platformio.ini` como `build_flags`, no en un header dedicado.

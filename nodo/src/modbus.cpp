@@ -1,4 +1,4 @@
-// ModuLinkr — Driver Modbus RTU sobre RS-485 (implementación)
+// ModuLinkr, driver Modbus RTU sobre RS-485 (implementación)
 
 #include "modbus.h"
 

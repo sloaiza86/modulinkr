@@ -1,4 +1,4 @@
-// ModuLinkr — Driver Modbus RTU sobre RS-485
+// ModuLinkr, driver Modbus RTU sobre RS-485
 //
 // Implementación mínima para hablar Modbus RTU como maestro a través
 // del transceptor SP3485EN del Atom DTU LoRaWAN, conectado al ESP32
@@ -11,7 +11,7 @@
 // Notas de diseño:
 //   - CRC16 estándar Modbus (poly 0xA001, init 0xFFFF).
 //   - El SP3485EN del DTU está en auto-dirección, así que basta con un
-//     HardwareSerial estándar — sin pines DE/RE.
+//     HardwareSerial estándar, sin pines DE/RE.
 //   - El tiempo entre tramas (3.5 caracteres a 9600 baudios ≈ 3.65 ms)
 //     se cumple sobradamente con el espaciado natural del loop a 1 Hz.
 
