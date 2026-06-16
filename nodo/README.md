@@ -43,9 +43,10 @@ Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las med
 | --- | --- | --- |
 | H0 | Estructura inicial del repo, stub compilable | Completado (tag `v0.0.1-h0`) |
 | H1 | Modbus → consola: lectura XY-MD02 cada 1 s, volcado por `Serial` | Completado (tag `v0.0.2-h1`) |
-| H2 | LoRa P2P en aislamiento: envío de payload mínimo cada N s al canal de prueba | Pendiente |
+| H2 emisor | LoRa P2P, solo TX: trama TELEMETRY según `frame-format.md` cada 1 s tras lectura Modbus OK | Completado (tag `v0.0.4-h2-tx`) |
+| H2 receptor | LoRa P2P, RX con segundo DTU o SDR para validar payload extremo a extremo y emitir ACKs | Pendiente |
 | H3 | NB-IoT en aislamiento: attach + 1 publish MQTT manual | Pendiente |
-| H4 | H1 + H2 integrados en una sola tarea | Pendiente |
+| H4 | H1 + H2 integrados (cola de ACKs, gestión de timeouts) | Pendiente |
 | H5 | Añadir tarea NB-IoT con cola FreeRTOS compartida y batch JSON periódico (modo prueba de concepto cada 5 min) | Pendiente |
 | H6 | Consola estructurada con timestamps, LED de estado, manejo de errores | Pendiente |
 
@@ -75,15 +76,15 @@ Atajos en VS Code: `PlatformIO: Build`, `PlatformIO: Upload`, `PlatformIO: Monit
 
 ```
 nodo/
-├── platformio.ini          Configuración del proyecto (incluye REGION_*, MODEM_*)
+├── platformio.ini          Configuración del proyecto (incluye REGION_*, MODEM_*, LORA_TX_DBM, NODE_ID)
 ├── src/
-│   ├── main.cpp            Punto de entrada, setup + tareas (existe)
+│   ├── main.cpp            Punto de entrada, ciclo Modbus + LoRa (existe)
 │   ├── modbus.{cpp,h}      Driver Modbus RTU sobre RS-485 (existe)
-│   ├── lora.{cpp,h}        Driver LoRa P2P sobre AT del DTU (pendiente, H2)
+│   ├── lora.{cpp,h}        Driver LoRa P2P sobre la librería M5-LoRaWAN-RAK (existe, modo TX)
 │   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028 (pendiente, H3)
-│   ├── buffer.{cpp,h}      Cola circular FreeRTOS para muestras (pendiente, H4-H5)
+│   ├── buffer.{cpp,h}      Cola circular FreeRTOS para tramas con ACK pendiente (pendiente, H4)
 │   └── console.{cpp,h}     Logging estructurado por Serial (pendiente, H6)
 └── lib/                    Librerías propias específicas del nodo
 ```
 
-Las constantes regionales (`REGION_US915` / `REGION_EU868`) viven en `platformio.ini` como `build_flags`, no en un header dedicado.
+Las constantes regionales (`REGION_US915` / `REGION_EU868`) y los parámetros del nodo (`NODE_ID`, `LORA_TX_DBM`) viven en `platformio.ini` como `build_flags`, no en un header dedicado.

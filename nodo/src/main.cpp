@@ -1,28 +1,36 @@
 // ModuLinkr, firmware del nodo (V1)
-// H1: lectura periódica del XY-MD02 por Modbus RTU a través del bus RS-485
-// del Atom DTU LoRaWAN. Sin LoRa ni NB-IoT todavía.
+// H2 emisor: lectura Modbus + envío LoRa P2P (sin recepción ni ACK).
+//
+// Flujo del loop a 1 Hz:
+//   1. Leer XY-MD02 por Modbus RTU (driver propio sobre RS-485).
+//   2. Si OK, construir trama TELEMETRY (formato frame-format.md) con
+//      los dos valores float y emitirla por LoRa P2P.
+//   3. Imprimir resultado de cada subsistema en la consola USB con
+//      contadores acumulados.
 //
 // Arquitectura del UART en el Atom Lite:
 //   Serial   (UART0) → USB CDC via CP2104 (consola de logs)
-//   Serial1  (UART1) → RS-485, GPIO 33 (RX), 23 (TX), 9600 8N1   ← Modbus
-//   Serial2  (UART2) → reservado para LoRa STM32WLE5 (G19/G22)   ← H2 en adelante
+//   Serial1  (UART1) → RS-485, GPIO 33 (RX), 23 (TX), 9600 8N1     ← Modbus
+//   Serial2  (UART2) → STM32WLE5 del DTU LoRa, GPIO 19/22, 115200  ← LoRa
 //
-// LED RGB del Atom Lite:
-//   verde tenue  → última lectura OK
-//   rojo  tenue  → última lectura fallida
+// LED RGB del Atom Lite (estado consolidado):
+//   verde tenue  → último ciclo: Modbus OK + LoRa OK
+//   ámbar tenue  → último ciclo: Modbus OK, LoRa falló
+//   rojo  tenue  → último ciclo: Modbus falló
 //
-// La consola del host añade el timestamp por delante mediante el filtro
+// El monitor del host añade timestamp por delante mediante el filtro
 // `time` de PlatformIO Monitor (configurado en platformio.ini).
 
 #include <Arduino.h>
 #include <M5Atom.h>
 
 #include "modbus.h"
+#include "lora.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.2-h1";
+constexpr const char* kFirmwareVersion = "0.0.4-h2-tx";
 
 // Pines y configuración del bus Modbus RTU.
 constexpr int8_t        kRs485RxPin   = 33;
@@ -34,16 +42,35 @@ constexpr uint8_t  kXyMd02SlaveId  = 0x01;
 constexpr uint16_t kXyMd02RegStart = 0x0001;
 constexpr uint8_t  kXyMd02RegCount = 2;
 
-// Cadencia objetivo de lectura.
-constexpr uint32_t kReadPeriodMs = 1000;
+// Pines y configuración del UART al STM32WLE5 del DTU.
+constexpr int8_t  kLoraRxPin = 19;
+constexpr int8_t  kLoraTxPin = 22;
 
+// Parámetros LoRa P2P. Frecuencia depende de la región.
 #if defined(REGION_EU868)
-constexpr const char* kRegionLabel = "EU868";
+constexpr unsigned long kLoraFreqHz = 869525000UL;  // sub-banda g3
+constexpr const char*   kRegionLabel = "EU868";
 #elif defined(REGION_US915)
-constexpr const char* kRegionLabel = "US915";
+constexpr unsigned long kLoraFreqHz = 915000000UL;
+constexpr const char*   kRegionLabel = "US915";
 #else
 #error "Falta definir REGION_EU868 o REGION_US915 en platformio.ini"
 #endif
+
+constexpr uint8_t  kLoraSF      = 7;
+constexpr uint16_t kLoraBwKhz   = 125;
+constexpr uint8_t  kLoraCrIndex = 0;  // 4/5
+
+#ifndef LORA_TX_DBM
+#define LORA_TX_DBM 10
+#endif
+constexpr uint8_t kLoraTxDbm = LORA_TX_DBM;
+
+// Identidad del nodo en la trama LoRa.
+#ifndef NODE_ID
+#define NODE_ID 1
+#endif
+constexpr uint8_t kNodeId = NODE_ID;
 
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
@@ -53,24 +80,26 @@ constexpr const char* kModemLabel = "SIM7080G";
 constexpr const char* kModemLabel = "?";
 #endif
 
+// Cadencia objetivo de lectura + envío.
+constexpr uint32_t kCyclePeriodMs = 1000;
+
 ModbusRTU modbus;
+LoraP2P   lora;
 
-uint32_t g_ok_count  = 0;
-uint32_t g_err_count = 0;
+uint32_t g_modbus_ok  = 0;
+uint32_t g_modbus_err = 0;
+uint32_t g_lora_ok    = 0;
+uint32_t g_lora_err   = 0;
+uint16_t g_seq        = 0;
 
-}  // namespace
-
-void setup() {
-    M5.begin(/*serial_enable=*/true, /*i2c_enable=*/false, /*led_enable=*/true);
-    Serial.begin(115200);
-    delay(200);
-
+void printBanner() {
     Serial.println();
     Serial.println(F("=============================================="));
     Serial.printf ("  %s  v%s\n", kFirmwareName, kFirmwareVersion);
-    Serial.printf ("  region=%s  modem=%s\n", kRegionLabel, kModemLabel);
-    Serial.println(F("  H1: lectura XY-MD02 cada 1 s vía Modbus RTU"));
-    Serial.printf ("  RS-485: %lu 8N1  pin_rx=%d pin_tx=%d\n",
+    Serial.printf ("  region=%s  modem=%s  node_id=%u\n",
+                   kRegionLabel, kModemLabel, kNodeId);
+    Serial.println(F("  H2 emisor: Modbus + LoRa TX (sin recepción)"));
+    Serial.printf ("  RS-485: %lu 8N1  rx=GPIO%d tx=GPIO%d\n",
                    kRs485Baud,
                    static_cast<int>(kRs485RxPin),
                    static_cast<int>(kRs485TxPin));
@@ -79,55 +108,106 @@ void setup() {
                    kXyMd02RegStart,
                    static_cast<uint16_t>(kXyMd02RegStart + kXyMd02RegCount - 1),
                    kXyMd02RegCount);
+    Serial.printf ("  LoRa:   %lu Hz  SF%u  BW%u  CR4/5  pwr=%u dBm  rx=GPIO%d tx=GPIO%d\n",
+                   kLoraFreqHz, kLoraSF, kLoraBwKhz, kLoraTxDbm,
+                   static_cast<int>(kLoraRxPin),
+                   static_cast<int>(kLoraTxPin));
     Serial.println(F("=============================================="));
+}
+
+}  // namespace
+
+void setup() {
+    M5.begin(/*serial_enable=*/true, /*i2c_enable=*/false, /*led_enable=*/true);
+    Serial.begin(115200);
+    delay(200);
+
+    printBanner();
+
+    M5.dis.drawpix(0, 0x202000);  // amarillo: inicializando
 
     modbus.begin(Serial1, kRs485RxPin, kRs485TxPin, kRs485Baud);
-    M5.dis.drawpix(0, 0x002000);  // verde tenue al arrancar
+
+    if (!lora.begin(Serial2,
+                    kLoraRxPin, kLoraTxPin,
+                    kLoraFreqHz,
+                    kLoraSF, kLoraBwKhz, kLoraCrIndex,
+                    kLoraTxDbm)) {
+        Serial.println(F("[lora]   init FALLO. El driver no responde, sigo solo con Modbus."));
+        M5.dis.drawpix(0, 0x200000);  // rojo persistente: LoRa no arrancó
+    } else {
+        Serial.println(F("[lora]   init OK. Modo P2P_TX_MODE activo."));
+        M5.dis.drawpix(0, 0x002000);  // verde: todo arriba
+    }
 }
 
 void loop() {
-    static uint32_t last_read_ms = 0;
+    static uint32_t last_cycle_ms = 0;
     const uint32_t now = millis();
 
-    // Cadencia 1 Hz, basada en el reloj del host.
-    if (now - last_read_ms < kReadPeriodMs) {
+    if (now - last_cycle_ms < kCyclePeriodMs) {
         delay(5);
         return;
     }
-    last_read_ms = now;
+    last_cycle_ms = now;
 
+    // 1. Modbus.
     uint16_t regs[kXyMd02RegCount] = {0, 0};
-    const auto status = modbus.readInputRegisters(
+    const auto m_status = modbus.readInputRegisters(
         kXyMd02SlaveId, kXyMd02RegStart, kXyMd02RegCount, regs);
 
-    if (status == ModbusRTU::Status::OK) {
-        // Temperatura: int16 con signo en complemento a 2, escala ×10.
-        // Humedad: uint16, escala ×10.
+    bool modbus_ok = false;
+    float temp_c = 0.0f, hum_pc = 0.0f;
+
+    if (m_status == ModbusRTU::Status::OK) {
         const int16_t  raw_t = static_cast<int16_t>(regs[0]);
         const uint16_t raw_h = regs[1];
-        const float temp_c = raw_t / 10.0f;
-        const float hum_pc = raw_h / 10.0f;
-        g_ok_count++;
+        temp_c = raw_t / 10.0f;
+        hum_pc = raw_h / 10.0f;
+        g_modbus_ok++;
+        modbus_ok = true;
 
         Serial.printf("[modbus] ok    T=%+6.1f C  H=%5.1f %%   ok=%lu err=%lu\n",
                       temp_c, hum_pc,
-                      static_cast<unsigned long>(g_ok_count),
-                      static_cast<unsigned long>(g_err_count));
-        M5.dis.drawpix(0, 0x002000);  // verde
+                      static_cast<unsigned long>(g_modbus_ok),
+                      static_cast<unsigned long>(g_modbus_err));
     } else {
-        g_err_count++;
-        const char* desc = ModbusRTU::statusToString(status);
-        if (status == ModbusRTU::Status::EXCEPTION) {
+        g_modbus_err++;
+        const char* desc = ModbusRTU::statusToString(m_status);
+        if (m_status == ModbusRTU::Status::EXCEPTION) {
             Serial.printf("[modbus] err   %s (code=0x%02X)  ok=%lu err=%lu\n",
                           desc, modbus.lastException(),
-                          static_cast<unsigned long>(g_ok_count),
-                          static_cast<unsigned long>(g_err_count));
+                          static_cast<unsigned long>(g_modbus_ok),
+                          static_cast<unsigned long>(g_modbus_err));
         } else {
             Serial.printf("[modbus] err   %-16s        ok=%lu err=%lu\n",
                           desc,
-                          static_cast<unsigned long>(g_ok_count),
-                          static_cast<unsigned long>(g_err_count));
+                          static_cast<unsigned long>(g_modbus_ok),
+                          static_cast<unsigned long>(g_modbus_err));
         }
+    }
+
+    // 2. LoRa: solo se emite si hay lectura Modbus válida.
+    if (modbus_ok && lora.isReady()) {
+        const float values[] = { temp_c, hum_pc };
+        g_seq++;  // wraparound automático uint16
+        const auto l_status = lora.sendTelemetry(kNodeId, g_seq, values, 2);
+        if (l_status == LoraP2P::Status::OK) {
+            g_lora_ok++;
+            Serial.printf("[lora]   tx ok seq=%u  tx_ok=%lu tx_err=%lu\n",
+                          g_seq,
+                          static_cast<unsigned long>(g_lora_ok),
+                          static_cast<unsigned long>(g_lora_err));
+            M5.dis.drawpix(0, 0x002000);  // verde
+        } else {
+            g_lora_err++;
+            Serial.printf("[lora]   tx err %-16s seq=%u  tx_ok=%lu tx_err=%lu\n",
+                          LoraP2P::statusToString(l_status), g_seq,
+                          static_cast<unsigned long>(g_lora_ok),
+                          static_cast<unsigned long>(g_lora_err));
+            M5.dis.drawpix(0, 0x201000);  // ámbar
+        }
+    } else if (!modbus_ok) {
         M5.dis.drawpix(0, 0x200000);  // rojo
     }
 }
