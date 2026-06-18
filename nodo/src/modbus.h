@@ -11,7 +11,10 @@
 // Notas de diseño:
 //   - CRC16 estándar Modbus (poly 0xA001, init 0xFFFF).
 //   - El SP3485EN del DTU está en auto-dirección, así que basta con un
-//     HardwareSerial estándar, sin pines DE/RE.
+//     UART estándar, sin pines DE/RE.
+//   - El driver acepta cualquier Stream (HardwareSerial o SoftwareSerial)
+//     ya inicializado. El caller es responsable de llamar begin() con
+//     los parámetros adecuados antes de pasarlo a este driver.
 //   - El tiempo entre tramas (3.5 caracteres a 9600 baudios ≈ 3.65 ms)
 //     se cumple sobradamente con el espaciado natural del loop a 1 Hz.
 
@@ -31,14 +34,11 @@ public:
         NOT_INITIALIZED,    // begin() no se llamó antes.
     };
 
-    // Inicializa el UART para Modbus RTU.
-    // Defaults para Atom DTU LoRaWAN: GPIO 33 RX, GPIO 23 TX, 9600 8N1.
+    // Inicializa el driver con un Stream ya configurado (HardwareSerial o
+    // SoftwareSerial). El caller debe haber llamado .begin() del UART con
+    // los parámetros adecuados (típicamente 9600 8N1, GPIO 33 RX / 23 TX).
     // response_timeout_ms aplica al tiempo total de espera de respuesta.
-    void begin(HardwareSerial& uart,
-               int8_t rx_pin = 33,
-               int8_t tx_pin = 23,
-               unsigned long baudrate = 9600,
-               uint32_t response_timeout_ms = 1000);
+    void begin(Stream& uart, uint32_t response_timeout_ms = 1000);
 
     // Lee `count` registros de entrada (función 0x04) desde el esclavo
     // `slave_id`, empezando en `address`. Devuelve los valores en `out`
@@ -59,9 +59,9 @@ public:
     static const char* statusToString(Status s);
 
 private:
-    HardwareSerial* uart_ = nullptr;
+    Stream*  uart_ = nullptr;
     uint32_t response_timeout_ms_ = 1000;
-    uint8_t last_exception_ = 0;
+    uint8_t  last_exception_ = 0;
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);

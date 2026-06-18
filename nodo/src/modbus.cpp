@@ -15,14 +15,9 @@ constexpr uint8_t kFuncReadInputRegisters   = 0x04;
 
 }  // namespace
 
-void ModbusRTU::begin(HardwareSerial& uart,
-                      int8_t rx_pin,
-                      int8_t tx_pin,
-                      unsigned long baudrate,
-                      uint32_t response_timeout_ms) {
+void ModbusRTU::begin(Stream& uart, uint32_t response_timeout_ms) {
     uart_ = &uart;
     response_timeout_ms_ = response_timeout_ms;
-    uart_->begin(baudrate, SERIAL_8N1, rx_pin, tx_pin);
 }
 
 ModbusRTU::Status ModbusRTU::readInputRegisters(uint8_t slave_id, uint16_t address,
