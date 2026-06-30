@@ -1,17 +1,17 @@
 # ModuLinkr, nodo (V1)
 
-Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las medidas por dos canales redundantes: LoRa P2P (cadencia rápida, local) y NB-IoT (cadencia baja, contingencia con respaldo en la nube).
+Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las medidas por dos canales redundantes: LoRa P2P y NB-IoT.
 
 ## Hardware
 
 | Componente | Modelo | Función |
 | --- | --- | --- |
 | MCU | M5Stack **Atom Lite** (ESP32-PICO-D4, 520 KB SRAM, 4 MB flash) | Cerebro del nodo |
-| LoRa + RS-485 | M5Stack **Atom DTU LoRaWAN US915** (STM32WLE5CC + SP3485EN) | Radio sub-GHz y bus Modbus, controlado por AT |
+| LoRa + RS-485 | M5Stack **Atom DTU LoRaWAN EU868** (STM32WLE5CC + SP3485EN) | Radio sub-GHz y bus Modbus, controlado por AT |
 | Celular | M5Stack **NB-IoT 2 Unit Global** (SIM7028) | NB-IoT Cat-NB2 multi-banda, en puerto Grove |
 | Sensor | **XY-MD02** | Temperatura + humedad por Modbus RTU |
 
-> **Nota región**: el DTU disponible ahora es **US915** (el EU868 se pidió por error). El firmware se desarrolla con `REGION_US915` y se mueve a `REGION_EU868` cuando llegue el módulo correcto, cambiando un único `build_flag`.
+> **Nota región**: el firmware se compila con `REGION_EU868` desde la portación del 30 de junio de 2026. La región US915 sigue soportada como `build_flag` alternativo en `platformio.ini` por si se necesitara recompilar para hardware de la primera tanda.
 
 ## Esquema funcional
 
@@ -110,7 +110,7 @@ Opciones C y D quedan reservadas como camino futuro si el escalado del proyecto 
 
 | Canal | Cadencia objetivo | Notas |
 | --- | --- | --- |
-| LoRa | cada 1 s, US915 en banco; cada 1 s en EU868 g3 (869.525 MHz) al portar | SF7 BW125. Trama TELEMETRY con 2 reads = 16 bytes (ver `shared/protocol/frame-format.md` §6), ToA ≈ 57 ms |
+| LoRa | cada 1 s en EU868 g3 (869.525 MHz) | SF7 BW125. Trama TELEMETRY con 2 reads = 16 bytes (ver `shared/protocol/frame-format.md` §6), ToA ≈ 57 ms |
 | NB-IoT, fase prueba de concepto (actual) | cada 5 min | Publica un batch periódico para validar que LoRa y NB-IoT conviven sin interferirse |
 | NB-IoT, fase operacional (post-validación) | respaldo selectivo | Se activa solo cuando una racha de ACKs LoRa falla. Mecanismo en `shared/protocol/node-config.md` §4.3 |
 | Consola | continua, formato append con timestamp | Sin cadencia fija. Cada evento imprime una línea |

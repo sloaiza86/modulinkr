@@ -83,8 +83,9 @@ constexpr const char* kModemLabel = "SIM7080G";
 constexpr const char* kModemLabel = "?";
 #endif
 
-// Cadencias.
-constexpr uint32_t kChannelPeriodMs    = 5000;
+// Cadencias. Valores controlados por build_flags en platformio.ini.
+constexpr uint32_t kLoraPeriodMs       = LORA_PERIOD_MS;
+constexpr uint32_t kNbiotPeriodMs      = NBIOT_PERIOD_MS;
 constexpr uint32_t kNbiotInitialOffset = 2500;
 constexpr uint32_t kRegistrationTimeoutMs = 30UL * 60UL * 1000UL;
 
@@ -126,14 +127,21 @@ void printBanner() {
                    static_cast<int>(kNbiotRxPin),
                    static_cast<int>(kNbiotTxPin),
                    kNbiotBaud);
-    Serial.printf ("  LoRa  : %lu Hz  SF%u  BW%u  pwr=%u dBm\n",
-                   kLoraFreqHz, kLoraSF, kLoraBwKhz, kLoraTxDbm);
+    Serial.printf ("  LoRa  : %lu Hz  SF%u  BW%u  pwr=%u dBm  period=%lu ms\n",
+                   kLoraFreqHz, kLoraSF, kLoraBwKhz, kLoraTxDbm,
+                   static_cast<unsigned long>(kLoraPeriodMs));
     Serial.printf ("  Modbus: slave=0x%02X  fn=0x04  reg=0x%04X..0x%04X\n",
                    kXyMd02SlaveId,
                    kXyMd02RegStart,
                    static_cast<uint16_t>(kXyMd02RegStart + kXyMd02RegCount - 1));
+#if NBIOT_ENABLED
+    Serial.printf ("  NB-IoT: enabled  period=%lu ms\n",
+                   static_cast<unsigned long>(kNbiotPeriodMs));
     Serial.printf ("  MQTT  : %s:%u  topic=%s  client=%s\n",
                    kBroker, kPort, kTopic, kClientId);
+#else
+    Serial.println(F("  NB-IoT: DISABLED por build_flag (NBIOT_ENABLED=0)"));
+#endif
     Serial.println(F("=============================================="));
 }
 
@@ -301,6 +309,7 @@ void setup() {
         Serial.println(F("FALLO. Sigo sin LoRa."));
     }
 
+#if NBIOT_ENABLED
     // ----- NB-IoT sobre Serial2 -----
     nbiot.setVerbose(true);
 
@@ -379,10 +388,17 @@ void setup() {
     }
 
     nbiot.setVerbose(false);
+#else
+    Serial.println(F("[init]   NB-IoT deshabilitado por build_flag (NBIOT_ENABLED=0)"));
+#endif  // NBIOT_ENABLED
 
     if (g_lora_ready || g_mqtt_ready) {
         setLed(0x002000);
+#if NBIOT_ENABLED
         Serial.println(F("[init]   listo. Arranca ciclo dual."));
+#else
+        Serial.println(F("[init]   listo. Arranca ciclo solo LoRa."));
+#endif
     } else {
         setLed(0x200000);
         Serial.println(F("[init]   sin canales activos."));
@@ -398,21 +414,23 @@ void loop() {
     if (first_loop) {
         // Inicializa los temporizadores. LoRa arranca en t=0 (now-período
         // hace que el primer disparo sea inmediato). NB-IoT arranca a
-        // t=kNbiotInitialOffset.
-        last_lora_ms  = now - kChannelPeriodMs;
-        last_nbiot_ms = now - kChannelPeriodMs + kNbiotInitialOffset;
+        // t=kNbiotInitialOffset y luego sigue su propia cadencia.
+        last_lora_ms  = now - kLoraPeriodMs;
+        last_nbiot_ms = now - kNbiotPeriodMs + kNbiotInitialOffset;
         first_loop    = false;
     }
 
-    if (now - last_lora_ms >= kChannelPeriodMs) {
-        last_lora_ms += kChannelPeriodMs;
+    if (now - last_lora_ms >= kLoraPeriodMs) {
+        last_lora_ms += kLoraPeriodMs;
         fireLora();
     }
 
-    if (now - last_nbiot_ms >= kChannelPeriodMs) {
-        last_nbiot_ms += kChannelPeriodMs;
+#if NBIOT_ENABLED
+    if (now - last_nbiot_ms >= kNbiotPeriodMs) {
+        last_nbiot_ms += kNbiotPeriodMs;
         fireNbiot();
     }
+#endif
 
     delay(20);
 }
