@@ -46,14 +46,18 @@ constexpr int8_t  kLoraRxPin = 19;
 constexpr int8_t  kLoraTxPin = 22;
 
 #if defined(REGION_EU868)
-constexpr unsigned long kLoraFreqHz  = 869525000UL;
 constexpr const char*   kRegionLabel = "EU868";
 #elif defined(REGION_US915)
-constexpr unsigned long kLoraFreqHz  = 915000000UL;
 constexpr const char*   kRegionLabel = "US915";
 #else
 #error "Falta definir REGION_EU868 o REGION_US915 en platformio.ini"
 #endif
+
+// Frecuencia LoRa controlada por build_flag LORA_FREQ_HZ en platformio.ini.
+// Por defecto en EU868: 868.125 MHz (g1) para compatibilidad con el receptor
+// Ebyte E22 del LoRa HAT del gateway. Para volver a 869.525 MHz (g3) o a
+// US915 (915 MHz) basta con cambiar el build_flag.
+constexpr unsigned long kLoraFreqHz = LORA_FREQ_HZ;
 
 constexpr uint8_t  kLoraSF      = 7;
 constexpr uint16_t kLoraBwKhz   = 125;
