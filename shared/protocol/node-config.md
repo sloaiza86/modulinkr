@@ -119,6 +119,7 @@ Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobie
   "relay_enabled":        true,
   "max_ttl":              4,
   "beacon_timeout_ms":    90000,
+  "parent_min_rssi":      -100,
   "parent_hysteresis_db": 6,
   "parent_missed_frames": 3,
   "sn_offer_wait_ms":     1000
@@ -130,6 +131,7 @@ Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobie
 | `relay_enabled` | boolean | `true`, `false` | Si `true`, el nodo reenvía tramas de otros nodos hacia su padre (relay uplink) y transporta ACKs por la ruta inversa. Con `false` el nodo solo origina tráfico propio; útil en nodos con presupuesto energético crítico. |
 | `max_ttl` | integer | `1`-`15` | TTL inicial de las tramas originadas por este nodo. Limita la profundidad de ruta. Debe ser homogéneo en el despliegue y coherente con el del gateway. |
 | `beacon_timeout_ms` | integer | `≥ 10000` | Caducidad de las entradas de la tabla de vecinos y del padre. Recomendado: al menos 3 veces el periodo de beacon del gateway (30 s por defecto). |
+| `parent_min_rssi` | integer | `-120`-`0` (dBm) | RSSI mínimo del beacon para que un vecino sea elegible como padre. Sin este filtro, la regla "menor hop_count gana" elige enlaces marginales al gateway aunque exista un vecino a un salto con enlace sano (observado en banco: enlace directo a −110 dBm con pérdidas continuas frente a un vecino a −86 dBm). El vecino débil sigue registrándose en la tabla con fines de diagnóstico. Recomendado: `-100`. |
 | `parent_hysteresis_db` | integer | `0`-`30` | Mejora mínima de RSSI para cambiar de padre a igualdad de `hop_count`. Evita oscilaciones entre padres equivalentes. |
 | `parent_missed_frames` | integer | `≥ 1` | Tramas consecutivas con reintentos agotados sin ACK que invalidan al padre actual y fuerzan reselección. |
 | `sn_offer_wait_ms` | integer | `≥ 200` | Ventana de escucha de ofertas tras emitir un SN_REQUEST (`frame-format.md` §8). |
@@ -431,6 +433,7 @@ Notas:
       "relay_enabled":        true,
       "max_ttl":              4,
       "beacon_timeout_ms":    90000,
+      "parent_min_rssi":      -100,
       "parent_hysteresis_db": 6,
       "parent_missed_frames": 3,
       "sn_offer_wait_ms":     1000
@@ -491,6 +494,7 @@ Notas:
       "relay_enabled":        true,
       "max_ttl":              4,
       "beacon_timeout_ms":    90000,
+      "parent_min_rssi":      -100,
       "parent_hysteresis_db": 6,
       "parent_missed_frames": 3,
       "sn_offer_wait_ms":     1000

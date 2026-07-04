@@ -68,38 +68,92 @@ bool LoraP2P::begin(HardwareSerial& uart,
 
 LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                                        const float* values,
-                                       uint8_t n_values) {
+                                       uint8_t n_values,
+                                       uint8_t hop_dst) {
     if (!initialized_) return Status::NOT_INITIALIZED;
     if (n_values == 0 || n_values > kMaxValues || values == nullptr) {
         return Status::INVALID_ARGS;
     }
 
+    // Payload: cada float32 en little-endian (ESP32 ya es LE nativo,
+    // basta con un memcpy).
+    uint8_t payload[4u * kMaxValues];
+    for (uint8_t i = 0; i < n_values; ++i) {
+        std::memcpy(&payload[4u * i], &values[i], sizeof(float));
+    }
+
+    return buildAndSend(hop_dst,
+                        node_id_,
+                        protocol::kAddrGateway,
+                        seq,
+                        protocol::kFrameTelemetry,
+                        ttl_,
+                        payload,
+                        static_cast<uint8_t>(4u * n_values));
+}
+
+LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (f.ttl == 0) return Status::INVALID_ARGS;
+
+    // Relay (spec §2.5): hop_src, hop_dst y ttl se reescriben; origen,
+    // destino final, seq, tipo y payload viajan intactos.
+    return buildAndSend(new_hop_dst,
+                        f.origin_id,
+                        f.dest_id,
+                        f.seq,
+                        f.frame_type,
+                        static_cast<uint8_t>(f.ttl - 1),
+                        f.payload,
+                        f.payload_length);
+}
+
+LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
+                                        uint8_t own_hop,
+                                        uint8_t ttl) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload BEACON (spec §7.2): hop_count del emisor de este salto
+    // (la distancia propia) + flags reservado.
+    const uint8_t payload[2] = {own_hop, 0x00};
+    return buildAndSend(protocol::kAddrBroadcast,
+                        protocol::kAddrGateway,   // origin: siempre el gateway
+                        protocol::kAddrBroadcast,
+                        beacon_seq,               // seq del gateway, inmutable
+                        protocol::kFrameBeacon,
+                        ttl,
+                        payload,
+                        sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
+                                      uint8_t origin_id,
+                                      uint8_t dest_id,
+                                      uint16_t seq,
+                                      uint8_t frame_type,
+                                      uint8_t ttl,
+                                      const uint8_t* payload,
+                                      uint8_t payload_length) {
     using namespace protocol;
 
-    const uint8_t payload_length = static_cast<uint8_t>(4u * n_values);
-    const size_t  total_length   = kHeaderBytes + payload_length + kCrcBytes;
+    if (payload_length > kMaxPayload) return Status::INVALID_ARGS;
 
-    uint8_t frame[kHeaderBytes + 4u * kMaxValues + kCrcBytes];
+    uint8_t frame[kOverhead + kMaxPayload];
 
-    // Cabecera v2.0 (11 bytes). Fase 1: envío directo al gateway, sin
-    // padre mesh (hop_dst = dest_id = 0xFF). La fase 2 sustituirá
-    // hop_dst por el id del padre elegido por beacons.
     frame[kOffSchema]     = kSchemaVersion;
     frame[kOffNetworkId]  = network_id_;
     frame[kOffHopSrc]     = node_id_;
-    frame[kOffHopDst]     = kAddrGateway;
-    frame[kOffOriginId]   = node_id_;
-    frame[kOffDestId]     = kAddrGateway;
+    frame[kOffHopDst]     = hop_dst;
+    frame[kOffOriginId]   = origin_id;
+    frame[kOffDestId]     = dest_id;
     frame[kOffSeqLow]     = static_cast<uint8_t>(seq & 0xFF);
     frame[kOffSeqHigh]    = static_cast<uint8_t>((seq >> 8) & 0xFF);
-    frame[kOffFrameType]  = kFrameTelemetry;
-    frame[kOffTtl]        = ttl_;
+    frame[kOffFrameType]  = frame_type;
+    frame[kOffTtl]        = ttl;
     frame[kOffPayloadLen] = payload_length;
 
-    // Payload: cada float32 en little-endian (ESP32 ya es LE nativo,
-    // basta con un memcpy).
-    for (uint8_t i = 0; i < n_values; ++i) {
-        std::memcpy(&frame[kOffPayload + 4u * i], &values[i], sizeof(float));
+    if (payload_length > 0 && payload != nullptr) {
+        std::memcpy(&frame[kOffPayload], payload, payload_length);
     }
 
     // CRC sobre [0..(10 + payload_length)].
@@ -108,7 +162,7 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
     frame[crc_input_len]     = static_cast<uint8_t>(crc & 0xFF);
     frame[crc_input_len + 1] = static_cast<uint8_t>((crc >> 8) & 0xFF);
 
-    return sendRaw(frame, total_length);
+    return sendRaw(frame, crc_input_len + kCrcBytes);
 }
 
 LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {

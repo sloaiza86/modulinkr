@@ -83,13 +83,27 @@ public:
 
     bool isReady() const { return initialized_; }
 
-    // Construye una trama TELEMETRY v2.0 y la emite.
+    // Construye una trama TELEMETRY v2.0 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
     //   values    Array de float32 en el orden de reads[] del config.
     //   n_values  Cuántos valores.
-    // Fase 1: hop_dst = dest_id = gateway (sin padre mesh todavía).
-    Status sendTelemetry(uint16_t seq, const float* values, uint8_t n_values);
+    //   hop_dst   Primer salto: el padre elegido por la capa mesh
+    //             (0xFF cuando el padre es el propio gateway).
+    // El destino final (dest_id) es siempre el gateway.
+    Status sendTelemetry(uint16_t seq, const float* values, uint8_t n_values,
+                         uint8_t hop_dst);
+
+    // Reenvía una trama ajena (relay, spec §2.3 y §2.4): reescribe
+    // hop_src con el id propio, hop_dst con el salto indicado, decrementa
+    // ttl y recalcula el CRC. El resto viaja intacto extremo a extremo.
+    // Devuelve INVALID_ARGS si el ttl ya está agotado.
+    Status forwardFrame(const RxFrame& f, uint8_t new_hop_dst);
+
+    // Re-emite un beacon del gateway (spec §7.3): mismo seq y origen
+    // gateway, hop_src propio, hop_count propio en el payload y ttl ya
+    // decrementado por el llamante.
+    Status sendBeaconEcho(uint16_t beacon_seq, uint8_t own_hop, uint8_t ttl);
 
     // Lee la UART sin bloquear y acumula tramas entrantes válidas.
     // Llamar en cada vuelta del loop().
@@ -124,7 +138,8 @@ private:
     size_t line_len_ = 0;
 
     // Ring buffer de tramas recibidas pendientes de leer por el llamante.
-    static constexpr size_t kRxRing = 4;
+    // Dimensionado para ráfagas de beacon + ACK + relay simultáneos.
+    static constexpr size_t kRxRing = 8;
     RxFrame ring_[kRxRing];
     size_t  ring_head_ = 0;  // próxima a leer
     size_t  ring_count_ = 0;
@@ -132,6 +147,16 @@ private:
     uint32_t rx_valid_     = 0;
     uint32_t rx_discarded_ = 0;
     uint32_t tx_errors_    = 0;
+
+    // Serializa cabecera v2.0 + payload + CRC y emite.
+    Status buildAndSend(uint8_t hop_dst,
+                        uint8_t origin_id,
+                        uint8_t dest_id,
+                        uint16_t seq,
+                        uint8_t frame_type,
+                        uint8_t ttl,
+                        const uint8_t* payload,
+                        uint8_t payload_length);
 
     // Emite AT+PSEND=<hex> sin bloquear (no espera el OK del módulo).
     Status sendRaw(const uint8_t* frame, size_t len);

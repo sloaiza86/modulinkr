@@ -1,7 +1,8 @@
 // ModuLinkr, firmware del nodo (V2)
-// Modo H4 fase 1: ACK + seq. Cada trama LoRa espera confirmación extremo
-// a extremo del gateway; sin ACK se reintenta con el mismo seq y, agotados
-// los reintentos, se contabiliza como no confirmada (frame-format.md §5).
+// Modo H5 fase 2: red mesh en árbol. El nodo elige padre por beacons del
+// gateway (frame-format.md §2), le envía su telemetría, releva tramas de
+// otros nodos hacia arriba y devuelve ACKs por la ruta inversa. Conserva
+// completa la reconciliación de la fase 1 (cola, timeouts, reintentos).
 //
 // Asignación de UART (resolución del conflicto, ver nodo/README.md):
 //   Modbus  → SoftwareSerial  GPIO 33 RX / GPIO 23 TX  @ 9600
@@ -30,11 +31,12 @@
 #include "nbiot.h"
 #include "pending.h"
 #include "protocol.h"
+#include "mesh.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.6-h4-ack";
+constexpr const char* kFirmwareVersion = "0.0.7-h5-mesh";
 
 // Modbus (SoftwareSerial).
 constexpr int8_t        kRs485RxPin = 33;
@@ -91,6 +93,14 @@ constexpr uint32_t kAckTimeoutMs = LORA_ACK_TIMEOUT_MS;
 constexpr uint8_t  kMaxRetries   = LORA_MAX_RETRIES;
 constexpr uint8_t  kMaxTtl       = LORA_MAX_TTL;
 
+// Parámetros mesh (equivalen al bloque transport.mesh del futuro
+// config.json, node-config.md §4.2).
+constexpr uint32_t kBeaconTimeoutMs     = MESH_BEACON_TIMEOUT_MS;
+constexpr int16_t  kParentMinRssi       = MESH_PARENT_MIN_RSSI;
+constexpr uint8_t  kParentHysteresisDb  = MESH_PARENT_HYSTERESIS_DB;
+constexpr uint8_t  kParentMissedFrames  = MESH_PARENT_MISSED_FRAMES;
+constexpr bool     kRelayEnabled        = MESH_RELAY_ENABLED;
+
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
 #elif defined(MODEM_SIM7080G)
@@ -111,6 +121,7 @@ ModbusRTU               modbus;
 LoraP2P                 lora;
 Nbiot                   nbiot;
 PendingQueue            pending;
+Mesh                    mesh;
 
 // Contadores.
 uint32_t g_modbus_ok  = 0;
@@ -120,6 +131,10 @@ uint32_t g_lora_err   = 0;   // fallos de TX
 uint32_t g_lora_acked = 0;   // tramas confirmadas por el gateway
 uint32_t g_lora_retx  = 0;   // retransmisiones emitidas
 uint32_t g_lora_lost  = 0;   // tramas con reintentos agotados sin ACK
+uint32_t g_noroute    = 0;   // muestras no enviadas por falta de padre
+uint32_t g_relay_up   = 0;   // tramas ajenas relevadas hacia el gateway
+uint32_t g_relay_down = 0;   // ACKs ajenos relevados hacia abajo
+uint32_t g_echoes     = 0;   // beacons re-emitidos
 uint32_t g_mqtt_ok    = 0;
 uint32_t g_mqtt_err   = 0;
 uint16_t g_lora_seq   = 0;
@@ -154,6 +169,11 @@ void printBanner() {
                    kNetworkId,
                    static_cast<unsigned long>(kAckTimeoutMs),
                    kMaxRetries, kMaxTtl);
+    Serial.printf ("  Mesh  : beacon_timeout=%lu ms  min_rssi=%d dBm  hyst=%u dB  missed=%u  relay=%s\n",
+                   static_cast<unsigned long>(kBeaconTimeoutMs),
+                   static_cast<int>(kParentMinRssi),
+                   kParentHysteresisDb, kParentMissedFrames,
+                   kRelayEnabled ? "on" : "off");
     Serial.printf ("  Modbus: slave=0x%02X  fn=0x04  reg=0x%04X..0x%04X\n",
                    kXyMd02SlaveId,
                    kXyMd02RegStart,
@@ -228,16 +248,27 @@ void fireLora() {
         return;
     }
 
+    if (!mesh.hasParent()) {
+        // Sin ruta al gateway: la muestra se pierde y queda contada.
+        // La fase 3 dará salida a esta situación (SN_REQUEST o failover).
+        g_noroute++;
+        Serial.printf("[mesh]   sin padre, muestra no enviada  noroute=%lu vecinos=%u\n",
+                      static_cast<unsigned long>(g_noroute),
+                      static_cast<unsigned>(mesh.neighborCount()));
+        return;
+    }
+
     const float values[] = {temp_c, hum_pc};
     g_lora_seq++;
-    const auto st = lora.sendTelemetry(g_lora_seq, values, 2);
+    const auto st = lora.sendTelemetry(g_lora_seq, values, 2, mesh.parentId());
     if (st == LoraP2P::Status::OK) {
         g_lora_ok++;
         if (!pending.push(g_lora_seq, values, 2, millis())) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
-        Serial.printf("[lora]   tx ok seq=%u  pend=%u  tx_ok=%lu tx_err=%lu\n",
+        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu\n",
                       g_lora_seq,
+                      mesh.parentId(), mesh.ownHop(),
                       static_cast<unsigned>(pending.count()),
                       static_cast<unsigned long>(g_lora_ok),
                       static_cast<unsigned long>(g_lora_err));
@@ -250,31 +281,102 @@ void fireLora() {
     }
 }
 
-// Procesa las tramas LoRa entrantes (fase 1: solo ACKs del gateway).
-void processLoraRx() {
-    LoraP2P::RxFrame f;
-    while (lora.readFrame(f)) {
-        if (f.frame_type != protocol::kFrameAck) {
-            // BEACON, SN_OFFER y demás llegan en fases 2 y 3.
-            Serial.printf("[lora]   rx tipo 0x%02X ignorado (fase 1)\n", f.frame_type);
-            continue;
-        }
-        if (f.dest_id != kNodeId || f.payload_length != 3) {
-            continue;
-        }
+// ACK entrante: propio (reconciliación) o ajeno (relay hacia abajo).
+void handleAck(const LoraP2P::RxFrame& f) {
+    if (f.payload_length != 3) return;
 
+    if (f.dest_id == kNodeId) {
         const uint16_t ack_seq = static_cast<uint16_t>(f.payload[0]) |
                                  (static_cast<uint16_t>(f.payload[1]) << 8);
         const uint8_t status = f.payload[2];
-
         if (pending.ack(ack_seq)) {
             g_lora_acked++;
+            mesh.onDeliveryOk();
             Serial.printf("[lora]   ack seq=%u status=0x%02X rssi=%d  acked=%lu pend=%u\n",
                           ack_seq, status, static_cast<int>(f.rssi),
                           static_cast<unsigned long>(g_lora_acked),
                           static_cast<unsigned>(pending.count()));
         }
         // ACK de trama ya purgada: descarte silencioso (spec §5.2).
+        return;
+    }
+
+    // ACK para otro nodo: bajar por la ruta inversa (spec §2.4).
+    if (!kRelayEnabled || f.ttl == 0) return;
+    uint8_t via = 0;
+    if (!mesh.routeFor(f.dest_id, via)) {
+        // Ruta caducada o reinicio: el origen lo resolverá por timeout.
+        return;
+    }
+    if (lora.forwardFrame(f, via) == LoraP2P::Status::OK) {
+        g_relay_down++;
+        Serial.printf("[relay]  ack dest=%u via=%u  down=%lu\n",
+                      f.dest_id, via, static_cast<unsigned long>(g_relay_down));
+    }
+}
+
+// Telemetría o heartbeat ajenos con este nodo como salto: relay arriba
+// (spec §2.3). Se aprende la ruta inversa incluso sin padre, para poder
+// bajar ACKs si la trama llegó al gateway por otro camino previo.
+void handleUplinkRelay(const LoraP2P::RxFrame& f) {
+    if (!kRelayEnabled) return;
+    if (f.hop_dst != kNodeId || f.dest_id != protocol::kAddrGateway) return;
+    if (f.origin_id == kNodeId) return;  // eco imposible, por si acaso
+
+    mesh.learnRoute(f.origin_id, f.hop_src, millis());
+
+    if (f.ttl == 0 || !mesh.hasParent()) {
+        return;  // sin ttl o sin ruta: se descarta, el origen reintentará
+    }
+    if (lora.forwardFrame(f, mesh.parentId()) == LoraP2P::Status::OK) {
+        g_relay_up++;
+        Serial.printf("[relay]  up origin=%u seq=%u via_padre=%u ttl=%u  up=%lu\n",
+                      f.origin_id, f.seq, mesh.parentId(), f.ttl - 1,
+                      static_cast<unsigned long>(g_relay_up));
+    }
+}
+
+// Beacon del árbol: alimenta la tabla de vecinos y al padre (spec §7).
+void handleBeacon(const LoraP2P::RxFrame& f) {
+    if (f.payload_length != 2) return;
+    const uint8_t hop_count = f.payload[0];
+    const bool had_parent = mesh.hasParent();
+    const uint8_t old_parent = mesh.parentId();
+
+    // Traza de todo beacon audible: es el mapa de vecinos en crudo.
+    Serial.printf("[mesh]   beacon de id=%u hop=%u rssi=%d ttl=%u\n",
+                  f.hop_src, hop_count, static_cast<int>(f.rssi), f.ttl);
+
+    mesh.onBeacon(f.hop_src, hop_count, f.rssi, f.seq, f.ttl, millis());
+
+    if (!had_parent && mesh.hasParent()) {
+        Serial.printf("[mesh]   padre adoptado id=%u hop_propio=%u (rssi=%d)\n",
+                      mesh.parentId(), mesh.ownHop(), static_cast<int>(f.rssi));
+    } else if (had_parent && mesh.hasParent() && mesh.parentId() != old_parent) {
+        Serial.printf("[mesh]   cambio de padre %u a %u hop_propio=%u\n",
+                      old_parent, mesh.parentId(), mesh.ownHop());
+    }
+}
+
+// Reparte las tramas LoRa entrantes por tipo.
+void processLoraRx() {
+    LoraP2P::RxFrame f;
+    while (lora.readFrame(f)) {
+        switch (f.frame_type) {
+            case protocol::kFrameAck:
+                handleAck(f);
+                break;
+            case protocol::kFrameTelemetry:
+            case protocol::kFrameHeartbeat:
+                handleUplinkRelay(f);
+                break;
+            case protocol::kFrameBeacon:
+                handleBeacon(f);
+                break;
+            default:
+                // SN_REQUEST y SN_OFFER llegan en la fase 3.
+                break;
+        }
     }
 }
 
@@ -284,21 +386,35 @@ void processAckTimeouts() {
     PendingQueue::Entry* e = pending.firstExpired(now, kAckTimeoutMs);
     if (e == nullptr) return;
 
+    if (!mesh.hasParent()) {
+        // El padre cayó con tramas en vuelo: sin ruta no hay reintento útil.
+        g_lora_lost++;
+        Serial.printf("[lora]   sin ack seq=%u y sin padre, abandonada  lost=%lu\n",
+                      e->seq, static_cast<unsigned long>(g_lora_lost));
+        pending.drop(*e);
+        return;
+    }
+
     if (e->retries < kMaxRetries) {
-        const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values);
+        // El reintento sale hacia el padre actual, que puede haber
+        // cambiado desde el envío original.
+        const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values,
+                                           mesh.parentId());
         pending.markRetry(*e, now);
         g_lora_retx++;
-        Serial.printf("[lora]   retx seq=%u intento=%u/%u (%s)\n",
-                      e->seq, e->retries, kMaxRetries,
+        Serial.printf("[lora]   retx seq=%u intento=%u/%u via=%u (%s)\n",
+                      e->seq, e->retries, kMaxRetries, mesh.parentId(),
                       LoraP2P::statusToString(st));
     } else {
-        // Fase 1: la trama se abandona y solo queda el contador.
+        // La trama se abandona y cuenta contra el padre (spec §2.2).
         // Fase 3: aquí alimentará el failover NB-IoT o la búsqueda
         // de supernodo (SN_REQUEST).
         g_lora_lost++;
-        Serial.printf("[lora]   sin ack seq=%u tras %u reintentos  lost=%lu\n",
+        mesh.onDeliveryFail();
+        Serial.printf("[lora]   sin ack seq=%u tras %u reintentos  lost=%lu%s\n",
                       e->seq, kMaxRetries,
-                      static_cast<unsigned long>(g_lora_lost));
+                      static_cast<unsigned long>(g_lora_lost),
+                      mesh.hasParent() ? "" : "  (padre invalidado)");
         pending.drop(*e);
     }
 }
@@ -376,6 +492,10 @@ void setup() {
         delay(200);
     }
     Serial.println(modbus_warm ? F("OK") : F("WARNING (seguimos igual)"));
+
+    // ----- Capa mesh -----
+    mesh.begin(kBeaconTimeoutMs, kParentMinRssi, kParentHysteresisDb,
+               kParentMissedFrames);
 
     // ----- LoRa sobre Serial1 -----
     Serial.print(F("[init]   LoRa init (TX+RX)... "));
@@ -507,11 +627,35 @@ void loop() {
         fireLora();
     }
 
-    // Recepción y reconciliación de ACKs en cada vuelta.
+    // Recepción, reconciliación y mantenimiento mesh en cada vuelta.
     if (g_lora_ready) {
         lora.poll();
         processLoraRx();
         processAckTimeouts();
+
+        // Caducidades de vecinos y rutas, una vez por segundo.
+        static uint32_t last_tick_ms = 0;
+        if (now - last_tick_ms >= 1000) {
+            last_tick_ms = now;
+            const bool had_parent = mesh.hasParent();
+            mesh.tick(now);
+            if (had_parent && !mesh.hasParent()) {
+                Serial.println(F("[mesh]   padre perdido por silencio de beacons"));
+            }
+        }
+
+        // Re-emisión de beacon pendiente (jitter vencido).
+        uint16_t echo_seq;
+        uint8_t  echo_ttl;
+        if (mesh.echoDue(now, echo_seq, echo_ttl)) {
+            if (lora.sendBeaconEcho(echo_seq, mesh.ownHop(), echo_ttl) ==
+                LoraP2P::Status::OK) {
+                g_echoes++;
+                Serial.printf("[mesh]   eco beacon seq=%u hop_propio=%u ttl=%u ecos=%lu\n",
+                              echo_seq, mesh.ownHop(), echo_ttl,
+                              static_cast<unsigned long>(g_echoes));
+            }
+        }
     }
 
 #if NBIOT_ENABLED

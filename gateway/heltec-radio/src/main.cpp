@@ -1,6 +1,10 @@
 // ModuLinkr, gateway-radio (Heltec WiFi LoRa 32 v3).
 //
-// Front-end LoRa del gateway, fase H4 (ACK + seq):
+// Front-end LoRa del gateway, fase H5 (mesh):
+//   0. Emite un BEACON cada BEACON_PERIOD_MS con hop_count=0: la raíz
+//      del árbol de rutas (frame-format.md §7). Los nodos lo re-emiten
+//      y eligen padre con él.
+// Y conserva la fase H4 (ACK + seq):
 //   1. Recibe tramas LoRa, las valida contra frame-format.md (schema v2.0)
 //      y vuelca cada trama por USB serial CDC al Pi:
 //      "[rx] len=N rssi=X.X snr=Y.Y hex=AABBCC..." (formato estable para
@@ -41,19 +45,21 @@ constexpr uint8_t  kPreambleLen   = 8;
 constexpr uint8_t  kTxPowerDbm    = LORA_TX_DBM;
 
 // ----- Parámetros de red v2.0 -----
-constexpr uint8_t kNetworkId = NETWORK_ID;
-constexpr uint8_t kMaxTtl    = LORA_MAX_TTL;
+constexpr uint8_t  kNetworkId      = NETWORK_ID;
+constexpr uint8_t  kMaxTtl         = LORA_MAX_TTL;
+constexpr uint32_t kBeaconPeriodMs = BEACON_PERIOD_MS;
 
 // SPI custom para Heltec v3 (no son los pines default del ESP32-S3).
 SPIClass loraSpi(HSPI);
 SX1262   radio = new Module(kPinNSS, kPinDIO1, kPinRESET, kPinBUSY, loraSpi);
 
 volatile bool g_rx_flag = false;
-uint32_t      g_rx_count   = 0;
-uint32_t      g_err_count  = 0;
-uint32_t      g_ack_count  = 0;
-uint32_t      g_dup_count  = 0;
-uint16_t      g_gw_seq     = 0;  // contador downlink propio del gateway
+uint32_t      g_rx_count     = 0;
+uint32_t      g_err_count    = 0;
+uint32_t      g_ack_count    = 0;
+uint32_t      g_dup_count    = 0;
+uint32_t      g_beacon_count = 0;
+uint16_t      g_gw_seq       = 0;  // contador downlink propio (ACKs y beacons)
 
 // Deduplicación por origen: último seq visto de cada node_id (1-254).
 bool     g_seen[256]     = {false};
@@ -82,13 +88,14 @@ uint16_t crc16(const uint8_t* data, size_t len) {
 void printBanner() {
     Serial.println();
     Serial.println(F("=================================================="));
-    Serial.println(F("  ModuLinkr/gateway-radio  v0.1.0-h4-ack"));
+    Serial.println(F("  ModuLinkr/gateway-radio  v0.2.0-h5-beacon"));
     Serial.println(F("  Heltec WiFi LoRa 32 v3 + SX1262 (RadioLib)"));
     Serial.printf ("  freq=%.3f MHz  SF%u  BW%.0f kHz  CR4/%u  sync=0x%02X\n",
                    kFreqMHz, kSpreadingFact, kBandwidthKHz,
                    kCodingRate, kSyncWord);
-    Serial.printf ("  network_id=%u  ttl=%u  ack=autonomo (schema v2.0)\n",
-                   kNetworkId, kMaxTtl);
+    Serial.printf ("  network_id=%u  ttl=%u  ack=autonomo  beacon=%lu ms (schema v2.0)\n",
+                   kNetworkId, kMaxTtl,
+                   static_cast<unsigned long>(kBeaconPeriodMs));
     Serial.println(F("=================================================="));
 }
 
@@ -151,6 +158,53 @@ bool sendAck(uint8_t origin, uint8_t hop_src, uint16_t ack_seq, uint8_t status) 
     }
     Serial.printf("[ack] tx err code=%d\n", state);
     return false;
+}
+
+// Emite el BEACON raíz del árbol (frame-format.md §7): hop_count=0,
+// broadcast, sin ACK. Comparte el contador downlink con los ACKs.
+void sendBeacon() {
+    using namespace protocol;
+
+    uint8_t frame[kOverhead + 2];
+    g_gw_seq++;
+
+    frame[kOffSchema]     = kSchemaVersion;
+    frame[kOffNetworkId]  = kNetworkId;
+    frame[kOffHopSrc]     = kAddrGateway;
+    frame[kOffHopDst]     = kAddrBroadcast;
+    frame[kOffOriginId]   = kAddrGateway;
+    frame[kOffDestId]     = kAddrBroadcast;
+    frame[kOffSeqLow]     = static_cast<uint8_t>(g_gw_seq & 0xFF);
+    frame[kOffSeqHigh]    = static_cast<uint8_t>((g_gw_seq >> 8) & 0xFF);
+    frame[kOffFrameType]  = kFrameBeacon;
+    frame[kOffTtl]        = kMaxTtl;
+    frame[kOffPayloadLen] = 2;
+    frame[kOffPayload]     = 0x00;  // hop_count: el gateway es la raíz
+    frame[kOffPayload + 1] = 0x00;  // flags reservado
+
+    const uint16_t crc = crc16(frame, kHeaderBytes + 2);
+    frame[kHeaderBytes + 2] = static_cast<uint8_t>(crc & 0xFF);
+    frame[kHeaderBytes + 3] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+
+    const int16_t state = radio.transmit(frame, sizeof(frame));
+
+    // Mismo fantasma que en el ACK: el fin del TX dispara DIO1.
+    g_rx_flag = false;
+
+    if (state == RADIOLIB_ERR_NONE) {
+        g_beacon_count++;
+        Serial.printf("[beacon] seq=%u ttl=%u beacons=%lu\n",
+                      g_gw_seq, kMaxTtl,
+                      static_cast<unsigned long>(g_beacon_count));
+    } else {
+        Serial.printf("[beacon] tx err code=%d\n", state);
+    }
+
+    // El transmit saca al SX1262 de recepción; rearme inmediato.
+    const int16_t restart = radio.startReceive();
+    if (restart != RADIOLIB_ERR_NONE) {
+        Serial.printf("[beacon] startReceive() falló code=%d\n", restart);
+    }
 }
 
 // Valida y procesa una trama entrante según frame-format.md §10.
@@ -291,6 +345,16 @@ void setup() {
 }
 
 void loop() {
+    // Beacon periódico (el primero sale nada más arrancar).
+    static uint32_t last_beacon_ms = 0;
+    static bool     first_beacon   = true;
+    const uint32_t now = millis();
+    if (first_beacon || (now - last_beacon_ms) >= kBeaconPeriodMs) {
+        first_beacon   = false;
+        last_beacon_ms = now;
+        sendBeacon();
+    }
+
     if (!g_rx_flag) {
         delay(5);
         return;

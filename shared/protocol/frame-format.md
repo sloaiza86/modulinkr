@@ -129,7 +129,7 @@ Con cada beacon escuchado, el nodo actualiza su **tabla de vecinos**: `(id del v
 
 ### 2.2 Selección de padre
 
-El nodo elige como padre al vecino con **menor `hop_count`**; a igualdad, el de mejor RSSI. Para evitar oscilaciones, el cambio de padre solo se ejecuta si el candidato mejora al padre actual en al menos un salto, o al mismo `hop_count` con RSSI superior en `mesh.parent_hysteresis_db` dB.
+Solo son elegibles como padre los vecinos cuyo beacon llegue con RSSI igual o mejor que `mesh.parent_min_rssi`: un enlace marginal al gateway no debe ganar por tener menos saltos si existe un vecino sano a un salto más. Entre los elegibles, el nodo elige al de **menor `hop_count`**; a igualdad, el de mejor RSSI. Para evitar oscilaciones, el cambio de padre solo se ejecuta si el candidato mejora al padre actual en al menos un salto, o al mismo `hop_count` con RSSI superior en `mesh.parent_hysteresis_db` dB.
 
 La distancia propia del nodo es `hop_count del padre + 1`.
 
