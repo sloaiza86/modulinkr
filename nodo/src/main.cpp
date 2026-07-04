@@ -1,5 +1,7 @@
-// ModuLinkr, firmware del nodo (V1)
-// Modo H3 fase 2b: ciclo dual LoRa + NB-IoT con Modbus en cada disparo.
+// ModuLinkr, firmware del nodo (V2)
+// Modo H4 fase 1: ACK + seq. Cada trama LoRa espera confirmación extremo
+// a extremo del gateway; sin ACK se reintenta con el mismo seq y, agotados
+// los reintentos, se contabiliza como no confirmada (frame-format.md §5).
 //
 // Asignación de UART (resolución del conflicto, ver nodo/README.md):
 //   Modbus  → SoftwareSerial  GPIO 33 RX / GPIO 23 TX  @ 9600
@@ -26,11 +28,13 @@
 #include "modbus.h"
 #include "lora.h"
 #include "nbiot.h"
+#include "pending.h"
+#include "protocol.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.5-h3-dual";
+constexpr const char* kFirmwareVersion = "0.0.6-h4-ack";
 
 // Modbus (SoftwareSerial).
 constexpr int8_t        kRs485RxPin = 33;
@@ -79,6 +83,14 @@ constexpr const char* kClientId = "modulinkr-node1";
 
 constexpr uint8_t kNodeId = NODE_ID;
 
+// Parámetros de red v2.0 (equivalen a lora.network_id, lora.ack_timeout_ms,
+// lora.max_retries y mesh.max_ttl del futuro config.json; por ahora
+// build_flags en platformio.ini).
+constexpr uint8_t  kNetworkId    = NETWORK_ID;
+constexpr uint32_t kAckTimeoutMs = LORA_ACK_TIMEOUT_MS;
+constexpr uint8_t  kMaxRetries   = LORA_MAX_RETRIES;
+constexpr uint8_t  kMaxTtl       = LORA_MAX_TTL;
+
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
 #elif defined(MODEM_SIM7080G)
@@ -98,12 +110,16 @@ EspSoftwareSerial::UART modbus_uart;
 ModbusRTU               modbus;
 LoraP2P                 lora;
 Nbiot                   nbiot;
+PendingQueue            pending;
 
 // Contadores.
 uint32_t g_modbus_ok  = 0;
 uint32_t g_modbus_err = 0;
-uint32_t g_lora_ok    = 0;
-uint32_t g_lora_err   = 0;
+uint32_t g_lora_ok    = 0;   // tramas aceptadas por el módulo (TX)
+uint32_t g_lora_err   = 0;   // fallos de TX
+uint32_t g_lora_acked = 0;   // tramas confirmadas por el gateway
+uint32_t g_lora_retx  = 0;   // retransmisiones emitidas
+uint32_t g_lora_lost  = 0;   // tramas con reintentos agotados sin ACK
 uint32_t g_mqtt_ok    = 0;
 uint32_t g_mqtt_err   = 0;
 uint16_t g_lora_seq   = 0;
@@ -134,6 +150,10 @@ void printBanner() {
     Serial.printf ("  LoRa  : %lu Hz  SF%u  BW%u  pwr=%u dBm  period=%lu ms\n",
                    kLoraFreqHz, kLoraSF, kLoraBwKhz, kLoraTxDbm,
                    static_cast<unsigned long>(kLoraPeriodMs));
+    Serial.printf ("  Red   : network_id=%u  ack_timeout=%lu ms  max_retries=%u  ttl=%u\n",
+                   kNetworkId,
+                   static_cast<unsigned long>(kAckTimeoutMs),
+                   kMaxRetries, kMaxTtl);
     Serial.printf ("  Modbus: slave=0x%02X  fn=0x04  reg=0x%04X..0x%04X\n",
                    kXyMd02SlaveId,
                    kXyMd02RegStart,
@@ -210,11 +230,15 @@ void fireLora() {
 
     const float values[] = {temp_c, hum_pc};
     g_lora_seq++;
-    const auto st = lora.sendTelemetry(kNodeId, g_lora_seq, values, 2);
+    const auto st = lora.sendTelemetry(g_lora_seq, values, 2);
     if (st == LoraP2P::Status::OK) {
         g_lora_ok++;
-        Serial.printf("[lora]   tx ok seq=%u  tx_ok=%lu tx_err=%lu\n",
+        if (!pending.push(g_lora_seq, values, 2, millis())) {
+            Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
+        }
+        Serial.printf("[lora]   tx ok seq=%u  pend=%u  tx_ok=%lu tx_err=%lu\n",
                       g_lora_seq,
+                      static_cast<unsigned>(pending.count()),
                       static_cast<unsigned long>(g_lora_ok),
                       static_cast<unsigned long>(g_lora_err));
     } else {
@@ -223,6 +247,59 @@ void fireLora() {
                       LoraP2P::statusToString(st), g_lora_seq,
                       static_cast<unsigned long>(g_lora_ok),
                       static_cast<unsigned long>(g_lora_err));
+    }
+}
+
+// Procesa las tramas LoRa entrantes (fase 1: solo ACKs del gateway).
+void processLoraRx() {
+    LoraP2P::RxFrame f;
+    while (lora.readFrame(f)) {
+        if (f.frame_type != protocol::kFrameAck) {
+            // BEACON, SN_OFFER y demás llegan en fases 2 y 3.
+            Serial.printf("[lora]   rx tipo 0x%02X ignorado (fase 1)\n", f.frame_type);
+            continue;
+        }
+        if (f.dest_id != kNodeId || f.payload_length != 3) {
+            continue;
+        }
+
+        const uint16_t ack_seq = static_cast<uint16_t>(f.payload[0]) |
+                                 (static_cast<uint16_t>(f.payload[1]) << 8);
+        const uint8_t status = f.payload[2];
+
+        if (pending.ack(ack_seq)) {
+            g_lora_acked++;
+            Serial.printf("[lora]   ack seq=%u status=0x%02X rssi=%d  acked=%lu pend=%u\n",
+                          ack_seq, status, static_cast<int>(f.rssi),
+                          static_cast<unsigned long>(g_lora_acked),
+                          static_cast<unsigned>(pending.count()));
+        }
+        // ACK de trama ya purgada: descarte silencioso (spec §5.2).
+    }
+}
+
+// Vencimiento de timeouts: retransmite o abandona (frame-format.md §5.3).
+void processAckTimeouts() {
+    const uint32_t now = millis();
+    PendingQueue::Entry* e = pending.firstExpired(now, kAckTimeoutMs);
+    if (e == nullptr) return;
+
+    if (e->retries < kMaxRetries) {
+        const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values);
+        pending.markRetry(*e, now);
+        g_lora_retx++;
+        Serial.printf("[lora]   retx seq=%u intento=%u/%u (%s)\n",
+                      e->seq, e->retries, kMaxRetries,
+                      LoraP2P::statusToString(st));
+    } else {
+        // Fase 1: la trama se abandona y solo queda el contador.
+        // Fase 3: aquí alimentará el failover NB-IoT o la búsqueda
+        // de supernodo (SN_REQUEST).
+        g_lora_lost++;
+        Serial.printf("[lora]   sin ack seq=%u tras %u reintentos  lost=%lu\n",
+                      e->seq, kMaxRetries,
+                      static_cast<unsigned long>(g_lora_lost));
+        pending.drop(*e);
     }
 }
 
@@ -301,12 +378,13 @@ void setup() {
     Serial.println(modbus_warm ? F("OK") : F("WARNING (seguimos igual)"));
 
     // ----- LoRa sobre Serial1 -----
-    Serial.print(F("[init]   LoRa init... "));
+    Serial.print(F("[init]   LoRa init (TX+RX)... "));
     if (lora.begin(Serial1,
                    kLoraRxPin, kLoraTxPin,
                    kLoraFreqHz,
                    kLoraSF, kLoraBwKhz, kLoraCrIndex,
-                   kLoraTxDbm)) {
+                   kLoraTxDbm,
+                   kNetworkId, kNodeId, kMaxTtl)) {
         g_lora_ready = true;
         Serial.println(F("OK"));
     } else {
@@ -427,6 +505,13 @@ void loop() {
     if (now - last_lora_ms >= kLoraPeriodMs) {
         last_lora_ms += kLoraPeriodMs;
         fireLora();
+    }
+
+    // Recepción y reconciliación de ACKs en cada vuelta.
+    if (g_lora_ready) {
+        lora.poll();
+        processLoraRx();
+        processAckTimeouts();
     }
 
 #if NBIOT_ENABLED
