@@ -4,12 +4,12 @@ Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las med
 
 ## Hardware
 
-| Componente | Modelo | Función |
-| --- | --- | --- |
-| MCU | M5Stack **Atom Lite** (ESP32-PICO-D4, 520 KB SRAM, 4 MB flash) | Cerebro del nodo |
-| LoRa + RS-485 | M5Stack **Atom DTU LoRaWAN EU868** (STM32WLE5CC + SP3485EN) | Radio sub-GHz y bus Modbus, controlado por AT |
-| Celular | M5Stack **NB-IoT 2 Unit Global** (SIM7028) | NB-IoT Cat-NB2 multi-banda, en puerto Grove |
-| Sensor | **XY-MD02** | Temperatura + humedad por Modbus RTU |
+| Componente    | Modelo                                                         | Función                                       |
+| ------------- | -------------------------------------------------------------- | --------------------------------------------- |
+| MCU           | M5Stack **Atom Lite** (ESP32-PICO-D4, 520 KB SRAM, 4 MB flash) | Cerebro del nodo                              |
+| LoRa + RS-485 | M5Stack **Atom DTU LoRaWAN EU868** (STM32WLE5CC + SP3485EN)    | Radio sub-GHz y bus Modbus, controlado por AT |
+| Celular       | M5Stack **NB-IoT 2 Unit Global** (SIM7028)                     | NB-IoT Cat-NB2 multi-banda, en puerto Grove   |
+| Sensor        | **XY-MD02**                                                    | Temperatura + humedad por Modbus RTU          |
 
 > **Nota región**: el firmware se compila con `REGION_EU868` desde la portación del 30 de junio de 2026. La región US915 sigue soportada como `build_flag` alternativo en `platformio.ini` por si se necesitara recompilar para hardware de la primera tanda.
 

@@ -13,16 +13,18 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "1.0"
+"schema_version": "2.0"
 ```
 
 Reglas de compatibilidad:
 
 | Cambio | Bump | Compatibilidad |
 | --- | --- | --- |
-| Añadir un campo opcional | MINOR (1.0 → 1.1) | Hacia atrás: nodos 1.0 ignoran el campo |
+| Añadir un campo opcional | MINOR (2.0 a 2.1) | Hacia atrás: nodos 2.0 ignoran el campo |
 | Añadir un valor a un enum existente | MINOR | Hacia atrás: validar en el firmware |
-| Cambiar un tipo, renombrar un campo, eliminar un campo | MAJOR (1.0 → 2.0) | **Rompe** la compatibilidad |
+| Añadir un campo obligatorio, cambiar un tipo, renombrar o eliminar un campo | MAJOR (1.0 a 2.0) | **Rompe** la compatibilidad |
+
+El salto de 1.0 a 2.0 introduce la red mesh: campos obligatorios nuevos en `lora` (`network_id`, `max_retries`), el bloque obligatorio `transport.mesh` y el campo `nbiot.relay_enabled`. Al ser campos obligatorios, un config 1.0 no valida contra 2.0, de ahí el bump de major. La cabecera de la trama LoRa cambió de forma incompatible en paralelo (ver `frame-format.md` §1.2).
 
 El firmware **rechaza al cargar** cualquier `config.json` con una `schema_version` que no entienda.
 
@@ -32,7 +34,7 @@ Tres bloques de primer nivel:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "node":      { ... },
   "transport": { ... },
   "modbus":    { ... }
@@ -71,14 +73,14 @@ Describe los canales por los que el dispositivo se comunica hacia el resto del s
 
 | `node.type` | Sub-bloques que aparecen |
 | --- | --- |
-| `"node"` | `lora` |
-| `"super_node"` | `lora` + `nbiot` |
+| `"node"` | `lora` + `mesh` |
+| `"super_node"` | `lora` + `mesh` + `nbiot` |
 
 Si un JSON contiene un sub-bloque incompatible con su `type` (por ejemplo, `nbiot` dentro de un `node`), el firmware lo rechaza como JSON inválido en boot.
 
 ### 4.1 Sub-bloque `lora`
 
-Configuración del transceptor LoRa P2P para envío periódico de telemetría hacia el gateway o supernodo. Todos los campos descritos abajo son obligatorios.
+Configuración del transceptor LoRa P2P para envío periódico de telemetría hacia el gateway. Todos los campos descritos abajo son obligatorios.
 
 ```json
 "lora": {
@@ -87,9 +89,11 @@ Configuración del transceptor LoRa P2P para envío periódico de telemetría ha
   "sf":               7,
   "bw_khz":           125,
   "tx_power_dbm":     20,
+  "network_id":       1,
   "send_interval_ms": 1000,
   "ack_enabled":      true,
-  "ack_timeout_ms":   5000
+  "ack_timeout_ms":   5000,
+  "max_retries":      2
 }
 ```
 
@@ -100,13 +104,39 @@ Configuración del transceptor LoRa P2P para envío periódico de telemetría ha
 | `sf` | integer | `7` a `12` | Spreading factor. SF7 ofrece mayor velocidad, menor alcance. |
 | `bw_khz` | integer | `125`, `250`, `500` | Ancho de banda del canal. |
 | `tx_power_dbm` | integer | `2` a `22` | Potencia de salida en dBm. Sujeta a límites por región. |
-| `send_interval_ms` | integer | `≥ 100` | Periodo entre envíos. Debe respetar el duty cycle de la región (validación en firmware). |
-| `ack_enabled` | boolean | `true`, `false` | Si `true`, el gateway responde un ACK por cada trama recibida (referenciado por `seq` de la trama, ver `frame-format.md`). El nodo lleva contabilidad de ACKs recibidos vs esperados. |
-| `ack_timeout_ms` | integer | `≥ 100` | Tiempo máximo de espera por ACK desde el envío. Vencido el plazo sin ACK, la trama se contabiliza como "no confirmada". Solo relevante si `ack_enabled == true`. |
+| `network_id` | integer | `1`-`254` | Identificador del despliegue. Va en cada trama (ver `frame-format.md` §1.4); todo receptor descarta tramas de otra red. Debe coincidir en todos los dispositivos del despliegue, gateway incluido. |
+| `send_interval_ms` | integer | `≥ 100` | Periodo entre envíos. Debe respetar el duty cycle de la región (validación en firmware), incluyendo el tráfico relayado. |
+| `ack_enabled` | boolean | `true`, `false` | Si `true`, el nodo espera y contabiliza el ACK extremo a extremo de cada trama (ver `frame-format.md` §4). Gobierna la espera en el nodo; el gateway emite ACK siempre. |
+| `ack_timeout_ms` | integer | `≥ 100` | Tiempo máximo de espera por ACK desde el envío. Debe cubrir la ruta completa (referencia en `frame-format.md` §5.3). Vencido el plazo, se dispara el reintento o la trama queda "no confirmada". Solo relevante si `ack_enabled == true`. |
+| `max_retries` | integer | `0`-`10` | Retransmisiones de una trama (mismo `seq`) tras cada timeout sin ACK, antes de darla por no confirmada. `0` desactiva reintentos. |
 
-### 4.2 Sub-bloque `nbiot`
+### 4.2 Sub-bloque `mesh`
 
-Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los campos descritos abajo son obligatorios.** Configuración del módem celular y del destino MQTT donde se vuelcan los batches con las muestras que LoRa no consiguió entregar (ver §4.3 sobre el mecanismo de respaldo selectivo).
+Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobierna el comportamiento del nodo dentro del árbol de rutas (ver `frame-format.md` §2).
+
+```json
+"mesh": {
+  "relay_enabled":        true,
+  "max_ttl":              4,
+  "beacon_timeout_ms":    90000,
+  "parent_hysteresis_db": 6,
+  "parent_missed_frames": 3,
+  "sn_offer_wait_ms":     1000
+}
+```
+
+| Campo | Tipo | Valores válidos | Notas |
+| --- | --- | --- | --- |
+| `relay_enabled` | boolean | `true`, `false` | Si `true`, el nodo reenvía tramas de otros nodos hacia su padre (relay uplink) y transporta ACKs por la ruta inversa. Con `false` el nodo solo origina tráfico propio; útil en nodos con presupuesto energético crítico. |
+| `max_ttl` | integer | `1`-`15` | TTL inicial de las tramas originadas por este nodo. Limita la profundidad de ruta. Debe ser homogéneo en el despliegue y coherente con el del gateway. |
+| `beacon_timeout_ms` | integer | `≥ 10000` | Caducidad de las entradas de la tabla de vecinos y del padre. Recomendado: al menos 3 veces el periodo de beacon del gateway (30 s por defecto). |
+| `parent_hysteresis_db` | integer | `0`-`30` | Mejora mínima de RSSI para cambiar de padre a igualdad de `hop_count`. Evita oscilaciones entre padres equivalentes. |
+| `parent_missed_frames` | integer | `≥ 1` | Tramas consecutivas con reintentos agotados sin ACK que invalidan al padre actual y fuerzan reselección. |
+| `sn_offer_wait_ms` | integer | `≥ 200` | Ventana de escucha de ofertas tras emitir un SN_REQUEST (`frame-format.md` §8). |
+
+### 4.3 Sub-bloque `nbiot`
+
+Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los campos descritos abajo son obligatorios.** Configuración del módem celular y del destino MQTT donde se vuelcan los batches con las muestras que LoRa no consiguió entregar (ver §4.4 sobre el mecanismo de respaldo selectivo).
 
 ```json
 "nbiot": {
@@ -117,7 +147,9 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
   "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
   "topic_commands":       "modulinkr/v1/{node_id}/cmd",
   "failover_missed_acks": 5,
-  "failover_window_ms":   30000
+  "failover_window_ms":   30000,
+  "relay_enabled":        true,
+  "relay_queue_max":      128
 }
 ```
 
@@ -129,24 +161,26 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. |
 | `topic_telemetry` | string | template MQTT | Topic donde publica los batches. `{node_id}` se sustituye por el `node.id` decimal. |
 | `topic_commands` | string | template MQTT | Topic al que se suscribe para recibir comandos (ver `commands-format.md`). |
-| `failover_missed_acks` | integer | `≥ 1` | Cuántas tramas LoRa sin ACK acumular antes de activar NB-IoT para reenviarlas. Valores iniciales sugeridos: 3 a 10. |
+| `failover_missed_acks` | integer | `≥ 1` | Cuántas tramas LoRa sin ACK (con reintentos agotados, ver `lora.max_retries`) acumular antes de activar NB-IoT para reenviarlas. Valores iniciales sugeridos: 3 a 10. |
 | `failover_window_ms` | integer | `≥ 1000` | Ventana temporal sobre la que se cuentan los ACKs perdidos. Si dentro de esa ventana se acumulan `failover_missed_acks` o más, se dispara el respaldo. |
+| `relay_enabled` | boolean | `true`, `false` | Si `true`, el supernodo responde SN_OFFER a los SN_REQUEST de vecinos sin ruta y acepta sus tramas en custodia (`frame-format.md` §8). Con `false` nunca ofrece su salida celular. |
+| `relay_queue_max` | integer | `≥ 1` | Tope de muestras ajenas en cola de custodia. Alcanzado el tope, el supernodo deja de responder SN_OFFER hasta liberar espacio. |
 
 **Nota importante**: NB-IoT está concebido como **canal de respaldo selectivo**, no de uso cotidiano. El supernodo **no acumula todas las muestras** sin filtrar: solo envía por NB-IoT las tramas LoRa que no recibieron ACK del gateway, identificadas por su `seq` (ver `frame-format.md` y `batch-format.md`). Cuando los ACKs vuelven a llegar con normalidad, el respaldo se desactiva. El envío fijo cada N minutos existe únicamente como **modo de comisionamiento/validación** durante pruebas iniciales y se dispara por comando externo (`commands-format.md`).
 
-### 4.3 Mecanismo de respaldo selectivo (LoRa ACK + NB-IoT)
+### 4.4 Mecanismo de respaldo selectivo (LoRa ACK + NB-IoT)
 
-Resumen del comportamiento que rige cómo los campos de §4.1 y §4.2 interactúan en tiempo real. Solo aplica a supernodos (`node.type == "super_node"`).
+Resumen del comportamiento que rige cómo los campos de §4.1, §4.2 y §4.3 interactúan en tiempo real. El respaldo con módem propio solo aplica a supernodos (`node.type == "super_node"`); un nodo sin NB-IoT cubre el mismo escenario buscando un supernodo vecino (`frame-format.md` §8).
 
 **Cómo opera en condiciones normales:**
 
-1. El supernodo envía tramas LoRa cada `lora.send_interval_ms`. Cada trama lleva un número de secuencia `seq` (uint16, ver `frame-format.md`).
-2. El gateway recibe la trama y, si `lora.ack_enabled == true`, responde con un ACK que referencia ese `seq`.
-3. El supernodo guarda en una cola local cada trama enviada hasta recibir su ACK. Si llega ACK, libera esa trama. Si pasan `lora.ack_timeout_ms` milisegundos sin ACK, la marca como "no confirmada".
+1. El supernodo envía tramas LoRa cada `lora.send_interval_ms` hacia su padre en el árbol de rutas. Cada trama lleva un número de secuencia `seq` (uint16, ver `frame-format.md`).
+2. El gateway recibe la trama (directa o relayada) y responde con un ACK extremo a extremo que referencia ese `seq`.
+3. El supernodo guarda en una cola local cada trama enviada hasta recibir su ACK. Si llega ACK, libera esa trama. Si pasan `lora.ack_timeout_ms` milisegundos sin ACK, retransmite hasta `lora.max_retries` veces; agotados los reintentos, la marca como "no confirmada".
 
 **Cuándo se activa NB-IoT:**
 
-- Si dentro de una ventana móvil de `nbiot.failover_window_ms` milisegundos se acumulan `nbiot.failover_missed_acks` o más tramas no confirmadas, el supernodo activa el módem celular.
+- Si dentro de una ventana móvil de `nbiot.failover_window_ms` milisegundos se acumulan `nbiot.failover_missed_acks` o más tramas no confirmadas, el supernodo activa el módem celular. En paralelo, las tramas no confirmadas alimentan la invalidación de padre (`mesh.parent_missed_frames`, ver `frame-format.md` §2.2).
 - Empaqueta las tramas no confirmadas en un batch (ver `batch-format.md`) y lo publica vía MQTT en `nbiot.topic_telemetry`.
 - El batch contiene **solo las muestras correspondientes a las tramas no confirmadas**, no todo lo que se haya enviado hasta el momento.
 
@@ -273,7 +307,7 @@ Cada entrada describe **una lectura periódica** que se ejecuta cada `poll_inter
 | `offset` | float | no, default `0.0` | cualquier float | Sumando para conversión. |
 | `unit` | string | no | hasta 8 caracteres | Etiqueta de unidad (`"C"`, `"%RH"`, `"kPa"`, `"V"`, ...). Solo decorativo. |
 
-La conversión `raw → unidad real` se hace **en el nodo** (decisión de edge computing). La trama LoRa lleva el valor ya convertido como `float32`.
+La conversión de `raw` a unidad real se hace **en el nodo** (decisión de edge computing). La trama LoRa lleva el valor ya convertido como `float32`.
 
 ### 5.4 Array `writes[]`
 
@@ -373,7 +407,7 @@ Notas:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "node": {
     "id":          1,
     "type":        "node",
@@ -387,9 +421,19 @@ Notas:
       "sf":               7,
       "bw_khz":           125,
       "tx_power_dbm":     20,
+      "network_id":       1,
       "send_interval_ms": 1000,
       "ack_enabled":      true,
-      "ack_timeout_ms":   5000
+      "ack_timeout_ms":   5000,
+      "max_retries":      2
+    },
+    "mesh": {
+      "relay_enabled":        true,
+      "max_ttl":              4,
+      "beacon_timeout_ms":    90000,
+      "parent_hysteresis_db": 6,
+      "parent_missed_frames": 3,
+      "sn_offer_wait_ms":     1000
     }
   },
   "modbus": {
@@ -417,13 +461,13 @@ Notas:
 }
 ```
 
-> En un nodo (no supernodo), los campos `ack_enabled` y `ack_timeout_ms` siguen siendo obligatorios. Si el gateway no responde ACKs, simplemente no se activa nada (no hay NB-IoT al que pasar el respaldo); el nodo asume que las tramas se entregaron.
+> En un nodo (no supernodo), los campos `ack_enabled` y `ack_timeout_ms` siguen siendo obligatorios. La contabilidad de ACKs le sirve al nodo para invalidar a su padre y reseleccionar ruta y, si se queda sin ruta, para buscar un supernodo con salida NB-IoT (`frame-format.md` §8). Con `ack_enabled == false` nada de eso opera: el nodo asume que las tramas se entregaron.
 
 ### 6.2 Supernodo con LoRa + NB-IoT y dispositivo con cambio de slave_id
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "node": {
     "id":          10,
     "type":        "super_node",
@@ -437,9 +481,19 @@ Notas:
       "sf":               7,
       "bw_khz":           125,
       "tx_power_dbm":     20,
+      "network_id":       1,
       "send_interval_ms": 1000,
       "ack_enabled":      true,
-      "ack_timeout_ms":   5000
+      "ack_timeout_ms":   5000,
+      "max_retries":      2
+    },
+    "mesh": {
+      "relay_enabled":        true,
+      "max_ttl":              4,
+      "beacon_timeout_ms":    90000,
+      "parent_hysteresis_db": 6,
+      "parent_missed_frames": 3,
+      "sn_offer_wait_ms":     1000
     },
     "nbiot": {
       "apn":                  "iot.1nce.net",
@@ -449,7 +503,9 @@ Notas:
       "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
       "failover_missed_acks": 5,
-      "failover_window_ms":   30000
+      "failover_window_ms":   30000,
+      "relay_enabled":        true,
+      "relay_queue_max":      128
     }
   },
   "modbus": {
@@ -509,14 +565,16 @@ El firmware (y la futura herramienta CLI) deben rechazar un `config.json` que vi
 3. `node.type` en el enum `{"node", "super_node"}`.
 4. Si `node.type == "node"`, **no debe existir** `transport.nbiot`.
 5. Si `node.type == "super_node"`, **debe existir** `transport.nbiot`.
-6. Todos los `id` dentro de `reads[]` y `writes[]` de un mismo dispositivo deben ser únicos.
-7. Si `addressing.default_slave_id != addressing.desired_slave_id`, los campos `change_function` y `change_address` son obligatorios.
-8. `function` de cada entrada coherente con su rol (`reads[]` solo admite funciones de lectura; `writes[]` solo de escritura).
-9. `type` obligatorio para registers, no admitido para coils ni discrete inputs.
-10. `count` coherente con el tamaño de `type` cuando este ocupa más de un registro.
-11. `send_interval_ms` de LoRa respeta los límites de duty cycle de su `region`.
-12. Los campos `lora.ack_enabled` y `lora.ack_timeout_ms` son obligatorios en todo dispositivo. Los campos `nbiot.failover_missed_acks` y `nbiot.failover_window_ms` son obligatorios cuando el bloque `nbiot` está presente. Si `lora.ack_enabled == false`, el firmware advierte por log que el respaldo NB-IoT solo podrá activarse por comando explícito.
-13. El campo `byte_order` es obligatorio cuando `type ∈ {uint32, int32, float32}` y debe ser uno de `"ABCD"`, `"BADC"`, `"CDAB"`, `"DCBA"`. Su presencia con `type ∈ {uint16, int16}` o sobre coils/discrete inputs hace el JSON inválido.
+6. `transport.mesh` obligatorio en ambos tipos, con todos sus campos.
+7. `lora.network_id` en rango `1`-`254` (`0` y `255` reservados en el espacio de direcciones de la trama).
+8. Todos los `id` dentro de `reads[]` y `writes[]` de un mismo dispositivo deben ser únicos.
+9. Si `addressing.default_slave_id != addressing.desired_slave_id`, los campos `change_function` y `change_address` son obligatorios.
+10. `function` de cada entrada coherente con su rol (`reads[]` solo admite funciones de lectura; `writes[]` solo de escritura).
+11. `type` obligatorio para registers, no admitido para coils ni discrete inputs.
+12. `count` coherente con el tamaño de `type` cuando este ocupa más de un registro.
+13. `send_interval_ms` de LoRa respeta los límites de duty cycle de su `region`.
+14. Los campos `lora.ack_enabled`, `lora.ack_timeout_ms` y `lora.max_retries` son obligatorios en todo dispositivo. Los campos `failover_*`, `relay_enabled` y `relay_queue_max` de `nbiot` son obligatorios cuando el bloque `nbiot` está presente. Si `lora.ack_enabled == false`, el firmware advierte por log que el respaldo NB-IoT solo podrá activarse por comando explícito y que la reselección de padre por fallo de entrega queda inoperativa.
+15. El campo `byte_order` es obligatorio cuando `type ∈ {uint32, int32, float32}` y debe ser uno de `"ABCD"`, `"BADC"`, `"CDAB"`, `"DCBA"`. Su presencia con `type ∈ {uint16, int16}` o sobre coils/discrete inputs hace el JSON inválido.
 
 ## 8. Documentos relacionados
 
