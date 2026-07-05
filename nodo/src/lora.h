@@ -101,9 +101,32 @@ public:
     Status forwardFrame(const RxFrame& f, uint8_t new_hop_dst);
 
     // Re-emite un beacon del gateway (spec §7.3): mismo seq y origen
-    // gateway, hop_src propio, hop_count propio en el payload y ttl ya
-    // decrementado por el llamante.
-    Status sendBeaconEcho(uint16_t beacon_seq, uint8_t own_hop, uint8_t ttl);
+    // gateway, hop_src propio, hop_count y padre propios en el payload
+    // y ttl ya decrementado por el llamante.
+    Status sendBeaconEcho(uint16_t beacon_seq, uint8_t own_hop,
+                          uint8_t own_parent, uint8_t ttl);
+
+    // ----- Fallback NB-IoT (frame-format.md §8) -----
+
+    // Telemetría en custodia: mismo formato que sendTelemetry pero con
+    // destino final el supernodo elegido (unicast directo, sin relay).
+    Status sendTelemetryCustody(uint16_t seq, const float* values,
+                                uint8_t n_values, uint8_t sn_id);
+
+    // Búsqueda de supernodo: broadcast a vecinos directos (ttl=1).
+    //   queued  muestras pendientes en la outbox (saturando a 255).
+    Status sendSnRequest(uint16_t seq, uint8_t queued);
+
+    // Oferta de salida celular, respuesta unicast a un SN_REQUEST.
+    //   quality      CSQ crudo 0-31, 0xFF desconocida.
+    //   queue_space  muestras que se pueden aceptar (saturando a 255).
+    Status sendSnOffer(uint8_t requester, uint16_t seq,
+                       uint8_t quality, uint8_t queue_space);
+
+    // ACK emitido por este nodo como receptor final (supernodo que acepta
+    // custodia). own_seq es el contador de tramas propio del emisor.
+    Status sendAck(uint8_t dest, uint16_t own_seq,
+                   uint16_t ack_seq, uint8_t status);
 
     // Lee la UART sin bloquear y acumula tramas entrantes válidas.
     // Llamar en cada vuelta del loop().

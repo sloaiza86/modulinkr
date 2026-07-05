@@ -172,11 +172,12 @@ def parse_frame(frame: bytes) -> dict:
             out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0'
 
     elif frame_type == FRAME_BEACON:
-        if payload_length != 2:
-            out['error'] = f'BEACON payload_length={payload_length}, esperado 2'
+        if payload_length != 3:
+            out['error'] = f'BEACON payload_length={payload_length}, esperado 3'
             return out
         out['hop_count'] = payload[0]
-        out['flags'] = payload[1]
+        out['parent'] = payload[1]
+        out['flags'] = payload[2]
 
     elif frame_type == FRAME_SN_REQUEST:
         if payload_length != 2:
@@ -222,7 +223,10 @@ def format_frame_summary(parsed: dict, rssi: float, snr: float, count: int) -> s
     if ft == FRAME_ACK:
         return f'{head}  ack_seq={parsed["ack_seq"]} status={parsed["ack_status_name"]}'
     if ft == FRAME_BEACON:
-        return f'{head}  hop_count={parsed["hop_count"]} flags=0x{parsed["flags"]:02X}'
+        parent = parsed['parent']
+        parent_str = '-' if parent == 0 else addr_name(parent)  # 0 = raíz, sin padre
+        return (f'{head}  hop_count={parsed["hop_count"]} '
+                f'parent={parent_str} flags=0x{parsed["flags"]:02X}')
     if ft == FRAME_SN_REQUEST:
         return f'{head}  queued={parsed["queued"]}'
     if ft == FRAME_SN_OFFER:

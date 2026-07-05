@@ -26,7 +26,9 @@ public:
         bool     in_use  = false;
         uint16_t seq     = 0;
         uint32_t sent_ms = 0;   // millis() del último envío (se actualiza al reintentar)
+        uint32_t capture_ms = 0;  // millis() de la captura de la muestra
         uint8_t  retries = 0;   // reintentos ya consumidos
+        uint8_t  dest    = 0xFF;  // destino final: 0xFF gateway, otro = supernodo (custodia)
         uint8_t  n_values = 0;
         float    values[kMaxValues] = {};
     };
@@ -34,11 +36,16 @@ public:
     // Registra una trama recién enviada. Si la cola está llena, sobrescribe
     // la entrada más antigua (FIFO con sobrescritura, spec §5.1) y lo
     // reporta devolviendo false.
-    bool push(uint16_t seq, const float* values, uint8_t n_values, uint32_t now_ms);
+    //   dest        0xFF para la ruta normal al gateway; el id de un
+    //               supernodo cuando la trama viaja en custodia (§8).
+    //   capture_ms  millis() de la captura de la muestra (para el ts del
+    //               batch si acaba en la outbox).
+    bool push(uint16_t seq, const float* values, uint8_t n_values,
+              uint32_t now_ms, uint8_t dest, uint32_t capture_ms);
 
     // Procesa un ACK entrante. Devuelve true si el seq estaba en cola
-    // (la entrada se libera).
-    bool ack(uint16_t seq);
+    // (la entrada se libera) y deja en dest_out el destino que llevaba.
+    bool ack(uint16_t seq, uint8_t& dest_out);
 
     // Devuelve la primera entrada cuyo timeout venció, o nullptr.
     // El llamante decide: reintentar (markRetry) o abandonar (drop).

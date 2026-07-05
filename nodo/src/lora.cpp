@@ -110,12 +110,13 @@ LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
 
 LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                                         uint8_t own_hop,
+                                        uint8_t own_parent,
                                         uint8_t ttl) {
     if (!initialized_) return Status::NOT_INITIALIZED;
 
-    // Payload BEACON (spec §7.2): hop_count del emisor de este salto
-    // (la distancia propia) + flags reservado.
-    const uint8_t payload[2] = {own_hop, 0x00};
+    // Payload BEACON (spec §7.2): hop_count y padre del emisor de este
+    // salto (el padre habilita la regla anti-bucle) + flags reservado.
+    const uint8_t payload[3] = {own_hop, own_parent, 0x00};
     return buildAndSend(protocol::kAddrBroadcast,
                         protocol::kAddrGateway,   // origin: siempre el gateway
                         protocol::kAddrBroadcast,
@@ -124,6 +125,58 @@ LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                         ttl,
                         payload,
                         sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
+                                              const float* values,
+                                              uint8_t n_values,
+                                              uint8_t sn_id) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (n_values == 0 || n_values > kMaxValues || values == nullptr) {
+        return Status::INVALID_ARGS;
+    }
+
+    uint8_t payload[4u * kMaxValues];
+    for (uint8_t i = 0; i < n_values; ++i) {
+        std::memcpy(&payload[4u * i], &values[i], sizeof(float));
+    }
+
+    // Entrega directa al supernodo: dest_id = hop_dst = sn (spec §8.3).
+    return buildAndSend(sn_id, node_id_, sn_id, seq,
+                        protocol::kFrameTelemetry, 1,
+                        payload, static_cast<uint8_t>(4u * n_values));
+}
+
+LoraP2P::Status LoraP2P::sendSnRequest(uint16_t seq, uint8_t queued) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    const uint8_t payload[2] = {queued, 0x00};
+    return buildAndSend(protocol::kAddrBroadcast, node_id_,
+                        protocol::kAddrBroadcast, seq,
+                        protocol::kFrameSnRequest, /*ttl=*/1,
+                        payload, sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::sendSnOffer(uint8_t requester, uint16_t seq,
+                                     uint8_t quality, uint8_t queue_space) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    const uint8_t payload[2] = {quality, queue_space};
+    return buildAndSend(requester, node_id_, requester, seq,
+                        protocol::kFrameSnOffer, /*ttl=*/1,
+                        payload, sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::sendAck(uint8_t dest, uint16_t own_seq,
+                                 uint16_t ack_seq, uint8_t status) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    const uint8_t payload[3] = {
+        static_cast<uint8_t>(ack_seq & 0xFF),
+        static_cast<uint8_t>((ack_seq >> 8) & 0xFF),
+        status,
+    };
+    // Receptor final directo (custodia): sin relay, ttl=1.
+    return buildAndSend(dest, node_id_, dest, own_seq,
+                        protocol::kFrameAck, /*ttl=*/1,
+                        payload, sizeof(payload));
 }
 
 LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,

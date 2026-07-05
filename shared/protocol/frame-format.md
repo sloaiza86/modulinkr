@@ -129,7 +129,7 @@ Con cada beacon escuchado, el nodo actualiza su **tabla de vecinos**: `(id del v
 
 ### 2.2 Selección de padre
 
-Solo son elegibles como padre los vecinos cuyo beacon llegue con RSSI igual o mejor que `mesh.parent_min_rssi`: un enlace marginal al gateway no debe ganar por tener menos saltos si existe un vecino sano a un salto más. Entre los elegibles, el nodo elige al de **menor `hop_count`**; a igualdad, el de mejor RSSI. Para evitar oscilaciones, el cambio de padre solo se ejecuta si el candidato mejora al padre actual en al menos un salto, o al mismo `hop_count` con RSSI superior en `mesh.parent_hysteresis_db` dB.
+Solo son elegibles como padre los vecinos que cumplan dos condiciones: su beacon llega con RSSI igual o mejor que `mesh.parent_min_rssi` (un enlace marginal al gateway no debe ganar por tener menos saltos si existe un vecino sano a un salto más), y su `parent_id` anunciado no es el propio nodo (regla anti-bucle: quien depende de mí no puede ser mi salida). Entre los elegibles, el nodo elige al de **menor `hop_count`**; a igualdad, el de mejor RSSI. Para evitar oscilaciones, el cambio de padre solo se ejecuta si el candidato mejora al padre actual en al menos un salto, o al mismo `hop_count` con RSSI superior en `mesh.parent_hysteresis_db` dB.
 
 La distancia propia del nodo es `hop_count del padre + 1`.
 
@@ -361,18 +361,21 @@ Mantiene el árbol de rutas (§2.1). La origina el gateway; los nodos con padre 
 ### 7.2 Estructura del payload
 
 ```
-hop_count   flags
-(1 B)       (1 B)
+hop_count   parent_id   flags
+(1 B)       (1 B)       (1 B)
 ```
 
 | Campo | Contenido |
 | --- | --- |
-| `hop_count` | Distancia al gateway **del emisor de este salto**: 0 en el gateway, `hop_propio` en cada re-emisor. Es el único campo del payload que un re-emisor reescribe. |
+| `hop_count` | Distancia al gateway **del emisor de este salto**: 0 en el gateway, `hop_propio` en cada re-emisor. |
+| `parent_id` | Padre actual del emisor de este salto: `0x00` en el gateway (raíz, sin padre) y el id del padre en cada re-emisor. Habilita la regla anti-bucle de §2.2: un nodo nunca adopta como padre a un vecino que lo anuncia a él como padre. Sin este campo, dos nodos con enlaces marginales al gateway pueden elegirse mutuamente (bucle observado en banco, con `hop_count` inflándose en cada ciclo de beacon). |
 | `flags` | Reservado, `0x00` en v2.0. |
+
+`hop_count` y `parent_id` son los campos que un re-emisor reescribe.
 
 El BEACON **no se confirma** (sin ACK) y no entra en la cola de pendientes.
 
-Tamaño: **15 bytes**. ToA SF7 ≈ 46 ms por emisor. Con periodo de 30 s el coste de duty cycle es despreciable (< 0,2 % por nodo).
+Tamaño: **16 bytes**. ToA SF7 ≈ 51 ms por emisor. Con periodo de 30 s el coste de duty cycle es despreciable (< 0,2 % por nodo).
 
 ### 7.3 Reglas de re-emisión
 
@@ -451,7 +454,7 @@ Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) 
 | Tipo | Tamaño | ToA aprox (por salto) |
 | --- | --- | --- |
 | HEARTBEAT | 13 B | ≈ 46 ms |
-| BEACON | 15 B | ≈ 46 ms |
+| BEACON | 16 B | ≈ 51 ms |
 | SN_REQUEST | 15 B | ≈ 46 ms |
 | SN_OFFER | 15 B | ≈ 46 ms |
 | ACK | 16 B | ≈ 51 ms |
@@ -473,7 +476,7 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
 7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
-8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length` no múltiplo de 4, ACK con `payload_length != 3`, BEACON / SN_REQUEST / SN_OFFER con `payload_length != 2`, HEARTBEAT con `payload_length != 0`).
+8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length` no múltiplo de 4, ACK y BEACON con `payload_length != 3`, SN_REQUEST / SN_OFFER con `payload_length != 2`, HEARTBEAT con `payload_length != 0`).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
 10. Para TELEMETRY en el gateway: el número de `reads` derivado de `payload_length / 4` no coincide con el `len(reads[])` del config del `origin_id` (ACK con `status = DECODE_ERROR`, cuando el enlace Pi a Heltec esté operativo).
 

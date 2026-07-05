@@ -22,18 +22,24 @@
 class Mesh {
 public:
     // Parámetros del bloque mesh del config (node-config.md §4.2).
+    //   self_id: id propio, para la regla anti-bucle (no adoptar a quien
+    //   me anuncia como su padre).
     //   parent_min_rssi: RSSI mínimo del beacon para que un vecino sea
     //   elegible como padre. Los más débiles entran en la tabla (para
     //   diagnóstico) pero nunca se eligen.
-    void begin(uint32_t beacon_timeout_ms,
+    void begin(uint8_t self_id,
+               uint32_t beacon_timeout_ms,
                int16_t parent_min_rssi,
                uint8_t hysteresis_db,
                uint8_t missed_limit);
 
     // Beacon escuchado: actualiza la tabla de vecinos, reevalúa el padre
     // y, si procede, programa la re-emisión (una por seq, con jitter).
+    //   advertised_parent: el parent_id que anuncia el emisor (0x00 en el
+    //   gateway). Alimenta la regla anti-bucle de la selección de padre.
     void onBeacon(uint8_t from_id,
                   uint8_t hop_count,
+                  uint8_t advertised_parent,
                   int16_t rssi,
                   uint16_t beacon_seq,
                   uint8_t ttl,
@@ -68,6 +74,7 @@ private:
         bool     in_use = false;
         uint8_t  id     = 0;
         uint8_t  hop    = 0;
+        uint8_t  parent = 0;   // padre que anuncia el vecino (anti-bucle)
         int16_t  rssi   = -127;
         uint32_t last_ms = 0;
     };
@@ -115,4 +122,7 @@ private:
 
     // Reevalúa el padre contra la tabla actual (adopción + histéresis).
     void reselectParent(uint32_t now_ms);
+
+    // El id propio, necesario para la regla anti-bucle.
+    uint8_t self_id_ = 0;
 };

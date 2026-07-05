@@ -2,10 +2,12 @@
 
 #include "mesh.h"
 
-void Mesh::begin(uint32_t beacon_timeout_ms,
+void Mesh::begin(uint8_t self_id,
+                 uint32_t beacon_timeout_ms,
                  int16_t parent_min_rssi,
                  uint8_t hysteresis_db,
                  uint8_t missed_limit) {
+    self_id_           = self_id;
     beacon_timeout_ms_ = beacon_timeout_ms;
     parent_min_rssi_   = parent_min_rssi;
     hysteresis_db_     = hysteresis_db;
@@ -51,6 +53,7 @@ bool Mesh::expired(const Neighbor& n, uint32_t now_ms) const {
 
 void Mesh::onBeacon(uint8_t from_id,
                     uint8_t hop_count,
+                    uint8_t advertised_parent,
                     int16_t rssi,
                     uint16_t beacon_seq,
                     uint8_t ttl,
@@ -60,6 +63,7 @@ void Mesh::onBeacon(uint8_t from_id,
     n->in_use  = true;
     n->id      = from_id;
     n->hop     = hop_count;
+    n->parent  = advertised_parent;
     n->rssi    = rssi;
     n->last_ms = now_ms;
 
@@ -79,13 +83,15 @@ void Mesh::onBeacon(uint8_t from_id,
 
 void Mesh::reselectParent(uint32_t now_ms) {
     // Mejor candidato de la tabla: menor hop, desempate por RSSI.
-    // Los vecinos por debajo de parent_min_rssi no son elegibles: un
-    // enlace marginal al gateway no debe ganar por tener menos saltos
-    // (node-config.md §4.2).
+    // No son elegibles: vecinos por debajo de parent_min_rssi (un enlace
+    // marginal al gateway no debe ganar por tener menos saltos) ni
+    // vecinos que anuncian a este nodo como su padre (regla anti-bucle,
+    // frame-format.md §2.2 y §7.2).
     const Neighbor* best = nullptr;
     for (const auto& n : neighbors_) {
         if (!n.in_use || expired(n, now_ms)) continue;
         if (n.rssi < parent_min_rssi_) continue;
+        if (n.parent == self_id_) continue;
         if (best == nullptr ||
             n.hop < best->hop ||
             (n.hop == best->hop && n.rssi > best->rssi)) {
@@ -109,9 +115,11 @@ void Mesh::reselectParent(uint32_t now_ms) {
 
     const Neighbor* incumbent = findConst(parent_id_);
     if (incumbent == nullptr || expired(*incumbent, now_ms) ||
-        incumbent->rssi < parent_min_rssi_) {
-        // El padre actual desapareció, caducó o su beacon cayó por
-        // debajo del umbral: se adopta al mejor elegible sin histéresis.
+        incumbent->rssi < parent_min_rssi_ ||
+        incumbent->parent == self_id_) {
+        // El padre actual desapareció, caducó, cayó bajo el umbral o
+        // empezó a anunciar a este nodo como su padre (bucle): se adopta
+        // al mejor elegible sin histéresis.
         parent_id_         = best->id;
         consecutive_fails_ = 0;
         return;

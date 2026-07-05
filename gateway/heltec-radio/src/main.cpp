@@ -165,7 +165,7 @@ bool sendAck(uint8_t origin, uint8_t hop_src, uint16_t ack_seq, uint8_t status) 
 void sendBeacon() {
     using namespace protocol;
 
-    uint8_t frame[kOverhead + 2];
+    uint8_t frame[kOverhead + 3];
     g_gw_seq++;
 
     frame[kOffSchema]     = kSchemaVersion;
@@ -178,13 +178,14 @@ void sendBeacon() {
     frame[kOffSeqHigh]    = static_cast<uint8_t>((g_gw_seq >> 8) & 0xFF);
     frame[kOffFrameType]  = kFrameBeacon;
     frame[kOffTtl]        = kMaxTtl;
-    frame[kOffPayloadLen] = 2;
+    frame[kOffPayloadLen] = 3;
     frame[kOffPayload]     = 0x00;  // hop_count: el gateway es la raíz
-    frame[kOffPayload + 1] = 0x00;  // flags reservado
+    frame[kOffPayload + 1] = 0x00;  // parent_id: la raíz no tiene padre
+    frame[kOffPayload + 2] = 0x00;  // flags reservado
 
-    const uint16_t crc = crc16(frame, kHeaderBytes + 2);
-    frame[kHeaderBytes + 2] = static_cast<uint8_t>(crc & 0xFF);
-    frame[kHeaderBytes + 3] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+    const uint16_t crc = crc16(frame, kHeaderBytes + 3);
+    frame[kHeaderBytes + 3] = static_cast<uint8_t>(crc & 0xFF);
+    frame[kHeaderBytes + 4] = static_cast<uint8_t>((crc >> 8) & 0xFF);
 
     const int16_t state = radio.transmit(frame, sizeof(frame));
 
