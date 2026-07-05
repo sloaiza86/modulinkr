@@ -7,6 +7,8 @@ Este formato es complemento de:
 - [`node-config.md`](node-config.md): define qué `reads[]` existen y en qué orden van los valores.
 - [`frame-format.md`](frame-format.md): define el `seq` que cada muestra arrastra desde su trama LoRa original.
 
+> **Actualización del 5-jul-2026**: el broker MQTT de destino pasa a ser el **broker cloud propio del despliegue** (Mosquitto self-hosted en VPS, en infraestructura de la universidad, o IoT Agent MQTT si se adopta FIWARE), no HiveMQ público. El batch no cambia de formato; solo cambia el destino. El consumidor cloud persiste con deduplicación por `(origin, seq)` en índice único, de modo que un batch reencolado tras micro-cortes de Internet no genera duplicados. Ver `Red V4.md` §"Actualización del 5-jul-2026" para el diseño completo.
+
 ## 1. Cuándo se publica un batch
 
 Cuatro escenarios disparan la publicación de un batch:

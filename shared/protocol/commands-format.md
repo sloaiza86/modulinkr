@@ -7,6 +7,8 @@ Este formato es complemento de:
 - [`node-config.md`](node-config.md): define los `writes[]` y `reads[]` que los comandos pueden referenciar por su `id`.
 - [`batch-format.md`](batch-format.md): describe los batches NB-IoT que algunos comandos pueden disparar manualmente.
 
+> **Actualización del 5-jul-2026**: el broker MQTT desde el que llegan los comandos pasa a ser el **broker cloud propio del despliegue** (Mosquitto self-hosted, universidad o FIWARE IoT Agent MQTT), no HiveMQ público. Además, la web local del gateway se formaliza como **punto de emisión de comandos**: el operador humano interactúa con el dashboard del Pi, el Pi publica al broker cloud, y el destino (supernodo con NB-IoT propio, o nodo sin celular al que se llega vía el gateway y el enlace descendente Pi a Heltec) recibe el comando por su ruta natural. Se anticipa la extensión del §11 de `frame-format.md` (enlace descendente Pi a Heltec) que llevará los comandos por LoRa a los nodos sin NB-IoT. Ver `Red V4.md` §"Actualización del 5-jul-2026" para el diseño completo.
+
 ## 1. Alcance
 
 **Solo aplica a supernodos** (`node.type == "super_node"`). Los nodos sin NB-IoT no reciben comandos en v2.0: su comunicación entrante por LoRa (ACK, BEACON, SN_OFFER, ver `frame-format.md`) es de control de red, no de comandos.
