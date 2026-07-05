@@ -60,9 +60,10 @@ constexpr const char*   kRegionLabel = "US915";
 #endif
 
 // Frecuencia LoRa controlada por build_flag LORA_FREQ_HZ en platformio.ini.
-// Por defecto en EU868: 868.125 MHz (g1) para compatibilidad con el receptor
-// Ebyte E22 del LoRa HAT del gateway. Para volver a 869.525 MHz (g3) o a
-// US915 (915 MHz) basta con cambiar el build_flag.
+// Por defecto en EU868: 869.525 MHz (g3), que es la banda en la que escucha
+// el gateway (Heltec WiFi LoRa 32 v3 con SX1262 puro, ver
+// firmware/gateway/heltec-radio/platformio.ini). Para portar a US915 basta
+// con cambiar el build_flag (LORA_FREQ_HZ y REGION_*).
 constexpr unsigned long kLoraFreqHz = LORA_FREQ_HZ;
 
 constexpr uint8_t  kLoraSF      = 7;
