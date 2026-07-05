@@ -9,16 +9,16 @@ Este formato es complemento de:
 
 ## 1. Alcance
 
-**Solo aplica a supernodos** (`node.type == "super_node"`). Los nodos sin NB-IoT no reciben comandos en v1.0: su única comunicación entrante es el ACK LoRa del gateway (ver `frame-format.md` §3), que no es un comando.
+**Solo aplica a supernodos** (`node.type == "super_node"`). Los nodos sin NB-IoT no reciben comandos en v2.0: su comunicación entrante por LoRa (ACK, BEACON, SN_OFFER, ver `frame-format.md`) es de control de red, no de comandos.
 
-En versiones futuras del protocolo se contempla añadir comandos vía downlink LoRa para nodos sin celular. Por ahora se asume que cualquier acción sobre un nodo sin NB-IoT requiere intervención física (USB, herramienta de comisionamiento).
+En versiones futuras del protocolo se contempla añadir comandos vía downlink LoRa para nodos sin celular, con el gateway como puerta de entrada principal y un supernodo como respaldo (ver `frame-format.md` §11). Por ahora se asume que cualquier acción sobre un nodo sin NB-IoT requiere intervención física (USB, herramienta de comisionamiento).
 
 ## 2. Transporte
 
-- **Protocolo**: MQTT SUBSCRIBE al topic `nbiot.topic_commands` del config del supernodo (ver `node-config.md` §4.2).
+- **Protocolo**: MQTT SUBSCRIBE al topic `nbiot.topic_commands` del config del supernodo (ver `node-config.md` §4.3).
 - **Topic ejemplo**: `modulinkr/v1/10/cmd` para el supernodo con `node_id=10`.
 - **QoS**: 1 (at-least-once). El supernodo procesa cada mensaje recibido, idempotente por `msg_id`.
-- **Retained**: el publisher (backend / CLI) **no debe** usar mensajes retenidos para comandos transaccionales (write/reboot/...). Sí puede usarse para configuración persistente (no contemplado en v1.0).
+- **Retained**: el publisher (backend / CLI) **no debe** usar mensajes retenidos para comandos transaccionales (write/reboot/...). Sí puede usarse para configuración persistente (no contemplado en v2.0).
 - **TLS**: heredado de la sesión MQTT (`nbiot.tls`).
 
 ## 3. Estructura de un comando (request)
@@ -28,7 +28,7 @@ Esquema básico, todos los comandos siguen este patrón:
 ```json
 {
   "msg_id":         "abc-123",
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "type":           "write",
   ...específicos del tipo...
 }
@@ -106,7 +106,7 @@ Para errores:
 ```json
 {
   "msg_id":         "cmd-001",
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "type":           "write",
   "id":             "fan",
   "value":          true
@@ -118,9 +118,9 @@ El supernodo:
 1. Busca en `modbus.devices[].writes[]` la entrada con ese `id`.
 2. Si no la encuentra: responde `error_code: "id_not_found"`.
 3. Si la encuentra, verifica que el tipo de `value` es coherente con el `function` declarado:
-   - `write_single_coil` / `write_multiple_coils` → `value` es `boolean` o array de booleanos.
-   - `write_single_register` → `value` es un número (se aplica conversión inversa con `scale`/`offset` antes de mandar).
-   - `write_multiple_registers` → `value` es array de números.
+   - `write_single_coil` / `write_multiple_coils`: `value` es `boolean` o array de booleanos.
+   - `write_single_register`: `value` es un número (se aplica conversión inversa con `scale`/`offset` antes de mandar).
+   - `write_multiple_registers`: `value` es array de números.
 4. Construye la trama Modbus y la envía por el bus.
 5. Espera respuesta del dispositivo:
    - Si OK: responde `status: "ok"`.
@@ -129,7 +129,7 @@ El supernodo:
 **Ejemplo con setpoint numérico:**
 
 ```json
-{ "msg_id": "cmd-002", "schema_version": "1.0", "type": "write",
+{ "msg_id": "cmd-002", "schema_version": "2.0", "type": "write",
   "id": "setpoint", "value": 25.0 }
 ```
 
@@ -142,7 +142,7 @@ Pide una lectura ahora, sin esperar a la cadencia normal.
 **Con `id` (lectura específica):**
 
 ```json
-{ "msg_id": "cmd-003", "schema_version": "1.0", "type": "read", "id": "temp" }
+{ "msg_id": "cmd-003", "schema_version": "2.0", "type": "read", "id": "temp" }
 ```
 
 Respuesta:
@@ -154,7 +154,7 @@ Respuesta:
 **Sin `id` (todas las lecturas configuradas):**
 
 ```json
-{ "msg_id": "cmd-004", "schema_version": "1.0", "type": "read" }
+{ "msg_id": "cmd-004", "schema_version": "2.0", "type": "read" }
 ```
 
 Respuesta:
@@ -175,7 +175,7 @@ Respuesta:
 ### 6.3 `reboot`, reiniciar supernodo
 
 ```json
-{ "msg_id": "cmd-005", "schema_version": "1.0", "type": "reboot",
+{ "msg_id": "cmd-005", "schema_version": "2.0", "type": "reboot",
   "value": "soft" }
 ```
 
@@ -187,7 +187,7 @@ Tipos de reboot:
 ### 6.4 `reload_config`, recargar configuración
 
 ```json
-{ "msg_id": "cmd-006", "schema_version": "1.0", "type": "reload_config" }
+{ "msg_id": "cmd-006", "schema_version": "2.0", "type": "reload_config" }
 ```
 
 Útil cuando la herramienta de comisionamiento ha actualizado el `config.json` en la flash y el supernodo debe aplicarlo sin reiniciar.
@@ -203,10 +203,10 @@ Comportamiento:
 ### 6.5 `flush_batch`, vaciar cola por NB-IoT
 
 ```json
-{ "msg_id": "cmd-007", "schema_version": "1.0", "type": "flush_batch" }
+{ "msg_id": "cmd-007", "schema_version": "2.0", "type": "flush_batch" }
 ```
 
-Dispara un batch con `trigger: "manual"` que se publica en `topic_telemetry` con todas las muestras no confirmadas que estén en cola en ese momento (ver `batch-format.md` §5.2).
+Dispara un batch con `trigger: "manual"` que se publica en `topic_telemetry` con todas las muestras no confirmadas que estén en cola en ese momento, propias y en custodia (ver `batch-format.md` §5.3).
 
 Respuesta:
 
@@ -217,15 +217,15 @@ Respuesta:
 ### 6.6 `test_batch`, batch de prueba
 
 ```json
-{ "msg_id": "cmd-008", "schema_version": "1.0", "type": "test_batch" }
+{ "msg_id": "cmd-008", "schema_version": "2.0", "type": "test_batch" }
 ```
 
-Publica un batch con `trigger: "test"` y `samples: []` (siempre vacío, ver `batch-format.md` §5.3). Útil para validar la cadena NB-IoT extremo a extremo durante comisionamiento, sin esperar a una racha real de ACKs perdidos.
+Publica un batch con `trigger: "test"` y `samples: []` (siempre vacío, ver `batch-format.md` §5.4). Útil para validar la cadena NB-IoT extremo a extremo durante comisionamiento, sin esperar a una racha real de ACKs perdidos.
 
 ### 6.7 `get_status`, estado interno
 
 ```json
-{ "msg_id": "cmd-009", "schema_version": "1.0", "type": "get_status" }
+{ "msg_id": "cmd-009", "schema_version": "2.0", "type": "get_status" }
 ```
 
 Respuesta con campos diagnósticos:
@@ -235,7 +235,7 @@ Respuesta con campos diagnósticos:
   "msg_id":     "cmd-009",
   "status":     "ok",
   "status_info": {
-    "fw_version":    "0.0.2-h1",
+    "fw_version":    "0.0.6-h4",
     "uptime_s":      3600,
     "lora_rssi":     -78,
     "lora_snr":      9,
@@ -264,11 +264,11 @@ El supernodo, al recibir un comando, lo rechaza si:
 
 ## 8. Consideraciones de seguridad
 
-**No están dentro del scope formal de v1.0**, pero conviene tenerlas presentes y dejarlas listadas:
+**No están dentro del scope formal de v2.0**, pero conviene tenerlas presentes y dejarlas listadas:
 
 - **Autenticación**: la sesión MQTT debe autenticarse (usuario + password como mínimo; recomendado: certificados cliente TLS). El supernodo confía en lo que viene por su sesión MQTT autenticada; no hace validación de identidad por comando.
-- **Autorización**: cualquier cliente con credenciales para publicar en `topic_commands` puede ejecutar **cualquier** comando. No hay roles ni permisos granulares en v1.0. Si el despliegue requiere segregación (ej. operadores que solo pueden leer, no escribir), se gestiona en el broker MQTT mediante ACLs por topic.
-- **Replay**: el `msg_id` no protege contra replay. Un atacante con acceso al broker podría capturar un comando `write` y reenviarlo. Mitigación parcial: el backend genera `msg_id` con timestamp y el supernodo rechaza comandos con `msg_id` ya procesado en una ventana corta (caché del último N). Implementación opcional para v1.0.
+- **Autorización**: cualquier cliente con credenciales para publicar en `topic_commands` puede ejecutar **cualquier** comando. No hay roles ni permisos granulares en v2.0. Si el despliegue requiere segregación (ej. operadores que solo pueden leer, no escribir), se gestiona en el broker MQTT mediante ACLs por topic.
+- **Replay**: el `msg_id` no protege contra replay. Un atacante con acceso al broker podría capturar un comando `write` y reenviarlo. Mitigación parcial: el backend genera `msg_id` con timestamp y el supernodo rechaza comandos con `msg_id` ya procesado en una ventana corta (caché del último N). Implementación opcional para v2.0.
 - **DoS**: una avalancha de comandos podría bloquear al supernodo. El firmware debe limitar la cola de comandos pendientes (recomendado: ≤16). Comandos en exceso reciben `error_code: "busy"`.
 
 Estas consideraciones se ampliarán en una sección dedicada del documento maestro de seguridad cuando esté.
@@ -282,7 +282,7 @@ Escenario: operador quiere encender el ventilador del supernodo 10 desde su CLI.
 Topic: `modulinkr/v1/10/cmd`
 Payload:
 ```json
-{ "msg_id": "op-20260605-001", "schema_version": "1.0",
+{ "msg_id": "op-20260605-001", "schema_version": "2.0",
   "type": "write", "id": "fan", "value": true }
 ```
 
@@ -299,8 +299,8 @@ Payload:
 
 ```
 $ modulinkr cmd --node 10 --type write --id fan --value true
-→ msg_id=op-20260605-001 sent
-← response: ok (coil 100 written: true)
+sent:     msg_id=op-20260605-001
+response: ok (coil 100 written: true)
 ```
 
 ## 10. Documentos relacionados

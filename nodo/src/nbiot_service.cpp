@@ -1,0 +1,236 @@
+// ModuLinkr, servicio NB-IoT no bloqueante (implementación)
+
+#include "nbiot_service.h"
+
+#include <cstring>
+#include <cstdlib>
+
+namespace {
+constexpr const char* kTag = "[nbsvc]";
+}
+
+bool NbiotService::begin(const Config& cfg) {
+    cfg_ = cfg;
+
+    queue_ = xQueueCreate(kQueueDepth, sizeof(char*));
+    if (queue_ == nullptr) return false;
+
+    state_ = State::UART_INIT;
+
+    // Núcleo 0: el loop de Arduino (mesh LoRa) vive en el núcleo 1.
+    const BaseType_t ok = xTaskCreatePinnedToCore(
+        taskEntry, "nbiot_service",
+        /*stack*/ 8192, this, /*prioridad*/ 1, &task_, /*core*/ 0);
+    return ok == pdPASS;
+}
+
+void NbiotService::taskEntry(void* arg) {
+    static_cast<NbiotService*>(arg)->run();
+}
+
+void NbiotService::run() {
+    for (;;) {
+        if (state_ == State::BACKOFF) {
+            vTaskDelay(pdMS_TO_TICKS(kBackoffMs));
+            state_ = State::UART_INIT;
+            continue;
+        }
+
+        if (!step()) {
+            Serial.printf("%s fallo en estado %s, backoff %lu ms\n",
+                          kTag, stateName(state_),
+                          static_cast<unsigned long>(kBackoffMs));
+            state_ = State::BACKOFF;
+            continue;
+        }
+
+        // Cadencia base del bucle de la tarea.
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+bool NbiotService::step() {
+    switch (state_) {
+        case State::UART_INIT: {
+            Serial.printf("%s abriendo UART al SIM7028...\n", kTag);
+            if (!modem_.begin(*cfg_.uart, cfg_.rx_pin, cfg_.tx_pin,
+                              cfg_.baudrate)) {
+                return false;
+            }
+            state_ = State::SIM_CHECK;
+            return true;
+        }
+
+        case State::SIM_CHECK: {
+            if (!modem_.isSimReady()) {
+                Serial.printf("%s SIM no lista\n", kTag);
+                return false;
+            }
+            Serial.printf("%s SIM ok, IMSI=%s\n", kTag,
+                          modem_.readIMSI().c_str());
+            state_ = State::APN_CONFIG;
+            return true;
+        }
+
+        case State::APN_CONFIG: {
+            if (!modem_.configureAPN(cfg_.apn, cfg_.user, cfg_.pass)) {
+                Serial.printf("%s APN rechazado\n", kTag);
+                // No fatal: algunos operadores registran igual.
+            }
+            // Actualización automática de hora de red (NITZ): sin esto el
+            // AT+CCLK? del SIM7028 se queda en la época GSM y los batches
+            // salen con clock_synced=false. Si el firmware del módulo no
+            // lo soporta, falla en silencio y se sigue igual.
+            modem_.sendAT("AT+CTZU=1");
+            register_start_ms_ = millis();
+            state_ = State::REGISTERING;
+            return true;
+        }
+
+        case State::REGISTERING: {
+            const auto creg = modem_.getCEREG();
+            csq_dbm_ = modem_.getCSQ();
+            if (creg == Nbiot::CeregStatus::REGISTERED_HOME ||
+                creg == Nbiot::CeregStatus::REGISTERED_ROAMING) {
+                Serial.printf("%s registrado en red (%s)\n", kTag,
+                              Nbiot::ceregToString(creg));
+                state_ = State::CLOCK_SYNC;
+                return true;
+            }
+            if ((millis() - register_start_ms_) > kRegisterLimitMs) {
+                Serial.printf("%s registro agotado tras 30 min\n", kTag);
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(kRegisterPollMs));
+            return true;
+        }
+
+        case State::CLOCK_SYNC: {
+            const uint32_t epoch = modem_.readClock();
+            if (epoch != 0) {
+                epoch_offset_ = epoch - millis() / 1000u;
+                clock_synced_ = true;
+                Serial.printf("%s reloj de red: epoch=%lu\n", kTag,
+                              static_cast<unsigned long>(epoch));
+            } else {
+                // Sin hora válida no se bloquea el servicio: los batches
+                // saldrán con clock_synced=false hasta la próxima pasada.
+                Serial.printf("%s sin hora de red todavía\n", kTag);
+            }
+            state_ = State::MQTT_START;
+            return true;
+        }
+
+        case State::MQTT_START: {
+            modem_.mqttReset();
+            if (!modem_.mqttBegin(cfg_.client_id)) {
+                Serial.printf("%s CMQTTSTART/ACCQ fallo: %s\n", kTag,
+                              modem_.lastResponse().c_str());
+                return false;
+            }
+            state_ = State::MQTT_CONNECT;
+            return true;
+        }
+
+        case State::MQTT_CONNECT: {
+            if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true)) {
+                Serial.printf("%s conexión MQTT fallo: %s\n", kTag,
+                              modem_.lastResponse().c_str());
+                return false;
+            }
+            Serial.printf("%s MQTT listo (%s:%u)\n", kTag, cfg_.broker,
+                          cfg_.port);
+            last_csq_ms_ = millis();
+            state_ = State::READY;
+            return true;
+        }
+
+        case State::READY: {
+            // Publicaciones pendientes.
+            char* json = nullptr;
+            if (xQueueReceive(queue_, &json, pdMS_TO_TICKS(500)) == pdTRUE) {
+                bool ok = modem_.mqttPublish(cfg_.topic_batch, json, 1);
+                if (!ok && !modem_.mqttIsConnected()) {
+                    // Sesión caída: un intento de reconexión y reintento.
+                    Serial.printf("%s sesión caída, reconectando...\n", kTag);
+                    if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true)) {
+                        ok = modem_.mqttPublish(cfg_.topic_batch, json, 1);
+                    }
+                }
+                if (ok) {
+                    published_ok_ = published_ok_ + 1;
+                    Serial.printf("%s batch publicado (%u bytes) ok=%lu\n",
+                                  kTag, static_cast<unsigned>(strlen(json)),
+                                  static_cast<unsigned long>(published_ok_));
+                } else {
+                    published_err_ = published_err_ + 1;
+                    Serial.printf("%s batch PERDIDO err=%lu: %s\n", kTag,
+                                  static_cast<unsigned long>(published_err_),
+                                  modem_.lastResponse().c_str());
+                }
+                free(json);
+                if (!ok) return false;  // reevalúa la sesión desde el principio
+            }
+
+            // Refresco periódico de CSQ y de reloj si aún no hay hora.
+            if ((millis() - last_csq_ms_) >= kCsqRefreshMs) {
+                last_csq_ms_ = millis();
+                csq_dbm_ = modem_.getCSQ();
+                if (!clock_synced_) {
+                    const uint32_t epoch = modem_.readClock();
+                    if (epoch != 0) {
+                        epoch_offset_ = epoch - millis() / 1000u;
+                        clock_synced_ = true;
+                    }
+                }
+            }
+            return true;
+        }
+
+        case State::IDLE:
+        case State::BACKOFF:
+        default:
+            return true;
+    }
+}
+
+uint8_t NbiotService::csqRaw() const {
+    const int8_t dbm = csq_dbm_;
+    if (dbm == INT8_MIN || dbm == 0) return 0xFF;
+    // Inversa de la conversión del driver: dBm = -113 + 2*csq.
+    const int raw = (dbm + 113) / 2;
+    if (raw < 0 || raw > 31) return 0xFF;
+    return static_cast<uint8_t>(raw);
+}
+
+uint32_t NbiotService::epochFromMillis(uint32_t ms) const {
+    if (!clock_synced_) return 0;
+    return epoch_offset_ + ms / 1000u;
+}
+
+bool NbiotService::publish(const char* json) {
+    if (queue_ == nullptr || json == nullptr) return false;
+    char* copy = strdup(json);
+    if (copy == nullptr) return false;
+    if (xQueueSend(queue_, &copy, 0) != pdTRUE) {
+        free(copy);
+        return false;
+    }
+    return true;
+}
+
+const char* NbiotService::stateName(State s) {
+    switch (s) {
+        case State::IDLE:         return "idle";
+        case State::UART_INIT:    return "uart_init";
+        case State::SIM_CHECK:    return "sim_check";
+        case State::APN_CONFIG:   return "apn_config";
+        case State::REGISTERING:  return "registering";
+        case State::CLOCK_SYNC:   return "clock_sync";
+        case State::MQTT_START:   return "mqtt_start";
+        case State::MQTT_CONNECT: return "mqtt_connect";
+        case State::READY:        return "ready";
+        case State::BACKOFF:      return "backoff";
+    }
+    return "?";
+}

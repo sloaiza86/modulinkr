@@ -375,6 +375,52 @@ Nbiot::CeregStatus Nbiot::getCEREG() {
     return static_cast<CeregStatus>(stat);
 }
 
+uint32_t Nbiot::readClock() {
+    if (uart_ == nullptr) return 0;
+    drain(*uart_);
+    uart_->println("AT+CCLK?");
+    const String r = readResponse(2000, "OK");
+    last_response_ = r;
+
+    // Formato SIM7028: +CCLK: "yy/MM/dd,hh:mm:ss±zz"
+    // zz = desfase de la hora local en cuartos de hora respecto a UTC.
+    const int pos = r.indexOf("+CCLK:");
+    if (pos < 0) return 0;
+    const int q1 = r.indexOf('"', pos);
+    const int q2 = r.indexOf('"', q1 + 1);
+    if (q1 < 0 || q2 < 0) return 0;
+    const String ts = r.substring(q1 + 1, q2);
+
+    int yy, mo, dd, hh, mi, ss, tz;
+    char sign;
+    if (sscanf(ts.c_str(), "%2d/%2d/%2d,%2d:%2d:%2d%c%2d",
+               &yy, &mo, &dd, &hh, &mi, &ss, &sign, &tz) != 8) {
+        return 0;
+    }
+
+    // Antes del primer attach el módulo reporta 80/01/06 (época GSM):
+    // cualquier año fuera de 2020-2079 se trata como hora no válida.
+    const int year = 2000 + yy;
+    if (year < 2020 || year > 2079 || mo < 1 || mo > 12 || dd < 1 || dd > 31) {
+        return 0;
+    }
+
+    // Días desde epoch (algoritmo de días civiles, válido 2000-2099).
+    static const uint16_t kCumDays[12] =
+        {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    uint32_t days = static_cast<uint32_t>(year - 1970) * 365u +
+                    static_cast<uint32_t>((year - 1969) / 4) +  // bisiestos pasados
+                    kCumDays[mo - 1] + (dd - 1);
+    const bool leap = (year % 4 == 0);  // suficiente en 2000-2099
+    if (leap && mo > 2) days += 1;
+
+    uint32_t epoch_local = days * 86400u + hh * 3600u + mi * 60u + ss;
+
+    // A UTC: restar el desfase local (o sumarlo si es negativo).
+    const uint32_t tz_s = static_cast<uint32_t>(tz) * 15u * 60u;
+    return (sign == '-') ? epoch_local + tz_s : epoch_local - tz_s;
+}
+
 const char* Nbiot::ceregToString(CeregStatus s) {
     switch (s) {
         case CeregStatus::NOT_REGISTERED:      return "not_registered";

@@ -89,6 +89,12 @@ public:
     CeregStatus getCEREG();
     static const char* ceregToString(CeregStatus s);
 
+    // Hora de la red celular (AT+CCLK?). Devuelve epoch Unix UTC en
+    // segundos, o 0 si el módulo aún no tiene hora válida (antes del
+    // primer attach suele reportar el año 80). El SIM7028 entrega la
+    // hora local con desfase en cuartos de hora; aquí se convierte a UTC.
+    uint32_t readClock();
+
     bool sendAT(const char* cmd,
                 const char* expected = "OK",
                 uint32_t timeout_ms = 3000);
