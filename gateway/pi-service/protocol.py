@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""ModuLinkr, librería del protocolo LoRa v2.0 para el gateway (lado Pi).
+
+Fuente normativa: firmware/shared/protocol/frame-format.md (schema v2.0,
+cabecera de 11 bytes + payload + CRC16). Este módulo materializa en Python:
+
+  - Las constantes del protocolo.
+  - El CRC16 Modbus RTU (mismo algoritmo que el driver Modbus del nodo).
+  - El parseo de una trama recibida (parse_frame).
+  - La construcción de las tramas descendentes que ANTES generaba el Heltec
+    y ahora genera el Pi (build_ack, build_beacon), ver §12 de la spec.
+
+No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
+cualquier utilidad de diagnóstico.
+"""
+
+from __future__ import annotations
+
+import struct
+from typing import Optional
+
+
+# ----- CRC16 Modbus RTU (polinomio 0xA001, init 0xFFFF, sin reflexión) -----
+
+def crc16_modbus(data: bytes) -> int:
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+
+# ----- Constantes del protocolo (frame-format.md) -----
+
+SCHEMA_VERSION = 0x20          # v2.0 (major en nibble alto, minor en bajo)
+SCHEMA_MAJOR_MASK = 0xF0
+
+HEADER_BYTES = 11
+CRC_BYTES = 2
+OVERHEAD = HEADER_BYTES + CRC_BYTES  # 13
+
+# Offsets de la cabecera fija (frame-format.md §1.4).
+OFF_SCHEMA      = 0
+OFF_NETWORK_ID  = 1
+OFF_HOP_SRC     = 2
+OFF_HOP_DST     = 3
+OFF_ORIGIN_ID   = 4
+OFF_DEST_ID     = 5
+OFF_SEQ         = 6   # uint16 LE en 6..7
+OFF_FRAME_TYPE  = 8
+OFF_TTL         = 9
+OFF_PAYLOAD_LEN = 10
+OFF_PAYLOAD     = 11
+
+# Direcciones especiales (§1.5).
+ADDR_BROADCAST = 0x00
+ADDR_GATEWAY   = 0xFF
+
+# Tipos de trama (§1.6).
+FRAME_TELEMETRY  = 0x00
+FRAME_ACK        = 0x01
+FRAME_HEARTBEAT  = 0x02
+FRAME_ALARM      = 0x03
+FRAME_BEACON     = 0x10
+FRAME_SN_REQUEST = 0x11
+FRAME_SN_OFFER   = 0x12
+
+FRAME_TYPE_NAMES = {
+    FRAME_TELEMETRY:  'TELEMETRY',
+    FRAME_ACK:        'ACK',
+    FRAME_HEARTBEAT:  'HEARTBEAT',
+    FRAME_ALARM:      'ALARM',
+    FRAME_BEACON:     'BEACON',
+    FRAME_SN_REQUEST: 'SN_REQUEST',
+    FRAME_SN_OFFER:   'SN_OFFER',
+}
+
+# Status de ACK (§4.2).
+ACK_OK              = 0x00
+ACK_CRC_ERROR       = 0x01
+ACK_SCHEMA_MISMATCH = 0x02
+ACK_UNKNOWN_NODE    = 0x03
+ACK_DECODE_ERROR    = 0x04
+ACK_OK_VIA_NBIOT    = 0x05
+
+ACK_STATUS_NAMES = {
+    ACK_OK:              'OK',
+    ACK_CRC_ERROR:       'CRC_ERROR',
+    ACK_SCHEMA_MISMATCH: 'SCHEMA_MISMATCH',
+    ACK_UNKNOWN_NODE:    'UNKNOWN_NODE',
+    ACK_DECODE_ERROR:    'DECODE_ERROR',
+    ACK_OK_VIA_NBIOT:    'OK_VIA_NBIOT',
+}
+
+
+def addr_name(addr: int) -> str:
+    if addr == ADDR_GATEWAY:
+        return 'GW'
+    if addr == ADDR_BROADCAST:
+        return '*'
+    return str(addr)
+
+
+def seq_older(a: int, b: int) -> bool:
+    """True si a es anterior a b en aritmética modular de 16 bits (§5.4)."""
+    return ((b - a) & 0xFFFF) < 0x8000
+
+
+# ----- Parseo de trama entrante -----
+
+def parse_frame(frame: bytes) -> dict:
+    """Decodifica y valida una trama según frame-format.md §10. Devuelve un
+    dict con los campos; incluye 'error' si algo no valida. Siempre incluye
+    'crc_ok' cuando la trama tiene longitud coherente."""
+
+    if len(frame) < OVERHEAD:
+        return {'error': f'trama corta ({len(frame)} bytes, min {OVERHEAD})'}
+
+    schema_version = frame[OFF_SCHEMA]
+    network_id     = frame[OFF_NETWORK_ID]
+    hop_src        = frame[OFF_HOP_SRC]
+    hop_dst        = frame[OFF_HOP_DST]
+    origin_id      = frame[OFF_ORIGIN_ID]
+    dest_id        = frame[OFF_DEST_ID]
+    seq            = struct.unpack_from('<H', frame, OFF_SEQ)[0]
+    frame_type     = frame[OFF_FRAME_TYPE]
+    ttl            = frame[OFF_TTL]
+    payload_length = frame[OFF_PAYLOAD_LEN]
+
+    expected_total = HEADER_BYTES + payload_length + CRC_BYTES
+    if len(frame) != expected_total:
+        return {'error': f'payload_length={payload_length} no cuadra '
+                         f'(total={len(frame)} esperado={expected_total})'}
+
+    crc_off = HEADER_BYTES + payload_length
+    crc_received = struct.unpack_from('<H', frame, crc_off)[0]
+    crc_computed = crc16_modbus(frame[:crc_off])
+    crc_ok = crc_received == crc_computed
+
+    out = {
+        'schema_version':  schema_version,
+        'schema_str':      f'{(schema_version >> 4) & 0xF}.{schema_version & 0xF}',
+        'network_id':      network_id,
+        'hop_src':         hop_src,
+        'hop_dst':         hop_dst,
+        'origin_id':       origin_id,
+        'dest_id':         dest_id,
+        'seq':             seq,
+        'frame_type':      frame_type,
+        'frame_type_name': FRAME_TYPE_NAMES.get(frame_type, f'UNKNOWN(0x{frame_type:02X})'),
+        'ttl':             ttl,
+        'payload_length':  payload_length,
+        'crc_received':    crc_received,
+        'crc_computed':    crc_computed,
+        'crc_ok':          crc_ok,
+    }
+
+    if not crc_ok:
+        out['error'] = 'CRC invalido'
+        return out
+
+    payload = frame[OFF_PAYLOAD:OFF_PAYLOAD + payload_length]
+    out['payload'] = payload
+
+    if frame_type == FRAME_TELEMETRY:
+        if payload_length % 4 != 0:
+            out['error'] = f'TELEMETRY payload_length={payload_length} no multiplo de 4'
+            return out
+        n = payload_length // 4
+        out['reads'] = [struct.unpack_from('<f', payload, i * 4)[0] for i in range(n)]
+
+    elif frame_type == FRAME_ACK:
+        if payload_length != 3:
+            out['error'] = f'ACK payload_length={payload_length}, esperado 3'
+            return out
+        out['ack_seq'] = struct.unpack_from('<H', payload, 0)[0]
+        out['ack_status'] = payload[2]
+
+    elif frame_type == FRAME_HEARTBEAT:
+        if payload_length != 0:
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0'
+
+    elif frame_type == FRAME_BEACON:
+        if payload_length != 3:
+            out['error'] = f'BEACON payload_length={payload_length}, esperado 3'
+            return out
+        out['hop_count'] = payload[0]
+        out['parent'] = payload[1]
+        out['flags'] = payload[2]
+
+    return out
+
+
+# ----- Construcción de tramas descendentes (las genera el Pi, §12) -----
+
+def _finalize(frame: bytearray) -> bytes:
+    """Añade el CRC16 sobre todos los bytes previos y devuelve bytes."""
+    crc = crc16_modbus(frame)
+    frame += struct.pack('<H', crc)
+    return bytes(frame)
+
+
+def build_ack(origin_id: int, hop_dst: int, ack_seq: int, status: int,
+              gw_seq: int, network_id: int, ttl: int) -> bytes:
+    """Construye una trama ACK (frame-format.md §4.3).
+
+    origin_id : nodo cuya trama se confirma (va en dest_id del ACK).
+    hop_dst   : vecino por el que llegó el uplink (hop_src del uplink), por
+                donde vuelve el ACK en la ruta inversa.
+    ack_seq   : el seq de la trama confirmada (en el payload).
+    status    : uno de ACK_* (OK, etc.).
+    gw_seq    : contador propio downlink del gateway (bytes 6-7).
+    """
+    frame = bytearray(HEADER_BYTES + 3)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = origin_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_ACK
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 3
+    struct.pack_into('<H', frame, OFF_PAYLOAD, ack_seq & 0xFFFF)
+    frame[OFF_PAYLOAD + 2] = status & 0xFF
+    return _finalize(frame)
+
+
+def build_beacon(gw_seq: int, network_id: int, ttl: int) -> bytes:
+    """Construye el BEACON raíz del gateway (frame-format.md §7.2).
+
+    hop_count = 0 (el gateway es la raíz), parent_id = 0 (sin padre),
+    flags = 0. Broadcast, sin ACK.
+    """
+    frame = bytearray(HEADER_BYTES + 3)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = ADDR_BROADCAST
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = ADDR_BROADCAST
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_BEACON
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 3
+    frame[OFF_PAYLOAD]     = 0x00  # hop_count = 0, raíz
+    frame[OFF_PAYLOAD + 1] = 0x00  # parent_id = 0, sin padre
+    frame[OFF_PAYLOAD + 2] = 0x00  # flags reservado
+    return _finalize(frame)

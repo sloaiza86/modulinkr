@@ -1,0 +1,35 @@
+[Unit]
+# ModuLinkr, servicio del gateway (lado Pi).
+# El beacon del árbol de rutas depende de este proceso: si se cae, la red
+# LoRa se queda sin raíz hasta que systemd lo relanza. Por eso Restart=always
+# con un backoff corto.
+Description=ModuLinkr gateway service (LoRa mesh root, ACK and beacon)
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=practica
+Group=dialout
+WorkingDirectory=/home/practica/pi-service
+
+# El venv con pyserial ya existe en ~/modbus-test (ver bitacora).
+ExecStart=/home/practica/modbus-test/bin/python3 /home/practica/pi-service/gateway_service.py
+
+# Config por entorno (descomentar y ajustar lo que haga falta):
+# Environment=MODULINKR_PORT=/dev/ttyUSB0
+# Environment=MODULINKR_NETWORK_ID=1
+# Environment=MODULINKR_MAX_TTL=4
+# Environment=MODULINKR_BEACON_S=30
+# Environment=MODULINKR_DB=/home/practica/modulinkr_buffer.db
+# Environment=MODULINKR_BUFFER_MAX=1000
+
+Restart=always
+RestartSec=2
+
+# El servicio escribe a journald; se ve con: journalctl -u modulinkr-gateway -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

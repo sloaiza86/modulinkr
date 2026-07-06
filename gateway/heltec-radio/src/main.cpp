@@ -1,24 +1,31 @@
 // ModuLinkr, gateway-radio (Heltec WiFi LoRa 32 v3).
 //
-// Front-end LoRa del gateway, fase H5 (mesh):
-//   0. Emite un BEACON cada BEACON_PERIOD_MS con hop_count=0: la raíz
-//      del árbol de rutas (frame-format.md §7). Los nodos lo re-emiten
-//      y eligen padre con él.
-// Y conserva la fase H4 (ACK + seq):
-//   1. Recibe tramas LoRa, las valida contra frame-format.md (schema v2.0)
-//      y vuelca cada trama por USB serial CDC al Pi:
-//      "[rx] len=N rssi=X.X snr=Y.Y hex=AABBCC..." (formato estable para
-//      heltec_rx_parser.py).
-//   2. Responde ACK de forma autónoma (sin esperar al Pi) a toda trama
-//      TELEMETRY o HEARTBEAT válida dirigida al gateway. Los status que
-//      requieren catálogo (UNKNOWN_NODE, DECODE_ERROR) quedan para cuando
-//      exista el enlace descendente Pi a Heltec.
-//   3. Deduplica por origin+seq: un duplicado no se reporta como dato
-//      nuevo pero SÍ se vuelve a confirmar (el nodo reintentó porque no
-//      le llegó el ACK anterior).
+// Front-end LoRa del gateway, rol de RADIO PURA (desde el 5-jul-2026).
+// Ver shared/protocol/frame-format.md §12 "Enlace serial Pi a Heltec".
 //
-// Configuración LoRa controlada por build_flags en platformio.ini, debe
-// coincidir con la de los nodos.
+// El Heltec ya NO genera ACK ni BEACON por su cuenta. Toda la lógica de
+// protocolo (validación de CRC/schema, deduplicación, buffer, construcción
+// de tramas descendentes y contadores) vive en el Raspberry Pi. El Heltec:
+//
+//   1. Recibe tramas LoRa del aire, filtra por network_id (barato, para no
+//      saturar el USB con tráfico de despliegues vecinos) y vuelca cada
+//      trama al Pi por USB CDC con el formato estable que ya consume el
+//      servicio del Pi:
+//        "[rx] #N len=L rssi=X.X snr=Y.Y hex=AABBCC..."
+//   2. Transmite por LoRa cualquier trama que el Pi le ordene por la línea
+//      serial "TX <hex>". El Pi entrega la trama ya construida (cabecera +
+//      payload + CRC correctos); el Heltec la emite tal cual, sin
+//      interpretarla.
+//
+// El motivo del cambio: con el ACK autónomo previo, un ACK confirmaba solo
+// que el front-end de radio oyó la trama, no que el dato llegara a capas
+// superiores. Si el Pi caía, la red seguía recibiendo ACKs y creía
+// entregar, pero los datos se perdían en el Heltec. Ahora el ACK lo genera
+// el Pi tras aceptar el dato en su buffer, así una caída del Pi corta ACK y
+// BEACON y los nodos escalan a NB-IoT.
+//
+// Configuración LoRa por build_flags en platformio.ini, debe coincidir con
+// la de los nodos.
 
 #include <Arduino.h>
 #include <RadioLib.h>
@@ -44,62 +51,46 @@ constexpr uint8_t  kSyncWord      = LORA_SYNC_WORD;
 constexpr uint8_t  kPreambleLen   = 8;
 constexpr uint8_t  kTxPowerDbm    = LORA_TX_DBM;
 
-// ----- Parámetros de red v2.0 -----
-constexpr uint8_t  kNetworkId      = NETWORK_ID;
-constexpr uint8_t  kMaxTtl         = LORA_MAX_TTL;
-constexpr uint32_t kBeaconPeriodMs = BEACON_PERIOD_MS;
+// ----- Parámetros de red -----
+constexpr uint8_t  kNetworkId = NETWORK_ID;
 
 // SPI custom para Heltec v3 (no son los pines default del ESP32-S3).
 SPIClass loraSpi(HSPI);
 SX1262   radio = new Module(kPinNSS, kPinDIO1, kPinRESET, kPinBUSY, loraSpi);
 
 volatile bool g_rx_flag = false;
-uint32_t      g_rx_count     = 0;
-uint32_t      g_err_count    = 0;
-uint32_t      g_ack_count    = 0;
-uint32_t      g_dup_count    = 0;
-uint32_t      g_beacon_count = 0;
-uint16_t      g_gw_seq       = 0;  // contador downlink propio (ACKs y beacons)
+uint32_t      g_rx_count = 0;   // tramas volcadas al Pi
+uint32_t      g_rx_err   = 0;   // errores de recepción (CRC PHY, etc.)
+uint32_t      g_rx_alien = 0;   // tramas descartadas por network_id ajeno
+uint32_t      g_tx_count = 0;   // tramas transmitidas por orden del Pi
 
-// Deduplicación por origen: último seq visto de cada node_id (1-254).
-bool     g_seen[256]     = {false};
-uint16_t g_last_seq[256] = {0};
+// Buffer de la línea de entrada del USB (comandos "TX <hex>" del Pi).
+constexpr size_t kInLineMax = 1024;  // holgado: trama máx ~242 B = ~484 hex
+char   g_in_line[kInLineMax];
+size_t g_in_len = 0;
 
-IRAM_ATTR void onRxDone() {
+IRAM_ATTR void onDio1() {
+    // DIO1 dispara tanto "RX done" como "TX done". En este firmware solo
+    // interesa el RX done; el TX se hace con radio.transmit() bloqueante y
+    // se limpia el flag tras él.
     g_rx_flag = true;
-}
-
-// CRC-16 Modbus (polinomio 0xA001, init 0xFFFF), igual que en los nodos.
-uint16_t crc16(const uint8_t* data, size_t len) {
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= static_cast<uint16_t>(data[i]);
-        for (uint8_t bit = 0; bit < 8; ++bit) {
-            if (crc & 0x0001) {
-                crc = (crc >> 1) ^ 0xA001;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    return crc;
 }
 
 void printBanner() {
     Serial.println();
     Serial.println(F("=================================================="));
-    Serial.println(F("  ModuLinkr/gateway-radio  v0.2.0-h5-beacon"));
+    Serial.println(F("  ModuLinkr/gateway-radio  v0.3.0-radio-pura"));
     Serial.println(F("  Heltec WiFi LoRa 32 v3 + SX1262 (RadioLib)"));
     Serial.printf ("  freq=%.3f MHz  SF%u  BW%.0f kHz  CR4/%u  sync=0x%02X\n",
                    kFreqMHz, kSpreadingFact, kBandwidthKHz,
                    kCodingRate, kSyncWord);
-    Serial.printf ("  network_id=%u  ttl=%u  ack=autonomo  beacon=%lu ms (schema v2.0)\n",
-                   kNetworkId, kMaxTtl,
-                   static_cast<unsigned long>(kBeaconPeriodMs));
+    Serial.printf ("  network_id=%u  rol=radio pura (ACK y BEACON en el Pi)\n",
+                   kNetworkId);
+    Serial.println(F("  Pi->Heltec: 'TX <hex>'   Heltec->Pi: '[rx] ...'"));
     Serial.println(F("=================================================="));
 }
 
-// Vuelca la trama cruda al Pi con el formato que espera heltec_rx_parser.py.
+// Vuelca la trama cruda al Pi con el formato que espera el servicio del Pi.
 void dumpFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
     Serial.printf("[rx] #%lu len=%u rssi=%.1f snr=%.1f hex=",
                   static_cast<unsigned long>(g_rx_count),
@@ -111,176 +102,111 @@ void dumpFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
     Serial.println();
 }
 
-// Construye y transmite el ACK para una trama validada. Devuelve true si
-// RadioLib aceptó la transmisión.
-bool sendAck(uint8_t origin, uint8_t hop_src, uint16_t ack_seq, uint8_t status) {
-    using namespace protocol;
+// Transmite por LoRa una trama ya construida por el Pi. La radio sale de
+// RX durante el TX y se rearma después.
+void txRaw(const uint8_t* frame, size_t len) {
+    const int16_t state = radio.transmit(const_cast<uint8_t*>(frame), len);
 
-    uint8_t frame[kOverhead + 3];
-    g_gw_seq++;
-
-    frame[kOffSchema]     = kSchemaVersion;
-    frame[kOffNetworkId]  = kNetworkId;
-    frame[kOffHopSrc]     = kAddrGateway;
-    frame[kOffHopDst]     = hop_src;    // vecino por el que llegó el uplink
-    frame[kOffOriginId]   = kAddrGateway;
-    frame[kOffDestId]     = origin;     // nodo confirmado (extremo a extremo)
-    frame[kOffSeqLow]     = static_cast<uint8_t>(g_gw_seq & 0xFF);
-    frame[kOffSeqHigh]    = static_cast<uint8_t>((g_gw_seq >> 8) & 0xFF);
-    frame[kOffFrameType]  = kFrameAck;
-    frame[kOffTtl]        = kMaxTtl;
-    frame[kOffPayloadLen] = 3;
-    frame[kOffPayload]     = static_cast<uint8_t>(ack_seq & 0xFF);
-    frame[kOffPayload + 1] = static_cast<uint8_t>((ack_seq >> 8) & 0xFF);
-    frame[kOffPayload + 2] = status;
-
-    const uint16_t crc = crc16(frame, kHeaderBytes + 3);
-    frame[kHeaderBytes + 3] = static_cast<uint8_t>(crc & 0xFF);
-    frame[kHeaderBytes + 4] = static_cast<uint8_t>((crc >> 8) & 0xFF);
-
-    // transmit() es bloqueante (~51 ms a SF7) y saca al SX1262 de RX;
-    // el loop rearma startReceive() tras cada trama procesada.
-    const int16_t state = radio.transmit(frame, sizeof(frame));
-
-    // DIO1 comparte "RX done" y "TX done": el fin de esta transmisión
-    // dispara la ISR y deja g_rx_flag en true, lo que haría leer un
-    // paquete fantasma (restos del propio ACK en el buffer del SX1262).
-    // Durante el TX la radio no escucha, así que aquí no puede haber
-    // recepción real pendiente: se limpia el flag sin riesgo.
+    // El fin del TX dispara DIO1 y deja g_rx_flag en true (paquete fantasma:
+    // restos del propio envío en el buffer del SX1262). Durante el TX la
+    // radio no escucha, así que no hay recepción real pendiente: se limpia.
     g_rx_flag = false;
 
     if (state == RADIOLIB_ERR_NONE) {
-        g_ack_count++;
-        Serial.printf("[ack] dest=%u ack_seq=%u status=0x%02X gw_seq=%u acks=%lu\n",
-                      origin, ack_seq, status, g_gw_seq,
-                      static_cast<unsigned long>(g_ack_count));
-        return true;
-    }
-    Serial.printf("[ack] tx err code=%d\n", state);
-    return false;
-}
-
-// Emite el BEACON raíz del árbol (frame-format.md §7): hop_count=0,
-// broadcast, sin ACK. Comparte el contador downlink con los ACKs.
-void sendBeacon() {
-    using namespace protocol;
-
-    uint8_t frame[kOverhead + 3];
-    g_gw_seq++;
-
-    frame[kOffSchema]     = kSchemaVersion;
-    frame[kOffNetworkId]  = kNetworkId;
-    frame[kOffHopSrc]     = kAddrGateway;
-    frame[kOffHopDst]     = kAddrBroadcast;
-    frame[kOffOriginId]   = kAddrGateway;
-    frame[kOffDestId]     = kAddrBroadcast;
-    frame[kOffSeqLow]     = static_cast<uint8_t>(g_gw_seq & 0xFF);
-    frame[kOffSeqHigh]    = static_cast<uint8_t>((g_gw_seq >> 8) & 0xFF);
-    frame[kOffFrameType]  = kFrameBeacon;
-    frame[kOffTtl]        = kMaxTtl;
-    frame[kOffPayloadLen] = 3;
-    frame[kOffPayload]     = 0x00;  // hop_count: el gateway es la raíz
-    frame[kOffPayload + 1] = 0x00;  // parent_id: la raíz no tiene padre
-    frame[kOffPayload + 2] = 0x00;  // flags reservado
-
-    const uint16_t crc = crc16(frame, kHeaderBytes + 3);
-    frame[kHeaderBytes + 3] = static_cast<uint8_t>(crc & 0xFF);
-    frame[kHeaderBytes + 4] = static_cast<uint8_t>((crc >> 8) & 0xFF);
-
-    const int16_t state = radio.transmit(frame, sizeof(frame));
-
-    // Mismo fantasma que en el ACK: el fin del TX dispara DIO1.
-    g_rx_flag = false;
-
-    if (state == RADIOLIB_ERR_NONE) {
-        g_beacon_count++;
-        Serial.printf("[beacon] seq=%u ttl=%u beacons=%lu\n",
-                      g_gw_seq, kMaxTtl,
-                      static_cast<unsigned long>(g_beacon_count));
+        g_tx_count++;
+        Serial.printf("[tx] ok len=%u total=%lu\n",
+                      static_cast<unsigned>(len),
+                      static_cast<unsigned long>(g_tx_count));
     } else {
-        Serial.printf("[beacon] tx err code=%d\n", state);
+        Serial.printf("[tx] err code=%d\n", state);
     }
 
-    // El transmit saca al SX1262 de recepción; rearme inmediato.
     const int16_t restart = radio.startReceive();
     if (restart != RADIOLIB_ERR_NONE) {
-        Serial.printf("[beacon] startReceive() falló code=%d\n", restart);
+        Serial.printf("[tx] startReceive() fallo code=%d\n", restart);
     }
 }
 
-// Valida y procesa una trama entrante según frame-format.md §10.
+// Decodifica un hexstring ASCII a bytes. Devuelve el número de bytes
+// escritos, o 0 si el hex es inválido (longitud impar o carácter no hex).
+size_t hexToBytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_max) {
+    if (hex_len == 0 || (hex_len & 1)) return 0;
+    const size_t n = hex_len / 2;
+    if (n > out_max) return 0;
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const int hi = nib(hex[2 * i]);
+        const int lo = nib(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return n;
+}
+
+// Procesa una línea completa recibida del Pi por USB. Solo entiende el
+// comando "TX <hex>"; cualquier otra cosa se ignora (con aviso).
+void handleInLine(char* line, size_t len) {
+    // Trim de espacios/CR al final.
+    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' ')) {
+        line[--len] = '\0';
+    }
+    if (len == 0) return;
+
+    if (len >= 3 && line[0] == 'T' && line[1] == 'X' && line[2] == ' ') {
+        const char* hex = line + 3;
+        const size_t hex_len = len - 3;
+        static uint8_t frame[protocol::kMaxPayload + protocol::kOverhead];
+        const size_t n = hexToBytes(hex, hex_len, frame, sizeof(frame));
+        if (n == 0) {
+            Serial.println(F("[tx] err hex invalido"));
+            return;
+        }
+        txRaw(frame, n);
+    } else {
+        Serial.println(F("[in] comando desconocido (solo 'TX <hex>')"));
+    }
+}
+
+// Lee sin bloquear lo que haya en el USB y arma líneas terminadas en '\n'.
+void pollInput() {
+    while (Serial.available() > 0) {
+        const int c = Serial.read();
+        if (c < 0) break;
+        if (c == '\n') {
+            g_in_line[g_in_len] = '\0';
+            handleInLine(g_in_line, g_in_len);
+            g_in_len = 0;
+        } else if (g_in_len < kInLineMax - 1) {
+            g_in_line[g_in_len++] = static_cast<char>(c);
+        } else {
+            // Línea demasiado larga: descartar hasta el próximo '\n'.
+            g_in_len = 0;
+            Serial.println(F("[in] linea demasiado larga, descartada"));
+        }
+    }
+}
+
+// Filtra por network_id y vuelca la trama al Pi. Sin más validación: CRC,
+// schema, deduplicacion y logica las hace el Pi (frame-format.md §12).
 void processFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
     using namespace protocol;
 
-    // 1. Red ajena: descarte silencioso (ni log, spec §10.1). Se comprueba
-    //    tras el mínimo de longitud para poder leer el campo.
     if (len < kOverhead) {
-        Serial.printf("[drop] trama corta len=%u\n", static_cast<unsigned>(len));
+        // Demasiado corta para leer siquiera el network_id de forma segura.
         return;
     }
     if (buf[kOffNetworkId] != kNetworkId) {
-        return;
+        g_rx_alien++;
+        return;  // tráfico de otra red: descartar en silencio
     }
 
-    const uint8_t payload_length = buf[kOffPayloadLen];
-    if (len != kHeaderBytes + payload_length + kCrcBytes) {
-        Serial.printf("[drop] payload_length=%u incoherente con len=%u\n",
-                      payload_length, static_cast<unsigned>(len));
-        return;
-    }
-
-    const size_t crc_input_len = kHeaderBytes + payload_length;
-    const uint16_t crc_calc = crc16(buf, crc_input_len);
-    const uint16_t crc_recv = static_cast<uint16_t>(buf[crc_input_len]) |
-                              (static_cast<uint16_t>(buf[crc_input_len + 1]) << 8);
-    if (crc_calc != crc_recv) {
-        Serial.printf("[drop] crc app invalido recv=0x%04X calc=0x%04X\n",
-                      crc_recv, crc_calc);
-        return;
-    }
-
-    if ((buf[kOffSchema] & kSchemaMajorMask) != (kSchemaVersion & kSchemaMajorMask)) {
-        Serial.printf("[drop] schema 0x%02X incompatible\n", buf[kOffSchema]);
-        return;
-    }
-
-    const uint8_t hop_dst    = buf[kOffHopDst];
-    const uint8_t origin     = buf[kOffOriginId];
-    const uint8_t dest       = buf[kOffDestId];
-    const uint8_t hop_src    = buf[kOffHopSrc];
-    const uint8_t frame_type = buf[kOffFrameType];
-    const uint16_t seq = static_cast<uint16_t>(buf[kOffSeqLow]) |
-                         (static_cast<uint16_t>(buf[kOffSeqHigh]) << 8);
-
-    // El gateway solo procesa lo dirigido a él (como salto o broadcast).
-    if (hop_dst != kAddrGateway && hop_dst != kAddrBroadcast) {
-        return;
-    }
-
-    // La trama es válida: se entrega al Pi pase lo que pase después.
+    g_rx_count++;
     dumpFrame(buf, len, rssi, snr);
-
-    // Fase 1: se confirma TELEMETRY y HEARTBEAT con destino final gateway.
-    if (frame_type != kFrameTelemetry && frame_type != kFrameHeartbeat) {
-        return;
-    }
-    if (dest != kAddrGateway) {
-        return;
-    }
-
-    // Deduplicación por origin+seq. El duplicado no es dato nuevo pero se
-    // vuelve a confirmar: el nodo reintentó porque perdió el ACK (§2.6).
-    const bool duplicate = g_seen[origin] && g_last_seq[origin] == seq;
-    if (duplicate) {
-        g_dup_count++;
-        Serial.printf("[dup] origin=%u seq=%u dups=%lu\n",
-                      origin, seq, static_cast<unsigned long>(g_dup_count));
-    } else {
-        g_seen[origin]     = true;
-        g_last_seq[origin] = seq;
-    }
-
-    sendAck(origin, hop_src, seq, kAckOk);
 }
 
 void setup() {
@@ -330,7 +256,7 @@ void setup() {
     }
     Serial.println(F("OK"));
 
-    radio.setDio1Action(onRxDone);
+    radio.setDio1Action(onDio1);
 
     Serial.print(F("[init] startReceive... "));
     state = radio.startReceive();
@@ -342,25 +268,17 @@ void setup() {
     }
     Serial.println(F("OK"));
 
-    Serial.println(F("[init] Escuchando tramas LoRa (schema v2.0)..."));
+    Serial.println(F("[init] Radio pura lista. Escuchando LoRa y USB..."));
 }
 
 void loop() {
-    // Beacon periódico (el primero sale nada más arrancar).
-    static uint32_t last_beacon_ms = 0;
-    static bool     first_beacon   = true;
-    const uint32_t now = millis();
-    if (first_beacon || (now - last_beacon_ms) >= kBeaconPeriodMs) {
-        first_beacon   = false;
-        last_beacon_ms = now;
-        sendBeacon();
-    }
+    // Atiende órdenes de transmisión del Pi.
+    pollInput();
 
     if (!g_rx_flag) {
-        delay(5);
+        delay(2);
         return;
     }
-
     g_rx_flag = false;
 
     uint8_t buf[256];
@@ -368,24 +286,22 @@ void loop() {
     int16_t state = radio.readData(buf, len);
 
     if (state == RADIOLIB_ERR_NONE) {
-        g_rx_count++;
         const float rssi = radio.getRSSI();
         const float snr  = radio.getSNR();
         processFrame(buf, len, rssi, snr);
     } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-        g_err_count++;
+        g_rx_err++;
         Serial.printf("[rx] CRC PHY mismatch (errs=%lu)\n",
-                      static_cast<unsigned long>(g_err_count));
+                      static_cast<unsigned long>(g_rx_err));
     } else {
-        g_err_count++;
+        g_rx_err++;
         Serial.printf("[rx] err code=%d (errs=%lu)\n",
-                      state, static_cast<unsigned long>(g_err_count));
+                      state, static_cast<unsigned long>(g_rx_err));
     }
 
-    // Re-arma RX para la siguiente trama (el transmit del ACK saca al
-    // SX1262 del modo recepción).
+    // Re-arma RX para la siguiente trama.
     int16_t restart = radio.startReceive();
     if (restart != RADIOLIB_ERR_NONE) {
-        Serial.printf("[rx] startReceive() falló code=%d\n", restart);
+        Serial.printf("[rx] startReceive() fallo code=%d\n", restart);
     }
 }
