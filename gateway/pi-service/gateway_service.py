@@ -76,12 +76,17 @@ class GatewayService:
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
 
-        # Contadores de diagnóstico.
-        self.n_rx      = 0
-        self.n_ack     = 0
-        self.n_dup     = 0
-        self.n_beacon  = 0
-        self.n_drop    = 0
+        # Periodo del reporte de estadísticas de tráfico (segundos).
+        self.stats_s = float(os.environ.get("MODULINKR_STATS_S", "60"))
+
+        # Contadores de diagnóstico y de tráfico (para el análisis MAC).
+        self.n_rx        = 0   # líneas [rx] parseadas
+        self.n_ack       = 0   # ACKs emitidos
+        self.n_dup       = 0   # (origin, seq) ya en buffer
+        self.n_beacon    = 0   # beacons emitidos
+        self.n_drop      = 0   # descartadas por CRC/schema/tamaño
+        self.n_overheard = 0   # oídas de refilón (hop_dst != gateway): no van dirigidas a él
+        self.n_notconf   = 0   # tipo no confirmable (ACK, BEACON, SN_*) o dest != gateway
 
     # ----- Emisión hacia el Heltec -----
 
@@ -142,14 +147,30 @@ class GatewayService:
             LOG.warning("drop: %s (hex=%s)", parsed["error"], m.group("hex"))
             return
 
-        # El gateway solo confirma TELEMETRY/HEARTBEAT dirigidas a él.
+        # Filtro de salto (frame-format.md §10.6): el gateway solo procesa
+        # tramas cuyo SALTO actual va dirigido a él (hop_dst == GW). Una
+        # trama con dest_id=GW pero hop_dst=otro es un nodo transmitiendo a
+        # su padre (que no es el gateway); el gateway la oye de refilón por
+        # proximidad, pero NO debe confirmarla: esa era la fuente del ACK
+        # redundante del camino directo marginal (regresión corregida el
+        # 6-jul-2026, ver bitacora y mac.md).
+        if parsed["hop_dst"] != protocol.ADDR_GATEWAY:
+            self.n_overheard += 1
+            LOG.debug("overheard (no dirigida a este salto) hop_dst=%s origin=%s seq=%d",
+                      protocol.addr_name(parsed["hop_dst"]),
+                      protocol.addr_name(parsed["origin_id"]), parsed["seq"])
+            return
+
+        # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         ft = parsed["frame_type"]
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
+            self.n_notconf += 1
             LOG.debug("rx no confirmable type=%s origin=%s seq=%d",
                       parsed["frame_type_name"],
                       protocol.addr_name(parsed["origin_id"]), parsed["seq"])
             return
         if parsed["dest_id"] != protocol.ADDR_GATEWAY:
+            self.n_notconf += 1
             LOG.debug("rx no dirigida al gateway dest=%s",
                       protocol.addr_name(parsed["dest_id"]))
             return
@@ -173,6 +194,17 @@ class GatewayService:
         self.send_ack(parsed["origin_id"], parsed["hop_src"],
                       parsed["seq"], protocol.ACK_OK)
 
+    # ----- Reporte de estadísticas de tráfico (para el análisis MAC) -----
+
+    def report_stats(self) -> None:
+        LOG.info(
+            "STATS rx=%d ack=%d dup=%d beacon=%d overheard=%d notconf=%d drop=%d "
+            "buffer=%d",
+            self.n_rx, self.n_ack, self.n_dup, self.n_beacon,
+            self.n_overheard, self.n_notconf, self.n_drop,
+            self.buf.count() if self.buf is not None else -1,
+        )
+
     # ----- Bucle principal -----
 
     def run(self) -> int:
@@ -180,11 +212,12 @@ class GatewayService:
         self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
         self.ser.reset_input_buffer()
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
-        LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s",
-                 self.db_path, self.buf_max, self.net_id, self.beacon_s)
+        LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
+                 self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
 
         # Primer beacon al arrancar, luego cada beacon_s.
         last_beacon = 0.0
+        last_stats  = time.monotonic()
         rx_buf = b""
 
         try:
@@ -193,6 +226,9 @@ class GatewayService:
                 if now - last_beacon >= self.beacon_s:
                     last_beacon = now
                     self.send_beacon()
+                if now - last_stats >= self.stats_s:
+                    last_stats = now
+                    self.report_stats()
 
                 chunk = self.ser.read(self.ser.in_waiting or 1)
                 if not chunk:
@@ -203,6 +239,7 @@ class GatewayService:
                     self.handle_rx_line(raw.decode(errors="ignore"))
         except KeyboardInterrupt:
             LOG.info("interrumpido por usuario")
+            self.report_stats()
             return 0
         finally:
             if self.buf is not None:
