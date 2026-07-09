@@ -27,6 +27,7 @@ public:
         uint16_t seq     = 0;
         uint32_t sent_ms = 0;   // millis() del último envío (se actualiza al reintentar)
         uint32_t capture_ms = 0;  // millis() de la captura de la muestra
+        uint32_t timeout_ms = 0;  // vencimiento del intento actual; 0 = usar el base de firstExpired (backoff mac.md §4.4)
         uint8_t  retries = 0;   // reintentos ya consumidos
         uint8_t  dest    = 0xFF;  // destino final: 0xFF gateway, otro = supernodo (custodia)
         uint8_t  n_values = 0;

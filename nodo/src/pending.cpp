@@ -14,6 +14,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
             e.seq        = seq;
             e.sent_ms    = now_ms;
             e.capture_ms = capture_ms;
+            e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
             e.retries    = 0;
             e.dest       = dest;
             e.n_values   = n_values;
@@ -30,6 +31,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
     e.seq        = seq;
     e.sent_ms    = now_ms;
     e.capture_ms = capture_ms;
+    e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
     e.retries    = 0;
     e.dest       = dest;
     e.n_values   = n_values;
@@ -52,8 +54,13 @@ bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out) {
 PendingQueue::Entry* PendingQueue::firstExpired(uint32_t now_ms,
                                                 uint32_t timeout_ms) {
     for (size_t i = 0; i < kCapacity; ++i) {
-        if (entries_[i].in_use &&
-            (now_ms - entries_[i].sent_ms) >= timeout_ms) {
+        if (!entries_[i].in_use) continue;
+        // Backoff por entrada (mac.md §4.4): si la entrada trae su propio
+        // vencimiento (reintentos), se usa; si no (primer intento), el base.
+        const uint32_t thr = entries_[i].timeout_ms != 0
+                                 ? entries_[i].timeout_ms
+                                 : timeout_ms;
+        if ((now_ms - entries_[i].sent_ms) >= thr) {
             return &entries_[i];
         }
     }

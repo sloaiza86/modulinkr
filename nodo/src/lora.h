@@ -83,6 +83,18 @@ public:
 
     bool isReady() const { return initialized_; }
 
+    // Versión de firmware RUI3 del RAK3172, leída en begin() con AT+VER=?.
+    // Sirve para saber si el modulo soporta CAD/LBT en P2P (AT+CAD existe
+    // desde RUI3 V4.0.6). "desconocida" si el modulo no respondio.
+    const char* firmwareVersion() const { return fw_version_; }
+
+    // true si el modulo aceptó AT+CAD=1 en begin() (LBT por CAD activo).
+    bool cadEnabled() const { return cad_ok_; }
+
+    // Veces que el CAD reportó el canal ocupado (AT_BUSY_ERROR): indicador
+    // de contención del medio para el análisis MAC.
+    uint32_t busyEvents() const { return busy_events_; }
+
     // Construye una trama TELEMETRY v2.0 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
@@ -155,6 +167,25 @@ private:
     uint8_t node_id_    = 0;
     uint8_t ttl_        = 1;
 
+    // Versión de firmware RUI3 leída en begin() (AT+VER=?).
+    char fw_version_[64] = {0};
+
+    // LBT por CAD (mac.md §4.3). cad_ok_: el módulo aceptó AT+CAD=1.
+    bool cad_ok_ = false;
+
+    // Reintento rápido ante AT_BUSY_ERROR del CAD: el módulo detectó el canal
+    // ocupado y NO transmitió; se reenvía la última trama tras un backoff
+    // corto con jitter, hasta kBusyMaxTries. Independiente del backoff de ACK
+    // de main.cpp (que cubre el ACK perdido tras transmitir).
+    static constexpr uint8_t  kBusyMaxTries  = 3;
+    static constexpr uint32_t kBusyBackoffMs = 60;   // base del reintento rápido
+    static constexpr uint32_t kBusyJitterMs  = 60;   // jitter añadido
+    uint8_t  last_tx_[protocol::kOverhead + protocol::kMaxPayload];
+    size_t   last_tx_len_ = 0;
+    uint32_t busy_at_ms_  = 0;   // millis() del próximo reintento; 0 = ninguno
+    uint8_t  busy_tries_  = 0;   // reintentos rápidos consumidos para last_tx_
+    uint32_t busy_events_ = 0;   // total de AT_BUSY_ERROR observados
+
     // Línea en construcción de la UART (eventos asíncronos del RAK3172).
     static constexpr size_t kLineMax = 600;
     char   line_[kLineMax];
@@ -182,7 +213,14 @@ private:
                         uint8_t payload_length);
 
     // Emite AT+PSEND=<hex> sin bloquear (no espera el OK del módulo).
+    // sendRaw guarda la trama para el reintento rápido de CAD; writePsend
+    // solo escribe el comando (lo usan sendRaw y el reintento en poll()).
     Status sendRaw(const uint8_t* frame, size_t len);
+    void   writePsend(const uint8_t* frame, size_t len);
+
+    // Pregunta AT+VER=? y guarda la respuesta en fw_version_ (bloqueante,
+    // ventana corta; solo se usa una vez en begin(), antes del loop).
+    void queryVersion();
 
     // Procesa una línea completa; si es un evento RXP2P, decodifica y valida.
     void handleLine(const char* line);

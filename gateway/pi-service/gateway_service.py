@@ -29,6 +29,8 @@ código:
   MODULINKR_BEACON_S    (default 30)
   MODULINKR_DB          (default /home/practica/modulinkr_buffer.db)
   MODULINKR_BUFFER_MAX  (default 1000)
+  MODULINKR_STATS_S     (default 60)      periodo del reporte STATS
+  MODULINKR_ACK_WINDOW_S (default 1.0)    ventana de supresión de ACK dup
 
 Pensado para correr bajo systemd con reinicio automático: como el beacon
 depende de este proceso, un cuelgue derriba el árbol de rutas hasta que
@@ -79,9 +81,18 @@ class GatewayService:
         # Periodo del reporte de estadísticas de tráfico (segundos).
         self.stats_s = float(os.environ.get("MODULINKR_STATS_S", "60"))
 
+        # Ventana de supresión de ACK duplicado (mac.md §4.2). Si la misma
+        # (origin, seq) llega dos veces dentro de esta ventana, es multi-
+        # camino (directo + relay), no un reintento: se confirma una sola
+        # vez. Un reintento real llega tras el timeout del nodo (segundos)
+        # y sí se reconfirma. En segundos.
+        self.ack_window_s = float(os.environ.get("MODULINKR_ACK_WINDOW_S", "1.0"))
+        self.recent_acks: dict[tuple[int, int], float] = {}
+
         # Contadores de diagnóstico y de tráfico (para el análisis MAC).
         self.n_rx        = 0   # líneas [rx] parseadas
         self.n_ack       = 0   # ACKs emitidos
+        self.n_acksup    = 0   # ACKs suprimidos por ventana (multi-camino)
         self.n_dup       = 0   # (origin, seq) ya en buffer
         self.n_beacon    = 0   # beacons emitidos
         self.n_drop      = 0   # descartadas por CRC/schema/tamaño
@@ -191,16 +202,40 @@ class GatewayService:
                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
                      rssi, snr, reads_fmt, "" if is_new else "  [dup]")
 
+        # Supresión de ACK duplicado por ventana (mac.md §4.2). El dato ya
+        # está en buffer arriba; aquí solo se decide si reconfirmar. Si esta
+        # (origin, seq) se confirmó hace menos de ack_window_s, es la misma
+        # muestra llegando por otro camino (directo + relay), no un reintento:
+        # se calla el ACK redundante. Un reintento real llega tras el timeout
+        # del nodo (segundos) y cae fuera de la ventana, así que sí se reconfirma.
+        key = (parsed["origin_id"], parsed["seq"])
+        now = time.monotonic()
+        last = self.recent_acks.get(key)
+        if last is not None and (now - last) < self.ack_window_s:
+            self.n_acksup += 1
+            LOG.debug("ack suprimido (multi-camino) origin=%s seq=%d dt=%dms",
+                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
+                      int((now - last) * 1000))
+            return
+        self.recent_acks[key] = now
+
         self.send_ack(parsed["origin_id"], parsed["hop_src"],
                       parsed["seq"], protocol.ACK_OK)
 
     # ----- Reporte de estadísticas de tráfico (para el análisis MAC) -----
 
     def report_stats(self) -> None:
+        # Poda de recent_acks: las entradas más viejas que la ventana ya no
+        # pueden suprimir nada, así que se descartan para acotar memoria.
+        now = time.monotonic()
+        self.recent_acks = {
+            k: t for k, t in self.recent_acks.items()
+            if (now - t) < self.ack_window_s
+        }
         LOG.info(
-            "STATS rx=%d ack=%d dup=%d beacon=%d overheard=%d notconf=%d drop=%d "
-            "buffer=%d",
-            self.n_rx, self.n_ack, self.n_dup, self.n_beacon,
+            "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d overheard=%d "
+            "notconf=%d drop=%d buffer=%d",
+            self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
             self.n_overheard, self.n_notconf, self.n_drop,
             self.buf.count() if self.buf is not None else -1,
         )

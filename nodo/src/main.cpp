@@ -24,6 +24,7 @@
 #include <M5Atom.h>
 #include <SoftwareSerial.h>
 #include <ArduinoJson.h>
+#include <esp_random.h>
 
 #include "modbus.h"
 #include "lora.h"
@@ -36,7 +37,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.8-h6-fallback";
+constexpr const char* kFirmwareVersion = "0.0.16-mac-backoff";
 
 // Modbus (SoftwareSerial).
 constexpr int8_t        kRs485RxPin = 33;
@@ -96,6 +97,13 @@ constexpr uint8_t  kNetworkId    = NETWORK_ID;
 constexpr uint32_t kAckTimeoutMs = LORA_ACK_TIMEOUT_MS;
 constexpr uint8_t  kMaxRetries   = LORA_MAX_RETRIES;
 constexpr uint8_t  kMaxTtl       = LORA_MAX_TTL;
+
+// Backoff de reintentos (MAC, mac.md §4.4). El tiempo de espera del ACK
+// arranca en kAckTimeoutMs y se duplica por cada reintento, con techo, mas
+// un jitter aleatorio que desincroniza nodos que reintentan a la vez. El
+// primer envio usa kAckTimeoutMs pelado; el jitter solo entra en reintentos.
+constexpr uint32_t kBackoffCapMs    = 12000;  // techo del intervalo base
+constexpr uint32_t kBackoffJitterMs = 500;    // jitter maximo anadido
 
 // Parámetros mesh (equivalen al bloque transport.mesh del futuro
 // config.json, node-config.md §4.2).
@@ -284,12 +292,13 @@ void fireLora() {
                           protocol::kAddrGateway, millis())) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
-        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu\n",
+        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu\n",
                       g_lora_seq,
                       mesh.parentId(), mesh.ownHop(),
                       static_cast<unsigned>(pending.count()),
                       static_cast<unsigned long>(g_lora_ok),
-                      static_cast<unsigned long>(g_lora_err));
+                      static_cast<unsigned long>(g_lora_err),
+                      static_cast<unsigned long>(lora.busyEvents()));
     } else {
         g_lora_err++;
         Serial.printf("[lora]   tx err %s seq=%u  tx_ok=%lu tx_err=%lu\n",
@@ -510,6 +519,17 @@ void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
     pending.drop(e);
 }
 
+// Timeout de espera del ACK para el proximo intento, segun cuantos
+// reintentos se llevan (mac.md §4.4). retries=0 -> kAckTimeoutMs (lo aplica
+// firstExpired por defecto); retries>=1 -> base duplicada por reintento con
+// techo kBackoffCapMs, mas jitter aleatorio 0..kBackoffJitterMs.
+uint32_t backoffTimeoutMs(uint8_t retries) {
+    uint32_t t = kAckTimeoutMs;
+    for (uint8_t i = 0; i < retries && t < kBackoffCapMs; ++i) t <<= 1;
+    if (t > kBackoffCapMs) t = kBackoffCapMs;
+    return t + (esp_random() % (kBackoffJitterMs + 1));
+}
+
 // Vencimiento de timeouts: retransmite o retiene (frame-format.md §5.3).
 void processAckTimeouts() {
     const uint32_t now = millis();
@@ -521,9 +541,11 @@ void processAckTimeouts() {
         if (e->retries < kMaxRetries) {
             lora.sendTelemetryCustody(e->seq, e->values, e->n_values, e->dest);
             pending.markRetry(*e, now);
+            e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
             g_lora_retx++;
-            Serial.printf("[sn]     retx custodia seq=%u intento=%u/%u sn=%u\n",
-                          e->seq, e->retries, kMaxRetries, e->dest);
+            Serial.printf("[sn]     retx custodia seq=%u intento=%u/%u sn=%u wait=%lums\n",
+                          e->seq, e->retries, kMaxRetries, e->dest,
+                          static_cast<unsigned long>(e->timeout_ms));
         } else {
             // El supernodo no responde: la muestra sigue en la outbox y
             // la búsqueda vuelve a empezar con backoff.
@@ -550,9 +572,11 @@ void processAckTimeouts() {
         const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values,
                                            mesh.parentId());
         pending.markRetry(*e, now);
+        e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
         g_lora_retx++;
-        Serial.printf("[lora]   retx seq=%u intento=%u/%u via=%u (%s)\n",
+        Serial.printf("[lora]   retx seq=%u intento=%u/%u via=%u wait=%lums (%s)\n",
                       e->seq, e->retries, kMaxRetries, mesh.parentId(),
+                      static_cast<unsigned long>(e->timeout_ms),
                       LoraP2P::statusToString(st));
     } else {
         // Cuenta contra el padre (spec §2.2) y la muestra se retiene.
@@ -773,7 +797,9 @@ void setup() {
                    kLoraTxDbm,
                    kNetworkId, kNodeId, kMaxTtl)) {
         g_lora_ready = true;
-        Serial.println(F("OK"));
+        Serial.printf("OK  (RAK3172 fw: %s, CAD: %s)\n",
+                      lora.firmwareVersion(),
+                      lora.cadEnabled() ? "on" : "off");
     } else {
         Serial.println(F("FALLO. Sigo sin LoRa."));
     }

@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <cstring>
 #include <cstdlib>
+#include <esp_random.h>
 
 namespace {
 
@@ -56,6 +57,17 @@ bool LoraP2P::begin(HardwareSerial& uart,
         return false;
     }
 
+    // Versión de firmware del módulo, antes de entrar en modo P2P (el
+    // AT+VER=? responde igual, pero así queda antes de la escucha continua).
+    queryVersion();
+
+    // LBT por CAD (mac.md §4.3): el módulo escucha el canal antes de cada
+    // AT+PSEND y solo transmite si está libre (~32 ms). Persistente en flash;
+    // se fija explícito en cada arranque. Requiere RUI3 >= V4.0.6 (verificado
+    // en banco: RUI_4.0.6). Si el módulo trae firmware anterior, sendCommand
+    // devuelve false y seguimos sin CAD (cad_ok_ lo refleja en el banner).
+    cad_ok_ = module_.sendCommand("AT+CAD=1");
+
     // Modo TX+RX: el módulo queda en escucha continua (AT+PRECV=65533)
     // y permite transmitir sin salir de recepción.
     if (!module_.setMode(P2P_TX_RX_MODE)) {
@@ -64,6 +76,78 @@ bool LoraP2P::begin(HardwareSerial& uart,
 
     initialized_ = true;
     return true;
+}
+
+void LoraP2P::queryVersion() {
+    strncpy(fw_version_, "sin respuesta", sizeof(fw_version_) - 1);
+    fw_version_[sizeof(fw_version_) - 1] = '\0';
+    if (uart_ == nullptr) return;
+
+    // Despierta el módulo y vacía cualquier eco/OK pendiente de la config.
+    uart_->print("AT\r\n");
+    delay(100);
+    while (uart_->available() > 0) uart_->read();
+
+    uart_->print("AT+VER=?\r\n");
+
+    // Acumula la respuesta CRUDA durante una ventana amplia (el timeout de
+    // la librería es de solo 200 ms; damos margen de sobra al módulo).
+    char   raw[160];
+    size_t rlen = 0;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1500) {
+        while (uart_->available() > 0) {
+            const char c = static_cast<char>(uart_->read());
+            if (rlen < sizeof(raw) - 1) raw[rlen++] = c;
+        }
+    }
+    raw[rlen] = '\0';
+    if (rlen == 0) return;  // módulo mudo: queda "sin respuesta"
+
+    // RUI3 responde a la consulta con la forma "AT+VER=<valor>" (p. ej.
+    // "AT+VER=RUI_4.0.6_RAK3172-E"). Extrae lo que sigue al primer '=' que
+    // no sea el eco del propio comando ("AT+VER=?"), hasta el fin de línea.
+    for (const char* q = raw; *q != '\0'; ++q) {
+        if (*q == '=' && q[1] != '?' && q[1] != '\0') {
+            size_t k = 0;
+            for (const char* v = q + 1;
+                 *v != '\0' && *v != '\r' && *v != '\n' && k < sizeof(fw_version_) - 1;
+                 ++v) {
+                fw_version_[k++] = *v;
+            }
+            fw_version_[k] = '\0';
+            if (k > 0) return;
+        }
+    }
+
+    // Sin '=' util: recorre la respuesta línea a línea (sin destruir raw) y
+    // toma la primera que no sea el eco del comando ni el "OK".
+    const char* p = raw;
+    while (*p != '\0') {
+        while (*p == '\r' || *p == '\n') ++p;   // salta separadores
+        if (*p == '\0') break;
+        const char* start = p;
+        while (*p != '\0' && *p != '\r' && *p != '\n') ++p;
+        const size_t n = static_cast<size_t>(p - start);
+        char line[64];
+        const size_t m = n < sizeof(line) - 1 ? n : sizeof(line) - 1;
+        std::memcpy(line, start, m);
+        line[m] = '\0';
+        if (strstr(line, "AT+VER") == nullptr && strcmp(line, "OK") != 0) {
+            strncpy(fw_version_, line, sizeof(fw_version_) - 1);
+            fw_version_[sizeof(fw_version_) - 1] = '\0';
+            return;
+        }
+    }
+
+    // Solo llegó eco y/o OK: guarda el crudo compactado (separadores a '|')
+    // para poder diagnosticar qué respondió exactamente el módulo.
+    size_t j = 0;
+    for (size_t i = 0; i < rlen && j < sizeof(fw_version_) - 1; ++i) {
+        const char c = raw[i];
+        fw_version_[j++] = (c == '\r' || c == '\n') ? '|' : c;
+    }
+    fw_version_[j] = '\0';
 }
 
 LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
@@ -218,7 +302,7 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
     return sendRaw(frame, crc_input_len + kCrcBytes);
 }
 
-LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
+void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
     // AT+PSEND=<hex> escrito directamente, sin esperar el OK: el write()
     // de la librería bloquea 200 ms leyendo la UART y se tragaría el ACK
     // (ver comentario de cabecera en lora.h). El OK y los errores llegan
@@ -230,11 +314,38 @@ LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
         uart_->write(hexmap[frame[i] & 0x0F]);
     }
     uart_->print("\r\n");
+}
+
+LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
+    // Guarda la última trama por si el CAD reporta el canal ocupado
+    // (AT_BUSY_ERROR) y hay que reenviarla rápido (LBT, mac.md §4.3). Cada
+    // envío nuevo cancela un reintento rápido pendiente de una trama anterior:
+    // si esa trama vieja no salió, la recupera el backoff de ACK de main.cpp.
+    if (len <= sizeof(last_tx_)) {
+        std::memcpy(last_tx_, frame, len);
+        last_tx_len_ = len;
+    } else {
+        last_tx_len_ = 0;  // no cabe: sin reintento rápido
+    }
+    busy_at_ms_ = 0;
+    busy_tries_ = 0;
+
+    writePsend(frame, len);
     return Status::OK;
 }
 
 void LoraP2P::poll() {
     if (!initialized_ || uart_ == nullptr) return;
+
+    // Reintento rápido pendiente por CAD ocupado (LBT, mac.md §4.3): reenvía
+    // la última trama cuando vence el backoff corto. La resta con cast a
+    // int32_t es segura ante el desbordamiento de millis().
+    if (busy_at_ms_ != 0 && last_tx_len_ > 0 &&
+        static_cast<int32_t>(millis() - busy_at_ms_) >= 0) {
+        busy_at_ms_ = 0;
+        busy_tries_++;
+        writePsend(last_tx_, last_tx_len_);
+    }
 
     // Lectura no bloqueante, carácter a carácter, hasta línea completa.
     while (uart_->available() > 0) {
@@ -257,7 +368,25 @@ void LoraP2P::poll() {
 }
 
 void LoraP2P::handleLine(const char* line) {
-    // Errores asíncronos del módulo (AT_PARAM_ERROR, AT_BUSY_ERROR, ...).
+    // AT_BUSY_ERROR: el CAD encontró el canal ocupado y NO transmitió la
+    // trama (LBT, mac.md §4.3). Programa un reintento rápido de la última
+    // trama tras un backoff corto con jitter, hasta kBusyMaxTries. Es
+    // independiente del backoff de ACK de main.cpp (que cubre el ACK perdido
+    // DESPUÉS de transmitir); aquí la trama nunca salió al aire.
+    if (strstr(line, "BUSY") != nullptr) {
+        busy_events_++;
+        if (last_tx_len_ > 0 && busy_tries_ < kBusyMaxTries) {
+            busy_at_ms_ = millis() + kBusyBackoffMs +
+                          (esp_random() % (kBusyJitterMs + 1));
+        } else {
+            // Agotados los reintentos rápidos: que lo recupere el backoff
+            // de ACK cuando venza el timeout de la trama.
+            tx_errors_++;
+        }
+        return;
+    }
+
+    // Otros errores asíncronos del módulo (AT_PARAM_ERROR, ...).
     if (strstr(line, "ERROR") != nullptr) {
         tx_errors_++;
         return;
