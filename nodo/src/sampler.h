@@ -12,7 +12,7 @@
 // registros 1 y 2 en una petición), que operaba sin errores; las
 // transacciones individuales encadenadas provocaban respuestas rezagadas
 // del esclavo pisando la consulta siguiente (invalid_response, observado
-// en banco el 7-jul-2026). La IMU WT901 (52, 53, 54) también colapsa en
+// en banco el 10-jul-2026). La IMU WT901 (52, 53, 54) también colapsa en
 // una única transacción de 3 registros.
 //
 // MUESTREO EN LA VENTANA CALLADA: el sampler no corre libre; lo invoca
@@ -21,13 +21,13 @@
 // fase con el ciclo de envío (ambos relojes parten del boot) y cada
 // lectura coincidía con el TX y su ACK: las interrupciones de la UART
 // LoRa corrompían bytes del SoftwareSerial (observado en banco el
-// 7-jul-2026, errores clavados en los segundos del tx). Este es el orden
+// 10-jul-2026, errores clavados en los segundos del tx). Este es el orden
 // del firmware previo, probado limpio: leer, enviar, silencio.
 //
 // El poll_interval_ms de cada dispositivo actúa como FRENO: si es mayor
 // que el ciclo de envío, el dispositivo no se relee en cada ciclo y la
 // trama reutiliza su último valor. Muestrear más rápido que el ciclo de
-// envío no está soportado en este esquema (decisión del 7-jul-2026).
+// envío no está soportado en este esquema (decisión del 10-jul-2026).
 //
 // El snapshot conserva el ORDEN GLOBAL de reads[]: dispositivos en el
 // orden del array devices[] y, dentro de cada uno, sus reads[] en orden.

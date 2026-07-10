@@ -46,7 +46,13 @@ void Mesh::dropNeighbor(uint8_t id) {
 }
 
 bool Mesh::expired(const Neighbor& n, uint32_t now_ms) const {
-    return (now_ms - n.last_ms) >= beacon_timeout_ms_;
+    // Comparación con signo: un beacon sellado unos ms DESPUÉS del now
+    // del llamante (llega en la misma vuelta del loop) daba una resta
+    // negativa que, sin signo, se volvía gigante y caducaba al padre al
+    // instante ("padre perdido" espurio, capturado en banco el
+    // 10-jul-2026 con el beacon y la caducidad separados 4 ms).
+    return static_cast<int32_t>(now_ms - n.last_ms) >=
+           static_cast<int32_t>(beacon_timeout_ms_);
 }
 
 // ----- Beacons y padre -----
@@ -145,7 +151,10 @@ void Mesh::tick(uint32_t now_ms) {
         reselectParent(now_ms);
     }
     for (auto& r : routes_) {
-        if (r.in_use && (now_ms - r.last_ms) >= kRouteTtlMs) r.in_use = false;
+        if (r.in_use && static_cast<int32_t>(now_ms - r.last_ms) >=
+                            static_cast<int32_t>(kRouteTtlMs)) {
+            r.in_use = false;
+        }
     }
 }
 

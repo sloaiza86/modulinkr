@@ -112,7 +112,7 @@ uint16_t g_lora_seq   = 0;
 
 bool g_lora_ready = false;
 
-// Nota abierta (7-jul-2026): tras un reinicio el seq vuelve a 0 y el
+// Nota abierta (10-jul-2026): tras un reinicio el seq vuelve a 0 y el
 // buffer persistente del Pi descarta como duplicadas las muestras nuevas
 // que colisionen con (origen, seq) de corridas anteriores. La solución
 // está en evaluación (proceso de registro de nodos u otra); mientras
@@ -844,25 +844,32 @@ void loop() {
         // Emisión diferida de la oferta de custodia (jitter fino).
         offerTick(now);
 
-        // Mantenimiento a 1 Hz: caducidades, fallback y batches.
+        // Mantenimiento a 1 Hz: caducidades, fallback y batches. La hora
+        // se toma FRESCA aquí: los eventos procesados arriba (beacons,
+        // ACKs) llevan sellos posteriores al now del inicio del loop y
+        // compararlos contra una hora vieja producía caducidades falsas.
         static uint32_t last_tick_ms = 0;
         if (now - last_tick_ms >= 1000) {
             last_tick_ms = now;
+            const uint32_t tnow = millis();
             const bool had_parent = mesh.hasParent();
-            mesh.tick(now);
+            mesh.tick(tnow);
             if (had_parent && !mesh.hasParent()) {
                 Serial.println(F("[mesh]   padre perdido por silencio de beacons"));
             }
-            snClientTick(now);
-            outboxDrainTick(now);
-            batchTick(now);
+            snClientTick(tnow);
+            outboxDrainTick(tnow);
+            batchTick(tnow);
         }
 
-        // Re-emisión de beacon pendiente (jitter vencido).
+        // Re-emisión de beacon pendiente (jitter vencido). Solo con padre
+        // válido: un huérfano no debe anunciarse (un eco con hop 255
+        // podría ser adoptado y desquiciar las distancias del árbol).
         uint16_t echo_seq;
         uint8_t  echo_ttl;
         if (mesh.echoDue(now, echo_seq, echo_ttl)) {
-            if (lora.sendBeaconEcho(echo_seq, mesh.ownHop(), mesh.parentId(),
+            if (mesh.hasParent() &&
+                lora.sendBeaconEcho(echo_seq, mesh.ownHop(), mesh.parentId(),
                                     echo_ttl) == LoraP2P::Status::OK) {
                 g_echoes++;
                 Serial.printf("[mesh]   eco beacon seq=%u hop_propio=%u ttl=%u ecos=%lu\n",
