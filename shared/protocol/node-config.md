@@ -158,6 +158,8 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | Campo | Tipo | Valores válidos | Notas |
 | --- | --- | --- | --- |
 | `apn` | string | cadena APN del operador | Suministrada por el operador de la SIM. |
+| `apn_user` | string | opcional, default `""` | Usuario de autenticación del APN. Muchas SIMs IoT pre-autentican por IMSI y no lo requieren. |
+| `apn_pass` | string | opcional, default `""` | Contraseña de autenticación del APN. |
 | `mqtt_broker` | string | hostname o IPv4 | Broker MQTT destino. |
 | `mqtt_port` | integer | `1`-`65535` | `1883` (plano) o `8883` (TLS) típicamente. |
 | `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. |

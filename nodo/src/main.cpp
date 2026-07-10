@@ -1,21 +1,24 @@
 // ModuLinkr, firmware del nodo (V2)
-// Modo H6 fase 3: respaldo NB-IoT distribuido sobre la mesh de la fase 2.
+// Modo H7: configuración por config.json (node-config.md schema 2.0).
 //
-//   - Las muestras que no llegan al gateway (sin ruta, o con reintentos
-//     agotados) ya no se pierden: pasan a la outbox.
-//   - Nodo sin NB-IoT: si la outbox tiene contenido y hay padre, se drena
-//     por la ruta normal; si no hay ruta, busca un supernodo vecino
-//     (SN_REQUEST / SN_OFFER, frame-format.md, seccion 8) y le entrega
-//     las muestras en custodia.
-//   - Supernodo (NBIOT_ENABLED=1): acepta custodias con ACK OK_VIA_NBIOT
-//     y publica batches JSON (batch-format.md) por MQTT. El modem corre
-//     en una tarea del nucleo 0 (nbiot_service): el mesh nunca se para.
+//   - El JSON embebido (configs_embebidos.h, fase 1 del comisionamiento)
+//     dicta la identidad del nodo, la red LoRa y mesh, el bloque NB-IoT y
+//     el bus Modbus completo. Los build_flags de parámetros desaparecen;
+//     queda NODE_CONFIG para elegir qué config se embebe.
+//   - El rol de supernodo ya no es de compilación: lo decide node.type en
+//     runtime (un solo firmware, dos configs).
+//   - El sensor cableado desaparece: el sampler recorre devices[]/reads[]
+//     del config, convierte cada lectura (type, byte_order, scale, offset)
+//     y arma el payload TELEMETRY en el orden del spec.
+//   - Config inválido: el arranque se detiene con LED rojo y la regla
+//     violada en el log (node-config.md §1).
 //
-// NB-IoT es respaldo selectivo: el ciclo de publicacion periodica de H3
-// desaparece. En condiciones normales el celular no transmite nada.
+// Conserva completas las fases anteriores: ACK extremo a extremo (H4),
+// mesh en árbol (H5), respaldo NB-IoT distribuido (H6) y la capa MAC
+// (CAD, backoff, mac.md).
 //
 // Asignacion de UART (resolucion del conflicto, ver nodo/README.md):
-//   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  a 9600
+//   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  (baud del config)
 //   LoRa    Serial1         GPIO 19 RX / GPIO 22 TX  a 115200
 //   NB-IoT  Serial2         GPIO 32 RX / GPIO 26 TX  a 115200
 //   Consola Serial (UART0)  USB CDC via CP2104       a 115200
@@ -33,88 +36,35 @@
 #include "mesh.h"
 #include "outbox.h"
 #include "nbiot_service.h"
+#include "config.h"
+#include "sampler.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.16-mac-backoff";
+constexpr const char* kFirmwareVersion = "0.0.17-config-json";
 
-// Modbus (SoftwareSerial).
-constexpr int8_t        kRs485RxPin = 33;
-constexpr int8_t        kRs485TxPin = 23;
-constexpr unsigned long kRs485Baud  = 9600;
+// Pines fijos del hardware (no son configuración del despliegue).
+constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
+constexpr int8_t kRs485TxPin = 23;
+constexpr int8_t kLoraRxPin  = 19;   // LoRa (Serial1)
+constexpr int8_t kLoraTxPin  = 22;
+constexpr int8_t kNbiotRxPin = 32;   // NB-IoT (Serial2)
+constexpr int8_t kNbiotTxPin = 26;
+constexpr uint32_t kNbiotBaud = 115200;
 
-constexpr uint8_t  kXyMd02SlaveId  = 0x01;
-constexpr uint16_t kXyMd02RegStart = 0x0001;
-constexpr uint8_t  kXyMd02RegCount = 2;
-
-// LoRa (Serial1).
-constexpr int8_t  kLoraRxPin = 19;
-constexpr int8_t  kLoraTxPin = 22;
-
-#if defined(REGION_EU868)
-constexpr const char*   kRegionLabel = "EU868";
-#elif defined(REGION_US915)
-constexpr const char*   kRegionLabel = "US915";
-#else
-#error "Falta definir REGION_EU868 o REGION_US915 en platformio.ini"
-#endif
-
-// Frecuencia LoRa controlada por build_flag LORA_FREQ_HZ en platformio.ini.
-// Por defecto en EU868: 869.525 MHz (g3), que es la banda en la que escucha
-// el gateway (Heltec WiFi LoRa 32 v3 con SX1262 puro, ver
-// firmware/gateway/heltec-radio/platformio.ini). Para portar a US915 basta
-// con cambiar el build_flag (LORA_FREQ_HZ y REGION_*).
-constexpr unsigned long kLoraFreqHz = LORA_FREQ_HZ;
-
-constexpr uint8_t  kLoraSF      = 7;
-constexpr uint16_t kLoraBwKhz   = 125;
-constexpr uint8_t  kLoraCrIndex = 0;  // 4/5
-constexpr uint8_t  kLoraTxDbm   = LORA_TX_DBM;
-
-// NB-IoT (Serial2).
-constexpr int8_t   kNbiotRxPin = 32;
-constexpr int8_t   kNbiotTxPin = 26;
-constexpr uint32_t kNbiotBaud  = 115200;
-
-constexpr const char* kApn        = NBIOT_APN;
-constexpr const char* kUser       = NBIOT_USER;
-constexpr const char* kPass       = NBIOT_PASS;
-constexpr const char* kBroker     = MQTT_BROKER;
-constexpr uint16_t    kPort       = MQTT_PORT;
-constexpr const char* kTopicBatch = MQTT_TOPIC_BATCH;
-
-constexpr uint8_t kNodeId       = NODE_ID;
-constexpr bool    kNbiotEnabled = NBIOT_ENABLED;
-
-// client_id MQTT derivado del node_id (se rellena en setup).
-char g_client_id[24] = {0};
-
-// Parámetros de red v2.0 (equivalen a lora.network_id, lora.ack_timeout_ms,
-// lora.max_retries y mesh.max_ttl del futuro config.json; por ahora
-// build_flags en platformio.ini).
-constexpr uint8_t  kNetworkId    = NETWORK_ID;
-constexpr uint32_t kAckTimeoutMs = LORA_ACK_TIMEOUT_MS;
-constexpr uint8_t  kMaxRetries   = LORA_MAX_RETRIES;
-constexpr uint8_t  kMaxTtl       = LORA_MAX_TTL;
+// Coding rate fijo 4/5 (el spec no lo parametriza).
+constexpr uint8_t kLoraCrIndex = 0;
 
 // Backoff de reintentos (MAC, mac.md §4.4). El tiempo de espera del ACK
-// arranca en kAckTimeoutMs y se duplica por cada reintento, con techo, mas
-// un jitter aleatorio que desincroniza nodos que reintentan a la vez. El
-// primer envio usa kAckTimeoutMs pelado; el jitter solo entra en reintentos.
+// arranca en lora.ack_timeout_ms y se duplica por cada reintento, con
+// techo, mas un jitter aleatorio que desincroniza nodos que reintentan a
+// la vez. El primer envio usa el timeout pelado; el jitter solo entra en
+// reintentos.
 constexpr uint32_t kBackoffCapMs    = 12000;  // techo del intervalo base
 constexpr uint32_t kBackoffJitterMs = 500;    // jitter maximo anadido
 
-// Parámetros mesh (equivalen al bloque transport.mesh del futuro
-// config.json, node-config.md §4.2).
-constexpr uint32_t kBeaconTimeoutMs     = MESH_BEACON_TIMEOUT_MS;
-constexpr int16_t  kParentMinRssi       = MESH_PARENT_MIN_RSSI;
-constexpr uint8_t  kParentHysteresisDb  = MESH_PARENT_HYSTERESIS_DB;
-constexpr uint8_t  kParentMissedFrames  = MESH_PARENT_MISSED_FRAMES;
-constexpr bool     kRelayEnabled        = MESH_RELAY_ENABLED;
-
-// Parámetros del fallback NB-IoT (frame-format.md, seccion 8).
-constexpr uint32_t kSnOfferWaitMs    = MESH_SN_OFFER_WAIT_MS;
+// Política del fallback NB-IoT (constantes del firmware, no del config).
 constexpr uint32_t kSnBackoffMinMs   = 5000;
 constexpr uint32_t kSnBackoffMaxMs   = 60000;
 constexpr uint32_t kBatchCoalesceMs  = 2000;  // agrupado corto antes de publicar
@@ -128,8 +78,13 @@ constexpr const char* kModemLabel = "SIM7080G";
 constexpr const char* kModemLabel = "?";
 #endif
 
-// Cadencias. Valores controlados por build_flags en platformio.ini.
-constexpr uint32_t kLoraPeriodMs = LORA_PERIOD_MS;
+// Configuración del dispositivo, cargada del JSON embebido en setup().
+// Todo parámetro de despliegue (identidad, red, mesh, NB-IoT, Modbus)
+// sale de aquí (node-config.md schema 2.0).
+cfg::Config g_cfg;
+
+// client_id MQTT derivado del node_id (se rellena en setup).
+char g_client_id[24] = {0};
 
 // Instancias globales.
 EspSoftwareSerial::UART modbus_uart;
@@ -139,10 +94,9 @@ PendingQueue            pending;
 Mesh                    mesh;
 Outbox                  outbox;
 NbiotService            nbsvc;
+Sampler                 sampler;
 
-// Contadores.
-uint32_t g_modbus_ok  = 0;
-uint32_t g_modbus_err = 0;
+// Contadores (los de Modbus viven ahora en el sampler).
 uint32_t g_lora_ok    = 0;   // tramas aceptadas por el módulo (TX)
 uint32_t g_lora_err   = 0;   // fallos de TX
 uint32_t g_lora_acked = 0;   // tramas confirmadas por el gateway
@@ -157,6 +111,16 @@ uint32_t g_batch_id   = 0;
 uint16_t g_lora_seq   = 0;
 
 bool g_lora_ready = false;
+
+// Nota abierta (7-jul-2026): tras un reinicio el seq vuelve a 0 y el
+// buffer persistente del Pi descarta como duplicadas las muestras nuevas
+// que colisionen con (origen, seq) de corridas anteriores. La solución
+// está en evaluación (proceso de registro de nodos u otra); mientras
+// tanto, tras reflashear conviene vaciar la BBDD del Pi.
+uint16_t nextSeq() {
+    g_lora_seq++;
+    return g_lora_seq;
+}
 
 // Estado del cliente de fallback (nodo sin NB-IoT buscando supernodo).
 enum class SnState : uint8_t { IDLE, WAIT_OFFERS, DELIVER };
@@ -181,14 +145,15 @@ void printBanner() {
     Serial.println();
     Serial.println(F("=============================================="));
     Serial.printf ("  %s  v%s\n", kFirmwareName, kFirmwareVersion);
-    Serial.printf ("  region=%s  modem=%s  node_id=%u\n",
-                   kRegionLabel, kModemLabel, kNodeId);
+    Serial.printf ("  region=%s  modem=%s  node_id=%u  nombre=%s\n",
+                   g_cfg.region, kModemLabel, g_cfg.node_id, g_cfg.node_name);
     Serial.println(F("  H6 fase 3: mesh + respaldo NB-IoT distribuido"));
     Serial.println(F("  UART map:"));
-    Serial.printf ("    Modbus  SoftwareSerial rx=GPIO%d tx=GPIO%d @ %lu baud\n",
+    Serial.printf ("    Modbus  SoftwareSerial rx=GPIO%d tx=GPIO%d @ %lu %c%u\n",
                    static_cast<int>(kRs485RxPin),
                    static_cast<int>(kRs485TxPin),
-                   kRs485Baud);
+                   static_cast<unsigned long>(g_cfg.baudrate),
+                   g_cfg.parity, g_cfg.stopbits);
     Serial.printf ("    LoRa    Serial1        rx=GPIO%d tx=GPIO%d @ 115200\n",
                    static_cast<int>(kLoraRxPin),
                    static_cast<int>(kLoraTxPin));
@@ -197,28 +162,43 @@ void printBanner() {
                    static_cast<int>(kNbiotTxPin),
                    kNbiotBaud);
     Serial.printf ("  LoRa  : %lu Hz  SF%u  BW%u  pwr=%u dBm  period=%lu ms\n",
-                   kLoraFreqHz, kLoraSF, kLoraBwKhz, kLoraTxDbm,
-                   static_cast<unsigned long>(kLoraPeriodMs));
+                   static_cast<unsigned long>(g_cfg.freq_hz),
+                   g_cfg.sf, g_cfg.bw_khz, g_cfg.tx_dbm,
+                   static_cast<unsigned long>(g_cfg.send_interval_ms));
     Serial.printf ("  Red   : network_id=%u  ack_timeout=%lu ms  max_retries=%u  ttl=%u\n",
-                   kNetworkId,
-                   static_cast<unsigned long>(kAckTimeoutMs),
-                   kMaxRetries, kMaxTtl);
+                   g_cfg.network_id,
+                   static_cast<unsigned long>(g_cfg.ack_timeout_ms),
+                   g_cfg.max_retries, g_cfg.max_ttl);
     Serial.printf ("  Mesh  : beacon_timeout=%lu ms  min_rssi=%d dBm  hyst=%u dB  missed=%u  relay=%s\n",
-                   static_cast<unsigned long>(kBeaconTimeoutMs),
-                   static_cast<int>(kParentMinRssi),
-                   kParentHysteresisDb, kParentMissedFrames,
-                   kRelayEnabled ? "on" : "off");
-    Serial.printf ("  Modbus: slave=0x%02X  fn=0x04  reg=0x%04X..0x%04X\n",
-                   kXyMd02SlaveId,
-                   kXyMd02RegStart,
-                   static_cast<uint16_t>(kXyMd02RegStart + kXyMd02RegCount - 1));
-#if NBIOT_ENABLED
-    Serial.println(F("  Rol   : SUPERNODO (respaldo selectivo NB-IoT)"));
-    Serial.printf ("  MQTT  : %s:%u  topic_batch=%s\n",
-                   kBroker, kPort, kTopicBatch);
-#else
-    Serial.println(F("  Rol   : nodo (fallback via supernodo, SN_REQUEST)"));
-#endif
+                   static_cast<unsigned long>(g_cfg.beacon_timeout_ms),
+                   static_cast<int>(g_cfg.parent_min_rssi),
+                   g_cfg.parent_hysteresis_db, g_cfg.parent_missed_frames,
+                   g_cfg.relay_enabled ? "on" : "off");
+
+    // Catálogo Modbus del config: dispositivos y lecturas.
+    Serial.printf ("  Modbus: %u dispositivo(s), %u lectura(s) total\n",
+                   g_cfg.n_devices, g_cfg.total_reads);
+    for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
+        const cfg::DeviceDef& dev = g_cfg.devices[d];
+        Serial.printf("    [%s] slave=0x%02X poll=%lu ms reads=%u writes=%u\n",
+                      dev.name, dev.slave_id,
+                      static_cast<unsigned long>(dev.poll_ms),
+                      dev.n_reads, dev.n_writes);
+        for (uint8_t r = 0; r < dev.n_reads; ++r) {
+            const cfg::ReadDef& rd = dev.reads[r];
+            Serial.printf("      %s: fn=0x%02X addr=%u %s x%.3g %+.3g\n",
+                          rd.id, rd.function, rd.address,
+                          cfg::valTypeName(rd.type), rd.scale, rd.offset);
+        }
+    }
+
+    if (g_cfg.super_node) {
+        Serial.println(F("  Rol   : SUPERNODO (respaldo selectivo NB-IoT)"));
+        Serial.printf ("  MQTT  : %s:%u  topic_batch=%s\n",
+                       g_cfg.broker, g_cfg.port, g_cfg.topic_batch);
+    } else {
+        Serial.println(F("  Rol   : nodo (fallback via supernodo, SN_REQUEST)"));
+    }
     Serial.println(F("=============================================="));
 }
 
@@ -226,57 +206,47 @@ void setLed(uint32_t color) {
     M5.dis.drawpix(0, color);
 }
 
-// Lee XY-MD02 y devuelve true si OK. Rellena temp_c y hum_pc.
-bool readSensor(float& temp_c, float& hum_pc) {
-    uint16_t regs[kXyMd02RegCount] = {0, 0};
-    const auto status = modbus.readInputRegisters(
-        kXyMd02SlaveId, kXyMd02RegStart, kXyMd02RegCount, regs);
-
-    if (status != ModbusRTU::Status::OK) {
-        g_modbus_err++;
-        const char* desc = ModbusRTU::statusToString(status);
-        if (status == ModbusRTU::Status::EXCEPTION) {
-            Serial.printf("[modbus] err %s (code=0x%02X)  ok=%lu err=%lu\n",
-                          desc, modbus.lastException(),
-                          static_cast<unsigned long>(g_modbus_ok),
-                          static_cast<unsigned long>(g_modbus_err));
-        } else {
-            Serial.printf("[modbus] err %s  ok=%lu err=%lu\n",
-                          desc,
-                          static_cast<unsigned long>(g_modbus_ok),
-                          static_cast<unsigned long>(g_modbus_err));
-        }
-        return false;
-    }
-
-    const int16_t  raw_t = static_cast<int16_t>(regs[0]);
-    const uint16_t raw_h = regs[1];
-    temp_c = raw_t / 10.0f;
-    hum_pc = raw_h / 10.0f;
-    g_modbus_ok++;
-    Serial.printf("[modbus] ok  T=%+6.1f C  H=%5.1f %%   ok=%lu err=%lu\n",
-                  temp_c, hum_pc,
-                  static_cast<unsigned long>(g_modbus_ok),
-                  static_cast<unsigned long>(g_modbus_err));
-    return true;
-}
-
 void fireLora() {
-    float temp_c, hum_pc;
-    if (!readSensor(temp_c, hum_pc)) return;
+    // Muestreo en la ventana callada: la radio lleva casi todo el ciclo
+    // sin actividad, igual que el firmware previo leía el sensor justo
+    // antes de transmitir (ver cabecera de sampler.h).
+    sampler.pollDue(millis());
+
+    // Snapshot de todas las lecturas, en el orden global de reads[] (el
+    // mismo del payload TELEMETRY, frame-format.md §3.1).
+    float   values[cfg::kMaxReadsTotal];
+    uint8_t n_values = 0;
+    if (!sampler.snapshot(values, cfg::kMaxReadsTotal, n_values, millis())) {
+        // Lecturas incompletas o rancias: sin trama este ciclo. Con el
+        // sensor desconectado (caso del supernodo del banco) esto es lo
+        // normal y el nodo sigue haciendo mesh y custodia.
+        return;
+    }
     if (!g_lora_ready) {
         Serial.println(F("[lora]   tx skip, driver no inicializado"));
         return;
     }
 
-    const float values[] = {temp_c, hum_pc};
+    // Traza de los valores que van en la trama (equivale al log de
+    // sensor del firmware previo, una vez por ciclo de envío).
+    {
+        char line[120];
+        int  p = snprintf(line, sizeof(line), "[sensor] ");
+        for (uint8_t i = 0; i < n_values && p > 0 &&
+                            p < static_cast<int>(sizeof(line)) - 12; ++i) {
+            p += snprintf(line + p, sizeof(line) - p, "v%u=%.3f ", i, values[i]);
+        }
+        Serial.printf("%s ok=%lu err=%lu\n", line,
+                      static_cast<unsigned long>(sampler.okCount()),
+                      static_cast<unsigned long>(sampler.errCount()));
+    }
 
     if (!mesh.hasParent()) {
         // Sin ruta al gateway: la muestra va a la outbox con su seq
         // asignado. Saldrá por un supernodo (custodia) o por el padre
         // cuando la ruta vuelva.
-        g_lora_seq++;
-        outbox.push(kNodeId, g_lora_seq, values, 2, millis());
+        nextSeq();
+        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, millis());
         Serial.printf("[outbox] sin padre, muestra retenida seq=%u  outbox=%u vecinos=%u\n",
                       g_lora_seq,
                       static_cast<unsigned>(outbox.count()),
@@ -284,11 +254,12 @@ void fireLora() {
         return;
     }
 
-    g_lora_seq++;
-    const auto st = lora.sendTelemetry(g_lora_seq, values, 2, mesh.parentId());
+    nextSeq();
+    const auto st = lora.sendTelemetry(g_lora_seq, values, n_values,
+                                       mesh.parentId());
     if (st == LoraP2P::Status::OK) {
         g_lora_ok++;
-        if (!pending.push(g_lora_seq, values, 2, millis(),
+        if (!pending.push(g_lora_seq, values, n_values, millis(),
                           protocol::kAddrGateway, millis())) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
@@ -312,7 +283,7 @@ void fireLora() {
 void handleAck(const LoraP2P::RxFrame& f) {
     if (f.payload_length != 3) return;
 
-    if (f.dest_id == kNodeId) {
+    if (f.dest_id == g_cfg.node_id) {
         const uint16_t ack_seq = static_cast<uint16_t>(f.payload[0]) |
                                  (static_cast<uint16_t>(f.payload[1]) << 8);
         const uint8_t status = f.payload[2];
@@ -322,7 +293,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
 
             // Si la muestra vivía en la outbox (drenaje o custodia),
             // queda entregada y sale de ahí.
-            if (outbox.remove(kNodeId, ack_seq)) {
+            if (outbox.remove(g_cfg.node_id, ack_seq)) {
                 g_outbox_inflight = false;
             }
 
@@ -347,7 +318,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
     }
 
     // ACK para otro nodo: bajar por la ruta inversa (spec §2.4).
-    if (!kRelayEnabled || f.ttl == 0) return;
+    if (!g_cfg.relay_enabled || f.ttl == 0) return;
     uint8_t via = 0;
     if (!mesh.routeFor(f.dest_id, via)) {
         // Ruta caducada o reinicio: el origen lo resolverá por timeout.
@@ -363,7 +334,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
 // Telemetría ajena con este nodo como DESTINO FINAL: entrega en custodia
 // para el respaldo NB-IoT (spec seccion 8.3). Solo aplica al supernodo.
 void acceptCustody(const LoraP2P::RxFrame& f) {
-    if (!kNbiotEnabled) return;
+    if (!g_cfg.super_node) return;
     if (f.payload_length == 0 || (f.payload_length % 4) != 0) return;
     const uint8_t n = f.payload_length / 4;
     if (n > Outbox::kMaxValues) return;  // config ajeno mayor de lo soportado
@@ -377,7 +348,7 @@ void acceptCustody(const LoraP2P::RxFrame& f) {
     outbox.push(f.origin_id, f.seq, values, n, millis());
     if (!dup) g_custody_rx++;
 
-    g_lora_seq++;
+    nextSeq();
     lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckOkViaNbiot);
     Serial.printf("[custod] origin=%u seq=%u%s  outbox=%u rx=%lu\n",
                   f.origin_id, f.seq, dup ? " (reintento)" : "",
@@ -389,16 +360,16 @@ void acceptCustody(const LoraP2P::RxFrame& f) {
 // (spec §2.3). Se aprende la ruta inversa incluso sin padre, para poder
 // bajar ACKs si la trama llegó al gateway por otro camino previo.
 void handleUplinkRelay(const LoraP2P::RxFrame& f) {
-    if (f.origin_id == kNodeId) return;  // eco imposible, por si acaso
+    if (f.origin_id == g_cfg.node_id) return;  // eco imposible, por si acaso
 
     // Destino final este nodo: custodia, no relay.
-    if (f.dest_id == kNodeId) {
+    if (f.dest_id == g_cfg.node_id) {
         acceptCustody(f);
         return;
     }
 
-    if (!kRelayEnabled) return;
-    if (f.hop_dst != kNodeId || f.dest_id != protocol::kAddrGateway) return;
+    if (!g_cfg.relay_enabled) return;
+    if (f.hop_dst != g_cfg.node_id || f.dest_id != protocol::kAddrGateway) return;
 
     mesh.learnRoute(f.origin_id, f.hop_src, millis());
 
@@ -442,7 +413,7 @@ void handleBeacon(const LoraP2P::RxFrame& f) {
 // responde un supernodo operativo con espacio, tras un jitter de 0-300 ms
 // para no colisionar con otros supernodos (spec seccion 8.2).
 void handleSnRequest(const LoraP2P::RxFrame& f) {
-    if (!kNbiotEnabled || f.payload_length != 2) return;
+    if (!g_cfg.super_node || f.payload_length != 2) return;
     if (!nbsvc.ready() || outbox.space() == 0) return;
 
     g_offer_pending = true;
@@ -456,7 +427,7 @@ void handleSnRequest(const LoraP2P::RxFrame& f) {
 // búsqueda. Se queda con la mejor calidad (desempate por RSSI).
 void handleSnOffer(const LoraP2P::RxFrame& f) {
     if (g_sn_state != SnState::WAIT_OFFERS) return;
-    if (f.dest_id != kNodeId || f.payload_length != 2) return;
+    if (f.dest_id != g_cfg.node_id || f.payload_length != 2) return;
 
     const uint8_t quality = f.payload[0];  // CSQ crudo, 0xFF desconocida
     const uint8_t space   = f.payload[1];
@@ -509,8 +480,8 @@ void processLoraRx() {
 void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
     g_lora_lost++;
     // El push reemplaza la posible entrada previa del mismo seq.
-    outbox.remove(kNodeId, e.seq);
-    outbox.push(kNodeId, e.seq, e.values, e.n_values, e.capture_ms);
+    outbox.remove(g_cfg.node_id, e.seq);
+    outbox.push(g_cfg.node_id, e.seq, e.values, e.n_values, e.capture_ms);
     g_outbox_inflight = false;
     Serial.printf("[outbox] seq=%u retenida (%s)  outbox=%u lost=%lu\n",
                   e.seq, motivo,
@@ -520,11 +491,11 @@ void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
 }
 
 // Timeout de espera del ACK para el proximo intento, segun cuantos
-// reintentos se llevan (mac.md §4.4). retries=0 -> kAckTimeoutMs (lo aplica
+// reintentos se llevan (mac.md §4.4). retries=0 -> g_cfg.ack_timeout_ms (lo aplica
 // firstExpired por defecto); retries>=1 -> base duplicada por reintento con
 // techo kBackoffCapMs, mas jitter aleatorio 0..kBackoffJitterMs.
 uint32_t backoffTimeoutMs(uint8_t retries) {
-    uint32_t t = kAckTimeoutMs;
+    uint32_t t = g_cfg.ack_timeout_ms;
     for (uint8_t i = 0; i < retries && t < kBackoffCapMs; ++i) t <<= 1;
     if (t > kBackoffCapMs) t = kBackoffCapMs;
     return t + (esp_random() % (kBackoffJitterMs + 1));
@@ -533,18 +504,18 @@ uint32_t backoffTimeoutMs(uint8_t retries) {
 // Vencimiento de timeouts: retransmite o retiene (frame-format.md §5.3).
 void processAckTimeouts() {
     const uint32_t now = millis();
-    PendingQueue::Entry* e = pending.firstExpired(now, kAckTimeoutMs);
+    PendingQueue::Entry* e = pending.firstExpired(now, g_cfg.ack_timeout_ms);
     if (e == nullptr) return;
 
     // Entrega en custodia a un supernodo (dest != gateway).
     if (e->dest != protocol::kAddrGateway) {
-        if (e->retries < kMaxRetries) {
+        if (e->retries < g_cfg.max_retries) {
             lora.sendTelemetryCustody(e->seq, e->values, e->n_values, e->dest);
             pending.markRetry(*e, now);
             e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
             g_lora_retx++;
             Serial.printf("[sn]     retx custodia seq=%u intento=%u/%u sn=%u wait=%lums\n",
-                          e->seq, e->retries, kMaxRetries, e->dest,
+                          e->seq, e->retries, g_cfg.max_retries, e->dest,
                           static_cast<unsigned long>(e->timeout_ms));
         } else {
             // El supernodo no responde: la muestra sigue en la outbox y
@@ -566,7 +537,7 @@ void processAckTimeouts() {
         return;
     }
 
-    if (e->retries < kMaxRetries) {
+    if (e->retries < g_cfg.max_retries) {
         // El reintento sale hacia el padre actual, que puede haber
         // cambiado desde el envío original.
         const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values,
@@ -575,7 +546,7 @@ void processAckTimeouts() {
         e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
         g_lora_retx++;
         Serial.printf("[lora]   retx seq=%u intento=%u/%u via=%u wait=%lums (%s)\n",
-                      e->seq, e->retries, kMaxRetries, mesh.parentId(),
+                      e->seq, e->retries, g_cfg.max_retries, mesh.parentId(),
                       static_cast<unsigned long>(e->timeout_ms),
                       LoraP2P::statusToString(st));
     } else {
@@ -590,21 +561,21 @@ void processAckTimeouts() {
 
 // Cliente de fallback: nodo sin NB-IoT buscando supernodo (spec seccion 8).
 void snClientTick(uint32_t now) {
-    if (kNbiotEnabled) return;  // el supernodo no busca supernodos
+    if (g_cfg.super_node) return;  // el supernodo no busca supernodos
 
     switch (g_sn_state) {
         case SnState::IDLE:
             if (!mesh.hasParent() && outbox.count() > 0 &&
                 now >= g_sn_next_req_ms) {
-                g_lora_seq++;
+                nextSeq();
                 const uint8_t queued = static_cast<uint8_t>(
                     outbox.count() > 255 ? 255 : outbox.count());
                 lora.sendSnRequest(g_lora_seq, queued);
                 g_sn_have_offer  = false;
                 g_sn_state       = SnState::WAIT_OFFERS;
-                g_sn_window_end_ms = now + kSnOfferWaitMs;
+                g_sn_window_end_ms = now + g_cfg.sn_offer_wait_ms;
                 Serial.printf("[sn]     request emitido (queued=%u), ventana %lu ms\n",
-                              queued, static_cast<unsigned long>(kSnOfferWaitMs));
+                              queued, static_cast<unsigned long>(g_cfg.sn_offer_wait_ms));
             }
             break;
 
@@ -636,7 +607,7 @@ void snClientTick(uint32_t now) {
                 break;
             }
             if (outbox.count() > 0 && !g_outbox_inflight) {
-                Outbox::Entry* e = outbox.oldest(kNodeId);
+                Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
                 lora.sendTelemetryCustody(e->seq, e->values, e->n_values,
                                           g_sn_target);
@@ -654,10 +625,10 @@ void snClientTick(uint32_t now) {
 // Drenaje de la outbox por la ruta normal cuando hay padre (una muestra
 // en vuelo a la vez, para no saturar el aire).
 void outboxDrainTick(uint32_t now) {
-    if (kNbiotEnabled) return;  // el supernodo vacía su outbox por MQTT
+    if (g_cfg.super_node) return;  // el supernodo vacía su outbox por MQTT
     if (!mesh.hasParent() || outbox.count() == 0 || g_outbox_inflight) return;
 
-    Outbox::Entry* e = outbox.oldest(kNodeId);
+    Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
     if (e == nullptr) return;
 
     lora.sendTelemetry(e->seq, e->values, e->n_values, mesh.parentId());
@@ -676,7 +647,7 @@ void offerTick(uint32_t now) {
     if (!nbsvc.ready()) return;  // se cayó mientras esperaba el jitter
 
     const size_t space = outbox.space();
-    g_lora_seq++;
+    nextSeq();
     lora.sendSnOffer(g_offer_dest, g_lora_seq, nbsvc.csqRaw(),
                      static_cast<uint8_t>(space > 255 ? 255 : space));
     Serial.printf("[sn]     oferta enviada a id=%u (csq=%u space=%u)\n",
@@ -686,7 +657,7 @@ void offerTick(uint32_t now) {
 
 // Construcción y publicación del batch NB-IoT (batch-format.md).
 void batchTick(uint32_t now) {
-    if (!kNbiotEnabled || !nbsvc.ready() || outbox.count() == 0) return;
+    if (!g_cfg.super_node || !nbsvc.ready() || outbox.count() == 0) return;
 
     // Agrupado corto: espera kBatchCoalesceMs desde la muestra más
     // antigua por si están llegando más en ráfaga.
@@ -694,7 +665,7 @@ void batchTick(uint32_t now) {
 
     JsonDocument doc;  // ArduinoJson 7
     doc["schema_version"] = "2.0";
-    doc["node_id"]        = kNodeId;
+    doc["node_id"]        = g_cfg.node_id;
     doc["batch_id"]       = ++g_batch_id;
     doc["clock_synced"]   = nbsvc.clockSynced();
     doc["fw_version"]     = kFirmwareVersion;
@@ -707,7 +678,7 @@ void batchTick(uint32_t now) {
     for (size_t i = 0; i < Outbox::capacity() && n_included < kBatchMaxSamples; ++i) {
         Outbox::Entry* e = outbox.at(i);
         if (e == nullptr) continue;
-        if (e->origin != kNodeId) all_own = false;
+        if (e->origin != g_cfg.node_id) all_own = false;
 
         JsonObject s = samples.add<JsonObject>();
         s["origin"] = e->origin;
@@ -750,6 +721,13 @@ void batchTick(uint32_t now) {
     }
 }
 
+// Mapea parity/stopbits del config a la constante de EspSoftwareSerial.
+EspSoftwareSerial::Config swserialConfig(char parity, uint8_t stopbits) {
+    if (parity == 'E') return stopbits == 2 ? SWSERIAL_8E2 : SWSERIAL_8E1;
+    if (parity == 'O') return stopbits == 2 ? SWSERIAL_8O2 : SWSERIAL_8O1;
+    return stopbits == 2 ? SWSERIAL_8N2 : SWSERIAL_8N1;
+}
+
 }  // namespace
 
 void setup() {
@@ -757,45 +735,46 @@ void setup() {
     Serial.begin(115200);
     delay(200);
 
+    // ----- Config del dispositivo (JSON embebido, node-config.md) -----
+    // Se carga ANTES que todo: el resto del arranque depende de él. Un
+    // config inválido detiene el nodo (LED rojo y regla violada en el log).
+    char cfg_err[96];
+    if (!cfg::load(g_cfg, cfg_err, sizeof(cfg_err))) {
+        Serial.begin(115200);
+        while (true) {
+            Serial.printf("[config] INVALIDO: %s\n", cfg_err);
+            M5.dis.drawpix(0, 0x200000);
+            delay(3000);
+        }
+    }
+
     printBanner();
     setLed(0x202000);
 
-    // ----- Modbus sobre SoftwareSerial -----
-    modbus_uart.begin(kRs485Baud, SWSERIAL_8N1, kRs485RxPin, kRs485TxPin);
+    // ----- Modbus sobre SoftwareSerial, parámetros del config -----
+    modbus_uart.begin(g_cfg.baudrate,
+                      swserialConfig(g_cfg.parity, g_cfg.stopbits),
+                      kRs485RxPin, kRs485TxPin);
     modbus.begin(modbus_uart);
-    delay(200);
+    delay(400);  // margen para que el ISR de SoftwareSerial se estabilice
 
-    // Warmup: SoftwareSerial necesita unos ms tras begin() para que el
-    // ISR de timing se estabilice. Hacemos hasta 3 lecturas descartadas
-    // hasta que una vuelva OK, así el primer disparo del ciclo dual ya
-    // entra con el bus operativo y no genera un timeout cosmético.
-    Serial.print(F("[init]   Modbus warmup... "));
-    bool modbus_warm = false;
-    for (uint8_t i = 0; i < 3; ++i) {
-        uint16_t warmup[kXyMd02RegCount] = {0, 0};
-        if (modbus.readInputRegisters(kXyMd02SlaveId,
-                                      kXyMd02RegStart,
-                                      kXyMd02RegCount,
-                                      warmup) == ModbusRTU::Status::OK) {
-            modbus_warm = true;
-            break;
-        }
-        delay(200);
-    }
-    Serial.println(modbus_warm ? F("OK") : F("WARNING (seguimos igual)"));
+    // ----- Sampler dirigido por el config -----
+    sampler.begin(&modbus, &g_cfg);
+    Serial.printf("[init]   Modbus: %u lecturas agrupadas en %u transaccion(es) por ciclo\n",
+                  g_cfg.total_reads, sampler.groupCount());
 
     // ----- Capa mesh -----
-    mesh.begin(kNodeId, kBeaconTimeoutMs, kParentMinRssi,
-               kParentHysteresisDb, kParentMissedFrames);
+    mesh.begin(g_cfg.node_id, g_cfg.beacon_timeout_ms, g_cfg.parent_min_rssi,
+               g_cfg.parent_hysteresis_db, g_cfg.parent_missed_frames);
 
     // ----- LoRa sobre Serial1 -----
     Serial.print(F("[init]   LoRa init (TX+RX)... "));
     if (lora.begin(Serial1,
                    kLoraRxPin, kLoraTxPin,
-                   kLoraFreqHz,
-                   kLoraSF, kLoraBwKhz, kLoraCrIndex,
-                   kLoraTxDbm,
-                   kNetworkId, kNodeId, kMaxTtl)) {
+                   g_cfg.freq_hz,
+                   g_cfg.sf, g_cfg.bw_khz, kLoraCrIndex,
+                   g_cfg.tx_dbm,
+                   g_cfg.network_id, g_cfg.node_id, g_cfg.max_ttl)) {
         g_lora_ready = true;
         Serial.printf("OK  (RAK3172 fw: %s, CAD: %s)\n",
                       lora.firmwareVersion(),
@@ -804,29 +783,32 @@ void setup() {
         Serial.println(F("FALLO. Sigo sin LoRa."));
     }
 
-#if NBIOT_ENABLED
     // ----- NB-IoT en segundo plano (tarea del nucleo 0) -----
-    snprintf(g_client_id, sizeof(g_client_id), "modulinkr-node%u", kNodeId);
-    NbiotService::Config nbcfg;
-    nbcfg.uart        = &Serial2;
-    nbcfg.rx_pin      = kNbiotRxPin;
-    nbcfg.tx_pin      = kNbiotTxPin;
-    nbcfg.baudrate    = kNbiotBaud;
-    nbcfg.apn         = kApn;
-    nbcfg.user        = kUser;
-    nbcfg.pass        = kPass;
-    nbcfg.broker      = kBroker;
-    nbcfg.port        = kPort;
-    nbcfg.client_id   = g_client_id;
-    nbcfg.topic_batch = kTopicBatch;
-    if (nbsvc.begin(nbcfg)) {
-        Serial.println(F("[init]   servicio NB-IoT arrancado en nucleo 0 (no bloquea)"));
+    // El rol lo decide node.type del config en runtime: un mismo binario
+    // sirve de nodo o de supernodo según el JSON embebido.
+    if (g_cfg.super_node) {
+        snprintf(g_client_id, sizeof(g_client_id), "modulinkr-node%u",
+                 g_cfg.node_id);
+        NbiotService::Config nbcfg;
+        nbcfg.uart        = &Serial2;
+        nbcfg.rx_pin      = kNbiotRxPin;
+        nbcfg.tx_pin      = kNbiotTxPin;
+        nbcfg.baudrate    = kNbiotBaud;
+        nbcfg.apn         = g_cfg.apn;
+        nbcfg.user        = g_cfg.apn_user;
+        nbcfg.pass        = g_cfg.apn_pass;
+        nbcfg.broker      = g_cfg.broker;
+        nbcfg.port        = g_cfg.port;
+        nbcfg.client_id   = g_client_id;
+        nbcfg.topic_batch = g_cfg.topic_batch;
+        if (nbsvc.begin(nbcfg)) {
+            Serial.println(F("[init]   servicio NB-IoT arrancado en nucleo 0 (no bloquea)"));
+        } else {
+            Serial.println(F("[init]   FALLO arrancando servicio NB-IoT"));
+        }
     } else {
-        Serial.println(F("[init]   FALLO arrancando servicio NB-IoT"));
+        Serial.println(F("[init]   sin NB-IoT (node.type=node en el config)"));
     }
-#else
-    Serial.println(F("[init]   NB-IoT deshabilitado por build_flag (NBIOT_ENABLED=0)"));
-#endif  // NBIOT_ENABLED
 
     if (g_lora_ready) {
         setLed(0x002000);
@@ -844,12 +826,12 @@ void loop() {
 
     if (first_loop) {
         // El primer disparo LoRa es inmediato.
-        last_lora_ms = now - kLoraPeriodMs;
+        last_lora_ms = now - g_cfg.send_interval_ms;
         first_loop   = false;
     }
 
-    if (now - last_lora_ms >= kLoraPeriodMs) {
-        last_lora_ms += kLoraPeriodMs;
+    if (now - last_lora_ms >= g_cfg.send_interval_ms) {
+        last_lora_ms += g_cfg.send_interval_ms;
         fireLora();
     }
 

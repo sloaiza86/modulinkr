@@ -1,0 +1,184 @@
+// ModuLinkr, motor de muestreo Modbus (implementación)
+
+#include "sampler.h"
+
+#include <cstring>
+
+void Sampler::begin(ModbusRTU* bus, const cfg::Config* config) {
+    bus_ = bus;
+    cfg_ = config;
+
+    // Precalcula los grupos: reads contiguos (misma función, dirección
+    // consecutiva contando el ancho en registros del anterior) colapsan
+    // en una sola transacción.
+    n_groups_ = 0;
+    for (uint8_t d = 0; d < cfg_->n_devices; ++d) {
+        const cfg::DeviceDef& dev = cfg_->devices[d];
+        dev_group_start_[d] = n_groups_;
+        dev_group_count_[d] = 0;
+
+        for (uint8_t r = 0; r < dev.n_reads; ++r) {
+            const cfg::ReadDef& rd = dev.reads[r];
+            const uint8_t regs = cfg::typeRegisters(rd.type);
+
+            Group* g = (dev_group_count_[d] > 0) ? &groups_[n_groups_ - 1] : nullptr;
+            const bool contiguo =
+                g != nullptr &&
+                g->function == rd.function &&
+                static_cast<uint16_t>(g->address + g->n_regs) == rd.address;
+
+            if (contiguo) {
+                g->n_reads++;
+                g->n_regs = static_cast<uint8_t>(g->n_regs + regs);
+            } else {
+                Group& ng = groups_[n_groups_++];
+                ng.dev        = d;
+                ng.first_read = r;
+                ng.n_reads    = 1;
+                ng.address    = rd.address;
+                ng.n_regs     = regs;
+                ng.function   = rd.function;
+                dev_group_count_[d]++;
+            }
+        }
+    }
+
+    // Primer sondeo inmediato de todos los dispositivos.
+    for (size_t i = 0; i < cfg::kMaxDevices; ++i) next_poll_ms_[i] = 0;
+}
+
+uint8_t Sampler::globalIndex(uint8_t d, uint8_t r) const {
+    uint8_t idx = 0;
+    for (uint8_t i = 0; i < d; ++i) idx += cfg_->devices[i].n_reads;
+    return idx + r;
+}
+
+uint32_t Sampler::assemble32(uint16_t reg0, uint16_t reg1, cfg::ByteOrder order) {
+    // Los registros llegan del driver como uint16 ya en host order; el
+    // orden lógico ABCD se refiere a los bytes en el bus (A = MSB del
+    // valor). reg0 es el primer registro leído, reg1 el segundo.
+    const uint8_t b0 = reg0 >> 8, b1 = reg0 & 0xFF;   // bytes del registro 0
+    const uint8_t b2 = reg1 >> 8, b3 = reg1 & 0xFF;   // bytes del registro 1
+    uint8_t A, B, C, D;
+    switch (order) {
+        case cfg::ByteOrder::ABCD: A = b0; B = b1; C = b2; D = b3; break;
+        case cfg::ByteOrder::BADC: A = b1; B = b0; C = b3; D = b2; break;
+        case cfg::ByteOrder::CDAB: A = b2; B = b3; C = b0; D = b1; break;
+        case cfg::ByteOrder::DCBA: A = b3; B = b2; C = b1; D = b0; break;
+        default:                   A = b0; B = b1; C = b2; D = b3; break;
+    }
+    return (static_cast<uint32_t>(A) << 24) | (static_cast<uint32_t>(B) << 16) |
+           (static_cast<uint32_t>(C) << 8)  | static_cast<uint32_t>(D);
+}
+
+float Sampler::convert(const cfg::ReadDef& rd, const uint16_t* regs) {
+    // Interpretación del crudo según type (§5.6) y conversión a unidad
+    // real (value = raw x scale + offset, §5.3).
+    float raw;
+    switch (rd.type) {
+        case cfg::ValType::U16:
+            raw = static_cast<float>(regs[0]);
+            break;
+        case cfg::ValType::I16:
+            raw = static_cast<float>(static_cast<int16_t>(regs[0]));
+            break;
+        case cfg::ValType::U32:
+            raw = static_cast<float>(assemble32(regs[0], regs[1], rd.order));
+            break;
+        case cfg::ValType::I32:
+            raw = static_cast<float>(
+                static_cast<int32_t>(assemble32(regs[0], regs[1], rd.order)));
+            break;
+        case cfg::ValType::F32: {
+            const uint32_t bits = assemble32(regs[0], regs[1], rd.order);
+            float f;
+            std::memcpy(&f, &bits, sizeof(f));
+            raw = f;
+            break;
+        }
+        default:
+            raw = 0.0f;
+            break;
+    }
+    return raw * rd.scale + rd.offset;
+}
+
+bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
+    const cfg::DeviceDef& dev = cfg_->devices[g.dev];
+
+    uint16_t regs[cfg::kMaxReadsPerDev * 2];
+    ModbusRTU::Status st;
+    if (g.function == 0x04) {
+        st = bus_->readInputRegisters(dev.slave_id, g.address, g.n_regs, regs);
+    } else {
+        st = bus_->readHoldingRegisters(dev.slave_id, g.address, g.n_regs, regs);
+    }
+    if (st != ModbusRTU::Status::OK) {
+        err_count_++;
+        Serial.printf("[modbus] err %s dev=%s grupo@%u(x%u)  ok=%lu err=%lu\n",
+                      ModbusRTU::statusToString(st), dev.name,
+                      g.address, g.n_regs,
+                      static_cast<unsigned long>(ok_count_),
+                      static_cast<unsigned long>(err_count_));
+        return false;
+    }
+
+    // Reparte la ventana de registros entre los miembros del grupo.
+    uint8_t off = 0;
+    for (uint8_t m = 0; m < g.n_reads; ++m) {
+        const uint8_t r = g.first_read + m;
+        const cfg::ReadDef& rd = dev.reads[r];
+        Slot& s = slots_[globalIndex(g.dev, r)];
+        s.value    = convert(rd, &regs[off]);
+        s.fresh_ms = now_ms;
+        s.ever_ok  = true;
+        off = static_cast<uint8_t>(off + cfg::typeRegisters(rd.type));
+    }
+    ok_count_++;
+    return true;
+}
+
+void Sampler::pollDue(uint32_t now_ms) {
+    if (bus_ == nullptr || cfg_ == nullptr || n_groups_ == 0) return;
+
+    // Recorre los dispositivos con el intervalo vencido y lee TODOS sus
+    // grupos, uno tras otro. Bloqueante a propósito: se ejecuta en la
+    // ventana callada de radio (ver cabecera), igual que el firmware
+    // previo leía el sensor justo antes de transmitir.
+    bool first = true;
+    for (uint8_t d = 0; d < cfg_->n_devices; ++d) {
+        if (dev_group_count_[d] == 0) continue;
+        if (static_cast<int32_t>(now_ms - next_poll_ms_[d]) < 0) continue;
+
+        for (uint8_t k = 0; k < dev_group_count_[d]; ++k) {
+            if (!first) delay(kInterTxGapMs);  // respiro entre transacciones
+            first = false;
+            readGroup(groups_[dev_group_start_[d] + k], millis());
+        }
+        next_poll_ms_[d] = now_ms + cfg_->devices[d].poll_ms;
+    }
+}
+
+bool Sampler::snapshot(float* out, uint8_t max_values, uint8_t& n_out,
+                       uint32_t now_ms) const {
+    n_out = cfg_->total_reads;
+    if (n_out == 0 || n_out > max_values) return false;
+
+    uint8_t idx = 0;
+    for (uint8_t d = 0; d < cfg_->n_devices; ++d) {
+        const cfg::DeviceDef& dev = cfg_->devices[d];
+        // Frescura exigida: 2 intervalos de poll del dispositivo (margen
+        // para el round-robin) mas un piso para dispositivos muy rápidos.
+        uint32_t max_age = dev.poll_ms * 2;
+        if (max_age < 2000) max_age = 2000;
+        for (uint8_t r = 0; r < dev.n_reads; ++r) {
+            const Slot& s = slots_[idx];
+            if (!s.ever_ok || (now_ms - s.fresh_ms) > max_age) {
+                return false;
+            }
+            out[idx] = s.value;
+            idx++;
+        }
+    }
+    return true;
+}
