@@ -17,6 +17,17 @@
 // mesh en árbol (H5), respaldo NB-IoT distribuido (H6) y la capa MAC
 // (CAD, backoff, mac.md).
 //
+// v2.1 (10-jul-2026), registro y timestamps (frame-format.md §13):
+//   - Al adoptar padre, el nodo se registra en el gateway (NODE_REGISTER
+//     con el catálogo de reads/writes del config) y no emite telemetría
+//     LoRa hasta recibir el WELCOME (hora + estado). Sin gateway sigue
+//     capturando y sale por NB-IoT (custodia o failover).
+//   - Reloj del sistema en nodeclock: WELCOME y epoch de cada beacon lo
+//     sincronizan; NTP sobre NB-IoT queda como último recurso del batch.
+//   - TELEMETRY lleva el ts de captura (inmutable en reintentos, custodia
+//     y batch: es la identidad (origin, ts, seq) extremo a extremo).
+//   - El seq es efímero: nace en 1 en cada boot, nadie lo persiste.
+//
 // Asignacion de UART (resolucion del conflicto, ver nodo/README.md):
 //   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  (baud del config)
 //   LoRa    Serial1         GPIO 19 RX / GPIO 22 TX  a 115200
@@ -38,11 +49,12 @@
 #include "nbiot_service.h"
 #include "config.h"
 #include "sampler.h"
+#include "nodeclock.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.17-config-json";
+constexpr const char* kFirmwareVersion = "0.0.18-v21-registro";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -112,14 +124,91 @@ uint16_t g_lora_seq   = 0;
 
 bool g_lora_ready = false;
 
-// Nota abierta (10-jul-2026): tras un reinicio el seq vuelve a 0 y el
-// buffer persistente del Pi descarta como duplicadas las muestras nuevas
-// que colisionen con (origen, seq) de corridas anteriores. La solución
-// está en evaluación (proceso de registro de nodos u otra); mientras
-// tanto, tras reflashear conviene vaciar la BBDD del Pi.
+// El seq es EFÍMERO desde v2.1 (frame-format.md §2.6): nace en 1 en cada
+// boot y nadie lo persiste. La identidad duradera del dato es
+// (origin, ts, seq); las colisiones entre arranques que obligaban a
+// vaciar la BBDD del Pi tras reflashear desaparecen.
 uint16_t nextSeq() {
     g_lora_seq++;
     return g_lora_seq;
+}
+
+// ----- Registro en el gateway (v2.1, frame-format.md §13) -----
+
+constexpr uint32_t kRegBackoffMinMs = 5000;
+constexpr uint32_t kRegBackoffMaxMs = 60000;
+constexpr size_t   kCatalogMax      = 700;   // peor caso del config (8r+4w)
+constexpr size_t   kRegFragMax      = protocol::kMaxPayload - 2;
+
+bool     g_registered      = false;
+uint8_t  g_reg_catalog[kCatalogMax];
+size_t   g_reg_catalog_len = 0;
+uint8_t  g_reg_frag_total  = 1;
+uint8_t  g_reg_frag_next   = 0;
+uint32_t g_reg_next_ms     = 0;
+uint32_t g_reg_backoff_ms  = kRegBackoffMinMs;
+
+// Serializa el catálogo binario del NODE_REGISTER (spec §13.2):
+// fw_version, node.name, reads (id/name/unit en el orden global de
+// serialización de TELEMETRY) y writes (id/name/unit). Devuelve la
+// longitud, o 0 si no cupo (config imposiblemente grande).
+size_t buildCatalog(uint8_t* buf, size_t cap) {
+    size_t p = 0;
+    auto putStr = [&](const char* s, size_t max_len) -> bool {
+        size_t n = strnlen(s, max_len);
+        if (p + 1 + n > cap) return false;
+        buf[p++] = static_cast<uint8_t>(n);
+        memcpy(&buf[p], s, n);
+        p += n;
+        return true;
+    };
+
+    if (!putStr(kFirmwareVersion, 32)) return 0;
+    if (!putStr(g_cfg.node_name, 32)) return 0;
+
+    if (p + 1 > cap) return 0;
+    buf[p++] = g_cfg.total_reads;
+    for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
+        for (uint8_t r = 0; r < g_cfg.devices[d].n_reads; ++r) {
+            const cfg::ReadDef& rd = g_cfg.devices[d].reads[r];
+            if (!putStr(rd.id, 8) || !putStr(rd.name, 32) ||
+                !putStr(rd.unit, 8)) {
+                return 0;
+            }
+        }
+    }
+
+    uint8_t total_writes = 0;
+    for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
+        total_writes += g_cfg.devices[d].n_writes;
+    }
+    if (p + 1 > cap) return 0;
+    buf[p++] = total_writes;
+    for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
+        for (uint8_t w = 0; w < g_cfg.devices[d].n_writes; ++w) {
+            const cfg::WriteDef& wd = g_cfg.devices[d].writes[w];
+            if (!putStr(wd.id, 8) || !putStr(wd.name, 32) ||
+                !putStr(wd.unit, 8)) {
+                return 0;
+            }
+        }
+    }
+    return p;
+}
+
+// ----- ts de captura (v2.1, frame-format.md §3.1) -----
+
+// Fija el ts de una entrada de la outbox en su primera serialización
+// (trama LoRa o batch). Si el reloj sincronizó después de la captura, el
+// cálculo es retroactivo desde capture_ms (batch-format.md §6). Una vez
+// fijado (aunque sea a 0, "sin hora") no se recalcula jamás: la identidad
+// (origin, ts, seq) debe ser idéntica por todos los caminos de entrega.
+uint32_t fixOutboxTs(Outbox::Entry& e) {
+    if (!e.ts_fixed) {
+        e.ts       = nodeclock::epochAt(e.capture_ms);
+        e.ts_fixed = true;
+    }
+    return e.ts;
 }
 
 // Estado del cliente de fallback (nodo sin NB-IoT buscando supernodo).
@@ -241,12 +330,19 @@ void fireLora() {
                       static_cast<unsigned long>(sampler.errCount()));
     }
 
+    // ts de captura: se toma AHORA, en el instante de la muestra. Si el
+    // reloj aún no sincronizó queda 0 (y sin fijar: puede recibirlo
+    // retroactivamente mientras no viaje, ver fixOutboxTs).
+    const uint32_t capture_ms = millis();
+    const uint32_t ts         = nodeclock::epochNow();
+
     if (!mesh.hasParent()) {
         // Sin ruta al gateway: la muestra va a la outbox con su seq
         // asignado. Saldrá por un supernodo (custodia) o por el padre
         // cuando la ruta vuelva.
         nextSeq();
-        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, millis());
+        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, capture_ms,
+                    ts, nodeclock::synced());
         Serial.printf("[outbox] sin padre, muestra retenida seq=%u  outbox=%u vecinos=%u\n",
                       g_lora_seq,
                       static_cast<unsigned>(outbox.count()),
@@ -254,13 +350,25 @@ void fireLora() {
         return;
     }
 
+    if (!g_registered) {
+        // Con padre pero sin WELCOME: la telemetría LoRa espera al
+        // registro (frame-format.md §13.1). La muestra no se pierde: se
+        // retiene y el drenaje la saca en cuanto llegue el WELCOME.
+        nextSeq();
+        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, capture_ms,
+                    ts, nodeclock::synced());
+        Serial.printf("[outbox] sin registro, muestra retenida seq=%u  outbox=%u\n",
+                      g_lora_seq, static_cast<unsigned>(outbox.count()));
+        return;
+    }
+
     nextSeq();
-    const auto st = lora.sendTelemetry(g_lora_seq, values, n_values,
+    const auto st = lora.sendTelemetry(g_lora_seq, ts, values, n_values,
                                        mesh.parentId());
     if (st == LoraP2P::Status::OK) {
         g_lora_ok++;
         if (!pending.push(g_lora_seq, values, n_values, millis(),
-                          protocol::kAddrGateway, millis())) {
+                          protocol::kAddrGateway, capture_ms, ts)) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
         Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu\n",
@@ -335,17 +443,23 @@ void handleAck(const LoraP2P::RxFrame& f) {
 // para el respaldo NB-IoT (spec seccion 8.3). Solo aplica al supernodo.
 void acceptCustody(const LoraP2P::RxFrame& f) {
     if (!g_cfg.super_node) return;
-    if (f.payload_length == 0 || (f.payload_length % 4) != 0) return;
-    const uint8_t n = f.payload_length / 4;
+    // Payload v2.1: ts (4 B) + N float32.
+    if (f.payload_length < 8 || ((f.payload_length - 4) % 4) != 0) return;
+    const uint8_t n = (f.payload_length - 4) / 4;
     if (n > Outbox::kMaxValues) return;  // config ajeno mayor de lo soportado
 
+    // El ts viaja tal como lo fijó el origen y es INMUTABLE: es la
+    // identidad (origin, ts, seq) que el backend deduplica. Si viene a 0
+    // (origen sin hora) se conserva el 0; el batch lo publica como null.
+    uint32_t ts = 0;
+    memcpy(&ts, f.payload, sizeof(ts));
     float values[Outbox::kMaxValues];
-    memcpy(values, f.payload, f.payload_length);
+    memcpy(values, f.payload + 4, f.payload_length - 4);
 
     // Reintento de custodia (ACK anterior perdido): se reemplaza la
     // entrada en vez de duplicarla.
     const bool dup = outbox.remove(f.origin_id, f.seq);
-    outbox.push(f.origin_id, f.seq, values, n, millis());
+    outbox.push(f.origin_id, f.seq, values, n, millis(), ts, /*ts_fixed=*/true);
     if (!dup) g_custody_rx++;
 
     nextSeq();
@@ -384,13 +498,25 @@ void handleUplinkRelay(const LoraP2P::RxFrame& f) {
     }
 }
 
-// Beacon del árbol: alimenta la tabla de vecinos y al padre (spec §7).
+// Beacon del árbol: alimenta la tabla de vecinos, al padre (spec §7) y,
+// desde v2.1, el reloj del sistema (epoch del gateway, spec §7.2).
 void handleBeacon(const LoraP2P::RxFrame& f) {
-    if (f.payload_length != 3) return;
+    if (f.payload_length != 7) return;
     const uint8_t hop_count  = f.payload[0];
     const uint8_t adv_parent = f.payload[1];
+    uint32_t epoch = 0;
+    memcpy(&epoch, &f.payload[3], sizeof(epoch));
     const bool had_parent = mesh.hasParent();
     const uint8_t old_parent = mesh.parentId();
+
+    // Resincronización continua: cualquier beacon con hora vale (los
+    // relays no reescriben el epoch; el error por jitter es < 1 s).
+    const bool first_sync = !nodeclock::synced() && epoch != 0;
+    nodeclock::sync(epoch);  // ignora epoch == 0
+    if (first_sync) {
+        Serial.printf("[clock]  hora por beacon: epoch=%lu\n",
+                      static_cast<unsigned long>(epoch));
+    }
 
     // Traza de todo beacon audible: es el mapa de vecinos en crudo.
     Serial.printf("[mesh]   beacon de id=%u hop=%u padre=%u rssi=%d ttl=%u\n",
@@ -398,7 +524,7 @@ void handleBeacon(const LoraP2P::RxFrame& f) {
                   static_cast<int>(f.rssi), f.ttl);
 
     mesh.onBeacon(f.hop_src, hop_count, adv_parent, f.rssi, f.seq, f.ttl,
-                  millis());
+                  epoch, millis());
 
     if (!had_parent && mesh.hasParent()) {
         Serial.printf("[mesh]   padre adoptado id=%u hop_propio=%u (rssi=%d)\n",
@@ -406,6 +532,79 @@ void handleBeacon(const LoraP2P::RxFrame& f) {
     } else if (had_parent && mesh.hasParent() && mesh.parentId() != old_parent) {
         Serial.printf("[mesh]   cambio de padre %u a %u hop_propio=%u\n",
                       old_parent, mesh.parentId(), mesh.ownHop());
+    }
+}
+
+// WELCOME entrante (v2.1, spec §13.3): respuesta del gateway al registro.
+// Propio: sincroniza el reloj y desbloquea la telemetría. Ajeno: baja por
+// la ruta inversa igual que un ACK.
+void handleWelcome(const LoraP2P::RxFrame& f) {
+    if (f.payload_length != 5) return;
+
+    if (f.dest_id == g_cfg.node_id) {
+        uint32_t epoch = 0;
+        memcpy(&epoch, f.payload, sizeof(epoch));
+        const uint8_t status = f.payload[4];
+
+        nodeclock::sync(epoch);  // ignora epoch == 0 (gateway sin hora)
+
+        if (status == protocol::kAckOk) {
+            if (!g_registered) {
+                Serial.printf("[reg]    WELCOME: registrado en el gateway, epoch=%lu%s\n",
+                              static_cast<unsigned long>(epoch),
+                              epoch == 0 ? " (gateway sin hora)" : "");
+            }
+            g_registered     = true;
+            g_reg_backoff_ms = kRegBackoffMinMs;
+        } else {
+            // SCHEMA_MISMATCH / DECODE_ERROR: se registra y se reintenta
+            // con backoff largo (no tiene arreglo sin intervención).
+            Serial.printf("[reg]    WELCOME status=0x%02X, reintento en %lu ms\n",
+                          status, static_cast<unsigned long>(kRegBackoffMaxMs));
+            g_reg_frag_next = 0;
+            g_reg_next_ms   = millis() + kRegBackoffMaxMs;
+        }
+        return;
+    }
+
+    // WELCOME para otro nodo: ruta inversa, como el ACK (spec §2.4).
+    if (!g_cfg.relay_enabled || f.ttl == 0) return;
+    uint8_t via = 0;
+    if (!mesh.routeFor(f.dest_id, via)) return;
+    if (lora.forwardFrame(f, via) == LoraP2P::Status::OK) {
+        g_relay_down++;
+        Serial.printf("[relay]  welcome dest=%u via=%u  down=%lu\n",
+                      f.dest_id, via, static_cast<unsigned long>(g_relay_down));
+    }
+}
+
+// Emisión del registro (v2.1, spec §13.1-13.2). Llamado a 1 Hz: envía un
+// fragmento del catálogo por pasada (los catálogos reales caben en uno);
+// completada la ronda, espera el WELCOME con backoff exponencial y, si no
+// llega, la repite desde el fragmento 0.
+void registrationTick(uint32_t now) {
+    if (g_registered || !g_lora_ready || !mesh.hasParent()) return;
+    if (g_reg_catalog_len == 0) return;  // catálogo no construible (log en setup)
+    if (static_cast<int32_t>(now - g_reg_next_ms) < 0) return;
+
+    const size_t off = static_cast<size_t>(g_reg_frag_next) * kRegFragMax;
+    const size_t len = min(kRegFragMax, g_reg_catalog_len - off);
+    const auto st = lora.sendNodeRegister(mesh.parentId(), g_reg_frag_next,
+                                          g_reg_frag_total,
+                                          &g_reg_catalog[off],
+                                          static_cast<uint8_t>(len));
+    Serial.printf("[reg]    register frag %u/%u via=%u (%u B, %s)\n",
+                  g_reg_frag_next + 1, g_reg_frag_total, mesh.parentId(),
+                  static_cast<unsigned>(len), LoraP2P::statusToString(st));
+
+    g_reg_frag_next++;
+    if (g_reg_frag_next < g_reg_frag_total) {
+        g_reg_next_ms = now + 1000;  // siguiente fragmento en la próxima pasada
+    } else {
+        g_reg_frag_next = 0;
+        g_reg_next_ms   = now + g_reg_backoff_ms +
+                          (esp_random() % 500);  // jitter anti-sincronía
+        g_reg_backoff_ms = min(g_reg_backoff_ms * 2, kRegBackoffMaxMs);
     }
 }
 
@@ -458,7 +657,11 @@ void processLoraRx() {
                 break;
             case protocol::kFrameTelemetry:
             case protocol::kFrameHeartbeat:
+            case protocol::kFrameNodeRegister:  // uplink ajeno: relay normal
                 handleUplinkRelay(f);
+                break;
+            case protocol::kFrameWelcome:
+                handleWelcome(f);
                 break;
             case protocol::kFrameBeacon:
                 handleBeacon(f);
@@ -479,9 +682,11 @@ void processLoraRx() {
 // (si no estaba ya, caso del drenaje) para salir por otra vía.
 void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
     g_lora_lost++;
-    // El push reemplaza la posible entrada previa del mismo seq.
+    // El push reemplaza la posible entrada previa del mismo seq. El ts ya
+    // viajó en la trama (fijado): se conserva tal cual, inmutable.
     outbox.remove(g_cfg.node_id, e.seq);
-    outbox.push(g_cfg.node_id, e.seq, e.values, e.n_values, e.capture_ms);
+    outbox.push(g_cfg.node_id, e.seq, e.values, e.n_values, e.capture_ms,
+                e.ts, /*ts_fixed=*/true);
     g_outbox_inflight = false;
     Serial.printf("[outbox] seq=%u retenida (%s)  outbox=%u lost=%lu\n",
                   e.seq, motivo,
@@ -510,7 +715,8 @@ void processAckTimeouts() {
     // Entrega en custodia a un supernodo (dest != gateway).
     if (e->dest != protocol::kAddrGateway) {
         if (e->retries < g_cfg.max_retries) {
-            lora.sendTelemetryCustody(e->seq, e->values, e->n_values, e->dest);
+            lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->n_values,
+                                      e->dest);
             pending.markRetry(*e, now);
             e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
             g_lora_retx++;
@@ -539,9 +745,9 @@ void processAckTimeouts() {
 
     if (e->retries < g_cfg.max_retries) {
         // El reintento sale hacia el padre actual, que puede haber
-        // cambiado desde el envío original.
-        const auto st = lora.sendTelemetry(e->seq, e->values, e->n_values,
-                                           mesh.parentId());
+        // cambiado desde el envío original. Mismo seq y MISMO ts.
+        const auto st = lora.sendTelemetry(e->seq, e->ts, e->values,
+                                           e->n_values, mesh.parentId());
         pending.markRetry(*e, now);
         e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
         g_lora_retx++;
@@ -609,10 +815,11 @@ void snClientTick(uint32_t now) {
             if (outbox.count() > 0 && !g_outbox_inflight) {
                 Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
-                lora.sendTelemetryCustody(e->seq, e->values, e->n_values,
+                const uint32_t ts = fixOutboxTs(*e);  // primera serialización
+                lora.sendTelemetryCustody(e->seq, ts, e->values, e->n_values,
                                           g_sn_target);
                 pending.push(e->seq, e->values, e->n_values, now,
-                             g_sn_target, e->capture_ms);
+                             g_sn_target, e->capture_ms, ts);
                 g_outbox_inflight = true;
                 Serial.printf("[sn]     entregando seq=%u a sn=%u  outbox=%u\n",
                               e->seq, g_sn_target,
@@ -626,14 +833,16 @@ void snClientTick(uint32_t now) {
 // en vuelo a la vez, para no saturar el aire).
 void outboxDrainTick(uint32_t now) {
     if (g_cfg.super_node) return;  // el supernodo vacía su outbox por MQTT
+    if (!g_registered) return;     // sin WELCOME no hay telemetría LoRa (§13.1)
     if (!mesh.hasParent() || outbox.count() == 0 || g_outbox_inflight) return;
 
     Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
     if (e == nullptr) return;
 
-    lora.sendTelemetry(e->seq, e->values, e->n_values, mesh.parentId());
+    const uint32_t ts = fixOutboxTs(*e);
+    lora.sendTelemetry(e->seq, ts, e->values, e->n_values, mesh.parentId());
     pending.push(e->seq, e->values, e->n_values, now,
-                 protocol::kAddrGateway, e->capture_ms);
+                 protocol::kAddrGateway, e->capture_ms, ts);
     g_outbox_inflight = true;
     Serial.printf("[outbox] drenando seq=%u via padre=%u  outbox=%u\n",
                   e->seq, mesh.parentId(),
@@ -655,7 +864,7 @@ void offerTick(uint32_t now) {
                   static_cast<unsigned>(space > 255 ? 255 : space));
 }
 
-// Construcción y publicación del batch NB-IoT (batch-format.md).
+// Construcción y publicación del batch NB-IoT (batch-format.md v2.1).
 void batchTick(uint32_t now) {
     if (!g_cfg.super_node || !nbsvc.ready() || outbox.count() == 0) return;
 
@@ -663,11 +872,22 @@ void batchTick(uint32_t now) {
     // antigua por si están llegando más en ráfaga.
     if ((now - outbox.oldestCaptureMs()) < kBatchCoalesceMs) return;
 
+    // Último recurso de hora (batch-format.md §6): a punto de publicar
+    // sin reloj, se pide UN intento de NTP por el módem (ya despierto y
+    // registrado) y se le da una pasada para resolverse. Si falla, el
+    // cooldown del servicio evita reintentos en bucle y el batch sale
+    // sin hora, identificado por boot_id.
+    if (!nodeclock::synced()) {
+        nbsvc.requestNtpSync();
+        if (nbsvc.ntpPending()) return;
+    }
+
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "2.0";
+    doc["schema_version"] = "2.1";
     doc["node_id"]        = g_cfg.node_id;
     doc["batch_id"]       = ++g_batch_id;
-    doc["clock_synced"]   = nbsvc.clockSynced();
+    doc["boot_id"]        = nodeclock::bootId();
+    doc["clock_synced"]   = nodeclock::synced();
     doc["fw_version"]     = kFirmwareVersion;
 
     JsonArray samples = doc["samples"].to<JsonArray>();
@@ -683,8 +903,11 @@ void batchTick(uint32_t now) {
         JsonObject s = samples.add<JsonObject>();
         s["origin"] = e->origin;
         s["seq"]    = e->seq;
-        if (nbsvc.clockSynced()) {
-            s["ts"] = nbsvc.epochFromMillis(e->capture_ms);
+        // ts de captura, con la misma regla de inmutabilidad que la trama
+        // LoRa (esta serialización también lo fija). 0 = sin hora -> null.
+        const uint32_t ts = fixOutboxTs(*e);
+        if (ts != 0) {
+            s["ts"] = ts;
         } else {
             s["ts"] = nullptr;
         }
@@ -748,7 +971,22 @@ void setup() {
         }
     }
 
+    // ----- Reloj del sistema y boot_id (v2.1) -----
+    nodeclock::begin();
+
+    // ----- Catálogo del registro (v2.1, frame-format.md §13.2) -----
+    g_reg_catalog_len = buildCatalog(g_reg_catalog, sizeof(g_reg_catalog));
+    if (g_reg_catalog_len > 0) {
+        g_reg_frag_total = static_cast<uint8_t>(
+            (g_reg_catalog_len + kRegFragMax - 1) / kRegFragMax);
+    } else {
+        Serial.println(F("[reg]    ERROR: catalogo no construible, nodo sin registro"));
+    }
+
     printBanner();
+    Serial.printf("  Reg   : catalogo=%u B en %u fragmento(s)  boot_id=%08lX\n",
+                  static_cast<unsigned>(g_reg_catalog_len), g_reg_frag_total,
+                  static_cast<unsigned long>(nodeclock::bootId()));
     setLed(0x202000);
 
     // ----- Modbus sobre SoftwareSerial, parámetros del config -----
@@ -857,6 +1095,7 @@ void loop() {
             if (had_parent && !mesh.hasParent()) {
                 Serial.println(F("[mesh]   padre perdido por silencio de beacons"));
             }
+            registrationTick(tnow);
             snClientTick(tnow);
             outboxDrainTick(tnow);
             batchTick(tnow);
@@ -867,10 +1106,11 @@ void loop() {
         // podría ser adoptado y desquiciar las distancias del árbol).
         uint16_t echo_seq;
         uint8_t  echo_ttl;
-        if (mesh.echoDue(now, echo_seq, echo_ttl)) {
+        uint32_t echo_epoch;
+        if (mesh.echoDue(now, echo_seq, echo_ttl, echo_epoch)) {
             if (mesh.hasParent() &&
                 lora.sendBeaconEcho(echo_seq, mesh.ownHop(), mesh.parentId(),
-                                    echo_ttl) == LoraP2P::Status::OK) {
+                                    echo_ttl, echo_epoch) == LoraP2P::Status::OK) {
                 g_echoes++;
                 Serial.printf("[mesh]   eco beacon seq=%u hop_propio=%u ttl=%u ecos=%lu\n",
                               echo_seq, mesh.ownHop(), echo_ttl,

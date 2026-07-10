@@ -63,6 +63,7 @@ void Mesh::onBeacon(uint8_t from_id,
                     int16_t rssi,
                     uint16_t beacon_seq,
                     uint8_t ttl,
+                    uint32_t epoch,
                     uint32_t now_ms) {
     Neighbor* n = find(from_id);
     if (n == nullptr) n = allocNeighbor();
@@ -83,6 +84,7 @@ void Mesh::onBeacon(uint8_t from_id,
         echo_pending_ = true;
         echo_seq_     = beacon_seq;
         echo_ttl_     = ttl - 1;
+        echo_epoch_   = epoch;   // se re-emite intacto (spec §7.2)
         echo_due_ms_  = now_ms + random(kEchoJitterMinMs, kEchoJitterMaxMs + 1);
     }
 }
@@ -184,7 +186,8 @@ void Mesh::onDeliveryFail() {
 
 // ----- Eco de beacon -----
 
-bool Mesh::echoDue(uint32_t now_ms, uint16_t& seq_out, uint8_t& ttl_out) {
+bool Mesh::echoDue(uint32_t now_ms, uint16_t& seq_out, uint8_t& ttl_out,
+                   uint32_t& epoch_out) {
     if (!echo_pending_ || (now_ms - echo_due_ms_) >= 0x80000000UL) {
         return false;  // nada pendiente o aún no vence (aritmética modular)
     }
@@ -193,6 +196,7 @@ bool Mesh::echoDue(uint32_t now_ms, uint16_t& seq_out, uint8_t& ttl_out) {
     last_echo_seq_    = echo_seq_;
     seq_out           = echo_seq_;
     ttl_out           = echo_ttl_;
+    epoch_out         = echo_epoch_;
     return true;
 }
 

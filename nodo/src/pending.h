@@ -27,6 +27,9 @@ public:
         uint16_t seq     = 0;
         uint32_t sent_ms = 0;   // millis() del último envío (se actualiza al reintentar)
         uint32_t capture_ms = 0;  // millis() de la captura de la muestra
+        uint32_t ts      = 0;   // epoch de captura tal como viajó en la trama
+                                // (v2.1, INMUTABLE: los reintentos y la outbox
+                                // lo reutilizan tal cual; 0 = sin hora)
         uint32_t timeout_ms = 0;  // vencimiento del intento actual; 0 = usar el base de firstExpired (backoff mac.md §4.4)
         uint8_t  retries = 0;   // reintentos ya consumidos
         uint8_t  dest    = 0xFF;  // destino final: 0xFF gateway, otro = supernodo (custodia)
@@ -39,10 +42,12 @@ public:
     // reporta devolviendo false.
     //   dest        0xFF para la ruta normal al gateway; el id de un
     //               supernodo cuando la trama viaja en custodia (§8).
-    //   capture_ms  millis() de la captura de la muestra (para el ts del
-    //               batch si acaba en la outbox).
+    //   capture_ms  millis() de la captura de la muestra.
+    //   ts          epoch de captura tal como se serializó en la trama
+    //               (0 = sin hora). Viaja con la entrada hacia la outbox.
     bool push(uint16_t seq, const float* values, uint8_t n_values,
-              uint32_t now_ms, uint8_t dest, uint32_t capture_ms);
+              uint32_t now_ms, uint8_t dest, uint32_t capture_ms,
+              uint32_t ts);
 
     // Procesa un ACK entrante. Devuelve true si el seq estaba en cola
     // (la entrada se libera) y deja en dest_out el destino que llevaba.

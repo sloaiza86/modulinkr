@@ -9,9 +9,13 @@
 //   - Supernodo: además de las propias, muestras ajenas aceptadas en
 //     custodia. Se vacía publicando batches NB-IoT (batch-format.md).
 //
-// Cada entrada conserva el seq original de su trama LoRa y el millis()
-// de captura o recepción (el epoch se calcula al construir el batch,
-// cuando ya se conoce el offset del reloj de red).
+// Cada entrada conserva el seq original de su trama LoRa, el millis() de
+// captura o recepción y el ts de captura (v2.1, frame-format.md §3.1).
+// El ts es INMUTABLE una vez fijado (ts_fixed): se fija en la primera
+// serialización (trama LoRa o batch) y no se recalcula nunca, para que la
+// identidad (origin, ts, seq) sea idéntica por todos los caminos de
+// entrega. Una muestra que aún no viajó (ts_fixed=false) puede recibir su
+// ts retroactivamente si el reloj sincroniza (batch-format.md §6).
 
 #pragma once
 
@@ -27,14 +31,20 @@ public:
         uint8_t  origin     = 0;   // node.id que capturó la muestra
         uint16_t seq        = 0;   // seq original de la trama LoRa
         uint32_t capture_ms = 0;   // millis() de captura o recepción
+        uint32_t ts         = 0;   // epoch de captura; 0 = sin hora
+        bool     ts_fixed   = false;  // true: el ts ya viajó y es inmutable
         uint8_t  n_values   = 0;
         float    values[kMaxValues] = {};
     };
 
     // Añade una muestra. Con la bandeja llena descarta la más antigua
     // (FIFO con sobrescritura) y devuelve false.
+    //   ts / ts_fixed  ts de captura según la regla de inmutabilidad de
+    //                  arriba (para custodia: el ts de la trama recibida,
+    //                  siempre fijado).
     bool push(uint8_t origin, uint16_t seq, const float* values,
-              uint8_t n_values, uint32_t capture_ms);
+              uint8_t n_values, uint32_t capture_ms,
+              uint32_t ts, bool ts_fixed);
 
     // Elimina la entrada de un origen+seq (confirmada por otra vía).
     bool remove(uint8_t origin, uint16_t seq);

@@ -47,6 +47,8 @@ enum class ByteOrder : uint8_t { NONE, ABCD, BADC, CDAB, DCBA };
 
 struct ReadDef {
     char      id[9]     = {0};
+    char      name[33]  = {0};    // etiqueta humana; se anuncia en el registro (v2.1)
+    char      unit[9]   = {0};    // unidad; se anuncia en el registro (v2.1)
     uint8_t   function  = 0;      // código Modbus (0x03 o 0x04)
     uint16_t  address   = 0;
     uint8_t   count     = 1;
@@ -59,7 +61,10 @@ struct ReadDef {
 struct WriteDef {
     // Catálogo declarativo (§5.4): se valida y se retiene, pero nada lo
     // invoca todavía (los comandos MQTT que lo disparan no existen aún).
+    // Desde v2.1 el id/name/unit sí se anuncian al gateway en el registro.
     char      id[9]     = {0};
+    char      name[33]  = {0};
+    char      unit[9]   = {0};
     uint8_t   function  = 0;
     uint16_t  address   = 0;
     uint8_t   count     = 1;

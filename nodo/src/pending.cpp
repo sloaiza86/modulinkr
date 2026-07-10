@@ -3,7 +3,8 @@
 #include "pending.h"
 
 bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
-                        uint32_t now_ms, uint8_t dest, uint32_t capture_ms) {
+                        uint32_t now_ms, uint8_t dest, uint32_t capture_ms,
+                        uint32_t ts) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     // Busca un hueco libre.
@@ -14,6 +15,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
             e.seq        = seq;
             e.sent_ms    = now_ms;
             e.capture_ms = capture_ms;
+            e.ts         = ts;
             e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
             e.retries    = 0;
             e.dest       = dest;
@@ -31,6 +33,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
     e.seq        = seq;
     e.sent_ms    = now_ms;
     e.capture_ms = capture_ms;
+    e.ts         = ts;
     e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
     e.retries    = 0;
     e.dest       = dest;

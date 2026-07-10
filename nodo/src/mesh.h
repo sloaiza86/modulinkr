@@ -37,12 +37,17 @@ public:
     // y, si procede, programa la re-emisión (una por seq, con jitter).
     //   advertised_parent: el parent_id que anuncia el emisor (0x00 en el
     //   gateway). Alimenta la regla anti-bucle de la selección de padre.
+    //   epoch: hora del gateway que trae el beacon (v2.1); se retiene para
+    //   re-emitirla INTACTA en el eco (frame-format.md §7.2). La
+    //   sincronización del reloj propio la hace el llamante (main), no
+    //   este módulo.
     void onBeacon(uint8_t from_id,
                   uint8_t hop_count,
                   uint8_t advertised_parent,
                   int16_t rssi,
                   uint16_t beacon_seq,
                   uint8_t ttl,
+                  uint32_t epoch,
                   uint32_t now_ms);
 
     // Caducidades de vecinos y rutas. Llamar periódicamente (~1 s).
@@ -60,8 +65,10 @@ public:
     void onDeliveryFail();
 
     // Re-emisión de beacon pendiente. Devuelve true una sola vez cuando
-    // vence el jitter; entrega el seq del beacon y el ttl ya decrementado.
-    bool echoDue(uint32_t now_ms, uint16_t& seq_out, uint8_t& ttl_out);
+    // vence el jitter; entrega el seq del beacon, el ttl ya decrementado
+    // y el epoch original del gateway (inmutable en el eco).
+    bool echoDue(uint32_t now_ms, uint16_t& seq_out, uint8_t& ttl_out,
+                 uint32_t& epoch_out);
 
     // Ruta inversa: aprendida del uplink relayado, consultada al bajar ACKs.
     void learnRoute(uint8_t origin, uint8_t via, uint32_t now_ms);
@@ -110,6 +117,7 @@ private:
     bool     echo_pending_    = false;
     uint16_t echo_seq_        = 0;
     uint8_t  echo_ttl_        = 0;
+    uint32_t echo_epoch_      = 0;   // epoch del beacon original (v2.1)
     uint32_t echo_due_ms_     = 0;
     bool     last_echo_valid_ = false;
     uint16_t last_echo_seq_   = 0;

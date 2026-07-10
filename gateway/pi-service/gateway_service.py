@@ -11,14 +11,23 @@ según el enlace de frame-format.md §12:
 Responsabilidades (antes repartidas con el Heltec, ahora todas aquí):
 
   1. Validar cada trama (CRC, schema, tamaños) con protocol.parse_frame.
-  2. Para TELEMETRY/HEARTBEAT dirigidas al gateway: aceptar el dato en el
-     buffer local (custodia) y responder ACK con status OK. El ACK OK
-     significa "el Pi tiene el dato", no solo "el radio lo oyó". Esta es la
-     señal que gobierna el respaldo NB-IoT: si este servicio cae, deja de
-     emitir ACK (y beacon) y los nodos escalan a NB-IoT.
-  3. Emitir el BEACON raíz del árbol de rutas cada BEACON_PERIOD_S.
-  4. Llevar el contador de seq descendente del gateway (compartido por ACK
-     y BEACON).
+  2. Para TELEMETRY dirigida al gateway: aceptar el dato en el buffer local
+     (custodia) y responder ACK con status OK. El ACK OK significa "el Pi
+     tiene el dato", no solo "el radio lo oyó". Esta es la señal que
+     gobierna el respaldo NB-IoT: si este servicio cae, deja de emitir ACK
+     (y beacon) y los nodos escalan a NB-IoT. HEARTBEAT se confirma sin
+     pasar por el buffer (señaliza "vivo", no es dato).
+  3. Emitir el BEACON raíz del árbol de rutas cada BEACON_PERIOD_S, con la
+     hora del gateway en el campo epoch (v2.1). El Pi toma la hora de su
+     reloj de sistema, que systemd-timesyncd/chrony mantienen por NTP; si
+     el reloj no parece sincronizado (año < 2025), emite epoch=0 y los
+     nodos lo ignoran.
+  4. Llevar el contador de seq descendente del gateway (compartido por ACK,
+     BEACON y WELCOME).
+  5. Procesar el registro de nodos (v2.1, frame-format.md §13): reensamblar
+     los fragmentos del NODE_REGISTER, decodificar el catálogo, guardarlo
+     en la BBDD (tabla node_catalog) y responder WELCOME con la hora y el
+     estado. El registro es idempotente: se responde WELCOME siempre.
 
 Config por variables de entorno (con valores por defecto), sin tocar
 código:
@@ -52,6 +61,14 @@ from buffer import GatewayBuffer
 
 
 LOG = logging.getLogger("modulinkr.gateway")
+
+# Umbral de plausibilidad del reloj de sistema: por debajo de esto (1-ene-2025)
+# se asume que el Pi arrancó sin NTP y se emite epoch=0 (los nodos lo ignoran).
+MIN_VALID_EPOCH = 1735689600
+
+# Un registro fragmentado que no completa en este plazo se descarta (el nodo
+# reintentará la ronda completa de fragmentos, frame-format.md §13.2).
+REG_REASSEMBLY_TIMEOUT_S = 15.0
 
 # Formato de la línea de recepción que emite el Heltec.
 RX_RE = re.compile(
@@ -89,8 +106,14 @@ class GatewayService:
         self.ack_window_s = float(os.environ.get("MODULINKR_ACK_WINDOW_S", "1.0"))
         self.recent_acks: dict[tuple[int, int], float] = {}
 
+        # Reensamblado de NODE_REGISTER fragmentados (v2.1). Por origin:
+        # {"total": N, "frags": {idx: bytes}, "t_start": monotonic}.
+        self.reg_partial: dict[int, dict] = {}
+
         # Contadores de diagnóstico y de tráfico (para el análisis MAC).
         self.n_rx        = 0   # líneas [rx] parseadas
+        self.n_reg       = 0   # NODE_REGISTER completos procesados
+        self.n_welcome   = 0   # WELCOME emitidos
         self.n_ack       = 0   # ACKs emitidos
         self.n_acksup    = 0   # ACKs suprimidos por ventana (multi-camino)
         self.n_dup       = 0   # (origin, seq) ya en buffer
@@ -110,12 +133,32 @@ class GatewayService:
         self.gw_seq = (self.gw_seq + 1) & 0xFFFF
         return self.gw_seq
 
+    def _gw_epoch(self) -> int:
+        """Hora del gateway para beacon y WELCOME. 0 si el reloj de sistema
+        no parece sincronizado por NTP (frame-format.md §7.2 y §13.3)."""
+        now = int(time.time())
+        return now if now >= MIN_VALID_EPOCH else 0
+
     def send_beacon(self) -> None:
         seq = self._next_gw_seq()
-        frame = protocol.build_beacon(seq, self.net_id, self.max_ttl)
+        epoch = self._gw_epoch()
+        frame = protocol.build_beacon(seq, self.net_id, self.max_ttl, epoch)
         self._tx(frame)
         self.n_beacon += 1
-        LOG.info("beacon seq=%d ttl=%d (total=%d)", seq, self.max_ttl, self.n_beacon)
+        LOG.info("beacon seq=%d ttl=%d epoch=%d (total=%d)",
+                 seq, self.max_ttl, epoch, self.n_beacon)
+
+    def send_welcome(self, dest_id: int, hop_dst: int, status: int) -> None:
+        seq = self._next_gw_seq()
+        epoch = self._gw_epoch()
+        frame = protocol.build_welcome(
+            dest_id, hop_dst, epoch, status, seq, self.net_id, self.max_ttl)
+        self._tx(frame)
+        self.n_welcome += 1
+        LOG.info("welcome dest=%s status=%s epoch=%d via_hop=%s gw_seq=%d",
+                 protocol.addr_name(dest_id),
+                 protocol.ACK_STATUS_NAMES.get(status, hex(status)),
+                 epoch, protocol.addr_name(hop_dst), seq)
 
     def send_ack(self, origin_id: int, hop_dst: int, ack_seq: int,
                  status: int) -> None:
@@ -172,8 +215,18 @@ class GatewayService:
                       protocol.addr_name(parsed["origin_id"]), parsed["seq"])
             return
 
-        # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         ft = parsed["frame_type"]
+
+        # Registro de nodos (v2.1, frame-format.md §13): no pasa por el
+        # buffer de datos ni por la contabilidad de ACK; se responde WELCOME.
+        if ft == protocol.FRAME_NODE_REGISTER:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self._handle_register(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
+        # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
             LOG.debug("rx no confirmable type=%s origin=%s seq=%d",
@@ -186,21 +239,30 @@ class GatewayService:
                       protocol.addr_name(parsed["dest_id"]))
             return
 
-        # Aceptar en buffer (custodia) y confirmar. Nuevo o duplicado, se
-        # confirma igual: un duplicado significa que el nodo perdió el ACK.
-        is_new = self.buf.accept(parsed, rssi, snr)
-        if not is_new:
-            self.n_dup += 1
-            LOG.info("dup origin=%s seq=%d (dups=%d)",
-                     protocol.addr_name(parsed["origin_id"]),
-                     parsed["seq"], self.n_dup)
+        if ft == protocol.FRAME_TELEMETRY:
+            # Aceptar en buffer (custodia) y confirmar. Nuevo o duplicado, se
+            # confirma igual: un duplicado significa que el nodo perdió el ACK.
+            # La identidad es (origin, ts, seq), ver buffer.py.
+            is_new = self.buf.accept(parsed, rssi, snr)
+            if not is_new:
+                self.n_dup += 1
+                LOG.info("dup origin=%s ts=%d seq=%d (dups=%d)",
+                         protocol.addr_name(parsed["origin_id"]),
+                         parsed.get("ts", 0), parsed["seq"], self.n_dup)
 
-        reads = parsed.get("reads")
-        if reads is not None:
-            reads_fmt = "  ".join(f"read[{i}]={v:.3f}" for i, v in enumerate(reads))
-            LOG.info("rx origin=%s seq=%d rssi=%.1f snr=%.1f  %s%s",
+            reads = parsed.get("reads")
+            if reads is not None:
+                reads_fmt = "  ".join(f"read[{i}]={v:.3f}" for i, v in enumerate(reads))
+                LOG.info("rx origin=%s seq=%d ts=%d rssi=%.1f snr=%.1f  %s%s",
+                         protocol.addr_name(parsed["origin_id"]), parsed["seq"],
+                         parsed.get("ts", 0), rssi, snr, reads_fmt,
+                         "" if is_new else "  [dup]")
+        else:
+            # HEARTBEAT: señaliza "vivo", no es dato. Se confirma sin
+            # pasar por el buffer (no tiene ts y no viaja al cloud).
+            LOG.info("heartbeat origin=%s seq=%d rssi=%.1f snr=%.1f",
                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
-                     rssi, snr, reads_fmt, "" if is_new else "  [dup]")
+                     rssi, snr)
 
         # Supresión de ACK duplicado por ventana (mac.md §4.2). El dato ya
         # está en buffer arriba; aquí solo se decide si reconfirmar. Si esta
@@ -222,6 +284,58 @@ class GatewayService:
         self.send_ack(parsed["origin_id"], parsed["hop_src"],
                       parsed["seq"], protocol.ACK_OK)
 
+    # ----- Registro de nodos (v2.1, frame-format.md §13) -----
+
+    def _handle_register(self, parsed: dict) -> None:
+        """Procesa un fragmento de NODE_REGISTER. Con el catálogo completo:
+        decodifica, guarda en node_catalog y responde WELCOME. Idempotente:
+        un re-registro (reinicio del nodo, WELCOME perdido) actualiza el
+        catálogo y se responde igual."""
+        origin  = parsed["origin_id"]
+        hop_src = parsed["hop_src"]
+        idx     = parsed["frag_idx"]
+        total   = parsed["frag_total"]
+        now     = time.monotonic()
+
+        # Purga de reensamblados vencidos (el nodo reintentará la ronda).
+        self.reg_partial = {
+            o: p for o, p in self.reg_partial.items()
+            if (now - p["t_start"]) < REG_REASSEMBLY_TIMEOUT_S
+        }
+
+        part = self.reg_partial.get(origin)
+        if part is None or part["total"] != total:
+            part = {"total": total, "frags": {}, "t_start": now}
+            self.reg_partial[origin] = part
+        part["frags"][idx] = bytes(parsed["catalog_frag"])
+
+        if len(part["frags"]) < total:
+            LOG.info("register frag %d/%d origin=%s (esperando resto)",
+                     idx + 1, total, protocol.addr_name(origin))
+            return
+
+        del self.reg_partial[origin]
+        blob = b"".join(part["frags"][i] for i in range(total))
+        catalog = protocol.parse_catalog(blob)
+
+        if "error" in catalog:
+            self.n_reg += 1
+            LOG.warning("register origin=%s catalogo malformado: %s",
+                        protocol.addr_name(origin), catalog["error"])
+            self.send_welcome(origin, hop_src, protocol.ACK_DECODE_ERROR)
+            return
+
+        self.buf.catalog_upsert(origin, catalog)
+        self.n_reg += 1
+        reads_fmt = ", ".join(
+            f"{r['id']}[{r['unit']}]" if r['unit'] else r['id']
+            for r in catalog["reads"])
+        writes_fmt = ", ".join(w['id'] for w in catalog["writes"]) or "-"
+        LOG.info("register origin=%s fw=%s name=%r reads=[%s] writes=[%s]",
+                 protocol.addr_name(origin), catalog["fw_version"],
+                 catalog["node_name"], reads_fmt, writes_fmt)
+        self.send_welcome(origin, hop_src, protocol.ACK_OK)
+
     # ----- Reporte de estadísticas de tráfico (para el análisis MAC) -----
 
     def report_stats(self) -> None:
@@ -233,9 +347,10 @@ class GatewayService:
             if (now - t) < self.ack_window_s
         }
         LOG.info(
-            "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d overheard=%d "
-            "notconf=%d drop=%d buffer=%d",
+            "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
+            "overheard=%d notconf=%d drop=%d buffer=%d",
             self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
+            self.n_reg, self.n_welcome,
             self.n_overheard, self.n_notconf, self.n_drop,
             self.buf.count() if self.buf is not None else -1,
         )

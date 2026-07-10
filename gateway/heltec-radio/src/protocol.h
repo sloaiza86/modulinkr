@@ -1,4 +1,4 @@
-// ModuLinkr, constantes del protocolo LoRa schema v2.0 (copia gateway)
+// ModuLinkr, constantes del protocolo LoRa schema v2.1 (copia gateway)
 //
 // Fuente normativa: shared/protocol/frame-format.md. Duplicado consciente
 // de nodo/src/protocol.h porque heltec-radio es un proyecto PlatformIO
@@ -12,7 +12,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x20;  // v2.0
+constexpr uint8_t kSchemaVersion = 0x21;  // v2.1
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).

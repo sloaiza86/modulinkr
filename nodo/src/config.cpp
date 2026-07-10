@@ -70,13 +70,21 @@ bool parseByteOrder(const char* s, ByteOrder& out) {
 // Parsea una entrada de reads[] o writes[] (comparten campos).
 // is_read gobierna qué funciones son válidas (§7 regla 10).
 bool parseEntry(JsonObjectConst j, bool is_read,
-                char* id, uint8_t& function, uint16_t& address,
+                char* id, char* name, char* unit,
+                uint8_t& function, uint16_t& address,
                 uint8_t& count, ValType& type, ByteOrder& order,
                 float& scale, float& offset,
                 char* err, size_t err_len) {
     if (!copyStr(id, 9, j["id"] | (const char*)nullptr, 8)) {
         return fail(err, err_len, "read/write sin id valido (2-8 chars)");
     }
+    // name obligatorio (§5.3/§5.4), unit opcional. Se retienen porque se
+    // anuncian al gateway en el registro del nodo (frame-format.md §13.2).
+    if (!copyStr(name, 33, j["name"] | (const char*)nullptr, 32)) {
+        return failf(err, err_len, "name ausente o invalido en '%s'", id);
+    }
+    unit[0] = '\0';
+    copyStr(unit, 9, j["unit"] | "", 8);
     const char* fn = j["function"] | "";
     function = is_read ? readFunctionCode(fn) : writeFunctionCode(fn);
     if (function == 0) {
@@ -163,9 +171,11 @@ bool load(Config& c, char* err, size_t err_len) {
     }
 
     // ----- schema_version (regla 1) -----
+    // 2.1 es la actual; 2.0 se acepta porque la estructura del JSON no
+    // cambió entre ambas (node-config.md §1, nota v2.1).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "2.0") != 0) {
-        return failf(err, err_len, "schema_version '%s' no soportado (se espera 2.0)", schema);
+    if (strcmp(schema, "2.1") != 0 && strcmp(schema, "2.0") != 0) {
+        return failf(err, err_len, "schema_version '%s' no soportado (se espera 2.x)", schema);
     }
 
     // ----- node (reglas 2 y 3) -----
@@ -361,7 +371,8 @@ bool load(Config& c, char* err, size_t err_len) {
         d.n_reads = 0;
         for (JsonObjectConst jr : reads) {
             ReadDef& r = d.reads[d.n_reads];
-            if (!parseEntry(jr, /*is_read=*/true, r.id, r.function, r.address,
+            if (!parseEntry(jr, /*is_read=*/true, r.id, r.name, r.unit,
+                            r.function, r.address,
                             r.count, r.type, r.order, r.scale, r.offset,
                             err, err_len)) {
                 return false;
@@ -389,7 +400,8 @@ bool load(Config& c, char* err, size_t err_len) {
             }
             for (JsonObjectConst jw : writes) {
                 WriteDef& w = d.writes[d.n_writes];
-                if (!parseEntry(jw, /*is_read=*/false, w.id, w.function, w.address,
+                if (!parseEntry(jw, /*is_read=*/false, w.id, w.name, w.unit,
+                                w.function, w.address,
                                 w.count, w.type, w.order, w.scale, w.offset,
                                 err, err_len)) {
                     return false;

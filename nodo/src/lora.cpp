@@ -151,6 +151,7 @@ void LoraP2P::queryVersion() {
 }
 
 LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
+                                       uint32_t ts,
                                        const float* values,
                                        uint8_t n_values,
                                        uint8_t hop_dst) {
@@ -159,11 +160,12 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
         return Status::INVALID_ARGS;
     }
 
-    // Payload: cada float32 en little-endian (ESP32 ya es LE nativo,
-    // basta con un memcpy).
-    uint8_t payload[4u * kMaxValues];
+    // Payload v2.1: ts de captura (uint32 LE) + cada float32 en
+    // little-endian (ESP32 ya es LE nativo, basta con un memcpy).
+    uint8_t payload[4u + 4u * kMaxValues];
+    std::memcpy(&payload[0], &ts, sizeof(ts));
     for (uint8_t i = 0; i < n_values; ++i) {
-        std::memcpy(&payload[4u * i], &values[i], sizeof(float));
+        std::memcpy(&payload[4u + 4u * i], &values[i], sizeof(float));
     }
 
     return buildAndSend(hop_dst,
@@ -173,7 +175,7 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                         protocol::kFrameTelemetry,
                         ttl_,
                         payload,
-                        static_cast<uint8_t>(4u * n_values));
+                        static_cast<uint8_t>(4u + 4u * n_values));
 }
 
 LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
@@ -195,12 +197,15 @@ LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
 LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                                         uint8_t own_hop,
                                         uint8_t own_parent,
-                                        uint8_t ttl) {
+                                        uint8_t ttl,
+                                        uint32_t epoch) {
     if (!initialized_) return Status::NOT_INITIALIZED;
 
-    // Payload BEACON (spec §7.2): hop_count y padre del emisor de este
-    // salto (el padre habilita la regla anti-bucle) + flags reservado.
-    const uint8_t payload[3] = {own_hop, own_parent, 0x00};
+    // Payload BEACON v2.1 (spec §7.2): hop_count y padre del emisor de
+    // este salto (el padre habilita la regla anti-bucle), flags reservado
+    // y el epoch ORIGINAL del gateway (no se reescribe en el eco).
+    uint8_t payload[7] = {own_hop, own_parent, 0x00, 0, 0, 0, 0};
+    std::memcpy(&payload[3], &epoch, sizeof(epoch));
     return buildAndSend(protocol::kAddrBroadcast,
                         protocol::kAddrGateway,   // origin: siempre el gateway
                         protocol::kAddrBroadcast,
@@ -211,7 +216,31 @@ LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                         sizeof(payload));
 }
 
+LoraP2P::Status LoraP2P::sendNodeRegister(uint8_t hop_dst, uint8_t frag_idx,
+                                          uint8_t frag_total,
+                                          const uint8_t* frag,
+                                          uint8_t frag_len) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (frag == nullptr || frag_len == 0 || frag_total == 0 ||
+        frag_idx >= frag_total ||
+        static_cast<size_t>(frag_len) + 2 > protocol::kMaxPayload) {
+        return Status::INVALID_ARGS;
+    }
+
+    // Payload NODE_REGISTER (spec §13.2): frag_idx + frag_total + catálogo.
+    uint8_t payload[protocol::kMaxPayload];
+    payload[0] = frag_idx;
+    payload[1] = frag_total;
+    std::memcpy(&payload[2], frag, frag_len);
+
+    // seq = 0 fijo: el registro queda fuera de la deduplicación de datos.
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway,
+                        /*seq=*/0, protocol::kFrameNodeRegister, ttl_,
+                        payload, static_cast<uint8_t>(frag_len + 2));
+}
+
 LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
+                                              uint32_t ts,
                                               const float* values,
                                               uint8_t n_values,
                                               uint8_t sn_id) {
@@ -220,15 +249,16 @@ LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
         return Status::INVALID_ARGS;
     }
 
-    uint8_t payload[4u * kMaxValues];
+    uint8_t payload[4u + 4u * kMaxValues];
+    std::memcpy(&payload[0], &ts, sizeof(ts));
     for (uint8_t i = 0; i < n_values; ++i) {
-        std::memcpy(&payload[4u * i], &values[i], sizeof(float));
+        std::memcpy(&payload[4u + 4u * i], &values[i], sizeof(float));
     }
 
     // Entrega directa al supernodo: dest_id = hop_dst = sn (spec §8.3).
     return buildAndSend(sn_id, node_id_, sn_id, seq,
                         protocol::kFrameTelemetry, 1,
-                        payload, static_cast<uint8_t>(4u * n_values));
+                        payload, static_cast<uint8_t>(4u + 4u * n_values));
 }
 
 LoraP2P::Status LoraP2P::sendSnRequest(uint16_t seq, uint8_t queued) {

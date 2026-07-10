@@ -421,6 +421,27 @@ uint32_t Nbiot::readClock() {
     return (sign == '-') ? epoch_local + tz_s : epoch_local - tz_s;
 }
 
+uint32_t Nbiot::ntpSync(const char* server) {
+    if (uart_ == nullptr) return 0;
+
+    // Consulta NTP por la sesión de datos (POR VALIDAR contra el manual
+    // AT del SIM7028; si no soporta CSNTPSTART, sendAT falla y salimos).
+    char cmd[80];
+    snprintf(cmd, sizeof(cmd), "AT+CSNTPSTART=\"%s\"", server);
+    if (!sendAT(cmd, "OK", 5000)) {
+        return 0;
+    }
+
+    // El módulo emite una URC (+CSNTP) al completar la sincronización;
+    // espera acotada y silenciosa (si no llega, readClock decide).
+    readResponse(10000, "+CSNTP");
+    sendAT("AT+CSNTPSTOP", "OK", 3000);
+
+    // Si el NTP tuvo éxito, dejó el RTC del módulo en hora real y CCLK
+    // ya no devuelve la época GSM.
+    return readClock();
+}
+
 const char* Nbiot::ceregToString(CeregStatus s) {
     switch (s) {
         case CeregStatus::NOT_REGISTERED:      return "not_registered";

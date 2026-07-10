@@ -95,15 +95,19 @@ public:
     // de contención del medio para el análisis MAC.
     uint32_t busyEvents() const { return busy_events_; }
 
-    // Construye una trama TELEMETRY v2.0 y la emite hacia el padre.
+    // Construye una trama TELEMETRY v2.1 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
+    //   ts        Epoch de captura (uint32, 0 = sin hora). Va al inicio
+    //             del payload (frame-format.md §3.1). El llamante debe
+    //             pasar EL MISMO ts en los reintentos (inmutabilidad).
     //   values    Array de float32 en el orden de reads[] del config.
     //   n_values  Cuántos valores.
     //   hop_dst   Primer salto: el padre elegido por la capa mesh
     //             (0xFF cuando el padre es el propio gateway).
     // El destino final (dest_id) es siempre el gateway.
-    Status sendTelemetry(uint16_t seq, const float* values, uint8_t n_values,
+    Status sendTelemetry(uint16_t seq, uint32_t ts,
+                         const float* values, uint8_t n_values,
                          uint8_t hop_dst);
 
     // Reenvía una trama ajena (relay, spec §2.3 y §2.4): reescribe
@@ -113,16 +117,25 @@ public:
     Status forwardFrame(const RxFrame& f, uint8_t new_hop_dst);
 
     // Re-emite un beacon del gateway (spec §7.3): mismo seq y origen
-    // gateway, hop_src propio, hop_count y padre propios en el payload
-    // y ttl ya decrementado por el llamante.
+    // gateway, hop_src propio, hop_count y padre propios en el payload,
+    // ttl ya decrementado por el llamante y el epoch ORIGINAL del gateway
+    // (v2.1, §7.2: el re-emisor no lo reescribe).
     Status sendBeaconEcho(uint16_t beacon_seq, uint8_t own_hop,
-                          uint8_t own_parent, uint8_t ttl);
+                          uint8_t own_parent, uint8_t ttl, uint32_t epoch);
+
+    // Registro del nodo (v2.1, spec §13.2): un fragmento del catálogo
+    // hacia el gateway vía el padre. seq fijo a 0 (fuera de la dedup de
+    // datos); el WELCOME hace de confirmación.
+    Status sendNodeRegister(uint8_t hop_dst, uint8_t frag_idx,
+                            uint8_t frag_total,
+                            const uint8_t* frag, uint8_t frag_len);
 
     // ----- Fallback NB-IoT (frame-format.md §8) -----
 
-    // Telemetría en custodia: mismo formato que sendTelemetry pero con
-    // destino final el supernodo elegido (unicast directo, sin relay).
-    Status sendTelemetryCustody(uint16_t seq, const float* values,
+    // Telemetría en custodia: mismo formato que sendTelemetry (ts incluido)
+    // pero con destino final el supernodo elegido (unicast, sin relay).
+    Status sendTelemetryCustody(uint16_t seq, uint32_t ts,
+                                const float* values,
                                 uint8_t n_values, uint8_t sn_id);
 
     // Búsqueda de supernodo: broadcast a vecinos directos (ttl=1).
@@ -155,8 +168,8 @@ public:
     static const char* statusToString(Status s);
 
     // Tope blando de valores por trama (4 B cada uno), limitado por el
-    // payload PHY de SF7: (242 - 13) / 4 = 57.
-    static constexpr uint8_t kMaxValues = 57;
+    // payload PHY de SF7 tras el ts de v2.1: (242 - 13 - 4) / 4 = 56.
+    static constexpr uint8_t kMaxValues = 56;
 
 private:
     RAK3172P2P module_;

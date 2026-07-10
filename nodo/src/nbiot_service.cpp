@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cstdlib>
 
+#include "nodeclock.h"
+
 namespace {
 constexpr const char* kTag = "[nbsvc]";
 }
@@ -77,11 +79,10 @@ bool NbiotService::step() {
                 Serial.printf("%s APN rechazado\n", kTag);
                 // No fatal: algunos operadores registran igual.
             }
-            // Actualización automática de hora de red (NITZ): sin esto el
-            // AT+CCLK? del SIM7028 se queda en la época GSM y los batches
-            // salen con clock_synced=false. Si el firmware del módulo no
-            // lo soporta, falla en silencio y se sigue igual.
-            modem_.sendAT("AT+CTZU=1");
+            // v2.1: la hora de red NITZ (AT+CTZU / CCLK) sale del diseño;
+            // nunca la entregó el operador en banco. La hora viene del
+            // gateway (nodeclock) y, como último recurso, del NTP bajo
+            // demanda en READY (frame-format.md §13.4).
             register_start_ms_ = millis();
             state_ = State::REGISTERING;
             return true;
@@ -94,7 +95,7 @@ bool NbiotService::step() {
                 creg == Nbiot::CeregStatus::REGISTERED_ROAMING) {
                 Serial.printf("%s registrado en red (%s)\n", kTag,
                               Nbiot::ceregToString(creg));
-                state_ = State::CLOCK_SYNC;
+                state_ = State::MQTT_START;
                 return true;
             }
             if ((millis() - register_start_ms_) > kRegisterLimitMs) {
@@ -102,22 +103,6 @@ bool NbiotService::step() {
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(kRegisterPollMs));
-            return true;
-        }
-
-        case State::CLOCK_SYNC: {
-            const uint32_t epoch = modem_.readClock();
-            if (epoch != 0) {
-                epoch_offset_ = epoch - millis() / 1000u;
-                clock_synced_ = true;
-                Serial.printf("%s reloj de red: epoch=%lu\n", kTag,
-                              static_cast<unsigned long>(epoch));
-            } else {
-                // Sin hora válida no se bloquea el servicio: los batches
-                // saldrán con clock_synced=false hasta la próxima pasada.
-                Serial.printf("%s sin hora de red todavía\n", kTag);
-            }
-            state_ = State::MQTT_START;
             return true;
         }
 
@@ -172,17 +157,29 @@ bool NbiotService::step() {
                 if (!ok) return false;  // reevalúa la sesión desde el principio
             }
 
-            // Refresco periódico de CSQ y de reloj si aún no hay hora.
+            // Intento NTP encolado (último recurso de hora, se pide desde
+            // batchTick cuando va a publicar sin reloj). Bloquea esta
+            // tarea unos segundos; el mesh LoRa (núcleo 1) no se entera.
+            if (ntp_pending_ && !nodeclock::synced()) {
+                const uint32_t epoch = modem_.ntpSync();
+                ntp_last_try_ms_ = millis();
+                if (epoch != 0) {
+                    nodeclock::sync(epoch);
+                    Serial.printf("%s hora por NTP: epoch=%lu\n", kTag,
+                                  static_cast<unsigned long>(epoch));
+                } else {
+                    Serial.printf("%s NTP sin exito (%s)\n", kTag,
+                                  modem_.lastResponse().c_str());
+                }
+                ntp_pending_ = false;
+            } else if (ntp_pending_) {
+                ntp_pending_ = false;  // alguien más sincronizó entre medias
+            }
+
+            // Refresco periódico de CSQ.
             if ((millis() - last_csq_ms_) >= kCsqRefreshMs) {
                 last_csq_ms_ = millis();
                 csq_dbm_ = modem_.getCSQ();
-                if (!clock_synced_) {
-                    const uint32_t epoch = modem_.readClock();
-                    if (epoch != 0) {
-                        epoch_offset_ = epoch - millis() / 1000u;
-                        clock_synced_ = true;
-                    }
-                }
             }
             return true;
         }
@@ -203,9 +200,11 @@ uint8_t NbiotService::csqRaw() const {
     return static_cast<uint8_t>(raw);
 }
 
-uint32_t NbiotService::epochFromMillis(uint32_t ms) const {
-    if (!clock_synced_) return 0;
-    return epoch_offset_ + ms / 1000u;
+void NbiotService::requestNtpSync() {
+    if (ntp_pending_) return;
+    const uint32_t last = ntp_last_try_ms_;
+    if (last != 0 && (millis() - last) < kNtpCooldownMs) return;
+    ntp_pending_ = true;
 }
 
 bool NbiotService::publish(const char* json) {
@@ -226,7 +225,6 @@ const char* NbiotService::stateName(State s) {
         case State::SIM_CHECK:    return "sim_check";
         case State::APN_CONFIG:   return "apn_config";
         case State::REGISTERING:  return "registering";
-        case State::CLOCK_SYNC:   return "clock_sync";
         case State::MQTT_START:   return "mqtt_start";
         case State::MQTT_CONNECT: return "mqtt_connect";
         case State::READY:        return "ready";

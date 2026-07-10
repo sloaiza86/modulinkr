@@ -1,8 +1,12 @@
-// ModuLinkr, constantes del protocolo LoRa schema v2.0
+// ModuLinkr, constantes del protocolo LoRa schema v2.1
 //
 // Fuente normativa: shared/protocol/frame-format.md. Este archivo solo
 // materializa en C++ los valores de la spec; cualquier cambio se hace
 // primero en el documento y después aquí.
+//
+// v2.1 (10-jul-2026): TELEMETRY lleva ts de captura (uint32 LE al inicio
+// del payload), BEACON lleva epoch del gateway, y aparecen NODE_REGISTER
+// (0x04) y WELCOME (0x05) del proceso de registro (spec §13).
 
 #pragma once
 
@@ -11,7 +15,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x20;  // v2.0
+constexpr uint8_t kSchemaVersion = 0x21;  // v2.1
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -19,13 +23,15 @@ constexpr uint8_t kAddrBroadcast = 0x00;
 constexpr uint8_t kAddrGateway   = 0xFF;
 
 // Tipos de trama (frame-format.md §1.6).
-constexpr uint8_t kFrameTelemetry = 0x00;
-constexpr uint8_t kFrameAck       = 0x01;
-constexpr uint8_t kFrameHeartbeat = 0x02;
-constexpr uint8_t kFrameAlarm     = 0x03;
-constexpr uint8_t kFrameBeacon    = 0x10;
-constexpr uint8_t kFrameSnRequest = 0x11;
-constexpr uint8_t kFrameSnOffer   = 0x12;
+constexpr uint8_t kFrameTelemetry    = 0x00;
+constexpr uint8_t kFrameAck          = 0x01;
+constexpr uint8_t kFrameHeartbeat    = 0x02;
+constexpr uint8_t kFrameAlarm        = 0x03;
+constexpr uint8_t kFrameNodeRegister = 0x04;  // registro del nodo (v2.1, §13)
+constexpr uint8_t kFrameWelcome      = 0x05;  // respuesta al registro (v2.1, §13)
+constexpr uint8_t kFrameBeacon       = 0x10;
+constexpr uint8_t kFrameSnRequest    = 0x11;
+constexpr uint8_t kFrameSnOffer      = 0x12;
 
 // Status de ACK (frame-format.md §4.2).
 constexpr uint8_t kAckOk             = 0x00;

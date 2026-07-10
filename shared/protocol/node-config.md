@@ -13,8 +13,10 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "2.0"
+"schema_version": "2.1"
 ```
+
+> **Nota v2.1 (10-jul-2026)**: el bump acompaña al de la trama LoRa (`frame-format.md` §1.2, byte `0x21`), con la que este string se corresponde uno a uno. La estructura del JSON **no cambia** en 2.1; lo nuevo es comportamiento: registro del nodo en la red (NODE_REGISTER / WELCOME), `ts` de captura en TELEMETRY y `boot_id` en el batch. Los ejemplos de este documento conservan `"2.0"` donde son históricos.
 
 Reglas de compatibilidad:
 
@@ -313,6 +315,8 @@ Cada entrada describe **una lectura periódica** que se ejecuta cada `poll_inter
 
 La conversión de `raw` a unidad real se hace **en el nodo** (decisión de edge computing). La trama LoRa lleva el valor ya convertido como `float32`.
 
+> **Anuncio al gateway (v2.1, 10-jul-2026)**: al registrarse en la red (trama NODE_REGISTER, `frame-format.md` §13), el nodo anuncia de cada read su `id`, `name` y `unit`, en el orden estricto de serialización. Los campos Modbus (`function`, `address`, `type`, `scale`, `offset`, ...) no se anuncian: son internos del nodo.
+
 ### 5.4 Array `writes[]`
 
 Cada entrada describe una **acción de escritura disponible**, invocable únicamente desde fuera (mediante comando externo; ver `commands-format.md`). El JSON solo declara qué acciones existen y cómo materializarlas, no contiene el valor a escribir ni el momento de hacerlo.
@@ -355,6 +359,8 @@ Cada entrada describe una **acción de escritura disponible**, invocable únicam
 | `scale` | float | no, default `1.0` | Si presente, el valor del comando se divide por `scale` (conversión inversa) antes de mandarlo al dispositivo. |
 | `offset` | float | no, default `0.0` | Conversión inversa: `raw = (value - offset) / scale`. |
 | `unit` | string | no | Decorativo. |
+
+> **Anuncio al gateway (v2.1, 10-jul-2026)**: el nodo anuncia de cada write su `id`, `name` y `unit` en el registro (NODE_REGISTER, `frame-format.md` §13), para que el backend sepa qué acciones existen antes de emitir comandos (`commands-format.md`). El resto de campos son internos del nodo.
 
 ### 5.5 Tabla de funciones Modbus admitidas
 

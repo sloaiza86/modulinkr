@@ -14,13 +14,25 @@ cloud como única fuente de verdad, `Red V4.md` §"Actualización del
      vuelve (el drenado a cloud es otra pieza, aún no implementada).
 
 Política:
-  - Clave primaria (origin_id, seq): deduplicación e idempotencia
-    automáticas. Un INSERT de un (origin, seq) ya presente se ignora.
+  - Clave primaria (origin_id, ts, seq) desde v2.1: deduplicación e
+    idempotencia automáticas con la identidad nueva del dato
+    (frame-format.md §2.6). El ts de captura desambigua arranques del
+    nodo: un seq reiniciado ya no colisiona con corridas anteriores
+    (desaparece el paliativo de vaciar la BBDD tras reflashear).
+    ts = 0 significa "capturada sin hora"; en ese caso la dedup
+    degrada a (origin, 0, seq), suficiente porque un nodo con gateway
+    a la vista se registra y sincroniza antes de emitir telemetría.
   - Cota máxima de entradas (FIFO): al superarse, se borran las más
     antiguas por t_recv. Es un buffer de tolerancia, no un archivo; si
     Internet lleva mucho caído, los supernodos con NB-IoT ya están
     subiendo por su cuenta, y para nodos sin celular se asume la pérdida
     de los más antiguos como trade-off de un buffer acotado.
+  - Tabla node_catalog (v2.1): catálogo anunciado por cada nodo en su
+    NODE_REGISTER (fw, nombre, reads y writes con id/name/unit). Upsert
+    por origin_id; pendiente de publicar al backend cloud.
+
+Migración: si la BBDD contiene la tabla v2.0 (PK sin ts), se renombra a
+buffer_v20_legacy y se crea la nueva. No se borra nada.
 """
 
 from __future__ import annotations
@@ -36,9 +48,11 @@ class GatewayBuffer:
         self.max_entries = max_entries
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._migrate_v20_if_needed()
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS buffer (
                 origin_id      INTEGER NOT NULL,
+                ts             INTEGER NOT NULL,
                 seq            INTEGER NOT NULL,
                 t_recv         REAL    NOT NULL,
                 schema_version INTEGER,
@@ -50,16 +64,37 @@ class GatewayBuffer:
                 hop_src        INTEGER,
                 ttl            INTEGER,
                 published      INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (origin_id, seq)
+                PRIMARY KEY (origin_id, ts, seq)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_catalog (
+                origin_id    INTEGER PRIMARY KEY,
+                fw_version   TEXT,
+                node_name    TEXT,
+                catalog_json TEXT NOT NULL,
+                t_updated    REAL NOT NULL,
+                published    INTEGER NOT NULL DEFAULT 0
             )
         """)
         self.conn.commit()
+
+    def _migrate_v20_if_needed(self) -> None:
+        """Si existe la tabla buffer v2.0 (sin columna ts), la renombra a
+        buffer_v20_legacy. Conserva los datos viejos (no se borra nada)."""
+        cur = self.conn.execute("PRAGMA table_info(buffer)")
+        cols = [row[1] for row in cur.fetchall()]
+        if cols and 'ts' not in cols:
+            self.conn.execute(
+                "ALTER TABLE buffer RENAME TO buffer_v20_legacy")
+            self.conn.commit()
 
     def accept(self, parsed: dict, rssi: float, snr: float) -> bool:
         """Inserta una trama en el buffer. Devuelve True si es nueva, False
         si ya estaba (duplicado). En ambos casos el gateway confirma con
         ACK OK: si es duplicado, el nodo reintentó porque perdió el ACK
-        anterior (frame-format.md §2.6)."""
+        anterior (frame-format.md §2.6). La identidad es (origin, ts, seq);
+        ts = 0 si la trama llegó sin hora de captura."""
         reads_json = None
         if 'reads' in parsed:
             reads_json = json.dumps(parsed['reads'])
@@ -67,11 +102,12 @@ class GatewayBuffer:
         try:
             self.conn.execute(
                 """INSERT INTO buffer
-                   (origin_id, seq, t_recv, schema_version, frame_type,
+                   (origin_id, ts, seq, t_recv, schema_version, frame_type,
                     payload, reads_json, rssi, snr, hop_src, ttl, published)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (
                     parsed['origin_id'],
+                    parsed.get('ts', 0),
                     parsed['seq'],
                     time.time(),
                     parsed['schema_version'],
@@ -88,8 +124,42 @@ class GatewayBuffer:
             self._enforce_cap()
             return True
         except sqlite3.IntegrityError:
-            # (origin_id, seq) ya presente: duplicado. No se reinserta.
+            # (origin_id, ts, seq) ya presente: duplicado. No se reinserta.
             return False
+
+    # ----- Catálogo de nodos (v2.1, frame-format.md §13) -----
+
+    def catalog_upsert(self, origin_id: int, catalog: dict) -> None:
+        """Guarda o actualiza el catálogo anunciado por un nodo en su
+        NODE_REGISTER. published se resetea a 0: el backend debe volver a
+        recibirlo (el drenado a cloud es otra pieza, aún no implementada)."""
+        self.conn.execute(
+            """INSERT INTO node_catalog
+               (origin_id, fw_version, node_name, catalog_json, t_updated, published)
+               VALUES (?, ?, ?, ?, ?, 0)
+               ON CONFLICT(origin_id) DO UPDATE SET
+                 fw_version   = excluded.fw_version,
+                 node_name    = excluded.node_name,
+                 catalog_json = excluded.catalog_json,
+                 t_updated    = excluded.t_updated,
+                 published    = 0""",
+            (
+                origin_id,
+                catalog.get('fw_version'),
+                catalog.get('node_name'),
+                json.dumps(catalog),
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def catalog_get(self, origin_id: int) -> Optional[dict]:
+        """Catálogo conocido de un nodo, o None si nunca se registró."""
+        row = self.conn.execute(
+            "SELECT catalog_json FROM node_catalog WHERE origin_id=?",
+            (origin_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def _enforce_cap(self) -> None:
         """Mantiene el buffer por debajo de max_entries borrando las

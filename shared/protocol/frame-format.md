@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x20` (= `v2.0`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x21` (= `v2.1`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -36,6 +36,8 @@ Reglas de compatibilidad:
 - Minor distinto, trama parseable. El receptor interpreta lo que entienda y silencia campos desconocidos.
 
 **Historia**: el schema v1.0 definía una cabecera de 6 bytes sin soporte de red (sin `network_id`, sin direcciones de salto, sin TTL). La cabecera v2.0 no es parseable por un receptor v1.0, por eso el salto es de major y no de minor. El v1.0 nunca llegó a desplegarse más allá del banco de pruebas, así que no se mantiene compatibilidad hacia atrás en firmware.
+
+**v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 ### 1.3 CRC de aplicación
 
@@ -54,7 +56,7 @@ El CRC cubre **todos los bytes anteriores**, desde el byte 0 hasta el byte inmed
 Todas las tramas comparten una cabecera de **11 bytes** seguida de un payload variable y el CRC:
 
 ```
-byte 0      schema_version   (1 B)      0x20 para v2.0
+byte 0      schema_version   (1 B)      0x21 para v2.1
 byte 1      network_id       (1 B)      identificador de red
 byte 2      hop_src          (1 B)      emisor de este salto
 byte 3      hop_dst          (1 B)      receptor de este salto
@@ -70,13 +72,13 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x20` para v2.0. |
+| `schema_version` | `0x21` para v2.1. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
 | `origin_id` | Quién creó la trama. No cambia en toda la ruta. `0xFF` = gateway. |
 | `dest_id` | Destino final. Uplink normal: `0xFF` (gateway). Fallback NB-IoT: el id del supernodo elegido (§8). Downlink ACK: el nodo confirmado. `0x00` = broadcast sin destino concreto (BEACON, SN_REQUEST). |
-| `seq` | Número de secuencia del `origin_id`, estrictamente monotónico por emisor; envuelve a 0 tras 65535. Los relays **no lo tocan**. El gateway lleva un contador propio para sus tramas downlink (ACKs y beacons). |
+| `seq` | Número de secuencia del `origin_id`, estrictamente monotónico por emisor dentro de una sesión de arranque; envuelve a 0 tras 65535. Desde v2.1 es **efímero**: nace en 1 en cada boot y no se persiste; la identidad duradera del dato es `(origin, ts, seq)` (ver §2.6). Los relays **no lo tocan**. El gateway lleva un contador propio para sus tramas downlink (ACKs y beacons). |
 | `frame_type` | Indica qué hay en el payload. Tabla en §1.6. |
 | `ttl` | Saltos restantes. Cada relay lo decrementa antes de re-emitir; una trama que necesitaría relay con `ttl == 0` se descarta. Valor inicial: `mesh.max_ttl` del config. |
 | `payload_length` | Longitud en bytes del campo `payload`. Rango 0-255. Permite parsing autocontenido. |
@@ -111,6 +113,8 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x01` | ACK | downlink | Referencia a `seq` original + estado. Ver §4. |
 | `0x02` | HEARTBEAT | uplink | Sin payload. Señaliza "vivo" sin lecturas. Ver §6. |
 | `0x03` | ALARM | uplink | Evento asíncrono (sobreumbral, fallo Modbus, etc.). Spec en futuras versiones. |
+| `0x04` | NODE_REGISTER | uplink | Registro del nodo al arrancar: fw, catálogo de reads y writes. Ver §13. |
+| `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
@@ -171,7 +175,9 @@ El CRC de aplicación cubre también los campos mutables, así que valida la int
 
 ### 2.6 Deduplicación en el gateway
 
-El gateway mantiene por cada `origin_id` el último `seq` procesado. Una trama con `seq` ya visto (comparación modular, ver §5.4) **no se vuelve a procesar como dato, pero sí se vuelve a confirmar**: el gateway re-emite el ACK, porque un duplicado entrante significa casi siempre que el ACK anterior se perdió.
+> **Actualización del 10-jul-2026 (v2.1, replanteo del `seq`)**: el `seq` deja de ser identidad persistente del dato y queda como contador **efímero de enlace**: nace en 1 en cada arranque del nodo y nadie lo persiste. La identidad extremo a extremo de una muestra pasa a ser `(origin, ts, seq)`, donde `ts` es el timestamp de captura que ahora viaja en la trama TELEMETRY (§3). El `ts` hace el trabajo pesado (la misma muestra llega con el mismo `ts` por cualquier camino; muestras de arranques distintos nunca comparten `ts`) y el `seq` desempata muestras del mismo segundo.
+
+Para el re-ACK de reintentos, el gateway mantiene por cada `origin_id` una **memoria corta de seqs recientes** (ventana temporal recomendada: 10 min). Una trama con `seq` ya visto en la ventana **no se vuelve a procesar como dato, pero sí se vuelve a confirmar**: el gateway re-emite el ACK, porque un duplicado entrante significa casi siempre que el ACK anterior se perdió. La deduplicación **persistente** (buffer del gateway y consumidor cloud) usa la identidad `(origin, ts, seq)`; así, un nodo reiniciado cuyo `seq` vuelve a 1 no colisiona con muestras de corridas anteriores (desaparece el paliativo de vaciar la BBDD del Pi tras reflashear).
 
 ## 3. Trama TELEMETRY (uplink, `frame_type = 0x00`)
 
@@ -180,14 +186,16 @@ Es la trama principal: el envío periódico de telemetría desde el nodo hacia e
 ### 3.1 Estructura del payload
 
 ```
-reads[0]     reads[1]    ...   reads[N-1]
-float32 LE   float32 LE        float32 LE
-(4 B)        (4 B)             (4 B)
+ts           reads[0]     reads[1]    ...   reads[N-1]
+uint32 LE    float32 LE   float32 LE        float32 LE
+(4 B)        (4 B)        (4 B)             (4 B)
 ```
 
-Cada valor es un `float32` IEEE 754 en little-endian. El **orden estricto** corresponde al orden del array `reads[]` del [`node-config.md`](node-config.md). El primer `read` del JSON va en los bytes 11 a 14 de la trama, el segundo en 15 a 18, y así sucesivamente (el payload empieza en el byte 11, justo después de `payload_length`).
+`ts` (añadido en v2.1) es el **instante de captura** de la muestra: epoch Unix en segundos, UTC. `ts = 0` significa "capturada sin hora sincronizada" (nodo aún sin WELCOME ni beacon con epoch, ver §13); el receptor usa entonces la hora de recepción como aproximación. El `ts` se fija **al construir la trama y no cambia nunca más**: los reintentos y la entrega en custodia reutilizan los mismos bytes, y el batch NB-IoT (`batch-format.md`) arrastra este mismo valor. Esta inmutabilidad es la que hace estable la identidad `(origin, ts, seq)` de §2.6 por todos los caminos de entrega.
 
-Tamaño total: `4 × N` bytes de payload, donde `N` = número de `reads[]` activos en el config.
+Cada valor es un `float32` IEEE 754 en little-endian. El **orden estricto** corresponde al orden del array `reads[]` del [`node-config.md`](node-config.md). El primer `read` del JSON va en los bytes 15 a 18 de la trama (tras el `ts`), el segundo en 19 a 22, y así sucesivamente (el payload empieza en el byte 11, justo después de `payload_length`).
+
+Tamaño total: `4 + 4 × N` bytes de payload, donde `N` = número de `reads[]` activos en el config.
 
 ### 3.2 Frame completo TELEMETRY (ejemplo con 2 reads)
 
@@ -196,7 +204,7 @@ Para el ejemplo §6.1 del `node-config.md` (XY-MD02 con `temp` y `hum`), nodo 1 
 ```
 Byte | Hex   | Significado
 ─────|───────|──────────────────────────
-0    | 0x20  | schema_version = v2.0
+0    | 0x21  | schema_version = v2.1
 1    | 0x01  | network_id = 1
 2    | 0x01  | hop_src = 1 (emite el propio nodo)
 3    | 0x05  | hop_dst = 5 (su padre)
@@ -206,28 +214,32 @@ Byte | Hex   | Significado
 7    | 0x00  | seq high
 8    | 0x00  | frame_type = TELEMETRY
 9    | 0x04  | ttl = 4 (mesh.max_ttl)
-10   | 0x08  | payload_length = 8 bytes (2 reads × 4 B/read)
-11   | 0x00  | reads[0] = temperature
-12   | 0x00  |   float32 LE
-13   | 0xC4  |   bytes 11-14
-14   | 0x41  |   valor 24,5 °C
-15   | 0xCD  | reads[1] = humidity
-16   | 0xCC  |   float32 LE
-17   | 0x4C  |   bytes 15-18
-18   | 0x42  |   valor 51,2 %RH
-19   | 0xXX  | crc16 low
-20   | 0xXX  | crc16 high
+10   | 0x0C  | payload_length = 12 bytes (ts + 2 reads × 4 B/read)
+11   | 0x80  | ts = 1718000000
+12   | 0x99  |   uint32 LE
+13   | 0x66  |   bytes 11-14
+14   | 0x66  |   instante de captura (epoch s UTC)
+15   | 0x00  | reads[0] = temperature
+16   | 0x00  |   float32 LE
+17   | 0xC4  |   bytes 15-18
+18   | 0x41  |   valor 24,5 °C
+19   | 0xCD  | reads[1] = humidity
+20   | 0xCC  |   float32 LE
+21   | 0x4C  |   bytes 19-22
+22   | 0x42  |   valor 51,2 %RH
+23   | 0xXX  | crc16 low
+24   | 0xXX  | crc16 high
 ```
 
-Tamaño total: **21 bytes** (= 11 cabecera + 8 payload + 2 CRC).
+Tamaño total: **25 bytes** (= 11 cabecera + 12 payload + 2 CRC).
 
-Time-on-Air a SF7 BW125 CR 4/5: ≈ 57 ms por salto. Cada relay repite ese ToA, así que una ruta de 3 saltos consume ≈ 171 ms de aire agregado en la red (el duty cycle regulatorio se evalúa por emisor individual).
+Time-on-Air a SF7 BW125 CR 4/5: ≈ 62 ms por salto. Cada relay repite ese ToA, así que una ruta de 3 saltos consume ≈ 186 ms de aire agregado en la red (el duty cycle regulatorio se evalúa por emisor individual).
 
 ### 3.3 Cuántos `reads[]` caben
 
-El payload máximo de LoRa por trama depende de SF, BW y CR. Para SF7 BW125 (la combinación de referencia del proyecto) el límite práctico es ~242 bytes. Restando 13 de cabecera + CRC: **229 bytes** para payload, **57 reads como tope teórico**. Más que suficiente para cualquier nodo realista de este TFM.
+El payload máximo de LoRa por trama depende de SF, BW y CR. Para SF7 BW125 (la combinación de referencia del proyecto) el límite práctico es ~242 bytes. Restando 13 de cabecera + CRC y 4 del `ts`: **225 bytes** para valores, **56 reads como tope teórico**. Más que suficiente para cualquier nodo realista de este TFM.
 
-Para SF12 BW125 (alcance máximo, baja velocidad), el payload PHY baja a ~51 bytes: 38 de payload útil, 9 reads tope. Sigue siendo holgado para los casos típicos.
+Para SF12 BW125 (alcance máximo, baja velocidad), el payload PHY baja a ~51 bytes: 34 de payload útil tras el `ts`, 8 reads tope. Sigue siendo holgado para los casos típicos.
 
 ## 4. Trama ACK (downlink, `frame_type = 0x01`)
 
@@ -270,7 +282,7 @@ ACK del gateway para la trama `seq=42` del ejemplo §3.2, devuelto vía el nodo 
 ```
 Byte | Hex   | Significado
 ─────|───────|──────────────────────────
-0    | 0x20  | schema_version = v2.0
+0    | 0x21  | schema_version = v2.1
 1    | 0x01  | network_id = 1
 2    | 0xFF  | hop_src = gateway
 3    | 0x05  | hop_dst = 5 (vecino por el que llegó el uplink)
@@ -302,7 +314,7 @@ Cada nodo mantiene una **cola de tramas no confirmadas**. Cada entrada guarda:
 
 - `seq` de la trama.
 - Timestamp de envío y contador de reintentos.
-- Payload de los `reads[]` (los valores serializados, para poder reempaquetar en batch NB-IoT o reenviar a un supernodo si toca).
+- Payload completo (`ts` de captura + valores serializados, para poder reempaquetar en batch NB-IoT o reenviar a un supernodo si toca). El `ts` de captura viaja tal cual se fijó al construir la trama (§3.1): un reintento o una entrega en custodia nunca lo recalcula, aunque el nodo haya sincronizado su reloj entre medias.
 
 La cola tiene tamaño máximo (recomendado: 256 entradas). Si se llena, se descarta la entrada más antigua (FIFO con sobrescritura).
 
@@ -367,21 +379,22 @@ Mantiene el árbol de rutas (§2.1). La origina el gateway; los nodos con padre 
 ### 7.2 Estructura del payload
 
 ```
-hop_count   parent_id   flags
-(1 B)       (1 B)       (1 B)
+hop_count   parent_id   flags    epoch
+(1 B)       (1 B)       (1 B)    (4 B LE)
 ```
 
 | Campo | Contenido |
 | --- | --- |
 | `hop_count` | Distancia al gateway **del emisor de este salto**: 0 en el gateway, `hop_propio` en cada re-emisor. |
 | `parent_id` | Padre actual del emisor de este salto: `0x00` en el gateway (raíz, sin padre) y el id del padre en cada re-emisor. Habilita la regla anti-bucle de §2.2: un nodo nunca adopta como padre a un vecino que lo anuncia a él como padre. Sin este campo, dos nodos con enlaces marginales al gateway pueden elegirse mutuamente (bucle observado en banco, con `hop_count` inflándose en cada ciclo de beacon). |
-| `flags` | Reservado, `0x00` en v2.0. |
+| `flags` | Reservado, `0x00` en v2.1. |
+| `epoch` | Añadido en v2.1. Hora del gateway al construir el beacon: epoch Unix en segundos, UTC (el Pi la toma de su reloj de sistema, mantenido por NTP). `0` = gateway sin hora sincronizada (arranque sin Internet); los nodos ignoran un epoch a 0. Todo nodo que recibe un beacon con `epoch != 0` resincroniza su reloj: es la fuente de hora continua de la red, complementaria al WELCOME de §13. |
 
-`hop_count` y `parent_id` son los campos que un re-emisor reescribe.
+`hop_count` y `parent_id` son los campos que un re-emisor reescribe. El `epoch` **no se reescribe**: el error acumulado por los retardos de re-emisión (jitter de 100-400 ms más ToA por salto) queda por debajo de 1 s en las profundidades de árbol de este proyecto, dentro de la precisión objetivo (resolución de 1 s del `ts`).
 
 El BEACON **no se confirma** (sin ACK) y no entra en la cola de pendientes.
 
-Tamaño: **16 bytes**. ToA SF7 ≈ 51 ms por emisor. Con periodo de 30 s el coste de duty cycle es despreciable (< 0,2 % por nodo).
+Tamaño: **20 bytes**. ToA SF7 ≈ 54 ms por emisor. Con periodo de 30 s el coste de duty cycle es despreciable (< 0,2 % por nodo).
 
 ### 7.3 Reglas de re-emisión
 
@@ -394,7 +407,7 @@ Tamaño: **16 bytes**. ToA SF7 ≈ 51 ms por emisor. Con periodo de 30 s el cost
 
 Cuando un nodo **sin NB-IoT propio** se queda sin ruta al gateway (huérfano de §2.2, o failover disparado en §5.3), busca explícitamente un supernodo vecino que le sirva de salida celular. El flujo tiene tres pasos: solicitud broadcast, oferta unicast, y entrega en custodia.
 
-El alcance es de **un salto**: el supernodo debe ser vecino directo del solicitante. Encadenar relays hacia un supernodo queda fuera de v2.0 (ver §11).
+El alcance es de **un salto**: el supernodo debe ser vecino directo del solicitante. Encadenar relays hacia un supernodo queda fuera del schema actual (ver §11).
 
 ### 8.1 SN_REQUEST (broadcast local, `frame_type = 0x11`)
 
@@ -460,16 +473,18 @@ Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) 
 | Tipo | Tamaño | ToA aprox (por salto) |
 | --- | --- | --- |
 | HEARTBEAT | 13 B | ≈ 46 ms |
-| BEACON | 16 B | ≈ 51 ms |
+| BEACON | 20 B | ≈ 54 ms |
 | SN_REQUEST | 15 B | ≈ 46 ms |
 | SN_OFFER | 15 B | ≈ 46 ms |
 | ACK | 16 B | ≈ 51 ms |
-| TELEMETRY 1 read | 17 B | ≈ 51 ms |
-| TELEMETRY 2 reads | 21 B | ≈ 57 ms |
-| TELEMETRY 5 reads | 33 B | ≈ 72 ms |
-| TELEMETRY 10 reads | 53 B | ≈ 103 ms |
+| WELCOME | 18 B | ≈ 53 ms |
+| TELEMETRY 1 read | 21 B | ≈ 57 ms |
+| TELEMETRY 2 reads | 25 B | ≈ 62 ms |
+| TELEMETRY 5 reads | 37 B | ≈ 77 ms |
+| TELEMETRY 10 reads | 57 B | ≈ 108 ms |
+| NODE_REGISTER (XY-MD02, 2 reads) | ~75 B | ≈ 130 ms (una vez por boot) |
 
-El presupuesto de duty cycle por nodo suma su tráfico propio más el que relaya. Para el caso de referencia (2 reads cada 5 s, ACK de vuelta, un hijo relayado), un nodo emite ≈ 171 ms cada 5 s: 3,4 %, dentro del 10 % del g3 con margen. A cadencias de 1 s con relay conviene US915 o repartir hijos.
+El presupuesto de duty cycle por nodo suma su tráfico propio más el que relaya. Para el caso de referencia (2 reads cada 5 s, ACK de vuelta, un hijo relayado), un nodo emite ≈ 175 ms cada 5 s: 3,5 %, dentro del 10 % del g3 con margen. A cadencias de 1 s con relay conviene US915 o repartir hijos.
 
 ## 10. Reglas de validación
 
@@ -482,9 +497,9 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
 7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
-8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length` no múltiplo de 4, ACK y BEACON con `payload_length != 3`, SN_REQUEST / SN_OFFER con `payload_length != 2`, HEARTBEAT con `payload_length != 0`).
+8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST / SN_OFFER con `payload_length != 2`, HEARTBEAT con `payload_length != 0`, NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
-10. Para TELEMETRY en el gateway: el número de `reads` derivado de `payload_length / 4` no coincide con el `len(reads[])` del config del `origin_id` (ACK con `status = DECODE_ERROR`, cuando el enlace Pi a Heltec esté operativo).
+10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 4` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
 
 ## 11. Extensiones previstas
 
@@ -495,7 +510,7 @@ Cambios contemplados para versiones futuras del schema, listados aquí para que 
 - **ACKs batched**: un ACK que cubre un rango de seqs (`ack_seq_from`, `ack_seq_to`) para abaratar downlink en rutas largas. Requeriría bump de minor de schema.
 - **Fallback multi-salto**: permitir que un SN_REQUEST/entrega en custodia atraviese relays (`ttl > 1`) cuando el supernodo no es vecino directo.
 - **Alarmas** (`frame_type = 0x03`): formato del payload TBD según necesidades del despliegue.
-- **Seguridad del canal (cifrado + autenticación)**: el `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 6-jul-2026: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. Modelo previsto de dos claves inspirado en LoRaWAN: una clave de red que firma toda la trama con un MAC (integridad y autenticidad, protege también la cabecera de enrutamiento que va en claro para que los relays operen) y una clave de aplicación que cifra el payload (confidencialidad de los datos del sensor). Anti-replay ligando el `seq` al MAC. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (hoy un nodo participa solo escuchando beacons, sin presentarse). El diseño de la cabecera reserva hueco para un campo MAC y un flag de payload cifrado sin refactor mayor.
+- **Seguridad del canal (cifrado + autenticación)**: el `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 6-jul-2026: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. Modelo previsto de dos claves inspirado en LoRaWAN: una clave de red que firma toda la trama con un MAC (integridad y autenticidad, protege también la cabecera de enrutamiento que va en claro para que los relays operen) y una clave de aplicación que cifra el payload (confidencialidad de los datos del sensor). Anti-replay ligando el `seq` al MAC. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves). El diseño de la cabecera reserva hueco para un campo MAC y un flag de payload cifrado sin refactor mayor.
 
 ## 12. Enlace serial Pi a Heltec (dentro del gateway)
 
@@ -548,7 +563,85 @@ Donde `<hexstring>` es la trama LoRa completa **ya construida por el Pi** (cabec
 - Half-duplex: al recibir un `TX`, el Heltec sale del modo recepción, transmite y vuelve a recepción, con el mismo cuidado del disparo fantasma de DIO1 que ya se aplicaba a los ACK/BEACON autónomos previos.
 - El servicio del Pi debe correr bajo systemd con reinicio automático: como el Pi genera ahora el BEACON, un proceso caído derriba el árbol de rutas hasta que se reinicie.
 
-## 13. Cambios respecto a v1.0
+## 13. Registro e incorporación a la red (NODE_REGISTER / WELCOME, v2.1)
+
+Sección añadida el 10-jul-2026. Define el proceso por el que un nodo (o supernodo) se presenta a la red al arrancar, obtiene la hora, y anuncia qué mide y qué puede escribir. Resuelve tres pendientes con un solo mecanismo: la estrategia de timestamps, los duplicados tras reinicio (vía el replanteo del `seq` de §2.6) y el catálogo del gateway.
+
+### 13.1 Secuencia de arranque
+
+1. El nodo arranca, carga su `config.json` y genera un **`boot_id`**: un aleatorio de 32 bits que identifica esta sesión de arranque. No se persiste (sin NVS). El `boot_id` no viaja por LoRa; solo aparece en los batches NB-IoT (`batch-format.md` §3) para identificar muestras capturadas sin hora.
+2. Escucha beacons y adopta padre (§2.1-§2.2). Si un beacon trae `epoch != 0`, el nodo ya sincroniza reloj aquí.
+3. Envía **NODE_REGISTER** hacia el gateway (vía padre, con relays como cualquier uplink). Reintenta con el timeout de ACK normal y, agotados los reintentos, con backoff exponencial (recomendado: 5 s duplicando hasta 60 s) mientras tenga padre.
+4. El gateway procesa el registro (guarda/actualiza el catálogo del nodo, lo publica al backend) y responde **WELCOME** por la ruta inversa, con la hora y el estado del registro.
+5. Recibido el WELCOME con `status = OK`, el nodo arranca la telemetría con `seq = 1`.
+
+**Regla de bloqueo**: con padre adoptado, el nodo **no emite TELEMETRY hacia el gateway hasta recibir WELCOME**. Con gateway vivo son segundos. Sin gateway (sin beacons, nodo huérfano) la regla no aplica: el nodo captura y encola igual, y sus muestras salen por el respaldo NB-IoT (propio o en custodia, §8) identificadas por `boot_id` si aún no tiene hora. Al recuperar gateway, el registro se completa y la operación LoRa normal comienza.
+
+El registro se repite en cada boot. Re-registrarse con un catálogo ya conocido es válido e idempotente: el gateway responde WELCOME igualmente (y así el nodo re-obtiene la hora).
+
+### 13.2 NODE_REGISTER (uplink, `frame_type = 0x04`)
+
+Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay). Usa `seq = 0` fijo: el registro queda fuera de la deduplicación de datos (el gateway responde WELCOME a cualquier NODE_REGISTER; la operación es idempotente).
+
+Payload:
+
+```
+frag_idx    frag_total   catálogo (fragmento)
+(1 B)       (1 B)        (N B)
+```
+
+Con `frag_total = 1` (el caso normal) el catálogo viaja completo en una trama. Si el descriptor supera el payload disponible (§3.3), se parte en fragmentos numerados desde 0; el gateway reensambla y responde WELCOME solo al recibir el conjunto completo. Sin WELCOME, el nodo reintenta la ronda completa de fragmentos.
+
+El **catálogo** es un descriptor binario compacto derivado del `config.json` del nodo (`node-config.md`). Todos los strings van como `len (1 B) + ASCII`:
+
+```
+fw_version      string     versión del firmware
+node_name       string     node.name del config
+n_reads         (1 B)      número de reads anunciados
+por cada read (en el orden estricto de serialización de §3.1):
+  id            string     read.id    (2-8 chars)
+  name          string     read.name  (hasta 32)
+  unit          string     read.unit  (hasta 8; len=0 si no tiene)
+n_writes        (1 B)      número de writes anunciados
+por cada write:
+  id            string     write.id
+  name          string     write.name
+  unit          string     write.unit (len=0 si no tiene)
+```
+
+Los detalles Modbus (función, dirección, tipo, escala) **no viajan**: son asunto interno del nodo (edge computing, `node-config.md` §5.3). El gateway y el backend solo necesitan saber qué significa cada posición del payload TELEMETRY (reads) y qué acciones existen para comandos futuros (writes, `commands-format.md`). Si el config tiene varios dispositivos Modbus, los reads y writes se anuncian aplanados, en el mismo orden global que rige la serialización de TELEMETRY.
+
+Ejemplo de tamaño (XY-MD02, 2 reads, sin writes): fw `"0.0.12"` (7) + name `"Nodo banco 2"` (13) + 1 + reads `temp/temperature/C` (19) + `hum/humidity/%RH` (17) + 1 = ~58 B de catálogo, ~60 B de payload, **~73 B de trama**. Una sola trama incluso a SF9.
+
+### 13.3 WELCOME (downlink, `frame_type = 0x05`)
+
+Direccionamiento y transporte idénticos al ACK (§4): lo construye el Pi, `dest_id` = nodo registrado, vuelve por la ruta inversa, los relays solo lo transportan.
+
+Payload (5 bytes):
+
+```
+epoch       status
+(4 B LE)    (1 B)
+```
+
+| Campo | Contenido |
+| --- | --- |
+| `epoch` | Hora del gateway: epoch Unix en segundos, UTC. `0` = gateway sin hora sincronizada (el registro vale igualmente; el nodo tomará la hora de un beacon futuro). |
+| `status` | Reutiliza la tabla de §4.2: `OK` (registro aceptado), `SCHEMA_MISMATCH` (major del schema no soportado), `DECODE_ERROR` (catálogo malformado). Con status distinto de `OK` el nodo lo registra en log y reintenta con backoff largo. |
+
+Tamaño: **18 bytes**.
+
+### 13.4 Fuentes de hora del sistema (resumen normativo)
+
+| Prioridad | Fuente | Quién | Cuándo |
+| --- | --- | --- | --- |
+| 1 | `epoch` del WELCOME | todos | al registrarse, en cada boot |
+| 2 | `epoch` del BEACON | todos | resincronización continua cada periodo de beacon |
+| 3 | NTP sobre NB-IoT | solo supernodos | **solo si es estrictamente necesario**: a punto de publicar un batch con `clock_synced == false` (módem ya despierto y registrado). Ver `batch-format.md` §6. |
+
+El reloj local corre sobre el oscilador del nodo como `epoch_offset` respecto a `millis()`; cada fuente de las de arriba lo corrige. La hora de red LTE por `AT+CCLK?` (NITZ) queda **eliminada** del diseño: dependía de que el operador la implementara y en banco nunca la entregó.
+
+## 14. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -559,7 +652,15 @@ Resumen para trazabilidad del TFM:
 5. Reintentos por trama (`lora.max_retries`) formalizados en la reconciliación.
 6. El bump es de major (no el v1.1 previsto en la v1.0 §8) porque la cabecera nueva no es parseable por un receptor v1.0, y las reglas de §1.2 reservan el minor para cambios parseables.
 
-## 14. Documentos relacionados
+**Cambios de v2.0 a v2.1 (10-jul-2026)**:
+
+1. TELEMETRY lleva `ts` de captura (uint32 epoch, 4 B) al inicio del payload (§3.1).
+2. BEACON lleva `epoch` del gateway (4 B) al final del payload (§7.2).
+3. Tramas nuevas: NODE_REGISTER (`0x04`) y WELCOME (`0x05`), proceso de registro en §13.
+4. Replanteo del `seq`: contador efímero de enlace, nace en 1 en cada boot; la identidad persistente del dato pasa a ser `(origin, ts, seq)` (§2.6). Desaparecen la persistencia de contadores y la tabla de último seq por origen.
+5. La hora de red LTE por `AT+CCLK?` (NITZ) queda eliminada; jerarquía de fuentes de hora en §13.4.
+
+## 15. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del batch NB-IoT que reempaqueta las tramas no confirmadas, propias o en custodia.

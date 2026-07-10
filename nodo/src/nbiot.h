@@ -89,11 +89,26 @@ public:
     CeregStatus getCEREG();
     static const char* ceregToString(CeregStatus s);
 
-    // Hora de la red celular (AT+CCLK?). Devuelve epoch Unix UTC en
-    // segundos, o 0 si el módulo aún no tiene hora válida (antes del
-    // primer attach suele reportar el año 80). El SIM7028 entrega la
-    // hora local con desfase en cuartos de hora; aquí se convierte a UTC.
+    // Lectura del RTC del módulo (AT+CCLK?). Devuelve epoch Unix UTC en
+    // segundos, o 0 si el módulo no tiene hora válida (sin sincronizar
+    // reporta el año 80, la época GSM). El SIM7028 entrega la hora local
+    // con desfase en cuartos de hora; aquí se convierte a UTC.
+    //
+    // Nota v2.1 (10-jul-2026): la hora de red NITZ nunca llegó a poblar
+    // este RTC en banco, así que readClock() dejó de ser fuente de hora
+    // por sí misma. Se conserva como paso final de ntpSync(): el NTP del
+    // módulo fija el RTC y esta lectura lo recoge.
     uint32_t readClock();
+
+    // NTP sobre la sesión de datos NB-IoT (batch-format.md §6, último
+    // recurso cuando no hay hora del gateway). Devuelve epoch Unix UTC o
+    // 0 si falló. Bloqueante (hasta ~15 s); llamar solo desde la tarea
+    // del servicio NB-IoT, nunca desde el loop.
+    //
+    // POR VALIDAR EN BANCO: usa AT+CSNTPSTART/+CSNTPSTOP (familia SIMCom
+    // NB-IoT); hay que confirmarlo contra el manual AT del SIM7028. Si el
+    // módulo no soporta el comando, falla limpio y devuelve 0.
+    uint32_t ntpSync(const char* server = "pool.ntp.org");
 
     bool sendAT(const char* cmd,
                 const char* expected = "OK",
