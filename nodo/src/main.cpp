@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.20-v23-mqtts-coils";
+constexpr const char* kFirmwareVersion = "0.0.21-v23-nbiot-confirm";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -81,6 +81,11 @@ constexpr uint32_t kSnBackoffMinMs   = 5000;
 constexpr uint32_t kSnBackoffMaxMs   = 60000;
 constexpr uint32_t kBatchCoalesceMs  = 2000;  // agrupado corto antes de publicar
 constexpr size_t   kBatchMaxSamples  = 16;
+// v2.3: entrega NB-IoT confirmada (at-least-once). Un batch en vuelo a la
+// vez; sus muestras no se borran de la outbox hasta que el servicio
+// confirma el publish. Si no confirma en este plazo, se reintenta (el
+// backend deduplica por (origin, ts, seq)).
+constexpr uint32_t kBatchAckTimeoutMs = 30000;
 
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
@@ -120,6 +125,13 @@ uint32_t g_echoes     = 0;   // beacons re-emitidos
 uint32_t g_custody_rx = 0;   // muestras ajenas aceptadas en custodia (supernodo)
 uint32_t g_batches    = 0;   // batches encolados a NB-IoT
 uint32_t g_batch_id   = 0;
+
+// v2.3: batch NB-IoT en vuelo (stop-and-wait, entrega confirmada). Mientras
+// hay uno sin confirmar, sus muestras siguen en la outbox marcadas
+// in_flight y no se construye otro batch.
+bool     g_batch_inflight   = false;
+uint32_t g_inflight_batch_id = 0;
+uint32_t g_inflight_sent_ms  = 0;
 uint16_t g_lora_seq   = 0;
 
 bool g_lora_ready = false;
@@ -313,7 +325,18 @@ void fireLora() {
     // cae el padre, se sigue muestreando (las muestras van a la outbox y
     // salen por NB-IoT o custodia).
     if (!g_sampling_started) {
-        if (!g_registered) {
+        if (g_registered) {
+            g_sampling_started = true;
+            Serial.println(F("[sampler] registro completo: muestreo Modbus habilitado"));
+        } else if (g_cfg.super_node && millis() >= g_cfg.beacon_timeout_ms) {
+            // Supernodo aislado (v2.3): si tras beacon_timeout_ms del boot no
+            // hubo registro, se asume que no hay gateway y se arranca igual.
+            // Las muestras no salen por LoRa (sin WELCOME quedan en la outbox)
+            // y las publica su propio NB-IoT como failover. Si más tarde
+            // aparece el gateway y se registra, la telemetría LoRa se reanuda.
+            g_sampling_started = true;
+            Serial.println(F("[sampler] sin gateway tras timeout: muestreo autonomo (NB-IoT)"));
+        } else {
             static uint32_t last_wait_log_ms = 0;
             const uint32_t now = millis();
             if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
@@ -322,8 +345,6 @@ void fireLora() {
             }
             return;
         }
-        g_sampling_started = true;
-        Serial.println(F("[sampler] registro completo: muestreo Modbus habilitado"));
     }
 
     // Muestreo en la ventana callada: la radio lleva casi todo el ciclo
@@ -895,8 +916,43 @@ void offerTick(uint32_t now) {
 }
 
 // Construcción y publicación del batch NB-IoT (batch-format.md v2.1).
+// v2.3: entrega confirmada (at-least-once) con stop-and-wait. Un batch en
+// vuelo a la vez; sus muestras siguen en la outbox marcadas in_flight
+// hasta que el servicio confirma el publish (lastPublishedBatchId). Si no
+// confirma en kBatchAckTimeoutMs se reintenta; el backend deduplica por
+// (origin, ts, seq) si el batch anterior sí había llegado.
 void batchTick(uint32_t now) {
-    if (!g_cfg.super_node || !nbsvc.ready() || outbox.count() == 0) return;
+    if (!g_cfg.super_node) return;
+
+    // 1) Reconciliar el batch en vuelo con la confirmación del servicio.
+    if (g_batch_inflight) {
+        if (nbsvc.lastPublishedBatchId() >= g_inflight_batch_id) {
+            size_t freed = 0;
+            for (size_t i = 0; i < Outbox::capacity(); ++i) {
+                Outbox::Entry* e = outbox.at(i);
+                if (e != nullptr && e->in_flight) { outbox.drop(*e); freed++; }
+            }
+            g_batch_inflight = false;
+            Serial.printf("[batch]  id=%lu confirmado, %u muestra(s) liberada(s)  outbox=%u\n",
+                          static_cast<unsigned long>(g_inflight_batch_id),
+                          static_cast<unsigned>(freed),
+                          static_cast<unsigned>(outbox.count()));
+        } else if (now - g_inflight_sent_ms > kBatchAckTimeoutMs) {
+            // Sin confirmación a tiempo: se desmarca para rearmar un batch
+            // nuevo con las mismas muestras (el backend deduplica).
+            for (size_t i = 0; i < Outbox::capacity(); ++i) {
+                Outbox::Entry* e = outbox.at(i);
+                if (e != nullptr) e->in_flight = false;
+            }
+            g_batch_inflight = false;
+            Serial.printf("[batch]  id=%lu sin confirmacion, se reintenta\n",
+                          static_cast<unsigned long>(g_inflight_batch_id));
+        } else {
+            return;  // esperando la confirmación del batch en vuelo
+        }
+    }
+
+    if (!nbsvc.ready() || outbox.count() == 0) return;
 
     // Agrupado corto: espera kBatchCoalesceMs desde la muestra más
     // antigua por si están llegando más en ráfaga.
@@ -912,10 +968,13 @@ void batchTick(uint32_t now) {
         if (nbsvc.ntpPending()) return;
     }
 
+    // batch_id tentativo: solo se confirma (avanza g_batch_id) al encolar.
+    const uint32_t batch_id = g_batch_id + 1;
+
     JsonDocument doc;  // ArduinoJson 7
     doc["schema_version"] = "2.1";
     doc["node_id"]        = g_cfg.node_id;
-    doc["batch_id"]       = ++g_batch_id;
+    doc["batch_id"]       = batch_id;
     doc["boot_id"]        = nodeclock::bootId();
     doc["clock_synced"]   = nodeclock::synced();
     doc["fw_version"]     = kFirmwareVersion;
@@ -958,18 +1017,23 @@ void batchTick(uint32_t now) {
         return;
     }
 
-    if (nbsvc.publish(json)) {
-        for (size_t i = 0; i < n_included; ++i) outbox.drop(*included[i]);
+    if (nbsvc.publish(json, batch_id)) {
+        // v2.3: NO se borra al encolar. Se marcan en vuelo y se liberan al
+        // confirmar (arriba). Stop-and-wait: un batch a la vez.
+        for (size_t i = 0; i < n_included; ++i) included[i]->in_flight = true;
+        g_batch_id          = batch_id;
+        g_inflight_batch_id = batch_id;
+        g_inflight_sent_ms  = now;
+        g_batch_inflight    = true;
         g_batches++;
-        Serial.printf("[batch]  encolado id=%lu trigger=%s samples=%u (%u B)  outbox=%u\n",
-                      static_cast<unsigned long>(g_batch_id),
+        Serial.printf("[batch]  encolado id=%lu trigger=%s samples=%u (%u B), esperando confirmacion\n",
+                      static_cast<unsigned long>(batch_id),
                       all_own ? "failover" : "relay",
                       static_cast<unsigned>(n_included),
-                      static_cast<unsigned>(len),
-                      static_cast<unsigned>(outbox.count()));
+                      static_cast<unsigned>(len));
     } else {
-        // Cola del servicio llena: se reintenta en el siguiente tick.
-        g_batch_id--;
+        // Cola del servicio llena: se reintenta en el siguiente tick (no se
+        // marca nada; g_batch_id no avanza).
         Serial.println(F("[batch]  cola NB-IoT llena, reintento en 1 s"));
     }
 }

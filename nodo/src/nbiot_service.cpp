@@ -20,7 +20,7 @@ constexpr bool kAtVerbose = false;
 bool NbiotService::begin(const Config& cfg) {
     cfg_ = cfg;
 
-    queue_ = xQueueCreate(kQueueDepth, sizeof(char*));
+    queue_ = xQueueCreate(kQueueDepth, sizeof(PubItem));
     if (queue_ == nullptr) return false;
 
     state_ = State::UART_INIT;
@@ -140,29 +140,36 @@ bool NbiotService::step() {
 
         case State::READY: {
             // Publicaciones pendientes.
-            char* json = nullptr;
-            if (xQueueReceive(queue_, &json, pdMS_TO_TICKS(500)) == pdTRUE) {
-                bool ok = modem_.mqttPublish(cfg_.topic_batch, json, 1);
+            PubItem item{nullptr, 0};
+            if (xQueueReceive(queue_, &item, pdMS_TO_TICKS(500)) == pdTRUE) {
+                bool ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
                 if (!ok && !modem_.mqttIsConnected()) {
                     // Sesión caída: un intento de reconexión y reintento.
                     Serial.printf("%s sesión caída, reconectando...\n", kTag);
                     if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                            cfg_.mqtt_user, cfg_.mqtt_pass)) {
-                        ok = modem_.mqttPublish(cfg_.topic_batch, json, 1);
+                        ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
                     }
                 }
                 if (ok) {
                     published_ok_ = published_ok_ + 1;
-                    Serial.printf("%s batch publicado (%u bytes) ok=%lu\n",
-                                  kTag, static_cast<unsigned>(strlen(json)),
+                    // Confirmación: el loop (núcleo 1) libera del outbox las
+                    // muestras de los batches con id <= este (v2.3).
+                    last_published_batch_id_ = item.batch_id;
+                    Serial.printf("%s batch id=%lu publicado (%u bytes) ok=%lu\n",
+                                  kTag, static_cast<unsigned long>(item.batch_id),
+                                  static_cast<unsigned>(strlen(item.json)),
                                   static_cast<unsigned long>(published_ok_));
                 } else {
+                    // No se confirma: el batch sigue en el outbox y el loop
+                    // lo reintentará (el backend deduplica por origin/ts/seq).
                     published_err_ = published_err_ + 1;
-                    Serial.printf("%s batch PERDIDO err=%lu: %s\n", kTag,
+                    Serial.printf("%s batch id=%lu NO publicado err=%lu: %s\n", kTag,
+                                  static_cast<unsigned long>(item.batch_id),
                                   static_cast<unsigned long>(published_err_),
                                   modem_.lastResponse().c_str());
                 }
-                free(json);
+                free(item.json);
                 if (!ok) return false;  // reevalúa la sesión desde el principio
             }
 
@@ -216,11 +223,12 @@ void NbiotService::requestNtpSync() {
     ntp_pending_ = true;
 }
 
-bool NbiotService::publish(const char* json) {
+bool NbiotService::publish(const char* json, uint32_t batch_id) {
     if (queue_ == nullptr || json == nullptr) return false;
     char* copy = strdup(json);
     if (copy == nullptr) return false;
-    if (xQueueSend(queue_, &copy, 0) != pdTRUE) {
+    PubItem item{copy, batch_id};
+    if (xQueueSend(queue_, &item, 0) != pdTRUE) {
         free(copy);
         return false;
     }

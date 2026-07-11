@@ -28,6 +28,7 @@ bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
     }
 
     slot->in_use     = true;
+    slot->in_flight  = false;  // muestra nueva: aún no va en ningún batch
     slot->origin     = origin;
     slot->seq        = seq;
     slot->capture_ms = capture_ms;

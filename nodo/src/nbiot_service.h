@@ -90,9 +90,15 @@ public:
     // puede esperar a que se resuelva antes de publicar sin hora.
     bool ntpPending() const { return ntp_pending_; }
 
-    // Encola un batch JSON para publicar en topic_batch con QoS 1.
-    // Copia el string; devuelve false si la cola está llena.
-    bool publish(const char* json);
+    // Encola un batch JSON para publicar en topic_batch con QoS 1. Copia
+    // el string; devuelve false si la cola está llena. batch_id identifica
+    // el batch: al publicarse con éxito, lastPublishedBatchId() avanza a
+    // ese valor (v2.3, entrega confirmada / at-least-once).
+    bool publish(const char* json, uint32_t batch_id);
+
+    // batch_id del último batch publicado con éxito por MQTT (0 = ninguno).
+    // El loop lo usa para liberar del outbox solo lo confirmado.
+    uint32_t lastPublishedBatchId() const { return last_published_batch_id_; }
 
     uint32_t publishedOk() const { return published_ok_; }
     uint32_t publishedErr() const { return published_err_; }
@@ -105,6 +111,12 @@ private:
     static constexpr uint32_t kRegisterLimitMs  = 30UL * 60UL * 1000UL;
     static constexpr uint32_t kNtpCooldownMs    = 5UL * 60UL * 1000UL;
 
+    // Elemento de la cola: puntero al JSON (strdup) y su batch_id.
+    struct PubItem {
+        char*    json;
+        uint32_t batch_id;
+    };
+
     static void taskEntry(void* arg);
     void run();
     bool step();  // ejecuta un paso de la máquina; false si debe ir a backoff
@@ -113,12 +125,13 @@ private:
     Nbiot   modem_;
 
     TaskHandle_t  task_   = nullptr;
-    QueueHandle_t queue_  = nullptr;  // elementos: char* (strdup del JSON)
+    QueueHandle_t queue_  = nullptr;  // elementos: PubItem (json strdup + batch_id)
 
     volatile State    state_        = State::IDLE;
     volatile int8_t   csq_dbm_      = INT8_MIN;
     volatile uint32_t published_ok_  = 0;
     volatile uint32_t published_err_ = 0;
+    volatile uint32_t last_published_batch_id_ = 0;  // v2.3, confirmación
 
     // Intento NTP encolado (último recurso de hora). ntp_pending_ queda
     // true desde requestNtpSync() hasta que el intento termina, con éxito

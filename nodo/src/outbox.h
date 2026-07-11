@@ -28,6 +28,7 @@ public:
 
     struct Entry {
         bool     in_use     = false;
+        bool     in_flight  = false;  // v2.3: incluida en un batch NB-IoT sin confirmar
         uint8_t  origin     = 0;   // node.id que capturó la muestra
         uint16_t seq        = 0;   // seq original de la trama LoRa
         uint32_t capture_ms = 0;   // millis() de captura o recepción
