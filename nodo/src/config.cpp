@@ -340,12 +340,9 @@ bool load(Config& c, char* err, size_t err_len) {
                 }
             }
         }
-        if (nb["failover_missed_acks"].isNull() || nb["failover_window_ms"].isNull() ||
-            nb["relay_enabled"].isNull() || nb["relay_queue_max"].isNull()) {
+        if (nb["relay_enabled"].isNull() || nb["relay_queue_max"].isNull()) {
             return fail(err, err_len, "bloque nbiot incompleto (regla 14)");
         }
-        c.failover_missed_acks = nb["failover_missed_acks"].as<uint8_t>();
-        c.failover_window_ms   = nb["failover_window_ms"].as<uint32_t>();
         c.nb_relay_enabled     = nb["relay_enabled"].as<bool>();
         c.relay_queue_max      = nb["relay_queue_max"].as<uint16_t>();
     }

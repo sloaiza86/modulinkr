@@ -124,8 +124,6 @@ static const char kConfigJson[] = R"json({
       "mqtt_pass":            "practica",
       "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
-      "failover_missed_acks": 5,
-      "failover_window_ms":   30000,
       "relay_enabled":        true,
       "relay_queue_max":      128
     }

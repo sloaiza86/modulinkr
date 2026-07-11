@@ -145,8 +145,6 @@ struct Config {
     char     mqtt_user[33] = {0};     // usuario MQTT (opcional, default "")
     char     mqtt_pass[33] = {0};     // clave MQTT (opcional, default "")
     char     topic_batch[64] = {0};   // con {node_id} ya sustituido
-    uint8_t  failover_missed_acks = 5;
-    uint32_t failover_window_ms   = 30000;
     bool     nb_relay_enabled     = true;
     uint16_t relay_queue_max      = 128;
 

@@ -15,7 +15,7 @@ Cuatro escenarios disparan la publicación de un batch:
 
 | Disparador | Origen | Contenido |
 | --- | --- | --- |
-| `"failover"` | Automático. Se cumplió la condición de `nbiot.failover_missed_acks` en `nbiot.failover_window_ms` (ver `node-config.md` §4.4). | Las muestras correspondientes a las tramas LoRa **no confirmadas** que están en la cola del nodo. |
+| `"failover"` | Automático. Una o más muestras propias no lograron entregarse por LoRa (reintentos agotados o sin ruta) y cayeron al buzón de reenvío (ver `node-config.md` §4.4). | Las muestras propias **no confirmadas** acumuladas en el buzón. |
 | `"relay"` | Automático. El supernodo aceptó en custodia tramas de nodos vecinos sin ruta al gateway (flujo SN_REQUEST / SN_OFFER, `frame-format.md` §8). | Las muestras ajenas encoladas, cada una con su `origin` real. |
 | `"manual"` | Comando externo (`commands-format.md`): el operador o el backend ordena vaciar la cola por NB-IoT inmediatamente. | Todas las no confirmadas en cola, propias y en custodia. |
 | `"test"` | Comando externo en modo comisionamiento/validación. | Una muestra ficticia (o cero muestras) para probar conectividad NB-IoT extremo a extremo. |
@@ -85,7 +85,7 @@ Las muestras dentro de `samples` van agrupadas por `origin` y, dentro de cada gr
 
 No hay un máximo formal definido en la spec. En la práctica:
 
-- Tamaño típico esperado: 5 a 50 muestras (corresponde a la ventana de pérdida que dispara el failover).
+- Tamaño típico esperado: 5 a 50 muestras (las que se acumulan en el buzón durante una racha de fallos LoRa antes de vaciarlo).
 - Tope práctico: el tamaño de la cola de tramas pendientes del nodo (recomendado 256 entradas, ver `frame-format.md` §5.1).
 - Si la cola se llena por una racha larga sin LoRa, el supernodo puede fragmentar en varios batches MQTT consecutivos.
 
@@ -95,12 +95,11 @@ No hay un máximo formal definido en la spec. En la práctica:
 
 Es el caso de uso principal. Flujo:
 
-1. El supernodo lleva contabilidad de tramas LoRa enviadas vs ACKs recibidos.
-2. Cuando el contador "no confirmadas en la ventana móvil" alcanza `nbiot.failover_missed_acks`, despierta el módem celular (sale de PSM).
-3. Hace attach, abre la sesión MQTT, y publica un batch con `trigger: "failover"`.
-4. El batch incluye **todas las muestras no confirmadas en cola**, no solo las que dispararon el umbral.
-5. Una vez recibido el PUBACK, las muestras incluidas se marcan como "enviadas por NB-IoT". Permanecen en la cola por si vuelve a llegar el ACK de LoRa (idempotencia en el backend).
-6. Si en algún momento llega el ACK LoRa de una muestra ya enviada por NB-IoT, el contador local baja pero el backend ignora la trama duplicada por `seq`.
+1. Cada muestra propia que LoRa no logra entregar (reintentos agotados, o sin padre ni registro) cae al buzón de reenvío del supernodo.
+2. Con el módem listo y el buzón con muestras, tras una espera corta de agrupado el supernodo despierta el módem celular (sale de PSM), abre la sesión MQTT y publica un batch con `trigger: "failover"`.
+3. El batch incluye **todas las muestras propias acumuladas en el buzón**, hasta el tope de tamaño de batch.
+4. El envío es uno a la vez (stop-and-wait). Recibido el PUBACK, las muestras incluidas se liberan del buzón. Si el PUBACK no llega a tiempo, se rearma un batch nuevo con las mismas muestras; el backend deduplica por `(origin, ts, seq)`.
+5. La recuperación es implícita: si LoRa vuelve a entregar, las muestras nuevas se confirman por ACK y no entran al buzón, así que los envíos NB-IoT cesan cuando el buzón se vacía (ver `node-config.md` §4.4).
 
 ### 5.2 Trigger `"relay"`
 
@@ -146,7 +145,7 @@ El backend decide qué hacer con muestras `clock_synced == false`: las puede alm
 
 ## 7. Ejemplo completo
 
-Supernodo `node_id=10` (XY-MD02 con `temp` + `hum`) ha sufrido una racha de 5 tramas LoRa sin ACK en menos de 30 s. Dispara failover y envía:
+Supernodo `node_id=10` (XY-MD02 con `temp` + `hum`) ha acumulado 5 muestras propias en el buzón de reenvío tras fallar su entrega por LoRa. Publica un batch failover:
 
 ```json
 {
@@ -252,6 +251,6 @@ Estimación de consumo anual para un supernodo con failover semanal de 30 muestr
 
 ## 10. Documentos relacionados
 
-- [`node-config.md`](node-config.md): origen de las decisiones de qué muestrear y de los parámetros `failover_*`.
+- [`node-config.md`](node-config.md): origen de las decisiones de qué muestrear y de los parámetros del bloque `nbiot`.
 - [`frame-format.md`](frame-format.md): define el `seq` y la cola de tramas pendientes que alimenta este batch.
 - [`commands-format.md`](commands-format.md): comandos `manual` / `test_batch` que disparan publicaciones bajo demanda.

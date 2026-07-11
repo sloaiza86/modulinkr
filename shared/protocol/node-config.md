@@ -156,8 +156,6 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
   "tls":                  true,
   "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
   "topic_commands":       "modulinkr/v1/{node_id}/cmd",
-  "failover_missed_acks": 5,
-  "failover_window_ms":   30000,
   "relay_enabled":        true,
   "relay_queue_max":      128
 }
@@ -175,38 +173,30 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | `mqtt_pass` | string | opcional (v2.3), default `""` | Contraseña de autenticación MQTT. Solo se usa si `mqtt_user` no está vacío. |
 | `topic_telemetry` | string | template MQTT | Topic donde publica los batches. `{node_id}` se sustituye por el `node.id` decimal. |
 | `topic_commands` | string | template MQTT | Topic al que se suscribe para recibir comandos (ver `commands-format.md`). |
-| `failover_missed_acks` | integer | `≥ 1` | Cuántas tramas LoRa sin ACK (con reintentos agotados, ver `lora.max_retries`) acumular antes de activar NB-IoT para reenviarlas. Valores iniciales sugeridos: 3 a 10. |
-| `failover_window_ms` | integer | `≥ 1000` | Ventana temporal sobre la que se cuentan los ACKs perdidos. Si dentro de esa ventana se acumulan `failover_missed_acks` o más, se dispara el respaldo. |
 | `relay_enabled` | boolean | `true`, `false` | Si `true`, el supernodo responde SN_OFFER a los SN_REQUEST de vecinos sin ruta y acepta sus tramas en custodia (`frame-format.md` §8). Con `false` nunca ofrece su salida celular. |
 | `relay_queue_max` | integer | `≥ 1` | Tope de muestras ajenas en cola de custodia. Alcanzado el tope, el supernodo deja de responder SN_OFFER hasta liberar espacio. |
 
-**Nota importante**: NB-IoT está concebido como **canal de respaldo selectivo**, no de uso cotidiano. El supernodo **no acumula todas las muestras** sin filtrar: solo envía por NB-IoT las tramas LoRa que no recibieron ACK del gateway, identificadas por su `seq` (ver `frame-format.md` y `batch-format.md`). Cuando los ACKs vuelven a llegar con normalidad, el respaldo se desactiva. El envío fijo cada N minutos existe únicamente como **modo de comisionamiento/validación** durante pruebas iniciales y se dispara por comando externo (`commands-format.md`).
+**Nota importante**: NB-IoT está concebido como **canal de respaldo selectivo**, no de uso cotidiano. El supernodo **no acumula todas las muestras** sin filtrar: solo envía por NB-IoT las tramas LoRa que no recibieron ACK del gateway, identificadas por su `seq` (ver `frame-format.md` y `batch-format.md`). En cuanto LoRa vuelve a entregar, las muestras nuevas se confirman y dejan de entrar al buzón de reenvío, así que el respaldo cesa por sí solo. El envío fijo cada N minutos existe únicamente como **modo de comisionamiento/validación** durante pruebas iniciales y se dispara por comando externo (`commands-format.md`).
 
 ### 4.4 Mecanismo de respaldo selectivo (LoRa ACK + NB-IoT)
 
 Resumen del comportamiento que rige cómo los campos de §4.1, §4.2 y §4.3 interactúan en tiempo real. El respaldo con módem propio solo aplica a supernodos (`node.type == "super_node"`); un nodo sin NB-IoT cubre el mismo escenario buscando un supernodo vecino (`frame-format.md` §8).
 
-**Cómo opera en condiciones normales:**
+El mecanismo es por muestra, gobernado por un buzón local de reenvío (la outbox), no por una ventana de fallos acumulados:
 
-1. El supernodo envía tramas LoRa cada `lora.send_interval_ms` hacia su padre en el árbol de rutas. Cada trama lleva un número de secuencia `seq` (uint16, ver `frame-format.md`).
-2. El gateway recibe la trama (directa o relayada) y responde con un ACK extremo a extremo que referencia ese `seq`.
-3. El supernodo guarda en una cola local cada trama enviada hasta recibir su ACK. Si llega ACK, libera esa trama. Si pasan `lora.ack_timeout_ms` milisegundos sin ACK, retransmite hasta `lora.max_retries` veces; agotados los reintentos, la marca como "no confirmada".
+1. El supernodo envía cada muestra por LoRa hacia su padre en el árbol de rutas, con su número de secuencia `seq` (uint16, ver `frame-format.md`), y la guarda en la cola de pendientes hasta recibir el ACK del gateway.
+2. Si el ACK llega, la muestra se libera y no toca el celular. Si pasan `lora.ack_timeout_ms` sin ACK, retransmite hasta `lora.max_retries` veces.
+3. Agotados los reintentos (o si no hay padre ni registro), la muestra pasa al buzón de reenvío. En paralelo, el fallo alimenta la invalidación de padre (`mesh.parent_missed_frames`, ver `frame-format.md` §2.2).
+4. El supernodo vacía su buzón por NB-IoT: cuando el módem está listo y hay muestras en el buzón, tras una espera corta de agrupado empaqueta lo acumulado en un batch (ver `batch-format.md`) y lo publica vía MQTT en `nbiot.topic_telemetry`. El envío es uno a la vez (stop-and-wait): el batch se confirma con el PUBACK del módem, y si no se confirma a tiempo se reintenta; el backend descarta duplicados por `(origin, ts, seq)`.
 
-**Cuándo se activa NB-IoT:**
+A diferencia de un nodo normal, el supernodo no reintenta su propio buzón por LoRa: lo que LoRa dejó caer sale por celular.
 
-- Si dentro de una ventana móvil de `nbiot.failover_window_ms` milisegundos se acumulan `nbiot.failover_missed_acks` o más tramas no confirmadas, el supernodo activa el módem celular. En paralelo, las tramas no confirmadas alimentan la invalidación de padre (`mesh.parent_missed_frames`, ver `frame-format.md` §2.2).
-- Empaqueta las tramas no confirmadas en un batch (ver `batch-format.md`) y lo publica vía MQTT en `nbiot.topic_telemetry`.
-- El batch contiene **solo las muestras correspondientes a las tramas no confirmadas**, no todo lo que se haya enviado hasta el momento.
-
-**Cuándo se desactiva NB-IoT:**
-
-- Cuando vuelvan a llegar ACKs LoRa con normalidad, el contador de tramas no confirmadas se vacía y el módem celular pasa de nuevo a estado dormido (PSM).
-- Los criterios exactos de "vuelta a la normalidad" (cuántos ACKs consecutivos, qué ventana) se cierran en la implementación del firmware. Por ahora se asume: el siguiente ACK válido reduce el contador de tramas pendientes; cuando llega a cero, el modo respaldo se considera desactivado.
+**Vuelta a la normalidad (implícita):** no hay un estado de respaldo que activar o desactivar, ni umbral que ajustar. Una muestra solo viaja por NB-IoT si LoRa no pudo entregarla. En cuanto LoRa vuelve a entregar, las muestras nuevas se confirman por ACK y no entran al buzón, así que dejan de salir por celular; cuando el buzón se vacía, los envíos NB-IoT cesan solos. Es el criterio más agresivo de ahorro de datos, adecuado a la alimentación enchufada del despliegue actual (si algún supernodo pasara a batería, aquí se revisaría añadiendo histéresis).
 
 **Casos límite:**
 
-- Si `lora.ack_enabled == false`, no hay ACKs. El supernodo no puede saber qué se perdió, así que el respaldo automático **nunca se activa**. NB-IoT solo se puede disparar entonces por comando externo explícito (ver `commands-format.md`).
-- Si el supernodo se queda sin tramas pendientes (cola vacía) y aún así se le ordena enviar por NB-IoT vía comando, el batch va vacío salvo por los metadatos (útil como ping de prueba).
+- Si `lora.ack_enabled == false`, no hay ACKs. El supernodo no puede saber qué se perdió, así que nada entra al buzón por fallo de entrega y el respaldo automático **nunca se activa**. NB-IoT solo se puede disparar entonces por comando externo explícito (ver `commands-format.md`).
+- Si el supernodo tiene el buzón vacío y aún así se le ordena enviar por NB-IoT vía comando, el batch va vacío salvo por los metadatos (útil como ping de prueba).
 
 ### 4.5 Sub-bloque `security` (opcional, v2.2)
 
@@ -544,8 +534,6 @@ Notas:
       "tls":                  true,
       "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
-      "failover_missed_acks": 5,
-      "failover_window_ms":   30000,
       "relay_enabled":        true,
       "relay_queue_max":      128
     }
@@ -615,7 +603,7 @@ El firmware (y la futura herramienta CLI) deben rechazar un `config.json` que vi
 11. `type` obligatorio para registers, no admitido para coils ni discrete inputs.
 12. `count` coherente con el tamaño de `type` cuando este ocupa más de un registro.
 13. `send_interval_ms` de LoRa respeta los límites de duty cycle de su `region`.
-14. Los campos `lora.ack_enabled`, `lora.ack_timeout_ms` y `lora.max_retries` son obligatorios en todo dispositivo. Los campos `failover_*`, `relay_enabled` y `relay_queue_max` de `nbiot` son obligatorios cuando el bloque `nbiot` está presente. Si `lora.ack_enabled == false`, el firmware advierte por log que el respaldo NB-IoT solo podrá activarse por comando explícito y que la reselección de padre por fallo de entrega queda inoperativa.
+14. Los campos `lora.ack_enabled`, `lora.ack_timeout_ms` y `lora.max_retries` son obligatorios en todo dispositivo. Los campos `relay_enabled` y `relay_queue_max` de `nbiot` son obligatorios cuando el bloque `nbiot` está presente. Si `lora.ack_enabled == false`, el firmware advierte por log que el respaldo NB-IoT solo podrá activarse por comando explícito y que la reselección de padre por fallo de entrega queda inoperativa.
 15. Si `lora.security` está presente con `enabled == true`, el campo `key` es obligatorio y debe ser exactamente 32 caracteres hexadecimales (mayúsculas o minúsculas). Una `key` malformada o ausente detiene el arranque, como cualquier otra violación del schema. Con `enabled == false` o bloque ausente, `key` se ignora si aparece.
 15. El campo `byte_order` es obligatorio cuando `type ∈ {uint32, int32, float32}` y debe ser uno de `"ABCD"`, `"BADC"`, `"CDAB"`, `"DCBA"`. Su presencia con `type ∈ {uint16, int16}` o sobre coils/discrete inputs hace el JSON inválido.
 
