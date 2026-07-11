@@ -9,6 +9,12 @@
 
 namespace {
 constexpr const char* kTag = "[nbsvc]";
+
+// Log AT verboso (v2.3, depuración del handshake TLS del SIM7028). Vuelca
+// cada comando AT y su respuesta con prefijo "[at] >>" / "[at] <<". Se
+// dejó en false tras validar el MQTTS en banco (cert RSA, 11-jul-2026);
+// poner a true para volver a depurar el módem.
+constexpr bool kAtVerbose = false;
 }
 
 bool NbiotService::begin(const Config& cfg) {
@@ -59,6 +65,7 @@ bool NbiotService::step() {
                               cfg_.baudrate)) {
                 return false;
             }
+            modem_.setVerbose(kAtVerbose);  // traza AT (depuración TLS, v2.3)
             state_ = State::SIM_CHECK;
             return true;
         }
@@ -108,7 +115,7 @@ bool NbiotService::step() {
 
         case State::MQTT_START: {
             modem_.mqttReset();
-            if (!modem_.mqttBegin(cfg_.client_id)) {
+            if (!modem_.mqttBegin(cfg_.client_id, cfg_.tls)) {
                 Serial.printf("%s CMQTTSTART/ACCQ fallo: %s\n", kTag,
                               modem_.lastResponse().c_str());
                 return false;
@@ -118,13 +125,14 @@ bool NbiotService::step() {
         }
 
         case State::MQTT_CONNECT: {
-            if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true)) {
+            if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
+                                    cfg_.mqtt_user, cfg_.mqtt_pass)) {
                 Serial.printf("%s conexión MQTT fallo: %s\n", kTag,
                               modem_.lastResponse().c_str());
                 return false;
             }
-            Serial.printf("%s MQTT listo (%s:%u)\n", kTag, cfg_.broker,
-                          cfg_.port);
+            Serial.printf("%s MQTT listo (%s:%u %s)\n", kTag, cfg_.broker,
+                          cfg_.port, cfg_.tls ? "TLS" : "plano");
             last_csq_ms_ = millis();
             state_ = State::READY;
             return true;
@@ -138,7 +146,8 @@ bool NbiotService::step() {
                 if (!ok && !modem_.mqttIsConnected()) {
                     // Sesión caída: un intento de reconexión y reintento.
                     Serial.printf("%s sesión caída, reconectando...\n", kTag);
-                    if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true)) {
+                    if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
+                                           cfg_.mqtt_user, cfg_.mqtt_pass)) {
                         ok = modem_.mqttPublish(cfg_.topic_batch, json, 1);
                     }
                 }

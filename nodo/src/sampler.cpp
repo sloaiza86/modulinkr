@@ -22,7 +22,10 @@ void Sampler::begin(ModbusRTU* bus, const cfg::Config* config) {
             const uint8_t regs = cfg::typeRegisters(rd.type);
 
             Group* g = (dev_group_count_[d] > 0) ? &groups_[n_groups_ - 1] : nullptr;
+            // En modo INDIVIDUAL nunca se fusionan lecturas: cada read sale
+            // en su propia transacción (v2.3).
             const bool contiguo =
+                dev.read_mode == cfg::ReadMode::GROUPED &&
                 g != nullptr &&
                 g->function == rd.function &&
                 static_cast<uint16_t>(g->address + g->n_regs) == rd.address;
@@ -106,30 +109,46 @@ float Sampler::convert(const cfg::ReadDef& rd, const uint16_t* regs) {
 bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
     const cfg::DeviceDef& dev = cfg_->devices[g.dev];
 
+    // Coils (0x01) y discrete inputs (0x02) devuelven bits; los registros
+    // (0x03/0x04) devuelven palabras de 16 bits. En ambos casos el grupo
+    // cubre g.n_regs "unidades" contiguas (1 por coil, 1-2 por registro).
+    const bool is_bits = (g.function == 0x01 || g.function == 0x02);
+
     uint16_t regs[cfg::kMaxReadsPerDev * 2];
+    uint8_t  bits[cfg::kMaxReadsPerDev];
     ModbusRTU::Status st;
-    if (g.function == 0x04) {
+    if (g.function == 0x01) {
+        st = bus_->readCoils(dev.slave_id, g.address, g.n_regs, bits);
+    } else if (g.function == 0x02) {
+        st = bus_->readDiscreteInputs(dev.slave_id, g.address, g.n_regs, bits);
+    } else if (g.function == 0x04) {
         st = bus_->readInputRegisters(dev.slave_id, g.address, g.n_regs, regs);
     } else {
         st = bus_->readHoldingRegisters(dev.slave_id, g.address, g.n_regs, regs);
     }
     if (st != ModbusRTU::Status::OK) {
         err_count_++;
-        Serial.printf("[modbus] err %s dev=%s grupo@%u(x%u)  ok=%lu err=%lu\n",
+        Serial.printf("[modbus] err %s dev=%s grupo@%u(x%u fn=0x%02X)  ok=%lu err=%lu\n",
                       ModbusRTU::statusToString(st), dev.name,
-                      g.address, g.n_regs,
+                      g.address, g.n_regs, g.function,
                       static_cast<unsigned long>(ok_count_),
                       static_cast<unsigned long>(err_count_));
         return false;
     }
 
-    // Reparte la ventana de registros entre los miembros del grupo.
+    // Reparte la ventana leída entre los miembros del grupo.
     uint8_t off = 0;
     for (uint8_t m = 0; m < g.n_reads; ++m) {
         const uint8_t r = g.first_read + m;
         const cfg::ReadDef& rd = dev.reads[r];
         Slot& s = slots_[globalIndex(g.dev, r)];
-        s.value    = convert(rd, &regs[off]);
+        if (is_bits) {
+            // Un coil = un valor 0/1; convert aplica scale/offset (§5.3).
+            const uint16_t bitval = bits[off];
+            s.value = convert(rd, &bitval);
+        } else {
+            s.value = convert(rd, &regs[off]);
+        }
         s.fresh_ms = now_ms;
         s.ever_ok  = true;
         off = static_cast<uint8_t>(off + cfg::typeRegisters(rd.type));
@@ -151,7 +170,9 @@ void Sampler::pollDue(uint32_t now_ms) {
         if (static_cast<int32_t>(now_ms - next_poll_ms_[d]) < 0) continue;
 
         for (uint8_t k = 0; k < dev_group_count_[d]; ++k) {
-            if (!first) delay(kInterTxGapMs);  // respiro entre transacciones
+            // Respiro entre transacciones = inter_read_ms del dispositivo
+            // (v2.3; default 250 ms = kInterTxGapMs clásico).
+            if (!first) delay(cfg_->devices[d].inter_read_ms);
             first = false;
             readGroup(groups_[dev_group_start_[d] + k], millis());
         }

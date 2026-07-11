@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.19-v22-seguridad";
+constexpr const char* kFirmwareVersion = "0.0.20-v23-mqtts-coils";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -147,6 +147,12 @@ uint8_t  g_reg_frag_total  = 1;
 uint8_t  g_reg_frag_next   = 0;
 uint32_t g_reg_next_ms     = 0;
 uint32_t g_reg_backoff_ms  = kRegBackoffMinMs;
+
+// v2.3: cerrojo de muestreo. El nodo no toma medidas Modbus hasta
+// completar el registro en la red LoRa (primer WELCOME). Latch: una vez
+// habilitado, el muestreo NO se detiene aunque más tarde caiga el padre
+// (las muestras se retienen en la outbox y salen por NB-IoT o custodia).
+bool     g_sampling_started = false;
 
 // Serializa el catálogo binario del NODE_REGISTER (spec §13.2):
 // fw_version, node.name, reads (id/name/unit en el orden global de
@@ -269,10 +275,12 @@ void printBanner() {
                    g_cfg.n_devices, g_cfg.total_reads);
     for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
         const cfg::DeviceDef& dev = g_cfg.devices[d];
-        Serial.printf("    [%s] slave=0x%02X poll=%lu ms reads=%u writes=%u\n",
+        Serial.printf("    [%s] slave=0x%02X poll=%lu ms reads=%u writes=%u mode=%s gap=%lu ms\n",
                       dev.name, dev.slave_id,
                       static_cast<unsigned long>(dev.poll_ms),
-                      dev.n_reads, dev.n_writes);
+                      dev.n_reads, dev.n_writes,
+                      dev.read_mode == cfg::ReadMode::INDIVIDUAL ? "individual" : "grouped",
+                      static_cast<unsigned long>(dev.inter_read_ms));
         for (uint8_t r = 0; r < dev.n_reads; ++r) {
             const cfg::ReadDef& rd = dev.reads[r];
             Serial.printf("      %s: fn=0x%02X addr=%u %s x%.3g %+.3g\n",
@@ -283,8 +291,11 @@ void printBanner() {
 
     if (g_cfg.super_node) {
         Serial.println(F("  Rol   : SUPERNODO (respaldo selectivo NB-IoT)"));
-        Serial.printf ("  MQTT  : %s:%u  topic_batch=%s\n",
-                       g_cfg.broker, g_cfg.port, g_cfg.topic_batch);
+        Serial.printf ("  MQTT  : %s:%u  %s  auth=%s  topic_batch=%s\n",
+                       g_cfg.broker, g_cfg.port,
+                       g_cfg.tls ? "TLS" : "plano",
+                       g_cfg.mqtt_user[0] ? g_cfg.mqtt_user : "(sin)",
+                       g_cfg.topic_batch);
     } else {
         Serial.println(F("  Rol   : nodo (fallback via supernodo, SN_REQUEST)"));
     }
@@ -296,6 +307,26 @@ void setLed(uint32_t color) {
 }
 
 void fireLora() {
+    // Cerrojo de muestreo (v2.3): al arrancar no se toma ninguna medida
+    // Modbus hasta que el nodo completa su registro en la red LoRa (primer
+    // WELCOME del gateway). Así el bus arranca sincronizado con el envío,
+    // no antes. Una vez habilitado, el latch no se cierra: si más tarde
+    // cae el padre, se sigue muestreando (las muestras van a la outbox y
+    // salen por NB-IoT o custodia).
+    if (!g_sampling_started) {
+        if (!g_registered) {
+            static uint32_t last_wait_log_ms = 0;
+            const uint32_t now = millis();
+            if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
+                last_wait_log_ms = now;
+                Serial.println(F("[sampler] esperando registro (WELCOME) para muestrear"));
+            }
+            return;
+        }
+        g_sampling_started = true;
+        Serial.println(F("[sampler] registro completo: muestreo Modbus habilitado"));
+    }
+
     // Muestreo en la ventana callada: la radio lleva casi todo el ciclo
     // sin actividad, igual que el firmware previo leía el sensor justo
     // antes de transmitir (ver cabecera de sampler.h).
@@ -1042,6 +1073,9 @@ void setup() {
         nbcfg.pass        = g_cfg.apn_pass;
         nbcfg.broker      = g_cfg.broker;
         nbcfg.port        = g_cfg.port;
+        nbcfg.tls         = g_cfg.tls;
+        nbcfg.mqtt_user   = g_cfg.mqtt_user;
+        nbcfg.mqtt_pass   = g_cfg.mqtt_pass;
         nbcfg.client_id   = g_client_id;
         nbcfg.topic_batch = g_cfg.topic_batch;
         if (nbsvc.begin(nbcfg)) {

@@ -20,7 +20,7 @@
 #if NODE_CONFIG == 1
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.2",
+  "schema_version": "2.3",
   "node": {
     "id":          1,
     "type":        "node",
@@ -81,7 +81,7 @@ static const char kConfigJson[] = R"json({
 #elif NODE_CONFIG == 2
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.2",
+  "schema_version": "2.3",
   "node": {
     "id":          2,
     "type":        "super_node",
@@ -118,9 +118,11 @@ static const char kConfigJson[] = R"json({
       "apn":                  "nb.wlapn.com",
       "apn_user":             "ENERBOSS",
       "apn_pass":             "ENERBOSS",
-      "mqtt_broker":          "broker.hivemq.com",
-      "mqtt_port":            1883,
-      "tls":                  false,
+      "mqtt_broker":          "modulinkr.loaiza.co",
+      "mqtt_port":            8883,
+      "tls":                  true,
+      "mqtt_user":            "modulinkr",
+      "mqtt_pass":            "practica",
       "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
       "failover_missed_acks": 5,

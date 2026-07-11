@@ -20,6 +20,8 @@ Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con e
 
 > **Nota v2.2 (11-jul-2026)**: añade el sub-bloque **opcional** `transport.lora.security` (§4.5), que activa el cifrado y la autenticación de la interfaz aire (`frame-format.md` §14). Al ser opcional (ausente = desactivado), el bump es de minor: un config 2.1 sigue validando.
 
+> **Nota v2.3 (11-jul-2026)**: tres añadidos opcionales, todos hacia atrás (bump de minor). En `nbiot`: `mqtt_user` / `mqtt_pass` (autenticación MQTT) y soporte real de `tls=true` en el firmware (TLS 1.2 sin verificar certificado en el SIM7028). En `modbus.devices[]`: `read_mode` (`grouped`/`individual`) e `inter_read_ms` para controlar si las lecturas van agrupadas o una a una. Además el firmware ya admite funciones de lectura de bits (`read_coils` 0x01, `read_discrete_inputs` 0x02), no solo registros.
+
 Reglas de compatibilidad:
 
 | Cambio | Bump | Compatibilidad |
@@ -166,7 +168,9 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | `apn_pass` | string | opcional, default `""` | Contraseña de autenticación del APN. |
 | `mqtt_broker` | string | hostname o IPv4 | Broker MQTT destino. |
 | `mqtt_port` | integer | `1`-`65535` | `1883` (plano) o `8883` (TLS) típicamente. |
-| `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. |
+| `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. En el SIM7028 (v2.3) el TLS se establece **sin verificar el certificado del servidor** (`authmode=0`), por lo que no requiere cargar ninguna CA. POR VALIDAR EN BANCO. |
+| `mqtt_user` | string | opcional (v2.3), default `""` | Usuario de autenticación MQTT. Se envía en `AT+CMQTTCONNECT`. Vacío = conexión anónima. |
+| `mqtt_pass` | string | opcional (v2.3), default `""` | Contraseña de autenticación MQTT. Solo se usa si `mqtt_user` no está vacío. |
 | `topic_telemetry` | string | template MQTT | Topic donde publica los batches. `{node_id}` se sustituye por el `node.id` decimal. |
 | `topic_commands` | string | template MQTT | Topic al que se suscribe para recibir comandos (ver `commands-format.md`). |
 | `failover_missed_acks` | integer | `≥ 1` | Cuántas tramas LoRa sin ACK (con reintentos agotados, ver `lora.max_retries`) acumular antes de activar NB-IoT para reenviarlas. Valores iniciales sugeridos: 3 a 10. |
@@ -264,6 +268,8 @@ Cada entrada del array describe un dispositivo industrial concreto: cómo direcc
 | `description` | string | no | Texto libre. |
 | `addressing` | object | sí | Direccionamiento del esclavo. Ver §5.2. |
 | `poll_interval_ms` | integer | sí | Periodo de polling para los `reads`. Debe ser `≥ 100`. |
+| `read_mode` | string | no (v2.3, default `"grouped"`) | `"grouped"`: las lecturas contiguas (misma función, direcciones consecutivas) se leen en UNA transacción Modbus. `"individual"`: cada lectura sale en su propia transacción. |
+| `inter_read_ms` | integer | no (v2.3, default `250`) | Respiro entre transacciones Modbus consecutivas del dispositivo, en ms (`0`-`5000`). En `individual` es el retardo entre cada lectura. |
 | `reads` | array | sí (puede ir vacío) | Lecturas periódicas. Ver §5.3. |
 | `writes` | array | no | Acciones de escritura invocables por comando externo. Ver §5.4. |
 

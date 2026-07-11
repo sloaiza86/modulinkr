@@ -183,8 +183,8 @@ bool load(Config& c, char* err, size_t err_len) {
     // estructura del JSON son opcionales hacia atrás (node-config.md §1:
     // 2.1 no cambió estructura, 2.2 añade el bloque opcional security).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "2.2") != 0 && strcmp(schema, "2.1") != 0 &&
-        strcmp(schema, "2.0") != 0) {
+    if (strcmp(schema, "2.3") != 0 && strcmp(schema, "2.2") != 0 &&
+        strcmp(schema, "2.1") != 0 && strcmp(schema, "2.0") != 0) {
         return failf(err, err_len, "schema_version '%s' no soportado (se espera 2.x)", schema);
     }
 
@@ -308,10 +308,12 @@ bool load(Config& c, char* err, size_t err_len) {
         if (port < 1 || port > 65535) return fail(err, err_len, "nbiot.mqtt_port invalido");
         c.port = static_cast<uint16_t>(port);
         if (nb["tls"].isNull()) return fail(err, err_len, "nbiot.tls obligatorio");
-        if (nb["tls"].as<bool>()) {
-            // Límite del firmware, no del spec: el driver MQTT va en claro.
-            return fail(err, err_len, "nbiot.tls=true no soportado por este firmware");
-        }
+        // v2.3: tls=true habilita TLS 1.2 en el SIM7028 sin verificar el
+        // certificado del servidor (nbiot.cpp, POR VALIDAR EN BANCO).
+        c.tls = nb["tls"].as<bool>();
+        // Autenticación MQTT (v2.3, opcional; default sin credenciales).
+        copyStr(c.mqtt_user, sizeof(c.mqtt_user), nb["mqtt_user"] | "", 32);
+        copyStr(c.mqtt_pass, sizeof(c.mqtt_pass), nb["mqtt_pass"] | "", 32);
         // topic_telemetry con {node_id} sustituido (spec §4.3).
         const char* tpl = nb["topic_telemetry"] | (const char*)nullptr;
         if (tpl == nullptr) return fail(err, err_len, "nbiot.topic_telemetry ausente");
@@ -398,6 +400,21 @@ bool load(Config& c, char* err, size_t err_len) {
         d.poll_ms = jd["poll_interval_ms"] | 0UL;
         if (d.poll_ms < 100) return failf(err, err_len, "poll_interval_ms < 100 en '%s'", d.name);
 
+        // read_mode / inter_read_ms (v2.3, ambos opcionales). Ausente =
+        // "grouped" con 250 ms, idéntico al comportamiento clásico.
+        const char* rm = jd["read_mode"] | "grouped";
+        if (strcmp(rm, "grouped") == 0) {
+            d.read_mode = ReadMode::GROUPED;
+        } else if (strcmp(rm, "individual") == 0) {
+            d.read_mode = ReadMode::INDIVIDUAL;
+        } else {
+            return failf(err, err_len, "read_mode invalido en '%s' (grouped|individual)", d.name);
+        }
+        d.inter_read_ms = jd["inter_read_ms"] | 250UL;
+        if (d.inter_read_ms > 5000) {
+            return failf(err, err_len, "inter_read_ms > 5000 en '%s'", d.name);
+        }
+
         JsonArrayConst reads = jd["reads"];
         if (reads.isNull()) return failf(err, err_len, "device '%s' sin array reads", d.name);
         if (reads.size() > kMaxReadsPerDev) {
@@ -412,10 +429,12 @@ bool load(Config& c, char* err, size_t err_len) {
                             err, err_len)) {
                 return false;
             }
-            // Límite del firmware: solo funciones de registros por ahora.
-            if (r.function != 0x03 && r.function != 0x04) {
+            // v2.3: registros (0x03/0x04) y bits (0x01 coils, 0x02 discrete
+            // inputs). El sampler lee cada bit como un valor 0.0/1.0.
+            if (r.function != 0x01 && r.function != 0x02 &&
+                r.function != 0x03 && r.function != 0x04) {
                 return failf(err, err_len,
-                             "funcion de lectura no soportada por este firmware en '%s' (solo 0x03/0x04)",
+                             "funcion de lectura no soportada en '%s' (0x01/0x02/0x03/0x04)",
                              r.id);
             }
             // Unicidad de ids dentro del dispositivo (regla 8).

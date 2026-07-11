@@ -46,6 +46,9 @@ public:
         const char*     pass;
         const char*     broker;
         uint16_t        port;
+        bool            tls;          // TLS 1.2 sin verificar cert (v2.3)
+        const char*     mqtt_user;    // usuario MQTT ("" = sin auth)
+        const char*     mqtt_pass;    // clave MQTT
         const char*     client_id;
         const char*     topic_batch;  // topic donde se publican los batches
     };

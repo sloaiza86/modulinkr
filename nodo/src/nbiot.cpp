@@ -169,8 +169,31 @@ void Nbiot::mqttReset() {
     delay(200);
 }
 
-bool Nbiot::mqttBegin(const char* client_id) {
+bool Nbiot::sslConfigure(uint8_t ctx) {
     if (uart_ == nullptr) return false;
+    char cmd[48];
+    // TLS 1.2.
+    snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"sslversion\",%u,3", ctx);
+    const bool v_ok = sendAT(cmd, "OK", 3000);
+    // authmode=0: sin verificación del certificado del servidor (decisión
+    // del despliegue, v2.3). No requiere cargar ninguna CA en el módulo.
+    snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"authmode\",%u,0", ctx);
+    const bool a_ok = sendAT(cmd, "OK", 3000);
+    // SNI activado: brokers con varios hosts en la misma IP necesitan el
+    // nombre en el handshake. Si el módulo no soporta el sub-comando,
+    // falla limpio y se ignora (no es fatal).
+    snprintf(cmd, sizeof(cmd), "AT+CSSLCFG=\"enableSNI\",%u,1", ctx);
+    sendAT(cmd, "OK", 3000);
+    return v_ok && a_ok;
+}
+
+bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
+    if (uart_ == nullptr) return false;
+
+    // Contexto SSL listo ANTES de arrancar la pila MQTT (v2.3).
+    if (tls && !sslConfigure(ssl_ctx)) {
+        Serial.println("[nbiot]  aviso: CSSLCFG rechazado, se intenta TLS igual");
+    }
 
     // Arranca el servicio MQTT. Activa el PDP context internamente.
     if (verbose_) Serial.println("[at] >> AT+CMQTTSTART");
@@ -189,14 +212,24 @@ bool Nbiot::mqttBegin(const char* client_id) {
         return false;
     }
 
-    // Registra el cliente.
+    // Registra el cliente. server_type=1 marca la sesión como SSL/TLS.
     char cmd[100];
-    snprintf(cmd, sizeof(cmd), "AT+CMQTTACCQ=0,\"%s\"", client_id);
+    snprintf(cmd, sizeof(cmd), "AT+CMQTTACCQ=0,\"%s\",%u", client_id, tls ? 1 : 0);
     if (!sendAT(cmd, "OK", 5000)) {
         // ERROR puede ser "client_index_in_use", aceptable si ya estaba.
         if (last_response_.indexOf("19") < 0 &&
             last_response_.indexOf("ERROR") >= 0) {
             return false;
+        }
+    }
+
+    // Enlaza el contexto SSL a la sesión MQTT (session_id 0). Debe ir tras
+    // ACCQ y antes de CONNECT.
+    if (tls) {
+        snprintf(cmd, sizeof(cmd), "AT+CMQTTSSLCFG=0,%u", ssl_ctx);
+        if (!sendAT(cmd, "OK", 3000)) {
+            Serial.printf("[nbiot]  aviso: CMQTTSSLCFG fallo: %s\n",
+                          last_response_.c_str());
         }
     }
     return true;
@@ -205,13 +238,25 @@ bool Nbiot::mqttBegin(const char* client_id) {
 bool Nbiot::mqttConnect(const char* broker,
                         uint16_t port,
                         uint16_t keepalive_s,
-                        bool clean_session) {
+                        bool clean_session,
+                        const char* user,
+                        const char* pass) {
     if (uart_ == nullptr) return false;
 
+    const bool have_auth = (user != nullptr && user[0] != '\0');
+
     char cmd[200];
-    snprintf(cmd, sizeof(cmd),
-             "AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u",
-             broker, port, keepalive_s, clean_session ? 1 : 0);
+    if (have_auth) {
+        // AT+CMQTTCONNECT=<idx>,<addr>,<keepalive>,<clean>,<user>,<pass>
+        snprintf(cmd, sizeof(cmd),
+                 "AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u,\"%s\",\"%s\"",
+                 broker, port, keepalive_s, clean_session ? 1 : 0,
+                 user, pass != nullptr ? pass : "");
+    } else {
+        snprintf(cmd, sizeof(cmd),
+                 "AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u",
+                 broker, port, keepalive_s, clean_session ? 1 : 0);
+    }
 
     if (verbose_) Serial.printf("[at] >> %s\n", cmd);
     drain(*uart_);

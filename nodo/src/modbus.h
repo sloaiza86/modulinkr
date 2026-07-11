@@ -5,6 +5,8 @@
 // del Atom Lite por GPIO 23 (TX) y 33 (RX).
 //
 // Soporta:
+//   - 0x01 Read Coils
+//   - 0x02 Read Discrete Inputs
 //   - 0x03 Read Holding Registers
 //   - 0x04 Read Input Registers
 //
@@ -51,6 +53,16 @@ public:
     Status readHoldingRegisters(uint8_t slave_id, uint16_t address,
                                 uint8_t count, uint16_t* out);
 
+    // Lee `count` coils (función 0x01) desde el esclavo `slave_id`,
+    // empezando en `address`. Devuelve un byte por coil en `out` (0 o 1).
+    Status readCoils(uint8_t slave_id, uint16_t address,
+                     uint8_t count, uint8_t* out);
+
+    // Lee `count` discrete inputs (función 0x02). Misma semántica que
+    // readCoils.
+    Status readDiscreteInputs(uint8_t slave_id, uint16_t address,
+                              uint8_t count, uint8_t* out);
+
     // Devuelve el último código de excepción Modbus si el último estado
     // fue Status::EXCEPTION. 0 si no aplica.
     uint8_t lastException() const { return last_exception_; }
@@ -65,6 +77,11 @@ private:
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);
+
+    // Núcleo común de 0x01/0x02: pide `count` bits y los desempaqueta a un
+    // byte (0/1) por posición en `out`.
+    Status readBits(uint8_t function_code, uint8_t slave_id,
+                    uint16_t address, uint8_t count, uint8_t* out);
 
     // Lee exactamente `len` bytes en `buf` con timeout total de
     // `response_timeout_ms_`. Devuelve número de bytes leídos.

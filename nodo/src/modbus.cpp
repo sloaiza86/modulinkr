@@ -10,8 +10,13 @@ constexpr uint8_t kMaxRegistersPerRequest = 125;
 constexpr size_t  kMaxResponseSize        = 260;  // 255 + margen.
 
 // Códigos de función Modbus.
+constexpr uint8_t kFuncReadCoils            = 0x01;
+constexpr uint8_t kFuncReadDiscreteInputs   = 0x02;
 constexpr uint8_t kFuncReadHoldingRegisters = 0x03;
 constexpr uint8_t kFuncReadInputRegisters   = 0x04;
+
+// Modbus RTU permite hasta 2000 bits por petición de read de coils.
+constexpr uint16_t kMaxBitsPerRequest = 2000;
 
 // ----- Traza de diagnóstico de fallos (10-jul-2026) -----
 // Cuando una transacción falla, se vuelca en hexadecimal la evidencia
@@ -45,6 +50,16 @@ ModbusRTU::Status ModbusRTU::readInputRegisters(uint8_t slave_id, uint16_t addre
 ModbusRTU::Status ModbusRTU::readHoldingRegisters(uint8_t slave_id, uint16_t address,
                                                   uint8_t count, uint16_t* out) {
     return readRegisters(kFuncReadHoldingRegisters, slave_id, address, count, out);
+}
+
+ModbusRTU::Status ModbusRTU::readCoils(uint8_t slave_id, uint16_t address,
+                                       uint8_t count, uint8_t* out) {
+    return readBits(kFuncReadCoils, slave_id, address, count, out);
+}
+
+ModbusRTU::Status ModbusRTU::readDiscreteInputs(uint8_t slave_id, uint16_t address,
+                                                uint8_t count, uint8_t* out) {
+    return readBits(kFuncReadDiscreteInputs, slave_id, address, count, out);
 }
 
 const char* ModbusRTU::statusToString(Status s) {
@@ -231,6 +246,135 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         const size_t off = 3 + 2 * i;
         out[i] = (static_cast<uint16_t>(resp[off]) << 8) |
                  static_cast<uint16_t>(resp[off + 1]);
+    }
+    return Status::OK;
+}
+
+ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
+                                      uint16_t address, uint8_t count,
+                                      uint8_t* out) {
+    if (uart_ == nullptr) return Status::NOT_INITIALIZED;
+    if (count == 0 || count > kMaxBitsPerRequest) {
+        return Status::INVALID_RESPONSE;
+    }
+    last_exception_ = 0;
+
+    // Vacía el buffer de entrada (basura o respuestas rezagadas).
+    uint8_t pre[24];
+    size_t  pre_len   = 0;
+    size_t  pre_total = 0;
+    while (uart_->available()) {
+        const int b = uart_->read();
+        if (b >= 0) {
+            if (pre_len < sizeof(pre)) pre[pre_len++] = static_cast<uint8_t>(b);
+            pre_total++;
+        }
+    }
+    if (kDiag && pre_total > 0) {
+        Serial.printf("[mb-dbg] buffer previo con %u bytes antes de la peticion (bits)\n",
+                      static_cast<unsigned>(pre_total));
+        diagHex("previos", pre, pre_len);
+    }
+
+    // Petición idéntica en estructura a la de registros.
+    uint8_t req[8];
+    req[0] = slave_id;
+    req[1] = function_code;
+    req[2] = static_cast<uint8_t>((address >> 8) & 0xFF);
+    req[3] = static_cast<uint8_t>(address & 0xFF);
+    req[4] = static_cast<uint8_t>((count >> 8) & 0xFF);
+    req[5] = static_cast<uint8_t>(count & 0xFF);
+    const uint16_t req_crc = crc16(req, 6);
+    req[6] = static_cast<uint8_t>(req_crc & 0xFF);
+    req[7] = static_cast<uint8_t>((req_crc >> 8) & 0xFF);
+
+    uart_->write(req, sizeof(req));
+    uart_->flush();
+
+    uint8_t resp[kMaxResponseSize];
+    auto diagFail = [&](const char* etapa, size_t rx_len) {
+        if (!kDiag) return;
+        Serial.printf("[mb-dbg] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
+                      etapa, slave_id, function_code, address, count);
+        diagHex("peticion", req, sizeof(req));
+        diagHex("recibido", resp, rx_len);
+    };
+
+    const size_t got_head = readWithTimeout(resp, 3);
+    if (got_head < 3) {
+        diagFail("timeout cabecera", got_head);
+        return Status::TIMEOUT;
+    }
+
+    // Resincronización de trama (byte espurio del transceptor auto-dirección).
+    constexpr uint8_t kMaxSyncSkip = 4;
+    uint8_t skipped = 0;
+    while (resp[0] != slave_id && skipped < kMaxSyncSkip) {
+        resp[0] = resp[1];
+        resp[1] = resp[2];
+        if (readWithTimeout(resp + 2, 1) < 1) {
+            diagFail("timeout en resincronizacion", 2);
+            return Status::TIMEOUT;
+        }
+        skipped++;
+    }
+    if (resp[0] != slave_id) {
+        diagFail("slave inesperado", 3);
+        return Status::INVALID_RESPONSE;
+    }
+
+    // Excepción.
+    if (resp[1] & 0x80) {
+        const size_t got_exc = readWithTimeout(resp + 3, 2);
+        if (got_exc < 2) {
+            diagFail("timeout excepcion", 3 + got_exc);
+            return Status::TIMEOUT;
+        }
+        const uint16_t recv_crc = static_cast<uint16_t>(resp[3]) |
+                                  (static_cast<uint16_t>(resp[4]) << 8);
+        if (crc16(resp, 3) != recv_crc) {
+            diagFail("crc excepcion", 5);
+            return Status::CRC_ERROR;
+        }
+        last_exception_ = resp[2];
+        return Status::EXCEPTION;
+    }
+
+    if (resp[1] != function_code) {
+        diagFail("function inesperado", 3);
+        return Status::INVALID_RESPONSE;
+    }
+
+    // byte_count = ceil(count / 8).
+    const uint8_t expected_bytes = static_cast<uint8_t>((count + 7) / 8);
+    const uint8_t byte_count = resp[2];
+    if (byte_count != expected_bytes) {
+        diagFail("byte_count inesperado", 3);
+        return Status::INVALID_RESPONSE;
+    }
+
+    const size_t remaining = static_cast<size_t>(byte_count) + 2;  // datos + CRC
+    if (3 + remaining > kMaxResponseSize) {
+        return Status::INVALID_RESPONSE;
+    }
+    const size_t got_body = readWithTimeout(resp + 3, remaining);
+    if (got_body < remaining) {
+        diagFail("timeout datos", 3 + got_body);
+        return Status::TIMEOUT;
+    }
+
+    const size_t crc_payload_len = 3 + byte_count;
+    const uint16_t recv_crc = static_cast<uint16_t>(resp[crc_payload_len]) |
+                              (static_cast<uint16_t>(resp[crc_payload_len + 1]) << 8);
+    if (crc16(resp, crc_payload_len) != recv_crc) {
+        diagFail("crc datos", 3 + remaining);
+        return Status::CRC_ERROR;
+    }
+
+    // Desempaqueta: bit i en el byte i/8, posición i%8 (LSB primero).
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t byte = resp[3 + (i / 8)];
+        out[i] = (byte >> (i % 8)) & 0x01;
     }
     return Status::OK;
 }

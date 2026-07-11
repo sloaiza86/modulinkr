@@ -58,15 +58,26 @@ public:
     void mqttReset();
 
     // Activa el servicio MQTT y registra un cliente. Hace AT+CMQTTSTART
-    // seguido de AT+CMQTTACCQ con el client_id dado.
-    bool mqttBegin(const char* client_id);
+    // seguido de AT+CMQTTACCQ con el client_id dado. Si tls es true,
+    // configura el contexto SSL (TLS 1.2, sin verificar el certificado del
+    // servidor) y registra el cliente como sesión segura (server_type=1).
+    //
+    // POR VALIDAR EN BANCO (v2.3): la secuencia AT de TLS del SIM7028
+    // (CSSLCFG / CMQTTSSLCFG / CMQTTACCQ server_type) sigue la convención
+    // de la familia SIMCom CMQTT; hay que confirmarla contra el manual AT
+    // del módulo concreto.
+    bool mqttBegin(const char* client_id, bool tls = false, uint8_t ssl_ctx = 0);
 
-    // Conecta a un broker MQTT TCP plano (sin TLS).
-    // El formato interno es "tcp://broker:port".
+    // Conecta a un broker MQTT. La dirección interna es "tcp://broker:port"
+    // (el TLS se activa por el contexto SSL enlazado en mqttBegin, no por
+    // el esquema de la URL). Si user no es nullptr ni vacío, añade las
+    // credenciales de autenticación MQTT (username/password).
     bool mqttConnect(const char* broker,
                      uint16_t    port,
                      uint16_t    keepalive_s = 600,
-                     bool        clean_session = true);
+                     bool        clean_session = true,
+                     const char* user = nullptr,
+                     const char* pass = nullptr);
 
     // True si el SIM7028 reporta sesión MQTT activa al hacer
     // AT+CMQTTCONNECT?.
@@ -123,6 +134,10 @@ public:
     Stream* stream() { return uart_; }
 
 private:
+    // Configura el contexto SSL `ctx` para TLS 1.2 sin verificar el
+    // certificado del servidor (authmode=0). POR VALIDAR EN BANCO.
+    bool sslConfigure(uint8_t ctx);
+
     HardwareSerial* uart_ = nullptr;
     bool            online_ = false;
     bool            verbose_ = false;

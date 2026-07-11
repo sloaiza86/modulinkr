@@ -5,15 +5,21 @@
 // con el último valor de cada lectura ya convertido a unidad real (raw
 // por scale mas offset, edge computing, node-config.md §5.3).
 //
-// AGRUPACIÓN DE TRANSACCIONES: las entradas de reads[] contiguas de un
-// mismo dispositivo (misma función y direcciones consecutivas) se leen en
-// UNA sola transacción Modbus, calculada al arrancar. Así el tráfico del
-// bus reproduce el patrón del firmware previo al config (el XY-MD02:
-// registros 1 y 2 en una petición), que operaba sin errores; las
-// transacciones individuales encadenadas provocaban respuestas rezagadas
-// del esclavo pisando la consulta siguiente (invalid_response, observado
-// en banco el 10-jul-2026). La IMU WT901 (52, 53, 54) también colapsa en
-// una única transacción de 3 registros.
+// AGRUPACIÓN DE TRANSACCIONES: con read_mode="grouped" (por defecto), las
+// entradas de reads[] contiguas de un mismo dispositivo (misma función y
+// direcciones consecutivas) se leen en UNA sola transacción Modbus,
+// calculada al arrancar. Así el tráfico del bus reproduce el patrón del
+// firmware previo al config (el XY-MD02: registros 1 y 2 en una petición),
+// que operaba sin errores; las transacciones individuales encadenadas
+// provocaban respuestas rezagadas del esclavo pisando la consulta
+// siguiente (invalid_response, observado en banco el 10-jul-2026). La IMU
+// WT901 (52, 53, 54) también colapsa en una única transacción de 3
+// registros.
+//
+// Con read_mode="individual" (v2.3) NO se fusiona nada: cada read sale en
+// su propia transacción, con inter_read_ms de respiro entre ellas. Útil
+// para esclavos que no toleran lecturas de bloque. Soporta también coils
+// (0x01) y discrete inputs (0x02): cada bit es un valor 0.0/1.0.
 //
 // MUESTREO EN LA VENTANA CALLADA: el sampler no corre libre; lo invoca
 // fireLora justo ANTES de transmitir, cuando la radio lleva casi todo el
@@ -67,7 +73,9 @@ public:
     // (diagnóstico para el banner).
     uint8_t groupCount() const { return n_groups_; }
 
-    // Espaciado mínimo entre transacciones Modbus consecutivas.
+    // Espaciado por defecto entre transacciones Modbus consecutivas
+    // (v2.3: configurable por dispositivo vía inter_read_ms; este es el
+    // default que aplica config.cpp cuando el campo está ausente).
     static constexpr uint32_t kInterTxGapMs = 250;
 
 private:

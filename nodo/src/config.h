@@ -18,9 +18,11 @@
 //
 // Límites de esta versión del firmware (se validan y rechazan con mensaje,
 // aunque el JSON sea válido contra el spec):
-//   - Funciones de lectura soportadas: read_holding_registers y
-//     read_input_registers (coils y discrete inputs, pendientes).
-//   - nbiot.tls debe ser false (el driver MQTT del SIM7028 va en claro).
+//   - Funciones de lectura soportadas: read_holding_registers,
+//     read_input_registers, read_coils y read_discrete_inputs (v2.3).
+//   - nbiot.tls=true habilita TLS 1.2 en el SIM7028 sin verificar el
+//     certificado del servidor (v2.3, POR VALIDAR EN BANCO). El bloque
+//     nbiot admite además mqtt_user / mqtt_pass (autenticación MQTT).
 //   - Total de reads[] entre todos los dispositivos: máximo 8 (capacidad
 //     de la cola de pendientes y la outbox).
 //   - addressing con default_slave_id != desired_slave_id: la rutina de
@@ -44,6 +46,13 @@ enum class ValType : uint8_t { U16, I16, U32, I32, F32 };
 
 // Orden de bytes para tipos multi-registro (§5.6.1).
 enum class ByteOrder : uint8_t { NONE, ABCD, BADC, CDAB, DCBA };
+
+// Modo de transacción Modbus por dispositivo (v2.3):
+//   GROUPED    lecturas contiguas (misma función, direcciones consecutivas)
+//              colapsan en UNA transacción (comportamiento clásico).
+//   INDIVIDUAL cada lectura sale en su propia transacción, con inter_read_ms
+//              de respiro entre ellas.
+enum class ReadMode : uint8_t { GROUPED, INDIVIDUAL };
 
 struct ReadDef {
     char      id[9]     = {0};
@@ -78,6 +87,8 @@ struct DeviceDef {
     char      name[17]  = {0};
     uint8_t   slave_id  = 0;      // desired_slave_id del addressing
     uint32_t  poll_ms   = 1000;
+    ReadMode  read_mode = ReadMode::GROUPED;  // v2.3
+    uint32_t  inter_read_ms = 250;            // v2.3, gap entre transacciones
     ReadDef   reads[kMaxReadsPerDev];
     uint8_t   n_reads   = 0;
     WriteDef  writes[kMaxWritesPerDev];
@@ -123,6 +134,9 @@ struct Config {
     char     apn_pass[17] = {0};
     char     broker[49]   = {0};
     uint16_t port         = 1883;
+    bool     tls          = false;    // TLS 1.2 con el broker (mqtt_port 8883)
+    char     mqtt_user[33] = {0};     // usuario MQTT (opcional, default "")
+    char     mqtt_pass[33] = {0};     // clave MQTT (opcional, default "")
     char     topic_batch[64] = {0};   // con {node_id} ya sustituido
     uint8_t  failover_missed_acks = 5;
     uint32_t failover_window_ms   = 30000;
