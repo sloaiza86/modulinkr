@@ -9,7 +9,7 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 
 | Archivo | Función |
 | --- | --- |
-| `protocol.py` | Librería del protocolo v2.0: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`. Sin dependencia de hardware. Fuente canónica para el lado Pi. |
+| `protocol.py` | Librería del protocolo v2.2: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`, `build_welcome` y la seguridad v2.2 (AES-CCM, nonce, AAD). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
 | `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin_id, seq)` para deduplicación e idempotencia, cota FIFO. |
 | `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente. |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
@@ -39,11 +39,28 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_BEACON_S` | `30` | Periodo del beacon en segundos |
 | `MODULINKR_DB` | `/home/practica/modulinkr_buffer.db` | Ruta del buffer SQLite |
 | `MODULINKR_BUFFER_MAX` | `1000` | Cota de entradas del buffer |
+| `MODULINKR_SEC_ENABLED` | `0` | Seguridad v2.2 de la interfaz aire (`frame-format.md` §14) |
+| `MODULINKR_SEC_KEY` | (sin default) | Clave de red, 32 caracteres hex. Obligatoria con `SEC_ENABLED=1`. **Debe coincidir** con `security.key` del config de todos los nodos |
+
+## Seguridad de la interfaz aire (v2.2)
+
+Con `MODULINKR_SEC_ENABLED=1` el servicio verifica el MIC y descifra cada
+trama entrante (AES-CCM, `frame-format.md` §14) y cifra y firma todo lo que
+emite (ACK, BEACON, WELCOME). Es un ajuste de **toda la red**: ON aquí y
+OFF en un nodo (o claves distintas) significa que las tramas de ese nodo
+fallan el MIC y se descartan (contador `micfail` en STATS). Requiere el
+paquete `cryptography` en el venv:
+
+```bash
+source ~/modbus-test/bin/activate
+pip install cryptography
+```
 
 ## Despliegue al Pi
 
 Copiar los archivos al Pi (vía `scp` a `practica@SuperNodo1.local:~/pi-service/`)
-y usar el venv existente `~/modbus-test` (ya tiene pyserial).
+y usar el venv existente `~/modbus-test` (ya tiene pyserial; con seguridad
+activa, instalar también `cryptography`, ver arriba).
 
 Ejecución manual para pruebas:
 

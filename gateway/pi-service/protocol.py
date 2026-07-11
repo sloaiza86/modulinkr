@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ModuLinkr, librería del protocolo LoRa v2.1 para el gateway (lado Pi).
+"""ModuLinkr, librería del protocolo LoRa v2.2 para el gateway (lado Pi).
 
-Fuente normativa: firmware/shared/protocol/frame-format.md (schema v2.1,
+Fuente normativa: firmware/shared/protocol/frame-format.md (schema v2.2,
 cabecera de 11 bytes + payload + CRC16). Este módulo materializa en Python:
 
   - Las constantes del protocolo.
@@ -10,10 +10,20 @@ cabecera de 11 bytes + payload + CRC16). Este módulo materializa en Python:
     del registro de nodos (parse_catalog), ver §13 de la spec.
   - La construcción de las tramas descendentes que genera el Pi
     (build_ack, build_beacon, build_welcome), ver §12 y §13 de la spec.
+  - La seguridad de la interfaz aire v2.2 (spec §14): AES-CCM con clave
+    de red, sobre de sec_ts (4 B) + MIC (4 B) por trama. Requiere el
+    paquete `cryptography` (pip install cryptography en el venv del Pi);
+    solo se importa si se usa una clave, así el servicio sin seguridad
+    no depende de él.
 
 Cambios v2.1 (10-jul-2026): TELEMETRY lleva ts de captura (uint32 epoch al
 inicio del payload), BEACON lleva epoch del gateway, y aparecen las tramas
 NODE_REGISTER (0x04) y WELCOME (0x05) del proceso de registro.
+
+Cambios v2.2 (11-jul-2026): seguridad de la interfaz aire (spec §14). Con
+clave, parse_frame espera y valida el sobre (verifica MIC, descifra) y los
+build_* cifran y firman. Sin clave, todo queda como en v2.1 salvo el byte
+de versión (0x22).
 
 No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
 cualquier utilidad de diagnóstico.
@@ -41,12 +51,25 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x21          # v2.1 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x22          # v2.2 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
 CRC_BYTES = 2
 OVERHEAD = HEADER_BYTES + CRC_BYTES  # 13
+
+# Seguridad de la interfaz aire (v2.2, spec §14). Trama con security ON:
+# cabecera (claro) + sec_ts (4 B LE, claro) + ciphertext + MIC (4 B) + CRC.
+SEC_TS_BYTES = 4
+MIC_BYTES = 4
+SEC_ENVELOPE = SEC_TS_BYTES + MIC_BYTES        # +8 B por trama
+SEC_OVERHEAD = OVERHEAD + SEC_ENVELOPE         # 21 B fijos
+OFF_SEC_TS = 11        # sec_ts, solo con security ON
+OFF_SEC_PAYLOAD = 15   # ciphertext, solo con security ON
+KEY_BYTES = 16         # AES-128
+NONCE_BYTES = 13       # CCM con L = 2 (spec §14.3)
+SEC_SALT_MAX = 0x40000000    # sec_ts < esto = salt de emisor sin hora (§14.4)
+SEC_FRESHNESS_WINDOW_S = 300  # frescura de tramas de control (§14.5)
 
 # Offsets de la cabecera fija (frame-format.md §1.4).
 OFF_SCHEMA      = 0
@@ -119,15 +142,75 @@ def seq_older(a: int, b: int) -> bool:
     return ((b - a) & 0xFFFF) < 0x8000
 
 
+# ----- Seguridad de la interfaz aire (v2.2, spec §14) -----
+
+def _aesccm(key: bytes):
+    """Instancia AESCCM con MIC de 4 B. Import perezoso: el paquete
+    `cryptography` solo es necesario con seguridad activa."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+    return AESCCM(key, tag_length=MIC_BYTES)
+
+
+def build_nonce(header: bytes, sec_ts: int) -> bytes:
+    """Nonce CCM de 13 B (spec §14.3): network | origin | dest | type |
+    seq (2 LE) | sec_ts (4 LE) | hop_src | pad (2). El hop_src distingue a
+    los transmisores de una misma trama: cada salto re-cifra con su nonce."""
+    return bytes([
+        header[OFF_NETWORK_ID],
+        header[OFF_ORIGIN_ID],
+        header[OFF_DEST_ID],
+        header[OFF_FRAME_TYPE],
+        header[OFF_SEQ], header[OFF_SEQ + 1],
+    ]) + struct.pack('<I', sec_ts & 0xFFFFFFFF) + bytes([
+        header[OFF_HOP_SRC], 0x00, 0x00,
+    ])
+
+
+def build_aad(header: bytes, sec_ts: int) -> bytes:
+    """AAD de 15 B (spec §14.3): cabecera con los campos mutables por salto
+    a cero (hop_src, hop_dst, ttl) + sec_ts. Autentica los campos
+    inmutables extremo a extremo a través de cualquier número de saltos."""
+    aad = bytearray(header[:HEADER_BYTES])
+    aad[OFF_HOP_SRC] = 0x00
+    aad[OFF_HOP_DST] = 0x00
+    aad[OFF_TTL] = 0x00
+    return bytes(aad) + struct.pack('<I', sec_ts & 0xFFFFFFFF)
+
+
+def _finalize_secure(frame: bytearray, key: bytes, sec_ts: int) -> bytes:
+    """Cifra y firma una trama en claro ya serializada (cabecera + payload,
+    sin CRC) y devuelve la trama v2.2 completa: cabecera + sec_ts +
+    ciphertext + MIC + CRC (spec §14.2). payload_length sigue siendo la
+    longitud del payload en claro (CCM no añade padding)."""
+    header = bytes(frame[:HEADER_BYTES])
+    plain = bytes(frame[HEADER_BYTES:])
+    nonce = build_nonce(header, sec_ts)
+    aad = build_aad(header, sec_ts)
+    # AESCCM.encrypt devuelve ciphertext || MIC, exactamente el orden del
+    # sobre en el aire.
+    ct_mic = _aesccm(key).encrypt(nonce, plain, aad)
+    out = bytearray(header)
+    out += struct.pack('<I', sec_ts & 0xFFFFFFFF)
+    out += ct_mic
+    out += struct.pack('<H', crc16_modbus(out))
+    return bytes(out)
+
+
 # ----- Parseo de trama entrante -----
 
-def parse_frame(frame: bytes) -> dict:
-    """Decodifica y valida una trama según frame-format.md §10. Devuelve un
-    dict con los campos; incluye 'error' si algo no valida. Siempre incluye
-    'crc_ok' cuando la trama tiene longitud coherente."""
+def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
+    """Decodifica y valida una trama según frame-format.md §10 y §14.6.
+    Devuelve un dict con los campos; incluye 'error' si algo no valida.
+    Siempre incluye 'crc_ok' cuando la trama tiene longitud coherente.
 
-    if len(frame) < OVERHEAD:
-        return {'error': f'trama corta ({len(frame)} bytes, min {OVERHEAD})'}
+    Con `key` (security ON, v2.2) la trama debe traer el sobre: se valida
+    la igualdad de tamaños de §14.2, se verifica el MIC y se descifra el
+    payload. MIC inválido devuelve 'error' con 'mic_fail'=True (descarte
+    silencioso en el llamante: jamás un ACK de error, sin oráculo)."""
+
+    min_len = SEC_OVERHEAD if key else OVERHEAD
+    if len(frame) < min_len:
+        return {'error': f'trama corta ({len(frame)} bytes, min {min_len})'}
 
     schema_version = frame[OFF_SCHEMA]
     network_id     = frame[OFF_NETWORK_ID]
@@ -140,12 +223,14 @@ def parse_frame(frame: bytes) -> dict:
     ttl            = frame[OFF_TTL]
     payload_length = frame[OFF_PAYLOAD_LEN]
 
-    expected_total = HEADER_BYTES + payload_length + CRC_BYTES
+    envelope = SEC_ENVELOPE if key else 0
+    expected_total = HEADER_BYTES + envelope + payload_length + CRC_BYTES
     if len(frame) != expected_total:
         return {'error': f'payload_length={payload_length} no cuadra '
-                         f'(total={len(frame)} esperado={expected_total})'}
+                         f'(total={len(frame)} esperado={expected_total}'
+                         f'{", security ON" if key else ""})'}
 
-    crc_off = HEADER_BYTES + payload_length
+    crc_off = expected_total - CRC_BYTES
     crc_received = struct.unpack_from('<H', frame, crc_off)[0]
     crc_computed = crc16_modbus(frame[:crc_off])
     crc_ok = crc_received == crc_computed
@@ -172,7 +257,23 @@ def parse_frame(frame: bytes) -> dict:
         out['error'] = 'CRC invalido'
         return out
 
-    payload = frame[OFF_PAYLOAD:OFF_PAYLOAD + payload_length]
+    if key:
+        # Sobre v2.2 (spec §14.6): verificar MIC y descifrar. La frescura
+        # de tramas de control no aplica en el gateway: sus tramas de
+        # control son las que él mismo origina, nunca las consume.
+        sec_ts = struct.unpack_from('<I', frame, OFF_SEC_TS)[0]
+        out['sec_ts'] = sec_ts
+        nonce = build_nonce(frame, sec_ts)
+        aad = build_aad(frame, sec_ts)
+        ct_mic = frame[OFF_SEC_PAYLOAD:OFF_SEC_PAYLOAD + payload_length + MIC_BYTES]
+        try:
+            payload = _aesccm(key).decrypt(nonce, bytes(ct_mic), aad)
+        except Exception:
+            out['error'] = 'MIC invalido'
+            out['mic_fail'] = True
+            return out
+    else:
+        payload = frame[OFF_PAYLOAD:OFF_PAYLOAD + payload_length]
     out['payload'] = payload
 
     if frame_type == FRAME_TELEMETRY:
@@ -284,15 +385,21 @@ def parse_catalog(data: bytes) -> dict:
 
 # ----- Construcción de tramas descendentes (las genera el Pi, §12) -----
 
-def _finalize(frame: bytearray) -> bytes:
-    """Añade el CRC16 sobre todos los bytes previos y devuelve bytes."""
+def _finalize(frame: bytearray, key: Optional[bytes] = None,
+              sec_ts: int = 0) -> bytes:
+    """Cierra una trama serializada en claro (cabecera + payload). Sin
+    clave: añade el CRC16 y devuelve (v2.1/v2.2 en claro). Con clave:
+    inserta el sobre v2.2, cifra, firma y añade el CRC (spec §14.2)."""
+    if key:
+        return _finalize_secure(frame, key, sec_ts)
     crc = crc16_modbus(frame)
     frame += struct.pack('<H', crc)
     return bytes(frame)
 
 
 def build_ack(origin_id: int, hop_dst: int, ack_seq: int, status: int,
-              gw_seq: int, network_id: int, ttl: int) -> bytes:
+              gw_seq: int, network_id: int, ttl: int,
+              key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
     """Construye una trama ACK (frame-format.md §4.3).
 
     origin_id : nodo cuya trama se confirma (va en dest_id del ACK).
@@ -301,6 +408,8 @@ def build_ack(origin_id: int, hop_dst: int, ack_seq: int, status: int,
     ack_seq   : el seq de la trama confirmada (en el payload).
     status    : uno de ACK_* (OK, etc.).
     gw_seq    : contador propio downlink del gateway (bytes 6-7).
+    key/sec_ts: seguridad v2.2 (spec §14); sec_ts es la hora del gateway
+                (o su salt de sesión si no tiene hora, §14.4).
     """
     frame = bytearray(HEADER_BYTES + 3)
     frame[OFF_SCHEMA]      = SCHEMA_VERSION
@@ -315,15 +424,17 @@ def build_ack(origin_id: int, hop_dst: int, ack_seq: int, status: int,
     frame[OFF_PAYLOAD_LEN] = 3
     struct.pack_into('<H', frame, OFF_PAYLOAD, ack_seq & 0xFFFF)
     frame[OFF_PAYLOAD + 2] = status & 0xFF
-    return _finalize(frame)
+    return _finalize(frame, key, sec_ts)
 
 
-def build_beacon(gw_seq: int, network_id: int, ttl: int, epoch: int = 0) -> bytes:
+def build_beacon(gw_seq: int, network_id: int, ttl: int, epoch: int = 0,
+                 key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
     """Construye el BEACON raíz del gateway (frame-format.md §7.2, v2.1).
 
     hop_count = 0 (el gateway es la raíz), parent_id = 0 (sin padre),
     flags = 0, epoch = hora del gateway (0 = sin hora sincronizada; los
     nodos ignoran un epoch a 0). Broadcast, sin ACK.
+    key/sec_ts: seguridad v2.2 (spec §14).
     """
     frame = bytearray(HEADER_BYTES + 7)
     frame[OFF_SCHEMA]      = SCHEMA_VERSION
@@ -340,11 +451,12 @@ def build_beacon(gw_seq: int, network_id: int, ttl: int, epoch: int = 0) -> byte
     frame[OFF_PAYLOAD + 1] = 0x00  # parent_id = 0, sin padre
     frame[OFF_PAYLOAD + 2] = 0x00  # flags reservado
     struct.pack_into('<I', frame, OFF_PAYLOAD + 3, epoch & 0xFFFFFFFF)
-    return _finalize(frame)
+    return _finalize(frame, key, sec_ts)
 
 
 def build_welcome(dest_id: int, hop_dst: int, epoch: int, status: int,
-                  gw_seq: int, network_id: int, ttl: int) -> bytes:
+                  gw_seq: int, network_id: int, ttl: int,
+                  key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
     """Construye una trama WELCOME (frame-format.md §13.3), respuesta al
     NODE_REGISTER. Vuelve por la ruta inversa igual que un ACK.
 
@@ -352,6 +464,7 @@ def build_welcome(dest_id: int, hop_dst: int, epoch: int, status: int,
     hop_dst : vecino por el que llegó el NODE_REGISTER (hop_src del uplink).
     epoch   : hora del gateway (0 = sin hora; el registro vale igual).
     status  : ACK_OK, ACK_SCHEMA_MISMATCH o ACK_DECODE_ERROR (§13.3).
+    key/sec_ts: seguridad v2.2 (spec §14).
     """
     frame = bytearray(HEADER_BYTES + 5)
     frame[OFF_SCHEMA]      = SCHEMA_VERSION
@@ -366,4 +479,4 @@ def build_welcome(dest_id: int, hop_dst: int, epoch: int, status: int,
     frame[OFF_PAYLOAD_LEN] = 5
     struct.pack_into('<I', frame, OFF_PAYLOAD, epoch & 0xFFFFFFFF)
     frame[OFF_PAYLOAD + 4] = status & 0xFF
-    return _finalize(frame)
+    return _finalize(frame, key, sec_ts)

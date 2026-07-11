@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <esp_random.h>
 
+#include "nodeclock.h"
+
 namespace {
 
 constexpr uint16_t kPreambleSymbols = 8;  // valor estándar para LoRaWAN/P2P
@@ -150,6 +152,87 @@ void LoraP2P::queryVersion() {
     fw_version_[j] = '\0';
 }
 
+// ----- Seguridad de la interfaz aire (v2.2, frame-format.md §14) -----
+
+void LoraP2P::setSecurity(bool enabled, const uint8_t key[protocol::kKeyBytes]) {
+    if (ccm_ready_) {
+        mbedtls_ccm_free(&ccm_);
+        ccm_ready_ = false;
+    }
+    sec_enabled_ = false;
+    if (!enabled || key == nullptr) return;
+
+    std::memcpy(sec_key_, key, protocol::kKeyBytes);
+    mbedtls_ccm_init(&ccm_);
+    if (mbedtls_ccm_setkey(&ccm_, MBEDTLS_CIPHER_ID_AES, sec_key_,
+                           protocol::kKeyBytes * 8) != 0) {
+        // Fallo del setkey (no debería ocurrir con AES-128): mejor operar
+        // en claro y que se note en banco (las tramas no validarán en el
+        // gateway) que operar con un contexto roto.
+        mbedtls_ccm_free(&ccm_);
+        return;
+    }
+    ccm_ready_  = true;
+    sec_enabled_ = true;
+}
+
+uint32_t LoraP2P::ownSecTs(uint16_t seq) {
+    // Con hora: epoch de esta transmisión. El sec_ts es del SOBRE, no del
+    // dato: un reintento reconstruye la trama y lo refresca (nonce nuevo,
+    // spec §14.2); el ts de captura del payload es el inmutable.
+    if (nodeclock::synced()) {
+        const uint32_t now = nodeclock::epochNow();
+        if (now >= protocol::kSecSaltMax) return now;
+        // Reloj sincronizado a una época implausible: cae al salt.
+    }
+
+    // Sin hora: salt de sesión en [1, kSecSaltMax), spec §14.4. Se genera
+    // perezosamente y se regenera si el seq propio envuelve sin haber
+    // sincronizado nunca (evita reutilizar nonce tras 65536 tramas).
+    if (sec_salt_ == 0) {
+        sec_salt_ = (esp_random() % (protocol::kSecSaltMax - 1)) + 1;
+    }
+    if (seq != 0) {  // seq 0 es el NODE_REGISTER, fijo: no mide el avance
+        if (sec_seq_seen_ && protocol::seqOlder(seq, sec_last_seq_)) {
+            sec_salt_ = (esp_random() % (protocol::kSecSaltMax - 1)) + 1;
+        }
+        sec_last_seq_ = seq;
+        sec_seq_seen_ = true;
+    }
+    return sec_salt_;
+}
+
+void LoraP2P::buildNonce(uint8_t nonce[protocol::kNonceBytes],
+                         const uint8_t* hdr, uint32_t sec_ts) {
+    using namespace protocol;
+    // spec §14.3: network_id | origin | dest | frame_type | seq (2 LE) |
+    // sec_ts (4 LE) | hop_src | pad (2 x 0x00). El hop_src distingue a los
+    // transmisores de una misma trama: cada salto re-cifra con su nonce.
+    nonce[0]  = hdr[kOffNetworkId];
+    nonce[1]  = hdr[kOffOriginId];
+    nonce[2]  = hdr[kOffDestId];
+    nonce[3]  = hdr[kOffFrameType];
+    nonce[4]  = hdr[kOffSeqLow];
+    nonce[5]  = hdr[kOffSeqHigh];
+    std::memcpy(&nonce[6], &sec_ts, sizeof(sec_ts));  // ESP32 es LE nativo
+    nonce[10] = hdr[kOffHopSrc];
+    nonce[11] = 0x00;
+    nonce[12] = 0x00;
+}
+
+void LoraP2P::buildAad(uint8_t aad[protocol::kHeaderBytes + protocol::kSecTsBytes],
+                       const uint8_t* hdr, uint32_t sec_ts) {
+    using namespace protocol;
+    // spec §14.3: cabecera con los campos mutables por salto a cero
+    // (hop_src, hop_dst, ttl) + sec_ts. Autentica los campos inmutables
+    // extremo a extremo a través de cualquier número de saltos.
+    std::memcpy(aad, hdr, kHeaderBytes);
+    aad[kOffHopSrc] = 0x00;
+    aad[kOffHopDst] = 0x00;
+    aad[kOffTtl]    = 0x00;
+    std::memcpy(&aad[kHeaderBytes], &sec_ts, sizeof(sec_ts));
+}
+
 LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                                        uint32_t ts,
                                        const float* values,
@@ -183,7 +266,9 @@ LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
     if (f.ttl == 0) return Status::INVALID_ARGS;
 
     // Relay (spec §2.5): hop_src, hop_dst y ttl se reescriben; origen,
-    // destino final, seq, tipo y payload viajan intactos.
+    // destino final, seq, tipo y payload viajan intactos. Con security ON
+    // el payload (ya descifrado en RX) se re-cifra con el nonce de este
+    // salto y el sec_ts ORIGINAL del sobre (spec §14.2).
     return buildAndSend(new_hop_dst,
                         f.origin_id,
                         f.dest_id,
@@ -191,19 +276,25 @@ LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
                         f.frame_type,
                         static_cast<uint8_t>(f.ttl - 1),
                         f.payload,
-                        f.payload_length);
+                        f.payload_length,
+                        f.sec_ts);
 }
 
 LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                                         uint8_t own_hop,
                                         uint8_t own_parent,
                                         uint8_t ttl,
-                                        uint32_t epoch) {
+                                        uint32_t epoch,
+                                        uint32_t sec_ts) {
     if (!initialized_) return Status::NOT_INITIALIZED;
 
     // Payload BEACON v2.1 (spec §7.2): hop_count y padre del emisor de
     // este salto (el padre habilita la regla anti-bucle), flags reservado
     // y el epoch ORIGINAL del gateway (no se reescribe en el eco).
+    // Con security ON, el eco re-cifra con el sec_ts ORIGINAL del beacon
+    // y el hop_src propio en el nonce: es justo el caso que obligó a
+    // meter hop_src en el nonce (payload reescrito por el re-emisor bajo
+    // el mismo (origin, seq, sec_ts), spec §14.3).
     uint8_t payload[7] = {own_hop, own_parent, 0x00, 0, 0, 0, 0};
     std::memcpy(&payload[3], &epoch, sizeof(epoch));
     return buildAndSend(protocol::kAddrBroadcast,
@@ -213,7 +304,8 @@ LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
                         protocol::kFrameBeacon,
                         ttl,
                         payload,
-                        sizeof(payload));
+                        sizeof(payload),
+                        sec_ts);
 }
 
 LoraP2P::Status LoraP2P::sendNodeRegister(uint8_t hop_dst, uint8_t frag_idx,
@@ -301,9 +393,26 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
                                       uint8_t ttl,
                                       const uint8_t* payload,
                                       uint8_t payload_length) {
+    // Trama propia: el sec_ts del sobre es el de esta transmisión.
+    return buildAndSend(hop_dst, origin_id, dest_id, seq, frame_type, ttl,
+                        payload, payload_length,
+                        sec_enabled_ ? ownSecTs(seq) : 0);
+}
+
+LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
+                                      uint8_t origin_id,
+                                      uint8_t dest_id,
+                                      uint16_t seq,
+                                      uint8_t frame_type,
+                                      uint8_t ttl,
+                                      const uint8_t* payload,
+                                      uint8_t payload_length,
+                                      uint32_t sec_ts) {
     using namespace protocol;
 
-    if (payload_length > kMaxPayload) return Status::INVALID_ARGS;
+    if (payload_length > (sec_enabled_ ? kMaxPayloadSecure : kMaxPayload)) {
+        return Status::INVALID_ARGS;
+    }
 
     uint8_t frame[kOverhead + kMaxPayload];
 
@@ -319,12 +428,41 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
     frame[kOffTtl]        = ttl;
     frame[kOffPayloadLen] = payload_length;
 
-    if (payload_length > 0 && payload != nullptr) {
-        std::memcpy(&frame[kOffPayload], payload, payload_length);
+    size_t crc_input_len;
+
+    if (sec_enabled_ && ccm_ready_) {
+        // Sobre v2.2 (spec §14.2): sec_ts en claro + payload cifrado + MIC.
+        std::memcpy(&frame[kOffSecTs], &sec_ts, sizeof(sec_ts));
+
+        uint8_t nonce[kNonceBytes];
+        uint8_t aad[kHeaderBytes + kSecTsBytes];
+        buildNonce(nonce, frame, sec_ts);
+        buildAad(aad, frame, sec_ts);
+
+        // CCM cifra in-place-compatible (entrada y salida separadas aquí)
+        // y deja el MIC de 4 B a continuación del ciphertext. Con
+        // payload_length == 0 (HEARTBEAT) autentica cabecera y sec_ts.
+        const int rc = mbedtls_ccm_encrypt_and_tag(
+            &ccm_, payload_length,
+            nonce, kNonceBytes,
+            aad, sizeof(aad),
+            payload_length > 0 ? payload : frame /*dummy no leído*/,
+            &frame[kOffSecPayload],
+            &frame[kOffSecPayload + payload_length], kMicBytes);
+        if (rc != 0) {
+            tx_errors_++;
+            return Status::TX_FAILED;
+        }
+        crc_input_len = kHeaderBytes + kSecTsBytes + payload_length + kMicBytes;
+    } else {
+        if (payload_length > 0 && payload != nullptr) {
+            std::memcpy(&frame[kOffPayload], payload, payload_length);
+        }
+        crc_input_len = kHeaderBytes + payload_length;
     }
 
-    // CRC sobre [0..(10 + payload_length)].
-    const size_t crc_input_len = kHeaderBytes + payload_length;
+    // CRC sobre todos los bytes anteriores (con security ON incluye
+    // sec_ts, ciphertext y MIC; cada relay lo recalcula, spec §14.2).
     const uint16_t crc = crc16(frame, crc_input_len);
     frame[crc_input_len]     = static_cast<uint8_t>(crc & 0xFF);
     frame[crc_input_len + 1] = static_cast<uint8_t>((crc >> 8) & 0xFF);
@@ -456,21 +594,24 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
                              int16_t rssi, int8_t snr) {
     using namespace protocol;
 
-    // Validación según frame-format.md §10 (el orden importa).
+    // Validación según frame-format.md §10 y §14.6 (el orden importa).
     // 1. network_id ajeno: descarte silencioso, ni siquiera cuenta como
     //    descarte para no ensuciar diagnóstico con tráfico de otra red.
-    // 2-4. Longitudes y CRC.
+    // 2-4. Longitudes y CRC (con security ON la igualdad incluye el sobre).
     // 5. Major del schema.
-    if (len < kOverhead) { rx_discarded_++; return; }
+    const size_t min_len = sec_enabled_ ? kSecOverhead : kOverhead;
+    if (len < min_len) { rx_discarded_++; return; }
     if (buf[kOffNetworkId] != network_id_) { return; }
 
     const uint8_t payload_length = buf[kOffPayloadLen];
-    if (len != kHeaderBytes + payload_length + kCrcBytes) {
+    const size_t crc_input_len = sec_enabled_
+        ? kHeaderBytes + kSecTsBytes + payload_length + kMicBytes
+        : kHeaderBytes + payload_length;
+    if (len != crc_input_len + kCrcBytes) {
         rx_discarded_++;
         return;
     }
 
-    const size_t crc_input_len = kHeaderBytes + payload_length;
     const uint16_t crc_calc = crc16(buf, crc_input_len);
     const uint16_t crc_recv = static_cast<uint16_t>(buf[crc_input_len]) |
                               (static_cast<uint16_t>(buf[crc_input_len + 1]) << 8);
@@ -484,6 +625,56 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
     // 6. Tráfico ajeno legítimo de la misma red: no es para este nodo.
     const uint8_t hop_dst = buf[kOffHopDst];
     if (hop_dst != kAddrBroadcast && hop_dst != node_id_) { return; }
+
+    // 7 (v2.2, spec §14.6): verificar MIC y descifrar. También lo hace el
+    // relay (necesita el plaintext para re-cifrar el salto siguiente, y de
+    // paso no gasta aire en tramas falsificadas). Descarte silencioso con
+    // contador: jamás se responde con un ACK de error (sin oráculo).
+    uint8_t  plain[kMaxPayload];
+    uint32_t sec_ts = 0;
+    if (sec_enabled_) {
+        if (!ccm_ready_) { rx_discarded_++; return; }
+        std::memcpy(&sec_ts, &buf[kOffSecTs], sizeof(sec_ts));
+
+        uint8_t nonce[kNonceBytes];
+        uint8_t aad[kHeaderBytes + kSecTsBytes];
+        buildNonce(nonce, buf, sec_ts);
+        buildAad(aad, buf, sec_ts);
+
+        const int rc = mbedtls_ccm_auth_decrypt(
+            &ccm_, payload_length,
+            nonce, kNonceBytes,
+            aad, sizeof(aad),
+            &buf[kOffSecPayload], plain,
+            &buf[kOffSecPayload + payload_length], kMicBytes);
+        if (rc != 0) {
+            rx_mic_fail_++;
+            rx_discarded_++;
+            return;
+        }
+
+        // 8 (v2.2, spec §14.5): frescura de las tramas de control, solo
+        // cuando este nodo es su CONSUMIDOR (los relays quedan exentos;
+        // el BEACON es broadcast: todo receptor lo consume). Se omite si
+        // falta cualquiera de las dos horas: reloj propio sin sincronizar
+        // o sec_ts en rango de salt (emisor sin hora).
+        const uint8_t ft = buf[kOffFrameType];
+        const bool control =
+            ft == kFrameAck || ft == kFrameWelcome ||
+            ft == kFrameBeacon || ft == kFrameSnOffer;
+        const bool consumer =
+            ft == kFrameBeacon || buf[kOffDestId] == node_id_;
+        if (control && consumer && nodeclock::synced() &&
+            sec_ts >= kSecSaltMax) {
+            const uint32_t now = nodeclock::epochNow();
+            const uint32_t delta = now >= sec_ts ? now - sec_ts : sec_ts - now;
+            if (delta > kSecFreshnessWindowS) {
+                rx_stale_++;
+                rx_discarded_++;
+                return;
+            }
+        }
+    }
 
     if (ring_count_ >= kRxRing) {
         // Ring lleno: descarta la más antigua (el llamante va lento).
@@ -503,7 +694,12 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
     f.frame_type     = buf[kOffFrameType];
     f.ttl            = buf[kOffTtl];
     f.payload_length = payload_length;
-    std::memcpy(f.payload, &buf[kOffPayload], payload_length);
+    f.sec_ts         = sec_ts;
+    if (sec_enabled_) {
+        std::memcpy(f.payload, plain, payload_length);
+    } else {
+        std::memcpy(f.payload, &buf[kOffPayload], payload_length);
+    }
     f.rssi = rssi;
     f.snr  = snr;
 

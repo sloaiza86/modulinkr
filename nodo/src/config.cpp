@@ -26,6 +26,14 @@ bool fail(char* err, size_t err_len, const char* msg) {
     return false;
 }
 
+// Carácter hex a su valor 0-15, o -1 si no es hex. Para security.key.
+int hexNibble(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    return -1;
+}
+
 bool failf(char* err, size_t err_len, const char* fmt, const char* a) {
     snprintf(err, err_len, fmt, a);
     return false;
@@ -171,10 +179,12 @@ bool load(Config& c, char* err, size_t err_len) {
     }
 
     // ----- schema_version (regla 1) -----
-    // 2.1 es la actual; 2.0 se acepta porque la estructura del JSON no
-    // cambió entre ambas (node-config.md §1, nota v2.1).
+    // 2.2 es la actual; 2.0 y 2.1 se aceptan porque los cambios de
+    // estructura del JSON son opcionales hacia atrás (node-config.md §1:
+    // 2.1 no cambió estructura, 2.2 añade el bloque opcional security).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "2.1") != 0 && strcmp(schema, "2.0") != 0) {
+    if (strcmp(schema, "2.2") != 0 && strcmp(schema, "2.1") != 0 &&
+        strcmp(schema, "2.0") != 0) {
         return failf(err, err_len, "schema_version '%s' no soportado (se espera 2.x)", schema);
     }
 
@@ -227,6 +237,31 @@ bool load(Config& c, char* err, size_t err_len) {
     const int mr = lora["max_retries"].as<int>();
     if (mr < 0 || mr > 10) return fail(err, err_len, "lora.max_retries fuera de 0-10");
     c.max_retries = static_cast<uint8_t>(mr);
+
+    // ----- transport.lora.security (v2.2, opcional; regla 15) -----
+    // Bloque ausente o enabled=false: interfaz en claro (idéntico a v2.1).
+    // Con enabled=true, key es obligatoria: exactamente 32 caracteres hex
+    // (128 bits). Una key malformada detiene el arranque como cualquier
+    // otra violación del schema.
+    c.security_enabled = false;
+    JsonObjectConst sec = lora["security"];
+    if (!sec.isNull() && (sec["enabled"] | false)) {
+        const char* key = sec["key"] | (const char*)nullptr;
+        if (key == nullptr || strlen(key) != 32) {
+            return fail(err, err_len,
+                        "security.key ausente o de longitud != 32 hex (regla 15)");
+        }
+        for (size_t i = 0; i < 16; ++i) {
+            const int hi = hexNibble(key[2 * i]);
+            const int lo = hexNibble(key[2 * i + 1]);
+            if (hi < 0 || lo < 0) {
+                return fail(err, err_len,
+                            "security.key con caracteres no hexadecimales (regla 15)");
+            }
+            c.security_key[i] = static_cast<uint8_t>((hi << 4) | lo);
+        }
+        c.security_enabled = true;
+    }
 
     // ----- transport.mesh (regla 6) -----
     JsonObjectConst mesh = doc["transport"]["mesh"];

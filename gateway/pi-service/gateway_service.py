@@ -40,6 +40,13 @@ código:
   MODULINKR_BUFFER_MAX  (default 1000)
   MODULINKR_STATS_S     (default 60)      periodo del reporte STATS
   MODULINKR_ACK_WINDOW_S (default 1.0)    ventana de supresión de ACK dup
+  MODULINKR_SEC_ENABLED (default 0)       seguridad v2.2 (frame-format §14)
+  MODULINKR_SEC_KEY     (sin default)     clave de red, 32 caracteres hex;
+                                          obligatoria con SEC_ENABLED=1 y
+                                          DEBE coincidir con security.key
+                                          del config de todos los nodos.
+                                          Requiere `pip install cryptography`
+                                          en el venv del servicio.
 
 Pensado para correr bajo systemd con reinicio automático: como el beacon
 depende de este proceso, un cuelgue derriba el árbol de rutas hasta que
@@ -50,6 +57,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -95,6 +103,26 @@ class GatewayService:
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
 
+        # Seguridad de la interfaz aire (v2.2, frame-format.md §14).
+        # Ajuste de TODA la red: con ON aquí y OFF en un nodo (o claves
+        # distintas) las tramas de ese nodo fallan el MIC y se descartan.
+        sec_enabled = os.environ.get("MODULINKR_SEC_ENABLED", "0") == "1"
+        self.sec_key: bytes | None = None
+        if sec_enabled:
+            key_hex = os.environ.get("MODULINKR_SEC_KEY", "")
+            if len(key_hex) != 2 * protocol.KEY_BYTES:
+                raise SystemExit(
+                    "MODULINKR_SEC_ENABLED=1 exige MODULINKR_SEC_KEY con "
+                    f"{2 * protocol.KEY_BYTES} caracteres hex (regla 15 de "
+                    "node-config.md)")
+            try:
+                self.sec_key = bytes.fromhex(key_hex)
+            except ValueError:
+                raise SystemExit("MODULINKR_SEC_KEY no es hexadecimal valido")
+        # Salt de sesión para el sec_ts sin hora (spec §14.4): rango
+        # [1, SEC_SALT_MAX), regenerado en cada arranque del servicio.
+        self.sec_salt = random.randrange(1, protocol.SEC_SALT_MAX)
+
         # Periodo del reporte de estadísticas de tráfico (segundos).
         self.stats_s = float(os.environ.get("MODULINKR_STATS_S", "60"))
 
@@ -119,6 +147,7 @@ class GatewayService:
         self.n_dup       = 0   # (origin, seq) ya en buffer
         self.n_beacon    = 0   # beacons emitidos
         self.n_drop      = 0   # descartadas por CRC/schema/tamaño
+        self.n_micfail   = 0   # sobres con MIC inválido (v2.2, security ON)
         self.n_overheard = 0   # oídas de refilón (hop_dst != gateway): no van dirigidas a él
         self.n_notconf   = 0   # tipo no confirmable (ACK, BEACON, SN_*) o dest != gateway
 
@@ -139,10 +168,18 @@ class GatewayService:
         now = int(time.time())
         return now if now >= MIN_VALID_EPOCH else 0
 
+    def _gw_sec_ts(self) -> int:
+        """sec_ts del sobre v2.2 (spec §14.4): hora del gateway, o el salt
+        de sesión si el reloj no está sincronizado (los nodos eximen de
+        frescura los sec_ts en rango de salt)."""
+        now = int(time.time())
+        return now if now >= MIN_VALID_EPOCH else self.sec_salt
+
     def send_beacon(self) -> None:
         seq = self._next_gw_seq()
         epoch = self._gw_epoch()
-        frame = protocol.build_beacon(seq, self.net_id, self.max_ttl, epoch)
+        frame = protocol.build_beacon(seq, self.net_id, self.max_ttl, epoch,
+                                      self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_beacon += 1
         LOG.info("beacon seq=%d ttl=%d epoch=%d (total=%d)",
@@ -152,7 +189,8 @@ class GatewayService:
         seq = self._next_gw_seq()
         epoch = self._gw_epoch()
         frame = protocol.build_welcome(
-            dest_id, hop_dst, epoch, status, seq, self.net_id, self.max_ttl)
+            dest_id, hop_dst, epoch, status, seq, self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_welcome += 1
         LOG.info("welcome dest=%s status=%s epoch=%d via_hop=%s gw_seq=%d",
@@ -164,7 +202,8 @@ class GatewayService:
                  status: int) -> None:
         seq = self._next_gw_seq()
         frame = protocol.build_ack(
-            origin_id, hop_dst, ack_seq, status, seq, self.net_id, self.max_ttl)
+            origin_id, hop_dst, ack_seq, status, seq, self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_ack += 1
         LOG.info("ack dest=%s ack_seq=%d status=%s via_hop=%s gw_seq=%d",
@@ -193,12 +232,20 @@ class GatewayService:
         snr  = float(m.group("snr"))
         self.n_rx += 1
 
-        parsed = protocol.parse_frame(frame)
+        parsed = protocol.parse_frame(frame, self.sec_key)
 
         if "error" in parsed:
-            # CRC malo, schema incompatible, tamaños raros: sin ACK.
+            # CRC malo, schema incompatible, tamaños raros o MIC inválido:
+            # sin ACK (con MIC inválido, además, jamás un ACK de error:
+            # descarte silencioso sin oráculo, spec §14.6).
             self.n_drop += 1
-            LOG.warning("drop: %s (hex=%s)", parsed["error"], m.group("hex"))
+            if parsed.get("mic_fail"):
+                self.n_micfail += 1
+                LOG.warning("drop MIC invalido origin=%s seq=%s (micfail=%d)",
+                            protocol.addr_name(parsed.get("origin_id", 0)),
+                            parsed.get("seq", "?"), self.n_micfail)
+            else:
+                LOG.warning("drop: %s (hex=%s)", parsed["error"], m.group("hex"))
             return
 
         # Filtro de salto (frame-format.md §10.6): el gateway solo procesa
@@ -348,10 +395,10 @@ class GatewayService:
         }
         LOG.info(
             "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
-            "overheard=%d notconf=%d drop=%d buffer=%d",
+            "overheard=%d notconf=%d drop=%d micfail=%d buffer=%d",
             self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
             self.n_reg, self.n_welcome,
-            self.n_overheard, self.n_notconf, self.n_drop,
+            self.n_overheard, self.n_notconf, self.n_drop, self.n_micfail,
             self.buf.count() if self.buf is not None else -1,
         )
 
@@ -364,6 +411,8 @@ class GatewayService:
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
         LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
                  self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
+        LOG.info("seguridad interfaz aire (v2.2): %s",
+                 "AES-CCM activa" if self.sec_key else "desactivada (en claro)")
 
         # Primer beacon al arrancar, luego cada beacon_s.
         last_beacon = 0.0

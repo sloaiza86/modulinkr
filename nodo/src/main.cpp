@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.18-v21-registro";
+constexpr const char* kFirmwareVersion = "0.0.19-v22-seguridad";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -524,7 +524,7 @@ void handleBeacon(const LoraP2P::RxFrame& f) {
                   static_cast<int>(f.rssi), f.ttl);
 
     mesh.onBeacon(f.hop_src, hop_count, adv_parent, f.rssi, f.seq, f.ttl,
-                  epoch, millis());
+                  epoch, f.sec_ts, millis());
 
     if (!had_parent && mesh.hasParent()) {
         Serial.printf("[mesh]   padre adoptado id=%u hop_propio=%u (rssi=%d)\n",
@@ -1014,9 +1014,14 @@ void setup() {
                    g_cfg.tx_dbm,
                    g_cfg.network_id, g_cfg.node_id, g_cfg.max_ttl)) {
         g_lora_ready = true;
-        Serial.printf("OK  (RAK3172 fw: %s, CAD: %s)\n",
+        // Seguridad de la interfaz aire (v2.2, frame-format.md §14): del
+        // bloque security del config. Ajuste de TODA la red; el Pi del
+        // gateway debe llevar la misma clave.
+        lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
+        Serial.printf("OK  (RAK3172 fw: %s, CAD: %s, security: %s)\n",
                       lora.firmwareVersion(),
-                      lora.cadEnabled() ? "on" : "off");
+                      lora.cadEnabled() ? "on" : "off",
+                      lora.securityEnabled() ? "AES-CCM" : "off");
     } else {
         Serial.println(F("FALLO. Sigo sin LoRa."));
     }
@@ -1107,10 +1112,12 @@ void loop() {
         uint16_t echo_seq;
         uint8_t  echo_ttl;
         uint32_t echo_epoch;
-        if (mesh.echoDue(now, echo_seq, echo_ttl, echo_epoch)) {
+        uint32_t echo_sec_ts;
+        if (mesh.echoDue(now, echo_seq, echo_ttl, echo_epoch, echo_sec_ts)) {
             if (mesh.hasParent() &&
                 lora.sendBeaconEcho(echo_seq, mesh.ownHop(), mesh.parentId(),
-                                    echo_ttl, echo_epoch) == LoraP2P::Status::OK) {
+                                    echo_ttl, echo_epoch,
+                                    echo_sec_ts) == LoraP2P::Status::OK) {
                 g_echoes++;
                 Serial.printf("[mesh]   eco beacon seq=%u hop_propio=%u ttl=%u ecos=%lu\n",
                               echo_seq, mesh.ownHop(), echo_ttl,

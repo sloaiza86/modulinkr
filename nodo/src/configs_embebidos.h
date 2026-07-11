@@ -20,7 +20,7 @@
 #if NODE_CONFIG == 1
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.1",
+  "schema_version": "2.2",
   "node": {
     "id":          1,
     "type":        "node",
@@ -38,7 +38,11 @@ static const char kConfigJson[] = R"json({
       "send_interval_ms": 5000,
       "ack_enabled":      true,
       "ack_timeout_ms":   3000,
-      "max_retries":      2
+      "max_retries":      2,
+      "security": {
+        "enabled": true,
+        "key":     "5A4EFF35533E51AF54C00C46C530FABE"
+      }
     },
     "mesh": {
       "relay_enabled":        true,
@@ -77,7 +81,7 @@ static const char kConfigJson[] = R"json({
 #elif NODE_CONFIG == 2
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.1",
+  "schema_version": "2.2",
   "node": {
     "id":          2,
     "type":        "super_node",
@@ -95,7 +99,11 @@ static const char kConfigJson[] = R"json({
       "send_interval_ms": 5000,
       "ack_enabled":      true,
       "ack_timeout_ms":   3000,
-      "max_retries":      2
+      "max_retries":      2,
+      "security": {
+        "enabled": true,
+        "key":     "5A4EFF35533E51AF54C00C46C530FABE"
+      }
     },
     "mesh": {
       "relay_enabled":        true,

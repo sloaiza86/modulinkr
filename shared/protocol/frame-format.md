@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x21` (= `v2.1`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x22` (= `v2.2`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -38,6 +38,8 @@ Reglas de compatibilidad:
 **Historia**: el schema v1.0 definía una cabecera de 6 bytes sin soporte de red (sin `network_id`, sin direcciones de salto, sin TTL). La cabecera v2.0 no es parseable por un receptor v1.0, por eso el salto es de major y no de minor. El v1.0 nunca llegó a desplegarse más allá del banco de pruebas, así que no se mantiene compatibilidad hacia atrás en firmware.
 
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
+
+**v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
 ### 1.3 CRC de aplicación
 
@@ -486,6 +488,8 @@ Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) 
 
 El presupuesto de duty cycle por nodo suma su tráfico propio más el que relaya. Para el caso de referencia (2 reads cada 5 s, ACK de vuelta, un hijo relayado), un nodo emite ≈ 175 ms cada 5 s: 3,5 %, dentro del 10 % del g3 con margen. A cadencias de 1 s con relay conviene US915 o repartir hijos.
 
+Con la seguridad v2.2 activa (§14), todos los tamaños de la tabla crecen **+8 bytes** (sobre `sec_ts` + MIC) y los ToA suben en consecuencia (~10 ms por trama a SF7); el caso de referencia queda en ≈ 4,2 % de duty cycle, aún con margen.
+
 ## 10. Reglas de validación
 
 Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la descarta si:
@@ -510,7 +514,7 @@ Cambios contemplados para versiones futuras del schema, listados aquí para que 
 - **ACKs batched**: un ACK que cubre un rango de seqs (`ack_seq_from`, `ack_seq_to`) para abaratar downlink en rutas largas. Requeriría bump de minor de schema.
 - **Fallback multi-salto**: permitir que un SN_REQUEST/entrega en custodia atraviese relays (`ttl > 1`) cuando el supernodo no es vecino directo.
 - **Alarmas** (`frame_type = 0x03`): formato del payload TBD según necesidades del despliegue.
-- **Seguridad del canal (cifrado + autenticación)**: el `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 6-jul-2026: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. Modelo previsto de dos claves inspirado en LoRaWAN: una clave de red que firma toda la trama con un MAC (integridad y autenticidad, protege también la cabecera de enrutamiento que va en claro para que los relays operen) y una clave de aplicación que cifra el payload (confidencialidad de los datos del sensor). Anti-replay ligando el `seq` al MAC. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves). El diseño de la cabecera reserva hueco para un campo MAC y un flag de payload cifrado sin refactor mayor.
+- **Seguridad del canal (cifrado + autenticación)**: **implementado el 11-jul-2026 en v2.2, ver §14**. El `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 6-jul-2026: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. El modelo previsto aquí era de dos claves inspirado en LoRaWAN (clave de red para el MAC, clave de aplicación para el payload); la implementación final de §14 lo simplifica a **una clave de red con AES-CCM** (justificación en §14.1) y sustituye el anti-replay por `seq` (inviable tras el replanteo del seq efímero de v2.1) por el control de frescura basado en `sec_ts` (§14.5). Sin flag de cifrado en el aire: la activación es de toda la red, para cerrar el ataque de downgrade. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves); la rotación de claves queda pendiente (§14.7).
 
 ## 12. Enlace serial Pi a Heltec (dentro del gateway)
 
@@ -641,7 +645,102 @@ Tamaño: **18 bytes**.
 
 El reloj local corre sobre el oscilador del nodo como `epoch_offset` respecto a `millis()`; cada fuente de las de arriba lo corrige. La hora de red LTE por `AT+CCLK?` (NITZ) queda **eliminada** del diseño: dependía de que el operador la implementara y en banco nunca la entregó.
 
-## 14. Cambios respecto a v1.0
+## 14. Seguridad de la interfaz aire (v2.2)
+
+Sección añadida el 11-jul-2026. Materializa la extensión prevista en §11 ("Seguridad del canal"): confidencialidad, autenticidad e integridad de las tramas LoRa, **extremo a extremo entre los nodos y el Pi del gateway**. El Heltec, según la decisión de arquitectura del 6-jul-2026, no cifra ni descifra ni tiene claves: transporta bytes opacos (su único filtro, el `network_id`, sigue en claro en la cabecera).
+
+### 14.1 Modelo y decisiones de diseño
+
+**Algoritmo: AES-CCM con clave de 128 bits y MIC de 4 bytes.** CCM resuelve cifrado y autenticación en una sola operación y está disponible en ambos extremos sin dependencias nuevas: mbedtls en el ESP32 (con AES por hardware) y `cryptography`/AESCCM en el Python del Pi. El MIC de 4 bytes es el mismo compromiso que adopta LoRaWAN: suficiente contra falsificación por fuerza bruta en un canal de esta velocidad, y 4 bytes menos de aire que el tag completo.
+
+**Una sola clave de red, no dos.** El §11 preveía el modelo de dos claves de LoRaWAN (clave de red para el MAC, clave de aplicación para el payload). Se simplifica a una: esa separación protege al dueño de los datos frente al operador de la red cuando son entidades distintas; aquí ambos papeles los ejerce el Pi del gateway, así que la segunda clave duplicaría gestión sin añadir protección. El bloque `security` del JSON admite claves adicionales en el futuro sin romper el schema.
+
+**Ajuste de toda la red.** `security.enabled` y `security.key` (ver `node-config.md` §4.5) deben coincidir en todos los dispositivos del despliegue, Pi incluido. No hay flag en el aire que anuncie "voy cifrada": un flag permitiría a un atacante emitir tramas "sin seguridad" y que fueran aceptadas, anulando la protección (downgrade). Una trama cifrada en una red con `enabled == false` falla las validaciones de tamaño; una trama en claro en una red con `enabled == true` falla el MIC. Ambas se descartan.
+
+**La cabecera viaja en claro y cada salto re-cifra.** Los relays reescriben `hop_src`, `hop_dst` y `ttl` en cada salto (§2.5), y el eco de BEACON reescribe además parte del **payload** (`hop_count` y `parent_id`, §7.2). Esto último descarta el modelo de criptograma intocado extremo a extremo: si dos re-emisores cifraran payloads distintos bajo el mismo nonce, se violaría la regla central de CCM (§14.3). La solución es incluir `hop_src` en el nonce: **cada transmisor (origen o relay) cifra lo que emite con su propio nonce**, y el receptor de cada salto verifica y descifra con el `hop_src` que recibió. Todos los relays son nodos con la clave de red, así que pueden; el Heltec sigue sin claves porque en el gateway cifra y descifra el Pi. La cabecera se **autentica** (los campos inmutables van en el AAD, §14.3), de modo que un atacante no puede redirigir una trama cambiando `origin_id` o `dest_id` sin invalidar el MIC; la autenticidad de esos campos y del payload sigue siendo extremo a extremo aunque el criptograma cambie por salto (un relay malicioso necesitaría la clave para alterar el contenido, y quien tiene la clave es parte de la red: es el modelo de confianza inherente a una clave compartida, el mismo que asume LoRaWAN dentro de una red). Los campos mutables por relay quedan fuera del MIC por necesidad; su manipulación solo puede desviar o matar una trama (equivalente a jamming, no evitable criptográficamente).
+
+**Qué se protege y qué no.** Con `enabled == true`: nadie sin la clave lee los payloads, inyecta tramas ni modifica los campos extremo a extremo. Queda fuera del alcance: el análisis de tráfico (un observador ve cabeceras: quién habla, cuánto y cuándo), la denegación de servicio por radio, y el replay, que se mitiga aparte (§14.5).
+
+### 14.2 Formato de trama con seguridad activa
+
+```
+cabecera        sec_ts      ciphertext   mic       crc16
+(11 B, claro)   (4 B LE)    (N B)        (4 B)     (2 B LE)
+```
+
+| Campo | Contenido |
+| --- | --- |
+| `cabecera` | Los 11 bytes de §1.4, sin cambios y en claro. `payload_length` = N = longitud del payload **en claro** (CCM no añade padding: ciphertext y plaintext miden igual). |
+| `sec_ts` | Instante de construcción de esta transmisión (epoch Unix s, UTC). A diferencia del `ts` de captura (identidad del dato, inmutable), el `sec_ts` es del **sobre**: un reintento del origen reconstruye la trama y puede refrescarlo (nonce nuevo, criptograma nuevo, mismo contenido); los relays lo transportan intacto. Doble función: componente del nonce (§14.3) y base del control de frescura (§14.5). Si el emisor no tiene hora, ver §14.4. |
+| `ciphertext` | El payload de §3-§8, cifrado. Tramas sin payload (HEARTBEAT) llevan N = 0 y el sobre igualmente: CCM con plaintext vacío autentica cabecera y `sec_ts`. |
+| `mic` | Tag CCM truncado a 4 bytes. Cubre AAD + payload (§14.3). |
+| `crc16` | Sin cambios: cubre todos los bytes anteriores y cada relay lo recalcula al reescribir la cabecera. Sigue siendo la validación barata por salto; el MIC es la validación criptográfica extremo a extremo. |
+
+Relación de tamaños con seguridad activa (sustituye a la de §1.4 en las validaciones de §10):
+
+```
+total_length = 11 + 4 + payload_length + 4 + 2 = payload_length + 21
+```
+
+Sobrecoste: **+8 bytes por trama**, uniforme. La TELEMETRY de 2 reads pasa de 25 a 33 B (ToA SF7 ≈ 72 ms); el payload máximo práctico a SF7 BW125 baja de 229 a **221 bytes**. El relay (§2.3-§2.4) verifica el MIC del salto entrante, descifra, reescribe cabecera y **re-cifra con su propio nonce** (su `hop_src` forma parte de él, §14.1 y §14.3) antes de re-emitir; una trama con MIC inválido se descarta en el relay, que así no gasta aire en tramas falsificadas. El `sec_ts` y los campos inmutables viajan intactos: solo cambia el criptograma. En el eco de BEACON el re-emisor actualiza además `hop_count` y `parent_id` en el payload antes de re-cifrar, como manda §7.2.
+
+### 14.3 Nonce y datos autenticados (AAD)
+
+Nonce de 13 bytes (CCM con L = 2):
+
+```
+network_id   origin_id   dest_id   frame_type   seq        sec_ts     hop_src   padding
+(1 B)        (1 B)       (1 B)     (1 B)        (2 B LE)   (4 B LE)   (1 B)     (2 B = 0x00)
+```
+
+La regla inviolable de CCM es que un nonce jamás se repite con la misma clave (con textos distintos). La unicidad se apoya en tres patas:
+
+- `(seq, sec_ts)` distingue las tramas de un mismo origen: dentro de una sesión de arranque el `seq` es monotónico, y entre sesiones el `sec_ts` difiere (dos arranques nunca comparten época, mismo argumento que la identidad de §2.6). Esta es la razón de fondo para que el nonce no derive solo del `seq`: al ser efímero (renace en 1 en cada boot), reutilizaría nonces entre arranques. El emisor sin hora se resuelve en §14.4.
+- `hop_src` distingue a los **transmisores** de una misma trama: cada salto re-cifra (§14.1) y sin este byte el eco de BEACON reutilizaría el nonce del gateway con un payload distinto (`hop_count`/`parent_id` reescritos), la violación exacta que CCM prohíbe. Con él, gateway y cada re-emisor cifran bajo nonces distintos.
+- La retransmisión de una trama idéntica por el mismo transmisor (reintento, §5.3) repite nonce **y** texto: produce bytes idénticos a los originales, que no filtran nada nuevo (el reintento es observable de todos modos).
+
+El receptor reconstruye el nonce con los campos de la cabecera recibida (incluido el `hop_src` del salto entrante) más el `sec_ts` del sobre.
+
+AAD (datos autenticados pero no cifrados), 15 bytes:
+
+```
+bytes 0-10 de la cabecera, con hop_src (byte 2), hop_dst (byte 3) y ttl (byte 9)
+puestos a 0x00, seguidos de sec_ts (4 B)
+```
+
+Así el MIC liga el payload a `schema_version`, `network_id`, `origin_id`, `dest_id`, `seq`, `frame_type`, `payload_length` y `sec_ts` — exactamente los campos inmutables de §2.5 más el sobre — y permanece válido a través de cualquier número de saltos.
+
+### 14.4 Emisor sin hora sincronizada
+
+Un nodo recién arrancado sin WELCOME ni beacon con epoch no tiene hora (§13). Para esas tramas, `sec_ts` toma un **salt de sesión**: un aleatorio de 32 bits en el rango `[1, 0x40000000)` generado en cada boot (puede derivarse del `boot_id` de §13.1 recortado al rango). El rango está deliberadamente por debajo de cualquier epoch plausible (0x40000000 ≈ año 2004), de modo que el receptor distingue sin ambigüedad "hora real" de "salt": los valores bajos quedan exentos del control de frescura (§14.5). La unicidad del nonce se mantiene: el salt difiere entre arranques (colisión 2⁻³², despreciable) y el `seq` es monotónico dentro del arranque. Caso extremo: si el `seq` envuelve (65536 tramas) sin que el nodo haya sincronizado nunca, el firmware regenera el salt antes de continuar.
+
+En cuanto el nodo sincroniza, sus tramas nuevas llevan epoch real en `sec_ts`. Las ya construidas conservan sus bytes (inmutabilidad de §5.1).
+
+### 14.5 Anti-replay: control de frescura
+
+El cifrado autentica al emisor pero no la actualidad: una trama grabada del aire y reemitida es criptográficamente válida. El sistema ya neutraliza el replay de **datos** sin ayuda: una TELEMETRY reemitida cae en la deduplicación del gateway (§2.6, memoria corta de seqs y la identidad persistente `(origin, ts, seq)`) y no se procesa como dato nuevo. Por eso el control de frescura **no aplica a las tramas de datos** — y no debe aplicar: el protocolo está diseñado para que una TELEMETRY llegue tarde legítimamente (espera de `beacon_timeout_ms`, reselección de padre, reintentos, custodia NB-IoT asíncrona). Una ventana de frescura sobre TELEMETRY descartaría datos buenos o sería tan ancha que no protegería.
+
+Donde el replay sí hace daño es en las tramas de **control**, cuyo efecto no pasa por la deduplicación: un BEACON viejo desincroniza relojes y confunde la selección de padre; un WELCOME viejo entrega una hora pasada; un ACK de una sesión anterior podría liberar de la cola una trama actual que casualmente reutilice el mismo `seq`. Estas tramas, a diferencia de la telemetría, son de usar y tirar: viajan y mueren en segundos, así que una ventana estrecha no rechaza nada legítimo.
+
+**Regla**: el receptor descarta (con log) una trama de tipo **ACK (`0x01`), WELCOME (`0x05`), BEACON (`0x10`) o SN_OFFER (`0x12`)** si `|reloj_propio − sec_ts| > kSecFreshnessWindow`. Constante de firmware, no de config: **300 s** recomendados (cubre con margen holgado los segundos de vida real de estas tramas más la deriva del oscilador entre beacons).
+
+El control se **omite** cuando falta cualquiera de las dos horas: si el reloj propio del receptor no está sincronizado, o si `sec_ts < 0x40000000` (salt de emisor sin hora, §14.4). Riesgo residual aceptado y documentado: (a) un receptor sin hora no puede validar frescura — es la ventana entre el boot y el primer beacon/WELCOME; (b) tramas de control emitidas por un gateway sin hora (arranque sin NTP) viajan con salt y quedan exentas — ventana de exposición igual de corta. En ambos casos el atacante sigue sin poder **fabricar** tramas; solo reemitir, y solo durante esas ventanas.
+
+### 14.6 Validación en recepción (complemento a §10)
+
+Con `security.enabled == true`, el receptor inserta estos pasos en el orden de §10:
+
+1. La regla 3 de §10 se sustituye por la igualdad de §14.2: `total_length != payload_length + 21` descarta.
+2. Tras validar el CRC (regla 4) y antes de interpretar el `frame_type` (regla 7): reconstruir nonce y AAD, verificar MIC y descifrar. MIC inválido: **descarte silencioso con log**, jamás se responde ACK de error (no dar oráculo a un atacante).
+3. Control de frescura de §14.5 para los cuatro tipos de control, tras descifrar.
+
+Los relays ejecutan el paso 2 (verifican MIC y descifran, necesario para re-cifrar el salto siguiente, §14.2) pero quedan exentos del paso 3: la frescura la valida solo el **consumidor** de la trama de control.
+
+### 14.7 Gestión de claves
+
+La clave viaja en `transport.lora.security.key` (`node-config.md` §4.5): 32 caracteres hex = 128 bits, generada aleatoriamente por despliegue (nunca una frase ni un patrón). En la fase 1 del comisionamiento va embebida en el binario como el resto del config; nota de honestidad: quien extraiga la flash de un nodo obtiene la clave (el cifrado de flash del ESP32 y el almacenamiento en NVS quedan fuera del alcance de esta versión). En el gateway la clave vive en la configuración del servicio del Pi — el Heltec no la conoce (§12.1). La rotación de claves y el aprovisionamiento por aire conectan con el proceso de registro (§13), como ya preveía §11; fuera del alcance de v2.2.
+
+## 15. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -660,7 +759,14 @@ Resumen para trazabilidad del TFM:
 4. Replanteo del `seq`: contador efímero de enlace, nace en 1 en cada boot; la identidad persistente del dato pasa a ser `(origin, ts, seq)` (§2.6). Desaparecen la persistencia de contadores y la tabla de último seq por origen.
 5. La hora de red LTE por `AT+CCLK?` (NITZ) queda eliminada; jerarquía de fuentes de hora en §13.4.
 
-## 15. Documentos relacionados
+**Cambios de v2.1 a v2.2 (11-jul-2026)**:
+
+1. Seguridad de la interfaz aire (§14): AES-CCM extremo a extremo entre nodos y Pi, con una clave de red de 128 bits. Payload cifrado, cabecera en claro y autenticada (AAD), MIC de 4 bytes. Sobre de +8 B por trama (`sec_ts` + MIC).
+2. Activación por configuración a nivel de red (`transport.lora.security`, `node-config.md` §4.5), sin flag en el aire (anti-downgrade).
+3. Anti-replay por control de frescura sobre `sec_ts`, solo para tramas de control (ACK, WELCOME, BEACON, SN_OFFER); las tramas de datos quedan cubiertas por la deduplicación de §2.6.
+4. Con `security.enabled == false` la trama es idéntica a v2.1 salvo el byte de versión (`0x22`).
+
+## 16. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del batch NB-IoT que reempaqueta las tramas no confirmadas, propias o en custodia.

@@ -13,10 +13,12 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "2.1"
+"schema_version": "2.2"
 ```
 
 > **Nota v2.1 (10-jul-2026)**: el bump acompaña al de la trama LoRa (`frame-format.md` §1.2, byte `0x21`), con la que este string se corresponde uno a uno. La estructura del JSON **no cambia** en 2.1; lo nuevo es comportamiento: registro del nodo en la red (NODE_REGISTER / WELCOME), `ts` de captura en TELEMETRY y `boot_id` en el batch. Los ejemplos de este documento conservan `"2.0"` donde son históricos.
+
+> **Nota v2.2 (11-jul-2026)**: añade el sub-bloque **opcional** `transport.lora.security` (§4.5), que activa el cifrado y la autenticación de la interfaz aire (`frame-format.md` §14). Al ser opcional (ausente = desactivado), el bump es de minor: un config 2.1 sigue validando.
 
 Reglas de compatibilidad:
 
@@ -199,6 +201,27 @@ Resumen del comportamiento que rige cómo los campos de §4.1, §4.2 y §4.3 int
 
 - Si `lora.ack_enabled == false`, no hay ACKs. El supernodo no puede saber qué se perdió, así que el respaldo automático **nunca se activa**. NB-IoT solo se puede disparar entonces por comando externo explícito (ver `commands-format.md`).
 - Si el supernodo se queda sin tramas pendientes (cola vacía) y aún así se le ordena enviar por NB-IoT vía comando, el batch va vacío salvo por los metadatos (útil como ping de prueba).
+
+### 4.5 Sub-bloque `security` (opcional, v2.2)
+
+Activa la seguridad de la interfaz aire: cifrado AES-CCM del payload y autenticación de toda trama, extremo a extremo entre el nodo y el Pi del gateway. La especificación completa (formato de trama, nonce, anti-replay) vive en `frame-format.md` §14; este bloque solo la gobierna.
+
+```json
+"lora": {
+  "...": "resto de campos de §4.1",
+  "security": {
+    "enabled": true,
+    "key":     "3F2A9C8D1E4B76F0A5D8C3B2E1F09876"
+  }
+}
+```
+
+| Campo | Tipo | Valores válidos | Notas |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true`, `false` | Si `true`, toda trama emitida viaja cifrada y autenticada, y toda trama recibida sin MIC válido se descarta. **Ajuste de toda la red**: debe coincidir en todos los dispositivos del despliegue, gateway (Pi) incluido — como `network_id`. No existe modo mixto ni flag en el aire (decisión anti-downgrade, `frame-format.md` §14.1). |
+| `key` | string | 32 caracteres hex (128 bits) | Clave de red compartida. Generar **aleatoriamente** por despliegue (p. ej. `openssl rand -hex 16`), nunca una frase ni un patrón. Debe coincidir en todos los dispositivos y en la configuración del servicio del Pi. El Heltec no la conoce. Obligatoria si `enabled == true`; con `enabled == false` puede omitirse. |
+
+Bloque ausente = `enabled: false` (interfaz en claro, comportamiento idéntico a v2.1). El sobrecoste con seguridad activa es de +8 bytes por trama; el payload máximo de TELEMETRY baja en la misma medida (`frame-format.md` §14.2).
 
 ## 5. Bloque `modbus`
 
@@ -586,6 +609,7 @@ El firmware (y la futura herramienta CLI) deben rechazar un `config.json` que vi
 12. `count` coherente con el tamaño de `type` cuando este ocupa más de un registro.
 13. `send_interval_ms` de LoRa respeta los límites de duty cycle de su `region`.
 14. Los campos `lora.ack_enabled`, `lora.ack_timeout_ms` y `lora.max_retries` son obligatorios en todo dispositivo. Los campos `failover_*`, `relay_enabled` y `relay_queue_max` de `nbiot` son obligatorios cuando el bloque `nbiot` está presente. Si `lora.ack_enabled == false`, el firmware advierte por log que el respaldo NB-IoT solo podrá activarse por comando explícito y que la reselección de padre por fallo de entrega queda inoperativa.
+15. Si `lora.security` está presente con `enabled == true`, el campo `key` es obligatorio y debe ser exactamente 32 caracteres hexadecimales (mayúsculas o minúsculas). Una `key` malformada o ausente detiene el arranque, como cualquier otra violación del schema. Con `enabled == false` o bloque ausente, `key` se ignora si aparece.
 15. El campo `byte_order` es obligatorio cuando `type ∈ {uint32, int32, float32}` y debe ser uno de `"ABCD"`, `"BADC"`, `"CDAB"`, `"DCBA"`. Su presencia con `type ∈ {uint16, int16}` o sobre coils/discrete inputs hace el JSON inválido.
 
 ## 8. Documentos relacionados

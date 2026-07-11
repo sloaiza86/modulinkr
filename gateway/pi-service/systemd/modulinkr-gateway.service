@@ -24,6 +24,12 @@ ExecStart=/home/practica/modbus-test/bin/python3 /home/practica/pi-service/gatew
 # Environment=MODULINKR_DB=/home/practica/modulinkr_buffer.db
 # Environment=MODULINKR_BUFFER_MAX=1000
 
+# Seguridad de la interfaz aire (v2.2, frame-format.md §14). La clave DEBE
+# coincidir con security.key del config de todos los nodos, y el venv
+# necesita el paquete `cryptography` (pip install cryptography).
+Environment=MODULINKR_SEC_ENABLED=1
+Environment=MODULINKR_SEC_KEY=5A4EFF35533E51AF54C00C46C530FABE
+
 Restart=always
 RestartSec=2
 

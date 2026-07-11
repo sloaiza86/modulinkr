@@ -28,6 +28,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <mbedtls/ccm.h>
 #include "rak3172_p2p.hpp"
 #include "protocol.h"
 
@@ -42,7 +43,9 @@ public:
         INVALID_ARGS,
     };
 
-    // Trama entrante ya validada (longitud, CRC, schema major, network_id).
+    // Trama entrante ya validada (longitud, CRC, schema major, network_id;
+    // con security ON, además MIC verificado, payload DESCIFRADO y frescura
+    // de tramas de control comprobada, frame-format.md §14.6).
     struct RxFrame {
         uint8_t  network_id;
         uint8_t  hop_src;
@@ -54,6 +57,8 @@ public:
         uint8_t  ttl;
         uint8_t  payload_length;
         uint8_t  payload[protocol::kMaxPayload];
+        uint32_t sec_ts;   // sobre v2.2; 0 con security OFF. Necesario para
+                           // re-cifrar en relay/eco con el nonce correcto.
         int16_t  rssi;
         int8_t   snr;
     };
@@ -82,6 +87,14 @@ public:
                uint8_t ttl);
 
     bool isReady() const { return initialized_; }
+
+    // Seguridad de la interfaz aire (v2.2, frame-format.md §14). Llamar
+    // tras begin() con los valores del config. Con enabled == true toda
+    // trama emitida viaja cifrada y autenticada (AES-CCM, MIC de 4 B) y
+    // toda trama recibida sin sobre válido se descarta. Ajuste de TODA la
+    // red: sin modo mixto.
+    void setSecurity(bool enabled, const uint8_t key[protocol::kKeyBytes]);
+    bool securityEnabled() const { return sec_enabled_; }
 
     // Versión de firmware RUI3 del RAK3172, leída en begin() con AT+VER=?.
     // Sirve para saber si el modulo soporta CAD/LBT en P2P (AT+CAD existe
@@ -112,16 +125,20 @@ public:
 
     // Reenvía una trama ajena (relay, spec §2.3 y §2.4): reescribe
     // hop_src con el id propio, hop_dst con el salto indicado, decrementa
-    // ttl y recalcula el CRC. El resto viaja intacto extremo a extremo.
-    // Devuelve INVALID_ARGS si el ttl ya está agotado.
+    // ttl y recalcula el CRC. Los campos inmutables y el payload viajan
+    // intactos extremo a extremo; con security ON el payload se RE-CIFRA
+    // con el nonce de este salto (hop_src propio + sec_ts original, spec
+    // §14.2). Devuelve INVALID_ARGS si el ttl ya está agotado.
     Status forwardFrame(const RxFrame& f, uint8_t new_hop_dst);
 
     // Re-emite un beacon del gateway (spec §7.3): mismo seq y origen
     // gateway, hop_src propio, hop_count y padre propios en el payload,
     // ttl ya decrementado por el llamante y el epoch ORIGINAL del gateway
-    // (v2.1, §7.2: el re-emisor no lo reescribe).
+    // (v2.1, §7.2: el re-emisor no lo reescribe). sec_ts: el del beacon
+    // original (v2.2; ignorado con security OFF).
     Status sendBeaconEcho(uint16_t beacon_seq, uint8_t own_hop,
-                          uint8_t own_parent, uint8_t ttl, uint32_t epoch);
+                          uint8_t own_parent, uint8_t ttl, uint32_t epoch,
+                          uint32_t sec_ts);
 
     // Registro del nodo (v2.1, spec §13.2): un fragmento del catálogo
     // hacia el gateway vía el padre. seq fijo a 0 (fuera de la dedup de
@@ -164,6 +181,8 @@ public:
     uint32_t rxValid() const { return rx_valid_; }
     uint32_t rxDiscarded() const { return rx_discarded_; }
     uint32_t txErrors() const { return tx_errors_; }  // errores asíncronos del módulo
+    uint32_t rxMicFail() const { return rx_mic_fail_; }  // MIC inválido (v2.2)
+    uint32_t rxStale() const { return rx_stale_; }       // control fuera de frescura (v2.2)
 
     static const char* statusToString(Status s);
 
@@ -214,8 +233,40 @@ private:
     uint32_t rx_valid_     = 0;
     uint32_t rx_discarded_ = 0;
     uint32_t tx_errors_    = 0;
+    uint32_t rx_mic_fail_  = 0;   // sobres con MIC inválido (v2.2)
+    uint32_t rx_stale_     = 0;   // control fuera de la ventana de frescura (v2.2)
 
-    // Serializa cabecera v2.0 + payload + CRC y emite.
+    // ----- Seguridad v2.2 (frame-format.md §14) -----
+    bool                sec_enabled_ = false;
+    uint8_t             sec_key_[protocol::kKeyBytes] = {0};
+    mbedtls_ccm_context ccm_;
+    bool                ccm_ready_ = false;
+
+    // Salt de sesión para sec_ts sin hora (spec §14.4): aleatorio en
+    // [1, kSecSaltMax), generado perezosamente y regenerado si el seq
+    // propio envuelve sin haber sincronizado nunca.
+    uint32_t sec_salt_       = 0;
+    uint16_t sec_last_seq_   = 0;   // último seq propio visto sin hora
+    bool     sec_seq_seen_   = false;
+
+    // sec_ts para tramas PROPIAS: epoch si hay hora, salt si no (§14.4).
+    uint32_t ownSecTs(uint16_t seq);
+
+    // Nonce CCM de 13 B a partir de la cabecera ya serializada + sec_ts
+    // (spec §14.3: network, origin, dest, type, seq, sec_ts, hop_src).
+    static void buildNonce(uint8_t nonce[protocol::kNonceBytes],
+                           const uint8_t* hdr, uint32_t sec_ts);
+
+    // AAD de 15 B: cabecera con los campos mutables por salto a cero
+    // (hop_src, hop_dst, ttl) + sec_ts (spec §14.3).
+    static void buildAad(uint8_t aad[protocol::kHeaderBytes + protocol::kSecTsBytes],
+                         const uint8_t* hdr, uint32_t sec_ts);
+
+    // Serializa cabecera + payload + CRC y emite. Con security ON inserta
+    // el sobre (sec_ts + MIC) y cifra el payload (spec §14.2); sec_ts es
+    // el del sobre: el de esta transmisión en tramas propias (versión de
+    // 8 args, que lo calcula con ownSecTs) o el ORIGINAL en relay y eco
+    // de beacon (versión de 9 args).
     Status buildAndSend(uint8_t hop_dst,
                         uint8_t origin_id,
                         uint8_t dest_id,
@@ -224,6 +275,15 @@ private:
                         uint8_t ttl,
                         const uint8_t* payload,
                         uint8_t payload_length);
+    Status buildAndSend(uint8_t hop_dst,
+                        uint8_t origin_id,
+                        uint8_t dest_id,
+                        uint16_t seq,
+                        uint8_t frame_type,
+                        uint8_t ttl,
+                        const uint8_t* payload,
+                        uint8_t payload_length,
+                        uint32_t sec_ts);
 
     // Emite AT+PSEND=<hex> sin bloquear (no espera el OK del módulo).
     // sendRaw guarda la trama para el reintento rápido de CAD; writePsend

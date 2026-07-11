@@ -102,6 +102,12 @@ struct Config {
     uint32_t ack_timeout_ms   = 3000;
     uint8_t  max_retries      = 2;
 
+    // transport.lora.security (v2.2, opcional; ausente = desactivado).
+    // Ajuste de TODA la red: debe coincidir en cada dispositivo y en el
+    // Pi del gateway (node-config.md §4.5, frame-format.md §14).
+    bool     security_enabled = false;
+    uint8_t  security_key[16] = {0};
+
     // transport.mesh
     bool     relay_enabled        = true;
     uint8_t  max_ttl              = 4;
