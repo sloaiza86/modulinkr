@@ -10,10 +10,9 @@
 namespace {
 constexpr const char* kTag = "[nbsvc]";
 
-// Log AT verboso (v2.3, depuración del handshake TLS del SIM7028). Vuelca
-// cada comando AT y su respuesta con prefijo "[at] >>" / "[at] <<". Se
-// dejó en false tras validar el MQTTS en banco (cert RSA, 11-jul-2026);
-// poner a true para volver a depurar el módem.
+// Log AT verboso (v2.3). Vuelca cada comando AT y su respuesta con prefijo
+// "[at] >>" / "[at] <<". Se apagó tras validar el NTP por NB-IoT en banco
+// (11-jul-2026); poner a true para volver a depurar el módem.
 constexpr bool kAtVerbose = false;
 }
 

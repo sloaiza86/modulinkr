@@ -116,9 +116,9 @@ public:
     // 0 si falló. Bloqueante (hasta ~15 s); llamar solo desde la tarea
     // del servicio NB-IoT, nunca desde el loop.
     //
-    // POR VALIDAR EN BANCO: usa AT+CSNTPSTART/+CSNTPSTOP (familia SIMCom
-    // NB-IoT); hay que confirmarlo contra el manual AT del SIM7028. Si el
-    // módulo no soporta el comando, falla limpio y devuelve 0.
+    // Usa AT+CNTP (SIM7028 §8.2.1). POR VALIDAR EN BANCO el <cid> correcto
+    // (0 ó 1, según el contexto de datos activo); si el módulo no resuelve,
+    // falla limpio y devuelve 0 (el batch sale sin hora, con boot_id).
     uint32_t ntpSync(const char* server = "pool.ntp.org");
 
     bool sendAT(const char* cmd,

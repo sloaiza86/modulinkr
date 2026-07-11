@@ -427,7 +427,10 @@ uint32_t Nbiot::readClock() {
     const String r = readResponse(2000, "OK");
     last_response_ = r;
 
-    // Formato SIM7028: +CCLK: "yy/MM/dd,hh:mm:ss±zz"
+    // Formato del RTC: +CCLK: "<año>/MM/dd,hh:mm:ss±zz". OJO: el SIM7028
+    // devuelve el AÑO CON 4 DÍGITOS ("2026/07/11,...", observado en banco
+    // 11-jul-2026 tras sincronizar por NTP), no con 2 como la familia
+    // SIM7000. Se parsea el año con %d (2 ó 4 dígitos) y se normaliza.
     // zz = desfase de la hora local en cuartos de hora respecto a UTC.
     const int pos = r.indexOf("+CCLK:");
     if (pos < 0) return 0;
@@ -438,14 +441,15 @@ uint32_t Nbiot::readClock() {
 
     int yy, mo, dd, hh, mi, ss, tz;
     char sign;
-    if (sscanf(ts.c_str(), "%2d/%2d/%2d,%2d:%2d:%2d%c%2d",
+    if (sscanf(ts.c_str(), "%d/%2d/%2d,%2d:%2d:%2d%c%2d",
                &yy, &mo, &dd, &hh, &mi, &ss, &sign, &tz) != 8) {
         return 0;
     }
 
-    // Antes del primer attach el módulo reporta 80/01/06 (época GSM):
-    // cualquier año fuera de 2020-2079 se trata como hora no válida.
-    const int year = 2000 + yy;
+    // Año en 2 dígitos (yy, p.ej. 26) o 4 dígitos (p.ej. 2026). Antes del
+    // primer attach el módulo reporta la época GSM (año 80 / 1980): cualquier
+    // año fuera de 2020-2079 se trata como hora no válida.
+    const int year = (yy < 100) ? (2000 + yy) : yy;
     if (year < 2020 || year > 2079 || mo < 1 || mo > 12 || dd < 1 || dd > 31) {
         return 0;
     }
@@ -469,21 +473,34 @@ uint32_t Nbiot::readClock() {
 uint32_t Nbiot::ntpSync(const char* server) {
     if (uart_ == nullptr) return 0;
 
-    // Consulta NTP por la sesión de datos (POR VALIDAR contra el manual
-    // AT del SIM7028; si no soporta CSNTPSTART, sendAT falla y salimos).
+    // SIM7028: la actualización de hora por NTP es AT+CNTP (§8.2.1 del
+    // manual AT). NO es CSNTPSTART (familia SIM7500/7600, da ERROR aquí).
+    // El test command en banco (11-jul-2026, AT+CNTP=? -> +CNTP: "HOST",
+    // (-96~96)) confirmó que ESTE firmware SOLO acepta DOS parámetros:
+    //   AT+CNTP=<server>,<time_zone>
+    //     time_zone en cuartos de hora (-96..96); 0 = UTC.
+    // No hay <cid> ni <mode> (usa el contexto de datos por defecto): las
+    // formas de 4 parámetros de otros SIMCom (SIM7080) dan ERROR.
     char cmd[80];
-    snprintf(cmd, sizeof(cmd), "AT+CSNTPSTART=\"%s\"", server);
+    snprintf(cmd, sizeof(cmd), "AT+CNTP=\"%s\",0", server);
     if (!sendAT(cmd, "OK", 5000)) {
-        return 0;
+        return 0;  // configuración rechazada (ver last_response_)
     }
 
-    // El módulo emite una URC (+CSNTP) al completar la sincronización;
-    // espera acotada y silenciosa (si no llega, readClock decide).
-    readResponse(10000, "+CSNTP");
-    sendAT("AT+CSNTPSTOP", "OK", 3000);
+    // Ejecuta la sincronización: emite la URC +CNTP: <r>[,<time>] (r=1 OK).
+    // Puede tardar segundos en contactar el servidor NTP.
+    if (verbose_) Serial.println("[at] >> AT+CNTP");
+    drain(*uart_);
+    uart_->println("AT+CNTP");
+    String r = readResponse(20000, "+CNTP:");
+    last_response_ = r;
+    if (verbose_) {
+        String t = r; t.trim();
+        Serial.printf("[at] << %s\n", t.c_str());
+    }
 
-    // Si el NTP tuvo éxito, dejó el RTC del módulo en hora real y CCLK
-    // ya no devuelve la época GSM.
+    // Tras una sincronización correcta el RTC del módem tiene la hora real
+    // y CCLK? ya no devuelve la época GSM.
     return readClock();
 }
 
