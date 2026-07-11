@@ -286,6 +286,11 @@ bool load(Config& c, char* err, size_t err_len) {
     if (c.parent_missed_frames < 1) return fail(err, err_len, "mesh.parent_missed_frames < 1");
     c.sn_offer_wait_ms     = mesh["sn_offer_wait_ms"].as<uint32_t>();
     if (c.sn_offer_wait_ms < 200) return fail(err, err_len, "mesh.sn_offer_wait_ms < 200");
+    // gateway_wait_ms (v2.3, opcional; default 90000). Tiempo sin registro
+    // tras el cual el nodo arranca en modo autónomo (super_node) o busca
+    // hora en un supernodo (nodo normal).
+    c.gateway_wait_ms      = mesh["gateway_wait_ms"] | 90000UL;
+    if (c.gateway_wait_ms < 1000) return fail(err, err_len, "mesh.gateway_wait_ms < 1000");
 
     // ----- transport.nbiot (reglas 4 y 5) -----
     JsonObjectConst nb = doc["transport"]["nbiot"];

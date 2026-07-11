@@ -363,9 +363,17 @@ LoraP2P::Status LoraP2P::sendSnRequest(uint16_t seq, uint8_t queued) {
 }
 
 LoraP2P::Status LoraP2P::sendSnOffer(uint8_t requester, uint16_t seq,
-                                     uint8_t quality, uint8_t queue_space) {
+                                     uint8_t quality, uint8_t queue_space,
+                                     uint32_t epoch) {
     if (!initialized_) return Status::NOT_INITIALIZED;
-    const uint8_t payload[2] = {quality, queue_space};
+    // v2.3: payload de 6 B = quality, space, epoch (4 B LE).
+    const uint8_t payload[6] = {
+        quality, queue_space,
+        static_cast<uint8_t>(epoch & 0xFF),
+        static_cast<uint8_t>((epoch >> 8) & 0xFF),
+        static_cast<uint8_t>((epoch >> 16) & 0xFF),
+        static_cast<uint8_t>((epoch >> 24) & 0xFF),
+    };
     return buildAndSend(requester, node_id_, requester, seq,
                         protocol::kFrameSnOffer, /*ttl=*/1,
                         payload, sizeof(payload));

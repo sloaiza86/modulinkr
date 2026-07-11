@@ -129,6 +129,11 @@ struct Config {
     uint8_t  parent_hysteresis_db = 6;
     uint8_t  parent_missed_frames = 3;
     uint32_t sn_offer_wait_ms     = 1000;
+    // v2.3: tiempo desde el boot sin registrarse en la red LoRa tras el cual
+    // el nodo actúa por su cuenta. Supernodo: muestrea y saca por NB-IoT.
+    // Nodo normal: busca un supernodo para obtener la hora y luego reporta
+    // por custodia. Opcional; default 90 s.
+    uint32_t gateway_wait_ms      = 90000;
 
     // transport.nbiot (solo super_node)
     char     apn[33]      = {0};

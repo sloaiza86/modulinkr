@@ -162,8 +162,11 @@ public:
     // Oferta de salida celular, respuesta unicast a un SN_REQUEST.
     //   quality      CSQ crudo 0-31, 0xFF desconocida.
     //   queue_space  muestras que se pueden aceptar (saturando a 255).
+    //   epoch        hora UTC del supernodo (v2.3, 4 B LE); 0 si aún no la
+    //                tiene. El nodo huérfano la usa para sincronizar su
+    //                reloj sin gateway (payload SN_OFFER pasa de 2 a 6 B).
     Status sendSnOffer(uint8_t requester, uint16_t seq,
-                       uint8_t quality, uint8_t queue_space);
+                       uint8_t quality, uint8_t queue_space, uint32_t epoch);
 
     // ACK emitido por este nodo como receptor final (supernodo que acepta
     // custodia). own_seq es el contador de tramas propio del emisor.

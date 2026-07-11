@@ -442,17 +442,20 @@ Responde un supernodo que cumpla las tres condiciones: NB-IoT registrado en red,
 | `seq` | contador uplink del supernodo |
 | `ttl` | `1` |
 
-Payload (2 bytes):
+Payload (6 bytes, v2.3; antes 2 bytes):
 
 ```
-quality       queue_space
-(1 B)         (1 B)
+quality       queue_space   epoch
+(1 B)         (1 B)         (4 B, uint32 LE)
 ```
 
 | Campo | Contenido |
 | --- | --- |
 | `quality` | Calidad del enlace celular: CSQ crudo 0-31, `0xFF` = desconocido. |
 | `queue_space` | Muestras que el supernodo puede aceptar (saturando a 255). |
+| `epoch` | **(v2.3)** Hora UTC del supernodo en epoch Unix (segundos), o `0` si aún no la tiene. Un nodo huérfano sin gateway la usa para sincronizar su reloj antes de reportar (así sus muestras llevan `ts` real). El supernodo la obtiene por NTP sobre NB-IoT (ver `node-config.md` §4.3). |
+
+> **Nota v2.3**: la ampliación de 2 a 6 B es interna a la malla (SN_OFFER nunca lo procesa el gateway), por lo que **no** cambia el byte de versión de la trama. El receptor tolera ambos tamaños: 2 B (sin hora) o 6 B (con `epoch`). Todo el despliegue se flashea a la vez, así que en la práctica todos hablan 6 B.
 
 ### 8.3 Entrega en custodia
 
@@ -501,7 +504,7 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
 7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
-8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST / SN_OFFER con `payload_length != 2`, HEARTBEAT con `payload_length != 0`, NODE_REGISTER con payload menor que el mínimo de §13.2).
+8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length != 0`, NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
 10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 4` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
 

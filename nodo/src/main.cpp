@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.22-v23-ntp";
+constexpr const char* kFirmwareVersion = "0.0.23-v23-node-timesync";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -276,11 +276,12 @@ void printBanner() {
                    g_cfg.network_id,
                    static_cast<unsigned long>(g_cfg.ack_timeout_ms),
                    g_cfg.max_retries, g_cfg.max_ttl);
-    Serial.printf ("  Mesh  : beacon_timeout=%lu ms  min_rssi=%d dBm  hyst=%u dB  missed=%u  relay=%s\n",
+    Serial.printf ("  Mesh  : beacon_timeout=%lu ms  min_rssi=%d dBm  hyst=%u dB  missed=%u  relay=%s  gw_wait=%lu ms\n",
                    static_cast<unsigned long>(g_cfg.beacon_timeout_ms),
                    static_cast<int>(g_cfg.parent_min_rssi),
                    g_cfg.parent_hysteresis_db, g_cfg.parent_missed_frames,
-                   g_cfg.relay_enabled ? "on" : "off");
+                   g_cfg.relay_enabled ? "on" : "off",
+                   static_cast<unsigned long>(g_cfg.gateway_wait_ms));
 
     // Catálogo Modbus del config: dispositivos y lecturas.
     Serial.printf ("  Modbus: %u dispositivo(s), %u lectura(s) total\n",
@@ -325,23 +326,31 @@ void fireLora() {
     // cae el padre, se sigue muestreando (las muestras van a la outbox y
     // salen por NB-IoT o custodia).
     if (!g_sampling_started) {
+        const bool timed_out = millis() >= g_cfg.gateway_wait_ms;
         if (g_registered) {
             g_sampling_started = true;
             Serial.println(F("[sampler] registro completo: muestreo Modbus habilitado"));
-        } else if (g_cfg.super_node && millis() >= g_cfg.beacon_timeout_ms) {
-            // Supernodo aislado (v2.3): si tras beacon_timeout_ms del boot no
+        } else if (timed_out && g_cfg.super_node) {
+            // Supernodo aislado (v2.3): si tras gateway_wait_ms del boot no
             // hubo registro, se asume que no hay gateway y se arranca igual.
             // Las muestras no salen por LoRa (sin WELCOME quedan en la outbox)
             // y las publica su propio NB-IoT como failover. Si más tarde
             // aparece el gateway y se registra, la telemetría LoRa se reanuda.
             g_sampling_started = true;
             Serial.println(F("[sampler] sin gateway tras timeout: muestreo autonomo (NB-IoT)"));
+        } else if (timed_out && !g_cfg.super_node && nodeclock::synced()) {
+            // Nodo normal sin gateway (v2.3): obtuvo la hora de un supernodo
+            // vía SN_OFFER. Ya puede muestrear con ts real y entregar por
+            // custodia. Sin hora todavía, sigue esperando (política estricta:
+            // no reporta hasta tener timestamp).
+            g_sampling_started = true;
+            Serial.println(F("[sampler] hora obtenida de supernodo: muestreo (custodia NB-IoT)"));
         } else {
             static uint32_t last_wait_log_ms = 0;
             const uint32_t now = millis();
             if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
                 last_wait_log_ms = now;
-                Serial.println(F("[sampler] esperando registro (WELCOME) para muestrear"));
+                Serial.println(F("[sampler] esperando gateway/hora para muestrear"));
             }
             return;
         }
@@ -677,12 +686,28 @@ void handleSnRequest(const LoraP2P::RxFrame& f) {
 // búsqueda. Se queda con la mejor calidad (desempate por RSSI).
 void handleSnOffer(const LoraP2P::RxFrame& f) {
     if (g_sn_state != SnState::WAIT_OFFERS) return;
-    if (f.dest_id != g_cfg.node_id || f.payload_length != 2) return;
+    // v2.3: la oferta puede traer 2 B (legado) o 6 B (con epoch del supernodo).
+    if (f.dest_id != g_cfg.node_id ||
+        (f.payload_length != 2 && f.payload_length != 6)) return;
 
     const uint8_t quality = f.payload[0];  // CSQ crudo, 0xFF desconocida
     const uint8_t space   = f.payload[1];
-    Serial.printf("[sn]     oferta de id=%u quality=%u space=%u rssi=%d\n",
-                  f.origin_id, quality, space, static_cast<int>(f.rssi));
+
+    // Hora del supernodo: si viene (payload de 6 B) y este nodo aún no tiene
+    // reloj, se sincroniza. Es la vía para fechar muestras sin gateway.
+    uint32_t sn_epoch = 0;
+    if (f.payload_length == 6) {
+        memcpy(&sn_epoch, &f.payload[2], sizeof(sn_epoch));
+        if (sn_epoch != 0 && !nodeclock::synced()) {
+            nodeclock::sync(sn_epoch);
+            Serial.printf("[clock]  hora por supernodo id=%u: epoch=%lu\n",
+                          f.origin_id, static_cast<unsigned long>(sn_epoch));
+        }
+    }
+
+    Serial.printf("[sn]     oferta de id=%u quality=%u space=%u epoch=%lu rssi=%d\n",
+                  f.origin_id, quality, space,
+                  static_cast<unsigned long>(sn_epoch), static_cast<int>(f.rssi));
     if (space == 0) return;
 
     const uint8_t q_known    = (quality == 0xFF) ? 0 : quality;
@@ -820,9 +845,17 @@ void processAckTimeouts() {
 void snClientTick(uint32_t now) {
     if (g_cfg.super_node) return;  // el supernodo no busca supernodos
 
+    // v2.3: un nodo huérfano busca supernodo tanto para ENTREGAR muestras
+    // (outbox) como para OBTENER LA HORA cuando no hay gateway (tras
+    // gateway_wait_ms sin sincronizar). Con la política estricta, no
+    // muestrea hasta tener hora, así que la búsqueda por hora precede a la
+    // de entrega.
+    const bool need_time = !nodeclock::synced() &&
+                           millis() >= g_cfg.gateway_wait_ms;
+
     switch (g_sn_state) {
         case SnState::IDLE:
-            if (!mesh.hasParent() && outbox.count() > 0 &&
+            if (!mesh.hasParent() && (outbox.count() > 0 || need_time) &&
                 now >= g_sn_next_req_ms) {
                 nextSeq();
                 const uint8_t queued = static_cast<uint8_t>(
@@ -831,19 +864,32 @@ void snClientTick(uint32_t now) {
                 g_sn_have_offer  = false;
                 g_sn_state       = SnState::WAIT_OFFERS;
                 g_sn_window_end_ms = now + g_cfg.sn_offer_wait_ms;
-                Serial.printf("[sn]     request emitido (queued=%u), ventana %lu ms\n",
-                              queued, static_cast<unsigned long>(g_cfg.sn_offer_wait_ms));
+                Serial.printf("[sn]     request emitido (queued=%u%s), ventana %lu ms\n",
+                              queued, need_time ? ", busca hora" : "",
+                              static_cast<unsigned long>(g_cfg.sn_offer_wait_ms));
             }
             break;
 
         case SnState::WAIT_OFFERS:
             if (now >= g_sn_window_end_ms) {
-                if (g_sn_have_offer) {
+                if (g_sn_have_offer && !need_time) {
+                    // Hay supernodo y ya tenemos hora (o teníamos muestras):
+                    // a entregar por custodia.
                     g_sn_state      = SnState::DELIVER;
                     g_sn_backoff_ms = kSnBackoffMinMs;
                     Serial.printf("[sn]     supernodo elegido id=%u (quality=%u)\n",
                                   g_sn_target, g_sn_best_quality);
+                } else if (g_sn_have_offer) {
+                    // Supernodo presente pero aún sin hora (epoch=0):
+                    // re-preguntar pronto (backoff al mínimo) hasta que su
+                    // NTP sincronice.
+                    g_sn_state       = SnState::IDLE;
+                    g_sn_backoff_ms  = kSnBackoffMinMs;
+                    g_sn_next_req_ms = now + g_sn_backoff_ms;
+                    Serial.printf("[sn]     supernodo id=%u aun sin hora, reintento en %lu ms\n",
+                                  g_sn_target, static_cast<unsigned long>(g_sn_backoff_ms));
                 } else {
+                    // Sin ofertas: backoff creciente.
                     g_sn_state       = SnState::IDLE;
                     g_sn_next_req_ms = now + g_sn_backoff_ms;
                     Serial.printf("[sn]     sin ofertas, reintento en %lu ms\n",
@@ -908,11 +954,15 @@ void offerTick(uint32_t now) {
 
     const size_t space = outbox.space();
     nextSeq();
+    // v2.3: la oferta lleva el epoch NTP del supernodo (0 si aún no lo tiene)
+    // para que un nodo huérfano sincronice su reloj sin gateway.
+    const uint32_t epoch = nodeclock::epochNow();
     lora.sendSnOffer(g_offer_dest, g_lora_seq, nbsvc.csqRaw(),
-                     static_cast<uint8_t>(space > 255 ? 255 : space));
-    Serial.printf("[sn]     oferta enviada a id=%u (csq=%u space=%u)\n",
+                     static_cast<uint8_t>(space > 255 ? 255 : space), epoch);
+    Serial.printf("[sn]     oferta enviada a id=%u (csq=%u space=%u epoch=%lu)\n",
                   g_offer_dest, nbsvc.csqRaw(),
-                  static_cast<unsigned>(space > 255 ? 255 : space));
+                  static_cast<unsigned>(space > 255 ? 255 : space),
+                  static_cast<unsigned long>(epoch));
 }
 
 // Construcción y publicación del batch NB-IoT (batch-format.md v2.1).

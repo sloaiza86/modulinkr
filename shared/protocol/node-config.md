@@ -128,7 +128,8 @@ Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobie
   "parent_min_rssi":      -100,
   "parent_hysteresis_db": 6,
   "parent_missed_frames": 3,
-  "sn_offer_wait_ms":     1000
+  "sn_offer_wait_ms":     1000,
+  "gateway_wait_ms":      90000
 }
 ```
 
@@ -141,6 +142,7 @@ Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobie
 | `parent_hysteresis_db` | integer | `0`-`30` | Mejora mínima de RSSI para cambiar de padre a igualdad de `hop_count`. Evita oscilaciones entre padres equivalentes. |
 | `parent_missed_frames` | integer | `≥ 1` | Tramas consecutivas con reintentos agotados sin ACK que invalidan al padre actual y fuerzan reselección. |
 | `sn_offer_wait_ms` | integer | `≥ 200` | Ventana de escucha de ofertas tras emitir un SN_REQUEST (`frame-format.md` §8). |
+| `gateway_wait_ms` | integer | opcional (v2.3), default `90000`, `≥ 1000` | Tiempo desde el arranque sin registrarse en la red LoRa (sin WELCOME del gateway) tras el cual el nodo actúa por su cuenta. **Supernodo**: empieza a muestrear y saca sus datos por NB-IoT (failover autónomo). **Nodo normal**: busca un supernodo vecino, le pide la hora (viaja en el `SN_OFFER`, `frame-format.md` §8.2) y, una vez sincronizado, muestrea y entrega por custodia. Sin gateway ni hora de un supernodo, no reporta (política estricta: nada de timestamps nulos). |
 
 ### 4.3 Sub-bloque `nbiot`
 
