@@ -275,9 +275,8 @@ void printBanner() {
                    g_cfg.n_devices, g_cfg.total_reads);
     for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
         const cfg::DeviceDef& dev = g_cfg.devices[d];
-        Serial.printf("    [%s] slave=0x%02X poll=%lu ms reads=%u writes=%u mode=%s gap=%lu ms\n",
+        Serial.printf("    [%s] slave=0x%02X reads=%u writes=%u mode=%s gap=%lu ms\n",
                       dev.name, dev.slave_id,
-                      static_cast<unsigned long>(dev.poll_ms),
                       dev.n_reads, dev.n_writes,
                       dev.read_mode == cfg::ReadMode::INDIVIDUAL ? "individual" : "grouped",
                       static_cast<unsigned long>(dev.inter_read_ms));
@@ -330,7 +329,7 @@ void fireLora() {
     // Muestreo en la ventana callada: la radio lleva casi todo el ciclo
     // sin actividad, igual que el firmware previo leía el sensor justo
     // antes de transmitir (ver cabecera de sampler.h).
-    sampler.pollDue(millis());
+    sampler.pollDue();
 
     // Snapshot de todas las lecturas, en el orden global de reads[] (el
     // mismo del payload TELEMETRY, frame-format.md §3.1).

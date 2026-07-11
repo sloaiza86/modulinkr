@@ -46,8 +46,6 @@ void Sampler::begin(ModbusRTU* bus, const cfg::Config* config) {
         }
     }
 
-    // Primer sondeo inmediato de todos los dispositivos.
-    for (size_t i = 0; i < cfg::kMaxDevices; ++i) next_poll_ms_[i] = 0;
 }
 
 uint8_t Sampler::globalIndex(uint8_t d, uint8_t r) const {
@@ -157,17 +155,17 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
     return true;
 }
 
-void Sampler::pollDue(uint32_t now_ms) {
+void Sampler::pollDue() {
     if (bus_ == nullptr || cfg_ == nullptr || n_groups_ == 0) return;
 
-    // Recorre los dispositivos con el intervalo vencido y lee TODOS sus
-    // grupos, uno tras otro. Bloqueante a propósito: se ejecuta en la
-    // ventana callada de radio (ver cabecera), igual que el firmware
-    // previo leía el sensor justo antes de transmitir.
+    // v2.3: un solo timer. Se leen TODOS los dispositivos en cada llamada
+    // (una vez por ciclo de send_interval_ms, ya que fireLora invoca esto
+    // justo antes de transmitir). Bloqueante a propósito: corre en la
+    // ventana callada de radio (ver cabecera), como el firmware previo
+    // leía el sensor justo antes de transmitir.
     bool first = true;
     for (uint8_t d = 0; d < cfg_->n_devices; ++d) {
         if (dev_group_count_[d] == 0) continue;
-        if (static_cast<int32_t>(now_ms - next_poll_ms_[d]) < 0) continue;
 
         for (uint8_t k = 0; k < dev_group_count_[d]; ++k) {
             // Respiro entre transacciones = inter_read_ms del dispositivo
@@ -176,7 +174,6 @@ void Sampler::pollDue(uint32_t now_ms) {
             first = false;
             readGroup(groups_[dev_group_start_[d] + k], millis());
         }
-        next_poll_ms_[d] = now_ms + cfg_->devices[d].poll_ms;
     }
 }
 
@@ -188,9 +185,9 @@ bool Sampler::snapshot(float* out, uint8_t max_values, uint8_t& n_out,
     uint8_t idx = 0;
     for (uint8_t d = 0; d < cfg_->n_devices; ++d) {
         const cfg::DeviceDef& dev = cfg_->devices[d];
-        // Frescura exigida: 2 intervalos de poll del dispositivo (margen
-        // para el round-robin) mas un piso para dispositivos muy rápidos.
-        uint32_t max_age = dev.poll_ms * 2;
+        // Frescura exigida: 2 ciclos de envío (margen para un fallo Modbus
+        // puntual) mas un piso para envíos muy rápidos.
+        uint32_t max_age = cfg_->send_interval_ms * 2;
         if (max_age < 2000) max_age = 2000;
         for (uint8_t r = 0; r < dev.n_reads; ++r) {
             const Slot& s = slots_[idx];

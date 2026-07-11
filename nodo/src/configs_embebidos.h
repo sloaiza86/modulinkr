@@ -66,7 +66,6 @@ static const char kConfigJson[] = R"json({
           "default_slave_id": 1,
           "desired_slave_id": 1
         },
-        "poll_interval_ms": 5000,
         "reads": [
           { "id": "temp", "name": "temperature", "function": "read_input_registers",
             "address": 1, "type": "int16",  "scale": 0.1, "unit": "C" },
@@ -143,7 +142,6 @@ static const char kConfigJson[] = R"json({
           "default_slave_id": 80,
           "desired_slave_id": 80
         },
-        "poll_interval_ms": 1000,
         "reads": [
           { "id": "ax", "name": "accel_x", "function": "read_holding_registers",
             "address": 52, "type": "int16", "scale": 0.000488, "unit": "g" },

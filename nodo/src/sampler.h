@@ -1,7 +1,7 @@
 // ModuLinkr, motor de muestreo Modbus dirigido por el config.json
 //
 // Sustituye a la lectura cableada del XY-MD02: recorre los devices[] del
-// config, sondea cada uno a su poll_interval_ms y mantiene un snapshot
+// config, lee cada uno una vez por ciclo de envío y mantiene un snapshot
 // con el último valor de cada lectura ya convertido a unidad real (raw
 // por scale mas offset, edge computing, node-config.md §5.3).
 //
@@ -30,17 +30,19 @@
 // 10-jul-2026, errores clavados en los segundos del tx). Este es el orden
 // del firmware previo, probado limpio: leer, enviar, silencio.
 //
-// El poll_interval_ms de cada dispositivo actúa como FRENO: si es mayor
-// que el ciclo de envío, el dispositivo no se relee en cada ciclo y la
-// trama reutiliza su último valor. Muestrear más rápido que el ciclo de
-// envío no está soportado en este esquema (decisión del 10-jul-2026).
+// UN SOLO TIMER (v2.3): desaparece el poll_interval_ms por dispositivo.
+// Cada dispositivo se lee una vez por ciclo de send_interval_ms. Leer más
+// lento = subir send_interval_ms (baja lectura y envío a la vez, que es lo
+// que se quiere con un dispositivo por nodo). Muestrear más rápido que el
+// ciclo de envío no está soportado en este esquema (decisión del
+// 10-jul-2026; simplificación a un timer el 11-jul-2026).
 //
 // El snapshot conserva el ORDEN GLOBAL de reads[]: dispositivos en el
 // orden del array devices[] y, dentro de cada uno, sus reads[] en orden.
 // Ese mismo orden es el del payload TELEMETRY (frame-format.md §3.1).
 //
 // La trama solo se considera enviable cuando TODAS las lecturas tienen
-// valor y este no supera el doble de su poll_interval de antigüedad: una
+// valor y este no supera el doble del ciclo de envío de antigüedad: una
 // lectura rancia no se envía como si fuera actual.
 
 #pragma once
@@ -55,11 +57,12 @@ public:
     // Precalcula los grupos de lectura contiguos y programa los sondeos.
     void begin(ModbusRTU* bus, const cfg::Config* config);
 
-    // Sondea EN SECUENCIA todos los dispositivos cuyo intervalo venció.
-    // Bloqueante (una transacción tras otra, con kInterTxGapMs de respiro
-    // entre ellas): está pensado para llamarse desde fireLora en la
-    // ventana callada de radio, justo antes de transmitir.
-    void pollDue(uint32_t now_ms);
+    // Sondea EN SECUENCIA todos los dispositivos (v2.3: un solo timer, se
+    // leen todos en cada llamada). Bloqueante (una transacción tras otra,
+    // con inter_read_ms de respiro entre ellas): está pensado para llamarse
+    // desde fireLora en la ventana callada de radio, justo antes de
+    // transmitir. El nombre pollDue se conserva por compatibilidad.
+    void pollDue();
 
     // Copia el snapshot completo en el orden global de reads[]. Devuelve
     // false si alguna lectura falta o está rancia (la trama no debe salir).
@@ -105,8 +108,6 @@ private:
     uint8_t  n_groups_ = 0;
     uint8_t  dev_group_start_[cfg::kMaxDevices] = {0};
     uint8_t  dev_group_count_[cfg::kMaxDevices] = {0};
-
-    uint32_t next_poll_ms_[cfg::kMaxDevices] = {0};
 
     uint32_t ok_count_  = 0;
     uint32_t err_count_ = 0;

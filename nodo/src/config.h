@@ -86,7 +86,9 @@ struct WriteDef {
 struct DeviceDef {
     char      name[17]  = {0};
     uint8_t   slave_id  = 0;      // desired_slave_id del addressing
-    uint32_t  poll_ms   = 1000;
+    // v2.3: sin poll_interval_ms. La lectura Modbus va pegada al envío
+    // LoRa: cada dispositivo se lee una vez por ciclo de send_interval_ms
+    // (un solo timer). Leer más lento = subir send_interval_ms.
     ReadMode  read_mode = ReadMode::GROUPED;  // v2.3
     uint32_t  inter_read_ms = 250;            // v2.3, gap entre transacciones
     ReadDef   reads[kMaxReadsPerDev];

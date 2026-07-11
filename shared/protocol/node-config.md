@@ -20,7 +20,7 @@ Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con e
 
 > **Nota v2.2 (11-jul-2026)**: añade el sub-bloque **opcional** `transport.lora.security` (§4.5), que activa el cifrado y la autenticación de la interfaz aire (`frame-format.md` §14). Al ser opcional (ausente = desactivado), el bump es de minor: un config 2.1 sigue validando.
 
-> **Nota v2.3 (11-jul-2026)**: tres añadidos opcionales, todos hacia atrás (bump de minor). En `nbiot`: `mqtt_user` / `mqtt_pass` (autenticación MQTT) y soporte real de `tls=true` en el firmware (TLS 1.2 sin verificar certificado en el SIM7028). En `modbus.devices[]`: `read_mode` (`grouped`/`individual`) e `inter_read_ms` para controlar si las lecturas van agrupadas o una a una. Además el firmware ya admite funciones de lectura de bits (`read_coils` 0x01, `read_discrete_inputs` 0x02), no solo registros.
+> **Nota v2.3 (11-jul-2026)**: varios cambios. En `nbiot`: `mqtt_user` / `mqtt_pass` (autenticación MQTT) y soporte real de `tls=true` en el firmware (TLS 1.2 sin verificar certificado en el SIM7028; el broker debe usar cert **RSA**, el SIM7028 no negocia ECDSA). En `modbus.devices[]`: `read_mode` (`grouped`/`individual`) e `inter_read_ms` para controlar si las lecturas van agrupadas o una a una, y **se elimina `poll_interval_ms`** (un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`; para leer más lento se sube ese intervalo). Además el firmware ya admite funciones de lectura de bits (`read_coils` 0x01, `read_discrete_inputs` 0x02), no solo registros. La eliminación de `poll_interval_ms` es el único cambio no aditivo; como el firmware lo ignora si aparece, no rompe configs previos en la práctica.
 
 Reglas de compatibilidad:
 
@@ -256,7 +256,6 @@ Cada entrada del array describe un dispositivo industrial concreto: cómo direcc
   "name":             "amb",
   "description":      "XY-MD02 ambiente",
   "addressing":       { ... },
-  "poll_interval_ms": 1000,
   "reads":            [ ... ],
   "writes":           [ ... ]
 }
@@ -267,7 +266,7 @@ Cada entrada del array describe un dispositivo industrial concreto: cómo direcc
 | `name` | string | sí | Etiqueta corta para logs. 1-16 caracteres recomendado. |
 | `description` | string | no | Texto libre. |
 | `addressing` | object | sí | Direccionamiento del esclavo. Ver §5.2. |
-| `poll_interval_ms` | integer | sí | Periodo de polling para los `reads`. Debe ser `≥ 100`. |
+| ~~`poll_interval_ms`~~ | integer | **eliminado en v2.3** | Antes: periodo de polling por dispositivo. Desde v2.3 hay un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`. Si el campo aparece, el firmware lo ignora. Para leer más lento, subir `send_interval_ms`. |
 | `read_mode` | string | no (v2.3, default `"grouped"`) | `"grouped"`: las lecturas contiguas (misma función, direcciones consecutivas) se leen en UNA transacción Modbus. `"individual"`: cada lectura sale en su propia transacción. |
 | `inter_read_ms` | integer | no (v2.3, default `250`) | Respiro entre transacciones Modbus consecutivas del dispositivo, en ms (`0`-`5000`). En `individual` es el retardo entre cada lectura. |
 | `reads` | array | sí (puede ir vacío) | Lecturas periódicas. Ver §5.3. |
@@ -314,7 +313,7 @@ Comportamiento del firmware (cuando se implemente):
 
 ### 5.3 Array `reads[]`
 
-Cada entrada describe **una lectura periódica** que se ejecuta cada `poll_interval_ms` del dispositivo. El resultado se envía por LoRa (orden = índice del array; ver `frame-format.md`) y se acumula para batch NB-IoT (`batch-format.md`).
+Cada entrada describe **una lectura periódica** que se ejecuta una vez por ciclo de `lora.send_interval_ms` (v2.3: un solo timer). El resultado se envía por LoRa (orden = índice del array; ver `frame-format.md`) y se acumula para batch NB-IoT (`batch-format.md`).
 
 ```json
 {

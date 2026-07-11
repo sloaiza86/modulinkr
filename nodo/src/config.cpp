@@ -397,8 +397,8 @@ bool load(Config& c, char* err, size_t err_len) {
         }
         d.slave_id = static_cast<uint8_t>(des_id);
 
-        d.poll_ms = jd["poll_interval_ms"] | 0UL;
-        if (d.poll_ms < 100) return failf(err, err_len, "poll_interval_ms < 100 en '%s'", d.name);
+        // v2.3: poll_interval_ms desaparece (un solo timer, el de envío).
+        // Si aparece en el JSON se ignora sin error (compatibilidad).
 
         // read_mode / inter_read_ms (v2.3, ambos opcionales). Ausente =
         // "grouped" con 250 ms, idéntico al comportamiento clásico.
