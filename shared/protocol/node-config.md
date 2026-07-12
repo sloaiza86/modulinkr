@@ -341,6 +341,8 @@ La conversión de `raw` a unidad real se hace **en el nodo** (decisión de edge 
 
 Cada entrada describe una **acción de escritura disponible**, invocable únicamente desde fuera (mediante comando externo; ver `commands-format.md`). El JSON solo declara qué acciones existen y cómo materializarlas, no contiene el valor a escribir ni el momento de hacerlo.
 
+**Estado (pendiente):** el firmware valida y retiene este catálogo y lo anuncia al gateway en el registro (`frame-format.md` §13), pero todavía **no ejecuta escrituras**: no hay funciones de escritura en el driver Modbus ni recepción de comandos. Hoy `writes[]` es solo declarativo. La lectura (`reads[]`) sí es operativa.
+
 **Ejemplo (escritura de coil binario):**
 
 ```json

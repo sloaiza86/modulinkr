@@ -105,6 +105,8 @@ Para errores:
 
 ### 6.1 `write`, escribir Modbus
 
+**Estado (pendiente):** el firmware aún no implementa la ejecución de escrituras (falta el driver de escritura Modbus y la recepción de comandos). Esta sección es normativa para cuando se implemente. Además, la validación de `value` de abajo cubre las cuatro funciones comunes; para las avanzadas `mask_write_register` (0x16, que aplica dos máscaras AND/OR en vez de un valor) y `read_write_multiple_registers` (0x17, lectura y escritura atómicas) el `value` no está definido. Antes de habilitarlas hay que cerrar su forma o retirarlas del catálogo (`node-config.md` §5.5).
+
 ```json
 {
   "msg_id":         "cmd-001",
