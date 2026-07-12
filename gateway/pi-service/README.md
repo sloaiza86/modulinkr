@@ -10,8 +10,9 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 | Archivo | Función |
 | --- | --- |
 | `protocol.py` | Librería del protocolo v2.2: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`, `build_welcome` y la seguridad v2.2 (AES-CCM, nonce, AAD). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
-| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. |
-| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente. |
+| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. Expone `fetch_pending` / `mark_published` (telemetría) y sus equivalentes de catálogo para el drenado a cloud. |
+| `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría a `modulinkr/v1/{origin}/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. |
+| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
 | `heltec_rx_parser.py` | Visor de depuración anterior (solo lectura). Se conserva como herramienta; la lógica productiva vive en `gateway_service.py`. |
 
@@ -41,6 +42,34 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_BUFFER_MAX` | `1000` | Cota de entradas del buffer |
 | `MODULINKR_SEC_ENABLED` | `0` | Seguridad v2.2 de la interfaz aire (`frame-format.md` §14) |
 | `MODULINKR_SEC_KEY` | (sin default) | Clave de red, 32 caracteres hex. Obligatoria con `SEC_ENABLED=1`. **Debe coincidir** con `security.key` del config de todos los nodos |
+| `MODULINKR_MQTT_HOST` | (vacío) | Host del broker cloud. Vacío deja el MQTT desactivado y la telemetría se acumula en el buffer local |
+| `MODULINKR_MQTT_PORT` | `8883` | Puerto del broker |
+| `MODULINKR_MQTT_USER` | (vacío) | Usuario MQTT |
+| `MODULINKR_MQTT_PASS` | (vacío) | Clave MQTT. La pregunta el instalador al ejecutarse, no se escribe en el código |
+| `MODULINKR_MQTT_TLS` | `1` | `1` TLS, `0` en claro (solo banco o broker en localhost) |
+| `MODULINKR_MQTT_CAFILE` | (vacío) | Cert de la CA (RSA) que firma el broker. Vacío usa las CAs del sistema |
+| `MODULINKR_MQTT_CERTFILE` | (vacío) | Cert de cliente para mTLS (opcional) |
+| `MODULINKR_MQTT_KEYFILE` | (vacío) | Clave del cert de cliente (opcional) |
+| `MODULINKR_MQTT_TLS_INSECURE` | `0` | `1` no valida el hostname del cert (solo banco con cert autofirmado) |
+| `MODULINKR_MQTT_DRAIN_S` | `2.0` | Periodo del drenado del buffer a cloud, en segundos |
+| `MODULINKR_MQTT_DRAIN_MAX` | `50` | Muestras de telemetría por vuelta de drenado |
+| `MODULINKR_MQTT_PUB_TIMEOUT` | `5.0` | Espera del PUBACK antes de dejar la muestra pendiente, en segundos |
+
+## Publicación al broker cloud (MQTT)
+
+`mqtt_publisher.py` drena el buffer al broker cloud (Mosquitto self-hosted con
+TLS RSA, `Red V4.md` §Infraestructura cloud). La telemetría sale como una
+muestra por mensaje a `modulinkr/v1/{origin}/telemetry` (QoS 1, sin retener),
+con payload `{"schema_version","origin","seq","ts","v"}` (`ts` va `null` si la
+trama llegó sin hora). El catálogo de cada nodo se republica a
+`modulinkr/v1/{origin}/register` (QoS 1, retenido), en el formato de
+`batch-format.md` §10.2, para que el consumidor cloud tenga la leyenda de las
+lecturas antes que los datos.
+
+La marca `published=1` solo se pone tras el PUBACK del broker: un corte de
+Internet o un reinicio del servicio deja la muestra pendiente y se reintenta.
+El consumidor cloud deduplica los reenvíos por `(origin, ts, seq)`, de modo que
+una muestra llegada también por NB-IoT no se guarda dos veces.
 
 ## Seguridad de la interfaz aire (v2.2)
 
@@ -58,9 +87,19 @@ pip install cryptography
 
 ## Despliegue al Pi
 
-Copiar los archivos al Pi (vía `scp` a `practica@SuperNodo1.local:~/pi-service/`)
-y usar el venv existente `~/modbus-test` (ya tiene pyserial; con seguridad
-activa, instalar también `cryptography`, ver arriba).
+Método recomendado: el instalador (`installer/`). Copiar la carpeta `pi-service`
+al Pi (vía `scp` a `practica@SuperNodo1.local:~/pi-service/`) y correr:
+
+```bash
+cd ~/pi-service/installer
+sudo ./install.sh
+```
+
+El instalador crea el venv dedicado, instala las dependencias, pregunta la
+config (serie, red, seguridad y broker MQTT, con las contraseñas confirmadas),
+guarda los secretos en `/etc/modulinkr/gateway.env` y deja el servicio bajo
+systemd. Ver `installer/README.md`. Los pasos manuales de abajo son la
+alternativa para depurar o para instalaciones a medida.
 
 Ejecución manual para pruebas:
 

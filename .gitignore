@@ -30,6 +30,14 @@ credentials.json
 .env
 .env.*
 !.env.example
+# Config del instalador del servidor con valores rellenados (guarda secretos)
+server/modulinkr-server.conf
+server/config/modulinkr-server.conf
+# Config MQTT del gateway con la clave del broker (se crea en el Pi, 600)
+gateway/pi-service/mqtt.env
+# Config del instalador del gateway con valores rellenados (puede tener ajustes propios)
+gateway/pi-service/installer/modulinkr-gateway.conf
+gateway/pi-service/installer/config/modulinkr-gateway.conf
 
 # macOS
 .DS_Store

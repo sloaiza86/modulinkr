@@ -471,6 +471,22 @@ El supernodo publica las muestras en custodia con trigger `"relay"` según su pr
 
 La asociación con el supernodo es **transitoria**: en cuanto el solicitante recupera padre válido (beacon fresco, §2.1), vuelve a la ruta LoRa normal.
 
+### 8.4 Registro en custodia (añadido 12-jul-2026, pendiente de implementación)
+
+Extensión del flujo de custodia para el **alta zero-touch en el cloud** (`db-schema.md`): si nodo y supernodo arrancan sin gateway, las muestras del nodo llegan al backend por custodia pero su catálogo no llegaría por ninguna vía hasta que el gateway reviva. Esta extensión cierra ese hueco haciendo viajar también el NODE_REGISTER por el supernodo.
+
+Flujo, al iniciar una asociación de custodia (tras elegir oferta en §8.3):
+
+1. El solicitante entrega **primero** sus tramas NODE_REGISTER (formato idéntico a §13.2: `seq = 0`, `frag_idx`/`frag_total`) unicast al supernodo, antes de las TELEMETRY pendientes.
+2. El supernodo valida como receptor final y guarda los fragmentos **crudos, por `origin`, sin interpretarlos**. Responde ACK con `status = OK_VIA_NBIOT` por cada fragmento aceptado, igual que con TELEMETRY.
+3. Con el juego completo de fragmentos de un origen, el supernodo concatena el blob por índice (operación mecánica, no requiere el parser del catálogo) y lo encola para publicación NB-IoT (`batch-format.md` §10.4).
+
+El supernodo es **mensajero**: la decodificación del catálogo es del backend, que reutiliza el mismo parser del gateway (`parse_catalog` de `protocol.py`). Decisión deliberada para no duplicar el parser en C++ en el Atom.
+
+Semántica importante: el ACK `OK_VIA_NBIOT` sobre un NODE_REGISTER **no es un WELCOME**. El nodo no queda registrado en la red LoRa ni obtiene hora por esta vía (la hora ya viajó en el `epoch` del SN_OFFER, §8.2); solo sabe que su catálogo quedó en custodia y deja de reenviarlo en esta asociación. Al recuperar gateway, el registro normal de §13 procede sin ningún cambio.
+
+Coste: ~73 B una vez por asociación de custodia (ejemplo de §13.2). La re-entrega en asociaciones posteriores es idempotente: el blob del mismo origen se sobreescribe.
+
 ## 9. Resumen de tamaños y tiempos en aire
 
 Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) o US915 (sin DC):

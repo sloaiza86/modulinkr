@@ -228,6 +228,8 @@ El backend (y el firmware al construir el batch) deben rechazar o marcar como in
 9. Para `trigger == "failover"` o `"test"`, todo `samples[i].origin` debe ser igual a `node_id`. Muestras con `origin` ajeno solo son válidas con trigger `"relay"` o `"manual"`.
 10. `boot_id` ausente o fuera del rango uint32 invalida el batch (v2.1).
 
+> **Nota del 12-jul-2026 (alta zero-touch)**: las reglas 2 y 4 ("node_id / origin no registrado en el catálogo del backend") **dejan de significar rechazo**. Rechazar perdería datos ya confirmados con PUBACK al supernodo. El backend acepta el batch y envía las muestras de orígenes sin catálogo a la tabla de cuarentena, donde esperan su materialización (`db-schema.md` §3-4). El resto de reglas se mantiene.
+
 ### 8.1 Identidad y deduplicación en el backend (v2.1)
 
 El consumidor cloud deduplica con estas claves, en este orden:
@@ -249,7 +251,66 @@ Para el caso típico (XY-MD02 con 2 reads, supernodo con failover ocasional):
 
 Estimación de consumo anual para un supernodo con failover semanal de 30 muestras: **~100 KB / año**. Sobre un plan SIM Lifetime de 500 MB / 10 años, eso es el 0,02 % del presupuesto total, con margen para varias órdenes de magnitud de fallos LoRa.
 
-## 10. Documentos relacionados
+## 10. Mensaje de registro NB-IoT (register retenido)
+
+> **Añadido el 12-jul-2026, pendiente de implementación en firmware.** Decisión de diseño del alta zero-touch (`db-schema.md`): el alta de nodos en el cloud es **zero-touch** — no existe provisión manual. Este mensaje es el equivalente NB-IoT del NODE_REGISTER LoRa (`frame-format.md` §13), inspirado en el patrón BIRTH de Sparkplug B.
+
+### 10.1 Publicación
+
+- **Quién**: el supernodo, anunciando **su propio** catálogo (no puede anunciar el de vecinos en custodia; ese residuo lo absorbe la cuarentena del backend, `db-schema.md` §3). El **gateway** publica el mismo mensaje, en el mismo formato, en nombre de cada nodo cuyo NODE_REGISTER recibió por LoRa (republicación de su `node_catalog`), de modo que el consumidor tiene un único punto de ingesta de catálogos.
+- **Cuándo**: al abrir sesión MQTT, **antes** del primer batch de la sesión. El gateway, cada vez que un NODE_REGISTER cree o modifique una entrada de `node_catalog`.
+- **Topic**: `modulinkr/v1/{node_id}/register` (template en config: campo opcional `nbiot.topic_register`, default el anterior; requiere bump minor de `node-config.md`).
+- **QoS**: 1. **Retained**: `true` — el broker conserva la última versión y la entrega a cualquier suscriptor futuro, aunque el consumidor arranque después. Un register nuevo sobreescribe al anterior.
+
+### 10.2 Payload
+
+```json
+{
+  "schema_version": "2.1",
+  "node_id":        10,
+  "name":           "Supernodo planta 2",
+  "fw_version":     "0.0.6-h4",
+  "boot_id":        2857402742,
+  "reads": [
+    { "id": "temp", "name": "temperature", "unit": "C"   },
+    { "id": "hum",  "name": "humidity",    "unit": "%RH" }
+  ],
+  "writes": [
+    { "id": "fan", "name": "ventilator_relay", "unit": null }
+  ]
+}
+```
+
+Contenido idéntico al anuncio del NODE_REGISTER LoRa: `id`, `name`, `unit` de cada read y write, **en orden estricto de serialización** (el orden de `reads[]` define las posiciones de `v[]`). Los campos Modbus internos no se anuncian. Tamaño típico: ~300 bytes, una vez por sesión MQTT — despreciable frente al presupuesto de datos (§9).
+
+### 10.3 Consumo
+
+El consumidor cloud procesa todo register según `db-schema.md` §3: alta automática del nodo si no existía, sincronización de canales (cierre y creación si el catálogo difiere), y reintento de materialización de la cuarentena del origen. La carrera register/batch dentro de una sesión (MQTT solo garantiza orden por topic) la absorbe la cuarentena: un batch que gane la carrera espera y se materializa segundos después.
+
+### 10.4 Register en custodia (nodo sin NB-IoT, vía supernodo)
+
+> **Añadido el 12-jul-2026 (decisión B1: supernodo mensajero), pendiente de implementación.** Cubre el alta de un nodo normal cuando ni él ni el gateway se han visto nunca: el nodo entrega su NODE_REGISTER al supernodo en custodia (`frame-format.md` §8.4) y el supernodo lo reenvía crudo.
+
+Cuando el supernodo tiene el blob completo del catálogo de un vecino, lo publica en el **topic register del origen** (no el propio), retained y QoS 1, con esta variante de payload:
+
+```json
+{
+  "schema_version": "2.1",
+  "node_id":        3,
+  "via":            10,
+  "raw_catalog":    "<blob de frame-format.md §13.2, en base64>"
+}
+```
+
+| Campo | Notas |
+| --- | --- |
+| `node_id` | El **origen** dueño del catálogo, no el supernodo que publica. |
+| `via` | Id del supernodo mensajero. Informativo (diagnóstico). |
+| `raw_catalog` | El descriptor binario del NODE_REGISTER tal cual se reensambló, codificado en base64. El supernodo **no lo interpreta**. |
+
+El backend detecta la variante por la presencia de `raw_catalog` (en lugar de `reads`/`writes`), decodifica el blob con el mismo parser del gateway (`parse_catalog` de `protocol.py`) y procede exactamente igual que con un register normal (§10.3). Un blob malformado se registra en log y se descarta; las muestras de ese origen permanecen en cuarentena hasta un register válido.
+
+## 11. Documentos relacionados
 
 - [`node-config.md`](node-config.md): origen de las decisiones de qué muestrear y de los parámetros del bloque `nbiot`.
 - [`frame-format.md`](frame-format.md): define el `seq` y la cola de tramas pendientes que alimenta este batch.

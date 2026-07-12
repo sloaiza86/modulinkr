@@ -171,7 +171,7 @@ queryVersion()`), para tener a la vista la capacidad CAD de cada unidad.
 el resultado se guarda en `cad_ok_` y se muestra en el banner (`CAD: on/off`).
 A partir de ahí, cada `AT+PSEND` hace CAD antes de transmitir.
 
-Manejo del canal ocupado (decisión de Santiago: resolverlo ya, no en la
+Manejo del canal ocupado (decisión: resolverlo ya, no en la
 Fase 3). Cuando el CAD reporta `AT_BUSY_ERROR` la trama NO salió al aire; el
 driver programa un **reintento rápido** de la última trama tras un backoff
 corto (60 ms base + 0-60 ms de jitter), hasta `kBusyMaxTries` (3). Es

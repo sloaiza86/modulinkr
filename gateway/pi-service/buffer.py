@@ -11,7 +11,8 @@ cloud como única fuente de verdad, `Red V4.md` §"Actualización del
      temprano.
   2. Tolerar micro-cortes de Internet: mientras no haya conexión al broker
      cloud, las tramas se acumulan aquí (published=0) y se drenan cuando
-     vuelve (el drenado a cloud es otra pieza, aún no implementada).
+     vuelve (el drenado lo hace mqtt_publisher.py con fetch_pending /
+     mark_published).
 
 Política:
   - Clave primaria (origin_id, ts, seq) desde v2.1: deduplicación e
@@ -132,7 +133,7 @@ class GatewayBuffer:
     def catalog_upsert(self, origin_id: int, catalog: dict) -> None:
         """Guarda o actualiza el catálogo anunciado por un nodo en su
         NODE_REGISTER. published se resetea a 0: el backend debe volver a
-        recibirlo (el drenado a cloud es otra pieza, aún no implementada)."""
+        recibirlo (mqtt_publisher.py lo republica como register retenido)."""
         self.conn.execute(
             """INSERT INTO node_catalog
                (origin_id, fw_version, node_name, catalog_json, t_updated, published)
@@ -184,6 +185,71 @@ class GatewayBuffer:
         return self.conn.execute(
             "SELECT COUNT(*) FROM buffer WHERE published=0"
         ).fetchone()[0]
+
+    # ----- Drenado a cloud (telemetría) -----
+
+    def fetch_pending(self, limit: int = 100) -> list[dict]:
+        """Devuelve hasta `limit` muestras sin publicar, en orden de llegada
+        (t_recv ascendente). Cada muestra trae lo necesario para armar el
+        sample del batch-format: origin_id, ts, seq y la lista de valores
+        `v` (de reads_json). El drenado las publica y luego marca con
+        mark_published; nada se borra aquí."""
+        rows = self.conn.execute(
+            """SELECT origin_id, ts, seq, reads_json
+               FROM buffer WHERE published=0
+               ORDER BY t_recv ASC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        out = []
+        for origin_id, ts, seq, reads_json in rows:
+            out.append({
+                "origin_id": origin_id,
+                "ts": ts,
+                "seq": seq,
+                "v": json.loads(reads_json) if reads_json else [],
+            })
+        return out
+
+    def mark_published(self, keys: list[tuple[int, int, int]]) -> None:
+        """Marca published=1 las muestras cuya (origin_id, ts, seq) está en
+        `keys`. Se llama SOLO tras el PUBACK del broker: hasta entonces la
+        muestra sigue pendiente y sobrevive a un corte o a un reinicio del
+        servicio (entrega al menos una vez; el consumidor cloud deduplica)."""
+        if not keys:
+            return
+        self.conn.executemany(
+            """UPDATE buffer SET published=1
+               WHERE origin_id=? AND ts=? AND seq=?""",
+            keys,
+        )
+        self.conn.commit()
+
+    # ----- Drenado a cloud (catálogos) -----
+
+    def fetch_pending_catalogs(self) -> list[dict]:
+        """Catálogos sin republicar al cloud (published=0). Cada uno con su
+        origin_id y el catálogo decodificado (fw_version, node_name, reads,
+        writes), para armar el mensaje register retenido de batch-format.md
+        §10.2."""
+        rows = self.conn.execute(
+            """SELECT origin_id, catalog_json FROM node_catalog
+               WHERE published=0 ORDER BY t_updated ASC"""
+        ).fetchall()
+        return [
+            {"origin_id": origin_id, "catalog": json.loads(catalog_json)}
+            for origin_id, catalog_json in rows
+        ]
+
+    def mark_catalog_published(self, origin_id: int) -> None:
+        """Marca published=1 el catálogo de un nodo, tras el PUBACK del
+        mensaje register. Un re-registro posterior (reboot del nodo, cambio
+        de config) vuelve a poner published=0 en catalog_upsert y se
+        republica."""
+        self.conn.execute(
+            "UPDATE node_catalog SET published=1 WHERE origin_id=?",
+            (origin_id,),
+        )
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()

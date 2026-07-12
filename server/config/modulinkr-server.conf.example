@@ -1,0 +1,51 @@
+# modulinkr-server.conf.example
+# Config de ejemplo del instalador, solo para ajustes no sensibles (versión,
+# nombres, puertos, tuning). Copiar a modulinkr-server.conf y pasar con:
+#   sudo ./install.sh --config modulinkr-server.conf --components all
+# Todas las claves son opcionales; lo que falte se pregunta (o toma su default).
+#
+# Las contraseñas NO se ponen aquí. La contraseña MQTT y el usuario MQTT se
+# preguntan siempre durante la instalación (la contraseña sin eco); la de la
+# base, si no se fija, se genera y se guarda solo en /etc/modulinkr (root).
+
+# Identidad de la red
+MODULINKR_NETWORK_NAME=modulinkr
+
+# --- Base de datos ---
+PG_VERSION=16
+MODULINKR_DB_NAME=modulinkr
+MODULINKR_DB_USER=modulinkr
+# La contraseña de la base no va en este archivo: se genera y se guarda en
+# /etc/modulinkr/database.env (solo root).
+
+# Extensión TimescaleDB (1 = instalar y habilitar; 0 = PostgreSQL a secas)
+ENABLE_TIMESCALEDB=1
+
+# Ajuste para VM de 1 GB de RAM compartida con Mosquitto
+PG_SHARED_BUFFERS=128MB
+PG_EFFECTIVE_CACHE_SIZE=512MB
+PG_WORK_MEM=4MB
+PG_MAINTENANCE_WORK_MEM=32MB
+PG_MAX_CONNECTIONS=20
+
+# Swap (colchón ante picos con la base y el broker en la misma máquina)
+SWAP_SIZE=2G
+SWAP_FILE=/swapfile
+
+# --- Broker MQTT (Mosquitto con TLS) ---
+# Identificación del broker y estrategia de certificado:
+#   USE_DOMAIN=yes -> Let's Encrypt (certbot, requiere puerto 80 y DNS)
+#   USE_DOMAIN=no  -> certificado autofirmado RSA (con aviso en pantalla)
+MODULINKR_USE_DOMAIN=no
+MODULINKR_BROKER_DOMAIN=          # si USE_DOMAIN=yes, p. ej. modulinkr.loaiza.co
+MODULINKR_BROKER_IP=             # si USE_DOMAIN=no; vacío = autodetectar
+MODULINKR_LE_EMAIL=              # opcional; avisos de expiración de Let's Encrypt
+
+# El usuario y la contraseña MQTT se preguntan en la instalación, no aquí.
+
+# Parámetros del listener y del cert autofirmado (solo aplican sin dominio)
+MQTT_TLS_PORT=8883
+RSA_BITS=2048
+CA_DAYS=3650
+CERT_DAYS=3650
+FORCE_CERTS=0                     # 1 = regenerar el autofirmado existente

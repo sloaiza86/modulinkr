@@ -1,0 +1,24 @@
+# modulinkr-gateway.conf.example
+# Config OPCIONAL del instalador del gateway, solo para saltarse preguntas o
+# para casos raros. En una instalación normal NO hace falta: el instalador
+# pregunta lo justo y deriva el resto. Copiar a modulinkr-gateway.conf y pasar
+# con:  sudo ./install.sh --config modulinkr-gateway.conf
+#
+# Las contraseñas NO se ponen aquí. La contraseña MQTT y la clave de red se
+# preguntan siempre, sin eco y con confirmación. Un modulinkr-gateway.conf
+# rellenado está en .gitignore.
+
+# --- Broker MQTT (lo único que el instalador pregunta sí o sí) ---
+MODULINKR_MQTT_HOST=modulinkr.loaiza.co
+MODULINKR_MQTT_PORT=8883
+MODULINKR_MQTT_USER=modulinkr
+
+# --- Red LoRa ---
+MODULINKR_NETWORK_ID=1
+# MODULINKR_PORT=/dev/ttyUSB0     # normalmente se autodetecta; fijar solo si hay varios
+
+# --- Avanzado (rara vez se toca) ---
+# MODULINKR_MQTT_TLS=1            # 0 = broker sin cifrar
+# MODULINKR_MQTT_CAFILE=         # ruta a un CA propio; vacío = CA pública del sistema
+# GW_VENV=/home/practica/pi-service/.venv
+# MODULINKR_DB=/home/practica/modulinkr_buffer.db

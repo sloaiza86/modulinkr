@@ -66,6 +66,7 @@ import serial
 
 import protocol
 from buffer import GatewayBuffer
+from mqtt_publisher import MqttPublisher
 
 
 LOG = logging.getLogger("modulinkr.gateway")
@@ -102,6 +103,10 @@ class GatewayService:
         self.gw_seq = 0                 # contador downlink (ACK + BEACON)
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
+        self.mqtt: MqttPublisher | None = None
+
+        # Periodo del drenado del buffer hacia el broker cloud (segundos).
+        self.drain_s = float(os.environ.get("MODULINKR_MQTT_DRAIN_S", "2.0"))
 
         # Seguridad de la interfaz aire (v2.2, frame-format.md §14).
         # Ajuste de TODA la red: con ON aquí y OFF en un nodo (o claves
@@ -393,13 +398,19 @@ class GatewayService:
             k: t for k, t in self.recent_acks.items()
             if (now - t) < self.ack_window_s
         }
+        mqtt_up  = self.mqtt.connected if self.mqtt is not None else False
+        pub_tel  = self.mqtt.n_pub_tel if self.mqtt is not None else 0
+        pub_cat  = self.mqtt.n_pub_cat if self.mqtt is not None else 0
+        pending  = self.buf.pending_publish() if self.buf is not None else -1
         LOG.info(
             "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
-            "overheard=%d notconf=%d drop=%d micfail=%d buffer=%d",
+            "overheard=%d notconf=%d drop=%d micfail=%d buffer=%d "
+            "mqtt=%s pub_tel=%d pub_cat=%d pending=%d",
             self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
             self.n_reg, self.n_welcome,
             self.n_overheard, self.n_notconf, self.n_drop, self.n_micfail,
             self.buf.count() if self.buf is not None else -1,
+            "up" if mqtt_up else "down", pub_tel, pub_cat, pending,
         )
 
     # ----- Bucle principal -----
@@ -414,9 +425,16 @@ class GatewayService:
         LOG.info("seguridad interfaz aire (v2.2): %s",
                  "AES-CCM activa" if self.sec_key else "desactivada (en claro)")
 
+        # Publicador MQTT hacia el broker cloud. Drena el buffer (telemetría
+        # y catálogos) marcando published=1 solo tras el PUBACK. Si no hay
+        # host configurado arranca deshabilitado y las muestras se acumulan.
+        self.mqtt = MqttPublisher(self.buf)
+        self.mqtt.start()
+
         # Primer beacon al arrancar, luego cada beacon_s.
         last_beacon = 0.0
         last_stats  = time.monotonic()
+        last_drain  = 0.0
         rx_buf = b""
 
         try:
@@ -428,6 +446,9 @@ class GatewayService:
                 if now - last_stats >= self.stats_s:
                     last_stats = now
                     self.report_stats()
+                if now - last_drain >= self.drain_s:
+                    last_drain = now
+                    self.mqtt.drain()
 
                 chunk = self.ser.read(self.ser.in_waiting or 1)
                 if not chunk:
@@ -441,6 +462,8 @@ class GatewayService:
             self.report_stats()
             return 0
         finally:
+            if self.mqtt is not None:
+                self.mqtt.stop()
             if self.buf is not None:
                 self.buf.close()
             if self.ser is not None:
