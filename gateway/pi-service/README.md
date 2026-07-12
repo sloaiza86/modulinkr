@@ -10,7 +10,7 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 | Archivo | Función |
 | --- | --- |
 | `protocol.py` | Librería del protocolo v2.2: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`, `build_welcome` y la seguridad v2.2 (AES-CCM, nonce, AAD). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
-| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin_id, seq)` para deduplicación e idempotencia, cota FIFO. |
+| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. |
 | `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente. |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
 | `heltec_rx_parser.py` | Visor de depuración anterior (solo lectura). Se conserva como herramienta; la lógica productiva vive en `gateway_service.py`. |
