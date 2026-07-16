@@ -1,0 +1,88 @@
+/* ModuLinkr, visor web del gateway: estilos mínimos, sin framework. */
+
+:root {
+  --bg: #12161c; --panel: #1a212b; --text: #dbe4ee; --dim: #7d8ea3;
+  --ok: #38c172; --bad: #6b7684; --accent: #3aa0ff; --warn: #e6a23c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: center; gap: 1.2rem;
+  padding: 0.6rem 1rem; background: var(--panel);
+  border-bottom: 1px solid #2a3442;
+}
+h1 { font-size: 1.05rem; margin: 0; letter-spacing: 0.04em; }
+nav { display: flex; gap: 0.4rem; }
+.tab {
+  background: none; border: 1px solid #2a3442; color: var(--dim);
+  padding: 0.3rem 0.9rem; border-radius: 6px; cursor: pointer; font: inherit;
+}
+.tab.active { color: var(--text); border-color: var(--accent); }
+#clock { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+main { padding: 1rem; }
+table { border-collapse: collapse; width: 100%; background: var(--panel); border-radius: 8px; overflow: hidden; }
+th, td { padding: 0.45rem 0.7rem; text-align: left; border-bottom: 1px solid #232c38; }
+th { color: var(--dim); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; }
+
+.chip { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px; font-size: 0.8rem; }
+.chip.on  { background: rgba(56,193,114,0.15); color: var(--ok); }
+.chip.off { background: rgba(107,118,132,0.2); color: var(--bad); }
+
+.aviso { color: var(--dim); }
+.leyenda { color: var(--dim); font-size: 0.85rem; }
+#mapa { height: 70vh; background: var(--panel); border-radius: 8px; }
+
+/* Módulo de datos */
+#datos-controles {
+  display: flex; flex-direction: column; gap: 0.8rem;
+  background: var(--panel); border-radius: 8px; padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+#selector-cabecera { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+#filtro {
+  background: var(--bg); color: var(--text); border: 1px solid #2a3442;
+  border-radius: 6px; padding: 0.3rem 0.6rem; font: inherit; width: 16rem;
+}
+.modo { display: flex; gap: 0; }
+.modo-btn {
+  background: var(--bg); border: 1px solid #2a3442; color: var(--dim);
+  padding: 0.3rem 0.8rem; cursor: pointer; font: inherit;
+}
+.modo-btn:first-child { border-radius: 6px 0 0 6px; }
+.modo-btn:last-child { border-radius: 0 6px 6px 0; }
+.modo-btn.active { color: var(--text); border-color: var(--accent); }
+.vistas { display: flex; gap: 0.4rem; margin-left: auto; }
+.vistas select, .vistas button {
+  background: var(--bg); color: var(--text); border: 1px solid #2a3442;
+  border-radius: 6px; padding: 0.3rem 0.6rem; font: inherit; cursor: pointer;
+}
+#selector-canales { display: flex; gap: 1rem; flex-wrap: wrap; }
+#selector-canales details {
+  border: 1px solid #2a3442; border-radius: 6px; padding: 0.3rem 0.8rem;
+  min-width: 11rem; background: var(--bg);
+}
+#selector-canales summary {
+  color: var(--accent); cursor: pointer; user-select: none;
+  display: flex; gap: 0.5rem; align-items: center;
+}
+#selector-canales summary .cuenta { color: var(--dim); font-size: 0.8rem; }
+#selector-canales label { display: block; cursor: pointer; padding-left: 0.2rem; }
+#selector-canales .todos { border-bottom: 1px solid #232c38; margin-bottom: 0.2rem; color: var(--dim); }
+.rango { display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap; margin-left: auto; }
+.rango label { color: var(--dim); }
+.rango input {
+  background: var(--bg); color: var(--text); border: 1px solid #2a3442;
+  border-radius: 6px; padding: 0.25rem 0.4rem; font: inherit;
+}
+.rango button {
+  background: var(--accent); color: #fff; border: none; border-radius: 6px;
+  padding: 0.35rem 1rem; cursor: pointer; font: inherit;
+}
+.rango button#btn-csv { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+#grafico { height: 60vh; background: var(--panel); border-radius: 8px; }

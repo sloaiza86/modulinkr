@@ -4,7 +4,9 @@
 # crea un venv dedicado, pregunta la configuración (serie, red, seguridad
 # AES-CCM y broker MQTT, con las contraseñas confirmadas), guarda los secretos
 # en /etc/modulinkr/gateway.env (solo root) y deja el servicio systemd
-# corriendo. Reejecutable sin romper una instalación previa.
+# corriendo. Ofrece además el visor web (pi-web, servicio modulinkr-web) si
+# su árbol está junto a pi-service. Reejecutable sin romper una instalación
+# previa.
 #
 # Uso:
 #   sudo ./install.sh                       instalación interactiva
@@ -36,6 +38,8 @@ done
 . "$INSTALLER_DIR/lib/common.sh"
 # shellcheck source=lib/gateway.sh
 . "$INSTALLER_DIR/lib/gateway.sh"
+# shellcheck source=lib/web.sh
+. "$INSTALLER_DIR/lib/web.sh"
 
 load_config "$CONFIG_FILE"
 require_ubuntu
@@ -57,7 +61,9 @@ main() {
     require_root
     gw_load_env         # reusa secretos de una instalación previa
     gather_gateway      # pregunta lo que falte (contraseñas confirmadas)
+    gather_web          # visor web opcional (pi-web junto a pi-service)
     install_gateway     # instala, configura y arranca
+    install_web         # visor, si se pidió
 }
 
 main "$@"

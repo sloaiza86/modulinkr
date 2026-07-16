@@ -1,0 +1,60 @@
+# ModuLinkr, visor web del gateway (diseño)
+
+Documento de diseño del servidor web local del Pi. **Estado: fases 1 a 4 implementadas el 16-jul-2026** (tabla `node_status` en el pi-service; esqueleto FastAPI con basic auth y módulos de red y topología; módulo de datos contra el PostgreSQL de la VM con series agregadas y export CSV, `dataapi.py`; instalador integrado en el Gateway Installer, `installer/lib/web.sh`, servicio `modulinkr-web` con env en `/etc/modulinkr/web.env`); pendiente la fase 5 (comandos, §5). La fase 3.1 añadió el selector escalable (filtro, modos por nodo y por medida, vistas guardadas) y los ejes automáticos por unidad con paneles apilados.
+
+Arranque manual en banco (sin instalador todavía): `./get_vendor.sh` una vez con Internet (descarga vis-network y ECharts a `static/vendor/`), venv con `fastapi`, `uvicorn` y `psycopg2-binary`, y:
+
+```
+MODULINKR_DB=<ruta del buffer> \
+MODULINKR_PG_HOST=<dominio de la VM> MODULINKR_PG_PASSWORD=<clave de modulinkr_ro> \
+uvicorn web_service:app --host 0.0.0.0 --port 8080
+```
+
+Sin `MODULINKR_WEB_USER` el visor arranca sin autenticación y lo avisa en el log; sin `MODULINKR_PG_HOST` solo degrada el módulo de datos (503), el resto opera. El rol `modulinkr_ro` y el listener remoto los provisiona el componente `database` del instalador del servidor (`db_enable_remote_ro`); requiere además abrir 5432/tcp en el firewall de la nube. El cliente conecta con `sslmode=require`: canal cifrado, identidad del servidor no verificada (la protección es la contraseña; mejora futura: `verify-full` con el certificado del dominio).
+
+## 1. Propósito y alcance
+
+Interfaz web servida desde el Raspberry Pi del gateway con cuatro funciones en fase 1 y espacio para crecer:
+
+1. **Datos**: gráficos de las medidas guardadas en la base cloud y export CSV, con selección de nodos, medidas y rango temporal.
+2. **Estado de la red**: qué nodos están conectados, cuáles se vieron alguna vez y cuándo fue la última vez, y por qué ruta entregan (LoRa o NB-IoT).
+3. **Comandos de escritura**: pospuesto. Queda como módulo stub hasta que el firmware de comandos madure (recepción en supernodo incompleta; downlink LoRa a nodos sin NB-IoT sin implementar, `frame-format.md` §11).
+4. **Topología**: mapa del árbol mesh (gateway raíz, arista hijo a padre), al estilo del mapa de red de Zigbee2MQTT.
+
+## 2. Decisiones de arquitectura (16-jul-2026)
+
+- **Corre en el Pi** (`modulinkr-web`, servicio systemd separado del gateway). El Pi es el dueño de la verdad viva de la red; las funciones 2 y 4 operan 100 % en local y sobreviven sin Internet. La función 1 consulta la base remota y degrada con aviso si no hay conexión.
+- **Stack**: FastAPI + uvicorn (Python, coherente con el resto del proyecto), frontend estático servido por el propio backend, sin build ni Node: ECharts para gráficos, vis-network para el mapa. Presupuesto de memoria ~40-60 MB (los gráficos los renderiza el navegador del cliente; el Pi solo sirve JSON y estáticos).
+- **Modularidad**: un router de API por función (`/api/datos`, `/api/red`, `/api/topologia`; futuro `/api/comandos`), cada uno con su vista. Añadir una función es añadir un módulo, sin tocar los demás.
+- **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol **solo lectura** dedicado (`modulinkr_ro`, únicamente `SELECT` sobre la base de telemetría; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
+- **Autenticación**: basic auth (usuario y contraseña preguntados en la instalación) sobre HTTP en la LAN (`http://gateway.local:8080`). Sin TLS local en fase 1; se revisita si la web se expone fuera de la LAN.
+
+## 3. Fuentes de datos
+
+| Función | Fuente | Notas |
+| --- | --- | --- |
+| Datos (gráficos, CSV) | PostgreSQL de la VM (`nodes`, `channels`, `samples`, `sample_values`) | Selector de nodos y medidas desde el catálogo zero-touch. Consultas de `db-schema.md` §5. Rangos largos con agregación en servidor (`date_trunc`, promedio por bucket) para no arrastrar la serie cruda hasta el navegador. CSV en streaming con la misma consulta. |
+| Estado de red | Tabla nueva `node_status` en el `buffer.db` del Pi + cloud cuando hay Internet | Local: última trama oída por LoRa, tipo, RSSI, SNR, padre, hop (persistente a reinicios). Cloud: `max(received_at)` por origen y `source`, que cubre lo que el Pi no ve (entregas NB-IoT). La vista mezcla ambas y marca la ruta. "Conectado" = visto hace menos de N intervalos de muestreo. |
+| Topología | `node_status` (padre y hop por nodo) | El dato viaja en los ecos de BEACON que el Heltec oye de refilón (`parent_id`, `hop_count`, §7.2) y que hoy el servicio descarta como overheard. Cosecharlos es el único cambio al pi-service. |
+| Comandos (futuro) | Publicación MQTT a `modulinkr/v1/{node}/cmd` (`commands-format.md`) | Stub en fase 1. |
+
+## 4. Cambios al pi-service (únicos, pequeños)
+
+1. Tabla `node_status` en `buffer.db`: una fila por nodo (`origin`, `last_seen`, `last_frame_type`, `rssi`, `snr`, `parent_id`, `hop_count`). La actualiza `gateway_service.py` con cada trama válida oída (también las overheard).
+2. Cosecha de los ecos de BEACON: hoy se descartan; pasan a alimentar `parent_id`/`hop_count` de `node_status`.
+
+La web abre `buffer.db` en modo solo lectura; no comparte proceso ni sockets con el gateway.
+
+## 5. Fases de implementación
+
+1. `node_status` y cosecha de topología en el pi-service (validable sola, sin web).
+2. Esqueleto FastAPI con basic auth + módulos de red y topología (100 % local).
+3. Módulo de datos contra el Postgres remoto (rol `modulinkr_ro` en el instalador del servidor) con export CSV.
+4. Instalador del visor (patrón del pi-service: venv, systemd, credenciales preguntadas, idempotente).
+5. Módulo de comandos, cuando el firmware lo soporte.
+
+## 6. Descartes razonados
+
+- **Grafana**: cubre solo la función 1, pesa 150-300 MB (inviable en el Zero 2W) y obligaría a construir igualmente el resto. Queda como opción futura en la VM apuntando al mismo Postgres si algún día hace falta análisis avanzado.
+- **Home Assistant**: el patrón modular se copia; la plataforma no (dimensionada para cientos de integraciones domóticas, ajena a este dominio).
+- **Web en la VM**: era la opción recomendada por cercanía al dato histórico, descartada en favor del Pi para tener el estado vivo de la red en campo sin depender de Internet.

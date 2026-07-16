@@ -78,6 +78,21 @@ class GatewayBuffer:
                 published    INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Estado de red por nodo (visor web, pi-web/README.md §4): última
+        # trama oída por LoRa, incluidas las overheard. parent_id/hop_count
+        # los alimentan solo los ecos de BEACON; rssi/snr solo las tramas
+        # transmitidas por el propio nodo (hop_src), no las relayadas.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_status (
+                origin          INTEGER PRIMARY KEY,
+                last_seen       REAL    NOT NULL,
+                last_frame_type TEXT,
+                rssi            REAL,
+                snr             REAL,
+                parent_id       INTEGER,
+                hop_count       INTEGER
+            )
+        """)
         self.conn.commit()
 
     def _migrate_v20_if_needed(self) -> None:
@@ -250,6 +265,45 @@ class GatewayBuffer:
             (origin_id,),
         )
         self.conn.commit()
+
+    # ----- Estado de red por nodo (visor web) -----
+
+    def status_update(self, origin: int, frame_type: str,
+                      rssi: Optional[float] = None,
+                      snr: Optional[float] = None,
+                      parent_id: Optional[int] = None,
+                      hop_count: Optional[int] = None) -> None:
+        """Upsert del estado de un nodo al oír una trama. Los campos None
+        no pisan el valor anterior (COALESCE): una trama sin info de
+        topología conserva el padre conocido, y una relayada conserva el
+        RSSI del último contacto directo."""
+        self.conn.execute(
+            """INSERT INTO node_status
+                   (origin, last_seen, last_frame_type, rssi, snr,
+                    parent_id, hop_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(origin) DO UPDATE SET
+                   last_seen       = excluded.last_seen,
+                   last_frame_type = excluded.last_frame_type,
+                   rssi            = COALESCE(excluded.rssi, rssi),
+                   snr             = COALESCE(excluded.snr, snr),
+                   parent_id       = COALESCE(excluded.parent_id, parent_id),
+                   hop_count       = COALESCE(excluded.hop_count, hop_count)""",
+            (origin, time.time(), frame_type, rssi, snr,
+             parent_id, hop_count))
+        self.conn.commit()
+
+    def status_all(self) -> list[dict]:
+        """Estado completo de la red para el visor (solo lectura)."""
+        rows = self.conn.execute(
+            """SELECT origin, last_seen, last_frame_type, rssi, snr,
+                      parent_id, hop_count
+               FROM node_status ORDER BY origin""").fetchall()
+        return [
+            {"origin": r[0], "last_seen": r[1], "last_frame_type": r[2],
+             "rssi": r[3], "snr": r[4], "parent_id": r[5], "hop_count": r[6]}
+            for r in rows
+        ]
 
     def close(self) -> None:
         self.conn.close()

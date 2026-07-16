@@ -196,15 +196,95 @@ db_save_env() {
 MODULINKR_DB_NAME=$MODULINKR_DB_NAME
 MODULINKR_DB_USER=$MODULINKR_DB_USER
 MODULINKR_DB_PASSWORD=$MODULINKR_DB_PASSWORD
+MODULINKR_DB_RO_PASSWORD=$MODULINKR_DB_RO_PASSWORD
 EOF
     chmod 600 "$DB_ENV_FILE"
     ok "Credenciales guardadas en $DB_ENV_FILE (solo root)"
+}
+
+# db_load_or_make_ro_password: contraseña del rol de solo lectura, con la
+# misma política que la del rol de aplicación (estable entre reejecuciones).
+db_load_or_make_ro_password() {
+    if [ -z "${MODULINKR_DB_RO_PASSWORD:-}" ] && [ -f "$DB_ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$DB_ENV_FILE"
+        MODULINKR_DB_RO_PASSWORD="${MODULINKR_DB_RO_PASSWORD:-}"
+    fi
+    if [ -z "${MODULINKR_DB_RO_PASSWORD:-}" ]; then
+        MODULINKR_DB_RO_PASSWORD="$(rand_secret)"
+        log "Contraseña del rol de solo lectura generada automáticamente"
+    fi
+}
+
+# db_enable_remote_ro: acceso remoto de SOLO LECTURA para el visor del Pi
+# (pi-web/README.md §2). Rol modulinkr_ro con SELECT únicamente, listener
+# en todas las interfaces y una regla hostssl restringida a ese rol y esta
+# base. El cifrado lo da el ssl=on por defecto de Ubuntu (cert snakeoil):
+# el cliente conecta con sslmode=require (canal cifrado; la identidad del
+# servidor no se verifica, la protección de acceso es la contraseña).
+# Nota de operación: falta abrir 5432 en el firewall de la nube (NSG).
+db_enable_remote_ro() {
+    step "Acceso remoto de solo lectura (visor del Pi)"
+    local u="modulinkr_ro" d="$MODULINKR_DB_NAME"
+    local pesc="${MODULINKR_DB_RO_PASSWORD//\'/\'\'}"
+
+    if _psql_super -tAc "SELECT 1 FROM pg_roles WHERE rolname='$u'" | grep -q 1; then
+        _psql_super -c "ALTER ROLE \"$u\" WITH LOGIN PASSWORD '$pesc'"
+        ok "Rol '$u' ya existía; contraseña sincronizada"
+    else
+        _psql_super -c "CREATE ROLE \"$u\" WITH LOGIN PASSWORD '$pesc'"
+        ok "Rol '$u' creado"
+    fi
+
+    _psql_super -d "$d" <<SQL
+GRANT CONNECT ON DATABASE "$d" TO "$u";
+GRANT USAGE ON SCHEMA public TO "$u";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$u";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "$u";
+SQL
+    ok "Permisos de solo lectura concedidos a '$u'"
+
+    # Listener en todas las interfaces (drop-in propio, separado del de
+    # tuning porque aquel se reescribe entero en cada pasada).
+    local confd="${PG_CONFD:-/etc/postgresql/$PG_VERSION/main/conf.d}"
+    if [ ! -f "$confd/98-modulinkr-remote.conf" ]; then
+        cat > "$confd/98-modulinkr-remote.conf" <<EOF
+# Acceso remoto de solo lectura para el visor del Pi. Generado por el
+# instalador; la restricción de quién entra vive en pg_hba.conf.
+listen_addresses = '*'
+EOF
+        ok "listen_addresses='*' en conf.d/98-modulinkr-remote.conf"
+    else
+        ok "Drop-in de acceso remoto ya presente"
+    fi
+
+    # pg_hba: solo el rol ro, solo esta base, solo con TLS y scram.
+    local hba="/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
+    if ! grep -q "hostssl $d $u" "$hba"; then
+        backup_once "$hba"
+        cat >> "$hba" <<EOF
+
+# ModuLinkr: visor del Pi, solo lectura (generado por el instalador)
+hostssl $d $u 0.0.0.0/0 scram-sha-256
+hostssl $d $u ::/0      scram-sha-256
+EOF
+        ok "Regla hostssl añadida a pg_hba.conf"
+    else
+        ok "Regla hostssl ya presente en pg_hba.conf"
+    fi
+
+    # listen_addresses requiere reinicio (no basta reload).
+    systemctl restart "postgresql@$PG_VERSION-main" 2>/dev/null || systemctl restart postgresql
+    ok "PostgreSQL reiniciado con el listener remoto"
+    warn "Recordatorio: abrir el puerto 5432/tcp en el firewall de la nube (NSG de Azure)"
+    log "Conexión del visor: host=<dominio de la VM> user=$u sslmode=require"
 }
 
 # install_database: orquesta el módulo completo.
 install_database() {
     require_root
     db_load_or_make_password
+    db_load_or_make_ro_password
     db_add_repos
     db_install_packages
     db_ensure_swap
@@ -214,6 +294,7 @@ install_database() {
     db_enable_timescaledb
     db_run_migrations
     db_grant_app
+    db_enable_remote_ro
     db_save_env
     step "Base de datos lista"
     log "Base '$MODULINKR_DB_NAME', rol '$MODULINKR_DB_USER'. Conexión local:"

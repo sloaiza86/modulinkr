@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ModuLinkr</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>ModuLinkr</h1>
+  <nav>
+    <button class="tab active" data-view="red">Red</button>
+    <button class="tab" data-view="topologia">Topología</button>
+    <button class="tab" data-view="datos">Datos</button>
+  </nav>
+  <span id="clock"></span>
+</header>
+
+<main>
+  <section id="view-red" class="view">
+    <table id="tabla-red">
+      <thead>
+        <tr>
+          <th>Nodo</th><th>Nombre</th><th>Estado</th><th>Última vez</th>
+          <th>Última trama</th><th>RSSI</th><th>SNR</th><th>Padre</th><th>Hop</th><th>Firmware</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="red-aviso" class="aviso"></p>
+  </section>
+
+  <section id="view-topologia" class="view" hidden>
+    <div id="mapa"></div>
+    <p class="leyenda">Arista: hijo a padre (último eco de BEACON). Verde: en línea. Gris: sin tramas recientes.</p>
+  </section>
+
+  <section id="view-datos" class="view" hidden>
+    <div id="datos-controles">
+      <div id="selector-cabecera">
+        <input type="search" id="filtro" placeholder="Filtrar nodos o medidas...">
+        <div class="modo">
+          <button class="modo-btn active" data-modo="nodo">Por nodo</button>
+          <button class="modo-btn" data-modo="medida">Por medida</button>
+        </div>
+        <div class="vistas">
+          <select id="vistas-guardadas"><option value="">Vistas guardadas...</option></select>
+          <button id="btn-guardar-vista" title="Guardar la selección actual">Guardar</button>
+          <button id="btn-borrar-vista" title="Borrar la vista elegida">Borrar</button>
+        </div>
+      </div>
+      <div id="selector-canales"><p class="aviso">Cargando catálogo...</p></div>
+      <div class="rango">
+        <label>Desde <input type="datetime-local" id="desde"></label>
+        <label>Hasta <input type="datetime-local" id="hasta"></label>
+        <button id="btn-graficar">Graficar</button>
+        <button id="btn-csv">Exportar CSV</button>
+      </div>
+    </div>
+    <div id="grafico"></div>
+    <p id="datos-aviso" class="aviso"></p>
+  </section>
+</main>
+
+<script src="/static/vendor/vis-network.min.js"></script>
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

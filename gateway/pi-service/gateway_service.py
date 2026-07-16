@@ -253,6 +253,13 @@ class GatewayService:
                 LOG.warning("drop: %s (hex=%s)", parsed["error"], m.group("hex"))
             return
 
+        # Estado de red para el visor (pi-web/README.md §4): toda trama
+        # válida oída, también las que no van dirigidas a este salto, es
+        # prueba de vida de quien la transmite. Se cosecha ANTES del filtro
+        # de salto: los ecos de BEACON y el tráfico ajeno de la malla son
+        # justamente la fuente de la topología.
+        self._update_node_status(parsed, rssi, snr)
+
         # Filtro de salto (frame-format.md §10.6): el gateway solo procesa
         # tramas cuyo SALTO actual va dirigido a él (hop_dst == GW). Una
         # trama con dest_id=GW pero hop_dst=otro es un nodo transmitiendo a
@@ -348,6 +355,30 @@ class GatewayService:
 
         self.send_ack(parsed["origin_id"], parsed["hop_src"],
                       parsed["seq"], protocol.ACK_OK)
+
+    def _update_node_status(self, parsed: dict, rssi: float,
+                            snr: float) -> None:
+        """Alimenta node_status con una trama válida (visor web).
+
+        Dos identidades por trama: hop_src es quien TRANSMITIÓ este salto
+        (vivo ahora, el RSSI/SNR es suyo) y origin_id quien CREÓ la trama
+        (vivo también, pero el RSSI no le pertenece si llegó relayada).
+        En los ecos de BEACON el emisor anuncia además su parent_id y
+        hop_count (spec §7.2): es la fuente de la topología."""
+        ft = parsed["frame_type_name"]
+
+        hs = parsed["hop_src"]
+        if 1 <= hs <= 254:
+            parent = hop = None
+            if parsed["frame_type"] == protocol.FRAME_BEACON:
+                parent = parsed.get("parent")
+                hop    = parsed.get("hop_count")
+            self.buf.status_update(hs, ft, rssi=rssi, snr=snr,
+                                   parent_id=parent, hop_count=hop)
+
+        origin = parsed["origin_id"]
+        if origin != hs and 1 <= origin <= 254:
+            self.buf.status_update(origin, ft)
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
