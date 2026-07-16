@@ -32,6 +32,16 @@ function nombrePadre(id) {
   return id === 255 ? "Gateway" : String(id);
 }
 
+// Chip de duty cycle: verde lejos del límite del 10 % del g3, ámbar
+// acercándose, rojo por encima. null = sin reportes aún (firmware sin
+// heartbeat v3.1, o ventana sin dos reportes todavía).
+function chipDuty(d) {
+  if (d == null) return '<span class="chip off">sin datos</span>';
+  const pct = (d * 100).toFixed(2) + " %";
+  const cls = d > 0.10 ? "rojo" : (d > 0.05 ? "ambar" : "on");
+  return `<span class="chip ${cls}">${pct}</span>`;
+}
+
 // ----- Vista de red -----
 
 async function refrescarRed() {
@@ -48,8 +58,12 @@ async function refrescarRed() {
     return;
   }
   const data = await r.json();
-  aviso.textContent = data.nodes.length ? "" :
-    "Sin nodos vistos todavía. La tabla se llena con la primera trama oída.";
+  aviso.innerHTML = data.nodes.length
+    ? (data.gateway_duty_1h != null
+        ? "Gateway: duty 1h " + chipDuty(data.gateway_duty_1h) +
+          ' <span class="leyenda">(medido en cada transmisor, EN 300 220-1; límite 10 % en g3)</span>'
+        : "")
+    : "Sin nodos vistos todavía. La tabla se llena con la primera trama oída.";
 
   const tbody = document.querySelector("#tabla-red tbody");
   tbody.innerHTML = "";
@@ -65,6 +79,7 @@ async function refrescarRed() {
       `<td class="num">${fmtNum(n.snr)}</td>` +
       `<td>${nombrePadre(n.parent_id)}</td>` +
       `<td class="num">${n.hop_count ?? ""}</td>` +
+      `<td>${chipDuty(n.duty_1h)}</td>` +
       `<td>${n.fw_version ?? ""}</td>`;
     tbody.appendChild(tr);
   }

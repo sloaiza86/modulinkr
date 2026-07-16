@@ -183,8 +183,8 @@ bool load(Config& c, char* err, size_t err_len) {
     // estructura del JSON son opcionales hacia atrás (node-config.md §1:
     // 2.1 no cambió estructura, 2.2 añade el bloque opcional security).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "3.0") != 0) {
-        return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.0)", schema);
+    if (strcmp(schema, "3.1") != 0 && strcmp(schema, "3.0") != 0) {
+        return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.x)", schema);
     }
 
     // ----- node (reglas 2 y 3) -----

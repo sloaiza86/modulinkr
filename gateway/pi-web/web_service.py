@@ -79,7 +79,7 @@ red = APIRouter(prefix="/api/red", dependencies=[Depends(require_auth)])
 @red.get("/estado")
 def red_estado():
     try:
-        return {"online_s": netstatus.ONLINE_S, "nodes": netstatus.network_state()}
+        return {"online_s": netstatus.ONLINE_S, **netstatus.network_state()}
     except Exception as e:                           # noqa: BLE001
         # buffer.db ausente o gateway sin arrancar: la web informa, no cae.
         LOG.warning("estado de red no disponible: %s", e)

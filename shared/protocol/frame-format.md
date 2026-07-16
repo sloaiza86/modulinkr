@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x30` (= `v3.0`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x31` (= `v3.1`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -357,11 +357,20 @@ Es decir, una diferencia menor que la mitad del rango se considera "a anterior a
 
 ## 6. Trama HEARTBEAT (uplink, `frame_type = 0x02`)
 
-Sin payload. Sirve para que el gateway sepa que el nodo sigue vivo aunque no tenga lecturas que reportar (por ejemplo, supernodo en modo standby con Modbus desconectado temporalmente).
+> **Actualización del 16-jul-2026 (v3.1)**: el HEARTBEAT pasa de "vivo sin lecturas" a **diagnóstico periódico del duty cycle**. Gana un payload de 4 bytes y pierde el régimen de ACK.
 
-Cabecera y direccionamiento idénticos a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay). Aplica el mismo régimen de ACK, reintentos y cola que TELEMETRY.
+Payload (4 bytes):
 
-Tamaño: **13 bytes**. Cadencia a discreción del firmware; recomendado solo cuando no se envíen otras tramas, con un máximo de uno cada 60 s.
+```
+tx_ms
+(4 B, uint32 LE)
+```
+
+`tx_ms` es el **aire acumulado del transmisor desde el boot**, en milisegundos: la suma del Time-on-Air de cada trama realmente transmitida (el conteo ocurre en el evento de TX completada; los intentos abortados por CAD no ocuparon aire y no cuentan). Es la medida del duty cycle **en el lugar que define EN 300 220-1**: `Ton_cum / Tobs` por equipo transmisor, con ventana de observación de 1 hora. El contador es efímero (sin persistencia, como el `seq`): el receptor totaliza por **deltas** entre reportes consecutivos, con lo que los reportes perdidos no corrompen nada (el siguiente delta cubre el hueco, reintentos invisibles incluidos) y un delta negativo delata el reinicio del nodo (nueva línea base). El gateway lleva su propio contador equivalente para lo que él emite (beacons, ACKs, WELCOME).
+
+Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay). Desde v3.1 **no se confirma**: sin ACK, sin reintentos y sin paso por la cola de pendientes; la tolerancia a pérdidas ya la da el esquema de deltas. Cadencia: fija, cada 60 s, solo con registro completado y padre válido.
+
+Tamaño: **17 bytes** (25 con seguridad v2.2). Coste de aire del propio reporte: ~50 ms/min a SF7, ~0,08 % de duty, y queda contado en el contador que transporta.
 
 ## 7. Trama BEACON (downlink broadcast, `frame_type = 0x10`)
 
@@ -497,7 +506,7 @@ Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) 
 
 | Tipo | Tamaño | ToA aprox (por salto) |
 | --- | --- | --- |
-| HEARTBEAT | 13 B | ≈ 46 ms |
+| HEARTBEAT (v3.1, con `tx_ms`) | 17 B | ≈ 51 ms |
 | BEACON | 20 B | ≈ 54 ms |
 | SN_REQUEST | 15 B | ≈ 46 ms |
 | SN_OFFER | 15 B | ≈ 46 ms |
@@ -524,7 +533,7 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
 7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
-8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length != 0`, NODE_REGISTER con payload menor que el mínimo de §13.2).
+8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length ∉ {0, 4}` (0 = legado v3.0, 4 = con `tx_ms`, v3.1), NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
 10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 4` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
 11. Para TELEMETRY en el receptor final (gateway o supernodo en custodia): `ts == 0` (ACK con `status = DECODE_ERROR`). Desde v3.0 ninguna muestra legítima se captura sin hora; un `ts` a cero delata un firmware desactualizado o con un bug de reloj.
@@ -804,6 +813,12 @@ Resumen para trazabilidad del TFM:
 5. El bump es de major: `ts = 0` deja de ser tolerado y el mensaje MQTT cambia de forma incompatible. Sin consumidor cloud desplegado ni despliegue v2.x fuera del banco, la migración es reflashear todo a la vez, como en los bumps anteriores.
 
 (La v2.3, `epoch` en SN_OFFER, fue interna a la malla y no cambió el byte de versión; queda documentada en §8.2.)
+
+**Cambios de v3.0 a v3.1 (16-jul-2026)**:
+
+1. HEARTBEAT rediseñado como diagnóstico del duty cycle (§6): payload de 4 bytes con `tx_ms` (aire acumulado del transmisor, medido en el punto que define EN 300 220-1), emisión periódica cada 60 s, y sin régimen de ACK (la pérdida la absorbe la totalización por deltas en el receptor). Regla 8 de §10 actualizada (`payload_length ∈ {0, 4}`).
+2. El gateway contabiliza su propio aire (beacons, ACKs, WELCOME) con la misma fórmula de ToA y se reporta a sí mismo.
+3. Nota de honestidad habitual: un receptor v3.0 rechaza el HEARTBEAT de 4 bytes, pero todo el despliegue se flashea a la vez y el resto de tramas es idéntico; se acepta como minor.
 
 ## 16. Documentos relacionados
 

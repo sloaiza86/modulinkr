@@ -64,7 +64,7 @@ import paho.mqtt.client as mqtt
 
 LOG = logging.getLogger("modulinkr.mqtt")
 
-SCHEMA_VERSION   = "3.0"
+SCHEMA_VERSION   = "3.1"
 SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
 TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"

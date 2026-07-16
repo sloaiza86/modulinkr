@@ -159,6 +159,16 @@ public:
     //   queued  muestras pendientes en la outbox (saturando a 255).
     Status sendSnRequest(uint16_t seq, uint8_t queued);
 
+    // HEARTBEAT v3.1 (frame-format.md §6): diagnóstico periódico sin ACK
+    // con el contador de aire acumulado (duty cycle medido en el
+    // transmisor, EN 300 220-1).
+    Status sendHeartbeat(uint16_t seq, uint32_t tx_ms, uint8_t hop_dst);
+
+    // Milisegundos de aire acumulados desde el boot (suma del ToA de cada
+    // trama realmente transmitida, contada en el evento TXP2P DONE; los
+    // intentos abortados por CAD ocupado no ocupan aire y no cuentan).
+    uint32_t txAirtimeMs() const { return tx_air_ms_; }
+
     // Oferta de salida celular, respuesta unicast a un SN_REQUEST.
     //   quality      CSQ crudo 0-31, 0xFF desconocida.
     //   queue_space  muestras que se pueden aceptar (saturando a 255).
@@ -220,6 +230,16 @@ private:
     uint32_t busy_at_ms_  = 0;   // millis() del próximo reintento; 0 = ninguno
     uint8_t  busy_tries_  = 0;   // reintentos rápidos consumidos para last_tx_
     uint32_t busy_events_ = 0;   // total de AT_BUSY_ERROR observados
+
+    // Parámetros de radio para el cálculo de ToA (fijados en begin()).
+    uint8_t  sf_       = 7;
+    uint16_t bw_khz_   = 125;
+    uint8_t  cr_index_ = 0;
+    uint32_t tx_air_ms_ = 0;     // aire acumulado desde el boot (ms)
+
+    // Time-on-Air en ms (redondeado hacia arriba) de una trama de
+    // len_bytes con los parámetros de radio actuales.
+    uint32_t airtimeMs(size_t len_bytes) const;
 
     // Línea en construcción de la UART (eventos asíncronos del RAK3172).
     static constexpr size_t kLineMax = 600;

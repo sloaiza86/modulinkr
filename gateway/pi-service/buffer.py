@@ -82,6 +82,21 @@ class GatewayBuffer:
         # trama oída por LoRa, incluidas las overheard. parent_id/hop_count
         # los alimentan solo los ecos de BEACON; rssi/snr solo las tramas
         # transmitidas por el propio nodo (hop_src), no las relayadas.
+        # Reportes de aire acumulado por transmisor (v3.1, duty cycle
+        # normativo EN 300 220-1): cada fila es un valor del contador
+        # tx_ms de un origen en un instante. El duty de una ventana se
+        # calcula por deltas entre reportes; ver airtime_duty().
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_airtime (
+                origin  INTEGER NOT NULL,
+                t_recv  REAL    NOT NULL,
+                tx_ms   INTEGER NOT NULL
+            )
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS node_airtime_by_origin
+                ON node_airtime (origin, t_recv)
+        """)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS node_status (
                 origin          INTEGER PRIMARY KEY,
@@ -304,6 +319,52 @@ class GatewayBuffer:
              "rssi": r[3], "snr": r[4], "parent_id": r[5], "hop_count": r[6]}
             for r in rows
         ]
+
+    # ----- Duty cycle por transmisor (v3.1) -----
+
+    def airtime_report(self, origin: int, tx_ms: int) -> None:
+        """Guarda un valor del contador de aire de un transmisor y poda lo
+        más viejo que 25 h (la ventana normativa es 1 h; el margen permite
+        ventanas de análisis de un día)."""
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO node_airtime (origin, t_recv, tx_ms) VALUES (?, ?, ?)",
+            (origin, now, tx_ms))
+        self.conn.execute(
+            "DELETE FROM node_airtime WHERE t_recv < ?", (now - 25 * 3600,))
+        self.conn.commit()
+
+    def airtime_duty(self, window_s: float = 3600.0) -> dict:
+        """Duty cycle por origen en la ventana: suma de deltas positivos
+        del contador entre reportes consecutivos, dividida por el tiempo
+        cubierto. Un delta negativo es un reinicio del nodo (contador a
+        cero): abre segmento nuevo sin corromper la suma. Devuelve
+        {origin: {"duty": fraccion, "span_s": s, "reports": n}}."""
+        t0 = time.time() - window_s
+        rows = self.conn.execute(
+            """SELECT origin, t_recv, tx_ms FROM node_airtime
+               WHERE t_recv >= ? ORDER BY origin, t_recv""", (t0,)).fetchall()
+        out: dict = {}
+        prev: dict = {}
+        for origin, t, tx in rows:
+            st = out.setdefault(origin, {"on_ms": 0, "t_first": t,
+                                         "t_last": t, "reports": 0})
+            st["reports"] += 1
+            st["t_last"] = t
+            if origin in prev:
+                delta = tx - prev[origin]
+                if delta > 0:
+                    st["on_ms"] += delta
+            prev[origin] = tx
+        result = {}
+        for origin, st in out.items():
+            span = st["t_last"] - st["t_first"]
+            result[origin] = {
+                "duty": (st["on_ms"] / (span * 1000.0)) if span > 0 else None,
+                "span_s": round(span, 1),
+                "reports": st["reports"],
+            }
+        return result
 
     def close(self) -> None:
         self.conn.close()

@@ -20,7 +20,7 @@
 #if NODE_CONFIG == 1
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "3.0",
+  "schema_version": "3.1",
   "node": {
     "id":          1,
     "type":        "node",
@@ -80,7 +80,7 @@ static const char kConfigJson[] = R"json({
 #elif NODE_CONFIG == 2
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "3.0",
+  "schema_version": "3.1",
   "node": {
     "id":          2,
     "type":        "super_node",

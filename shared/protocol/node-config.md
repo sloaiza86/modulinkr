@@ -13,8 +13,10 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "3.0"
+"schema_version": "3.1"
 ```
+
+> **Nota v3.1 (16-jul-2026)**: acompaña al bump de la trama (`frame-format.md` §1.2, byte `0x31`, HEARTBEAT con `tx_ms` para el duty cycle normativo). La estructura del JSON **no cambia** en 3.1; el firmware acepta configs `"3.0"` y `"3.1"`.
 
 > **Nota v2.1 (10-jul-2026)**: el bump acompaña al de la trama LoRa (`frame-format.md` §1.2, byte `0x21`), con la que este string se corresponde uno a uno. La estructura del JSON **no cambia** en 2.1; lo nuevo es comportamiento: registro del nodo en la red (NODE_REGISTER / WELCOME), `ts` de captura en TELEMETRY y `boot_id` en el batch. Los ejemplos de este documento conservan `"2.0"` donde son históricos.
 

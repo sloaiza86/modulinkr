@@ -66,7 +66,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.24-v30-unified-telemetry";
+constexpr const char* kFirmwareVersion = "0.0.25-v31-duty-cycle";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -98,6 +98,11 @@ constexpr size_t   kBatchMaxSamples  = 16;
 // confirma el publish. Si no confirma en este plazo, se reintenta (el
 // backend deduplica por (origin, ts, seq)).
 constexpr uint32_t kBatchAckTimeoutMs = 30000;
+
+// HEARTBEAT periódico (v3.1, frame-format.md §6): transporta el contador
+// de aire tx_ms para el duty cycle medido en el transmisor. Sin ACK; la
+// pérdida de un reporte la absorbe el esquema de deltas del receptor.
+constexpr uint32_t kHeartbeatPeriodMs = 60000;
 
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
@@ -1012,6 +1017,23 @@ void ntpTick() {
     nbsvc.requestNtpSync();
 }
 
+// HEARTBEAT periódico con el contador de aire (v3.1). Solo con registro y
+// padre: sin ruta no llega y el contador sigue sumando; el primer delta
+// tras recuperar ruta totaliza el periodo oscuro (reintentos incluidos).
+void heartbeatTick(uint32_t now) {
+    static uint32_t last_hb_ms = 0;
+    if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
+    if (now - last_hb_ms < kHeartbeatPeriodMs) return;
+    last_hb_ms = now;
+
+    nextSeq();
+    const uint32_t tx_ms = lora.txAirtimeMs();
+    lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
+    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)\n",
+                  g_lora_seq, static_cast<unsigned long>(tx_ms),
+                  now > 0 ? (100.0 * tx_ms / now) : 0.0);
+}
+
 // Construcción y publicación del mensaje de telemetría MQTT
 // (batch-format.md v3.0, formato unificado con el gateway):
 //   {schema_version, samples[{origin, seq, ts, v}], debug?}
@@ -1062,7 +1084,7 @@ void batchTick(uint32_t now) {
     const uint32_t batch_id = g_batch_id + 1;
 
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "3.0";
+    doc["schema_version"] = "3.1";
 
     JsonArray samples = doc["samples"].to<JsonArray>();
     Outbox::Entry* included[kBatchMaxSamples];
@@ -1295,6 +1317,7 @@ void loop() {
             snClientTick(tnow);
             outboxDrainTick(tnow);
             ntpTick();
+            heartbeatTick(tnow);
             batchTick(tnow);
         }
 

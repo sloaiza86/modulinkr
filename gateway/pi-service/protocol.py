@@ -30,6 +30,11 @@ muestrea, spec §13.4). parse_frame valida el major del schema (regla 5 de
 §10) y una TELEMETRY con ts=0 se marca con 'ts_zero' para que el servicio
 responda ACK DECODE_ERROR (regla 11).
 
+Cambios v3.1 (16-jul-2026): HEARTBEAT pasa a diagnóstico periódico sin
+ACK con tx_ms (4 B LE), el aire acumulado del transmisor para el duty
+cycle normativo (EN 300 220-1). toa_ms() calcula el Time-on-Air de las
+tramas que el propio gateway ordena transmitir.
+
 No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
 cualquier utilidad de diagnóstico.
 """
@@ -38,6 +43,20 @@ from __future__ import annotations
 
 import struct
 from typing import Optional
+
+
+def toa_ms(length: int, sf: int = 7, bw_khz: int = 125,
+           cr_index: int = 0, preamble: int = 8) -> int:
+    """Time-on-Air en ms (techo) de una trama LoRa de `length` bytes.
+    Fórmula de Semtech: cabecera explícita, CRC PHY, LDRO con SF>=11 a
+    125 kHz. Es la misma cuenta que hace el nodo en lora.cpp."""
+    de = 1 if (sf >= 11 and bw_khz == 125) else 0
+    cr = cr_index + 1
+    num = 8 * length - 4 * sf + 28 + 16
+    den = 4 * (sf - 2 * de)
+    nsym = 8 + (((num + den - 1) // den) * (cr + 4) if num > 0 else 0)
+    tsym_ms = float(1 << sf) / bw_khz
+    return int((preamble + 4.25 + nsym) * tsym_ms) + 1
 
 
 # ----- CRC16 Modbus RTU (polinomio 0xA001, init 0xFFFF, sin reflexión) -----
@@ -56,7 +75,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x30          # v3.0 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x31          # v3.1 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -310,8 +329,13 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['ack_status'] = payload[2]
 
     elif frame_type == FRAME_HEARTBEAT:
-        if payload_length != 0:
-            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0'
+        # v3.1: 4 B con tx_ms (aire acumulado del transmisor, duty cycle
+        # normativo). 0 B = legado v3.0, sin contador.
+        if payload_length not in (0, 4):
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0 o 4'
+            return out
+        if payload_length == 4:
+            out['tx_ms'] = struct.unpack_from('<I', payload, 0)[0]
 
     elif frame_type == FRAME_BEACON:
         # v2.1: hop_count + parent + flags + epoch (uint32 LE).

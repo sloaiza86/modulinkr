@@ -45,6 +45,9 @@ bool LoraP2P::begin(HardwareSerial& uart,
     network_id_  = network_id;
     node_id_     = node_id;
     ttl_         = ttl;
+    sf_          = sf;
+    bw_khz_      = bw_khz;
+    cr_index_    = cr_index;
 
     if (!module_.init(&uart, rx_pin, tx_pin, RAK3172_BPS_115200)) {
         return false;
@@ -259,6 +262,41 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                         ttl_,
                         payload,
                         static_cast<uint8_t>(4u + 4u * n_values));
+}
+
+LoraP2P::Status LoraP2P::sendHeartbeat(uint16_t seq, uint32_t tx_ms,
+                                       uint8_t hop_dst) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    // Payload v3.1 (spec §6): tx_ms, aire acumulado desde el boot, uint32
+    // LE. El contador incluye este mismo heartbeat en cuanto se transmita
+    // (la medida se cuenta a sí misma, como exige la norma).
+    uint8_t payload[4];
+    std::memcpy(payload, &tx_ms, sizeof(tx_ms));
+    return buildAndSend(hop_dst,
+                        node_id_,
+                        protocol::kAddrGateway,
+                        seq,
+                        protocol::kFrameHeartbeat,
+                        ttl_,
+                        payload,
+                        sizeof(payload));
+}
+
+// Time-on-Air según la fórmula de Semtech (SX1276 datasheet §4.1.1.6):
+// preámbulo de kPreambleSymbols + 4,25 símbolos, cabecera explícita, CRC
+// PHY activo, y low data rate optimization con SF11/SF12 a 125 kHz.
+uint32_t LoraP2P::airtimeMs(size_t len_bytes) const {
+    const int sf = sf_;
+    const int de = (sf >= 11 && bw_khz_ == 125) ? 1 : 0;
+    const int cr = cr_index_ + 1;             // 0=4/5 -> 1
+    // Símbolos de payload: 8 + ceil(max(8L - 4SF + 28 + 16, 0) / (4(SF-2DE))) * (CR+4)
+    const int num = 8 * static_cast<int>(len_bytes) - 4 * sf + 28 + 16;
+    const int den = 4 * (sf - 2 * de);
+    const int nsym = 8 + ((num > 0) ? ((num + den - 1) / den) * (cr + 4) : 0);
+    // Tsym en ms = 2^SF / BW(kHz). Total = (preambulo + 4.25 + nsym) * Tsym.
+    const float tsym_ms = static_cast<float>(1u << sf) / bw_khz_;
+    const float total = (kPreambleSymbols + 4.25f + nsym) * tsym_ms;
+    return static_cast<uint32_t>(total) + 1;  // techo: nunca subestimar aire
 }
 
 LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
@@ -559,6 +597,15 @@ void LoraP2P::handleLine(const char* line) {
             // de ACK cuando venza el timeout de la trama.
             tx_errors_++;
         }
+        return;
+    }
+
+    // TXP2P DONE: la trama salió al aire de verdad. Es el punto de conteo
+    // del duty cycle normativo (EN 300 220-1: Ton_cum por transmisor):
+    // aquí y solo aquí se acumula el ToA de la última trama enviada. Los
+    // intentos abortados por CAD (BUSY, arriba) no ocuparon aire.
+    if (strstr(line, "TXP2P DONE") != nullptr) {
+        if (last_tx_len_ > 0) tx_air_ms_ += airtimeMs(last_tx_len_);
         return;
     }
 

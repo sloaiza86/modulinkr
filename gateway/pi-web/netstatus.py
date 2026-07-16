@@ -33,10 +33,46 @@ def _conn() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
 
 
-def network_state() -> list[dict]:
+def duty_by_origin(window_s: float = 3600.0) -> dict:
+    """Duty cycle por transmisor en la ventana (v3.1, EN 300 220-1): suma
+    de deltas positivos del contador tx_ms entre reportes consecutivos
+    dividida por el tiempo cubierto. Delta negativo = reinicio del nodo,
+    abre segmento nuevo. Incluye al gateway (origen 255), que se reporta
+    a sí mismo con la cadencia del beacon."""
+    t0 = time.time() - window_s
+    try:
+        with _conn() as c:
+            rows = c.execute(
+                """SELECT origin, t_recv, tx_ms FROM node_airtime
+                   WHERE t_recv >= ? ORDER BY origin, t_recv""",
+                (t0,)).fetchall()
+    except sqlite3.OperationalError:
+        # buffer.db de un gateway anterior a v3.1, sin la tabla: el resto
+        # de la vista de red funciona igual, solo sin duty.
+        return {}
+    acc: dict = {}
+    prev: dict = {}
+    for origin, t, tx in rows:
+        st = acc.setdefault(origin, {"on_ms": 0, "t_first": t, "t_last": t})
+        st["t_last"] = t
+        if origin in prev:
+            delta = tx - prev[origin]
+            if delta > 0:
+                st["on_ms"] += delta
+        prev[origin] = tx
+    out = {}
+    for origin, st in acc.items():
+        span = st["t_last"] - st["t_first"]
+        out[origin] = (st["on_ms"] / (span * 1000.0)) if span > 0 else None
+    return out
+
+
+def network_state() -> dict:
     """Estado por nodo para /api/red: node_status enriquecido con el
-    nombre y firmware del catálogo, y el veredicto online/offline."""
+    nombre y firmware del catálogo, el veredicto online/offline y el duty
+    cycle de la última hora medido en cada transmisor."""
     now = time.time()
+    duty = duty_by_origin()
     with _conn() as c:
         rows = c.execute(
             """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
@@ -45,7 +81,7 @@ def network_state() -> list[dict]:
                FROM node_status s
                LEFT JOIN node_catalog k ON k.origin_id = s.origin
                ORDER BY s.origin""").fetchall()
-    return [
+    nodes = [
         {
             "origin":     r[0],
             "name":       r[7],
@@ -58,15 +94,17 @@ def network_state() -> list[dict]:
             "snr":        r[4],
             "parent_id":  r[5],
             "hop_count":  r[6],
+            "duty_1h":    duty.get(r[0]),
         }
         for r in rows
     ]
+    return {"nodes": nodes, "gateway_duty_1h": duty.get(GATEWAY_ID)}
 
 
 def topology() -> dict:
     """Grafo para /api/topologia: nodos (gateway incluido como raíz) y
     aristas hijo a padre según el último eco de BEACON de cada nodo."""
-    nodes = network_state()
+    nodes = network_state()["nodes"]
     graph_nodes = [{"id": GATEWAY_ID, "label": "Gateway", "role": "gateway",
                     "online": True}]
     edges = []

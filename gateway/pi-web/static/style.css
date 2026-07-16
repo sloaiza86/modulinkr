@@ -33,6 +33,8 @@ td.num { font-variant-numeric: tabular-nums; }
 .chip { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px; font-size: 0.8rem; }
 .chip.on  { background: rgba(56,193,114,0.15); color: var(--ok); }
 .chip.off { background: rgba(107,118,132,0.2); color: var(--bad); }
+.chip.ambar { background: rgba(230,162,60,0.15); color: var(--warn); }
+.chip.rojo  { background: rgba(224,82,82,0.18); color: #e05252; }
 
 .aviso { color: var(--dim); }
 .leyenda { color: var(--dim); font-size: 0.85rem; }

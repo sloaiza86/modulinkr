@@ -99,8 +99,13 @@ class GatewayService:
         self.db_path  = os.environ.get(
             "MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
         self.buf_max  = int(os.environ.get("MODULINKR_BUFFER_MAX", "1000"))
+        # Parámetros de radio para el ToA propio (v3.1): los mismos que el
+        # despliegue usa en los nodos (node-config transport.lora).
+        self.sf       = int(os.environ.get("MODULINKR_SF", "7"))
+        self.bw_khz   = int(os.environ.get("MODULINKR_BW_KHZ", "125"))
 
-        self.gw_seq = 0                 # contador downlink (ACK + BEACON)
+        self.gw_seq   = 0               # contador downlink (ACK + BEACON)
+        self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
         self.mqtt: MqttPublisher | None = None
@@ -159,6 +164,10 @@ class GatewayService:
     # ----- Emisión hacia el Heltec -----
 
     def _tx(self, frame: bytes) -> None:
+        # Duty cycle propio del gateway (v3.1, EN 300 220-1: por
+        # transmisor): todo lo que el Pi ordena emitir suma su ToA aquí,
+        # el único punto de salida hacia el Heltec.
+        self.gw_tx_ms += protocol.toa_ms(len(frame), self.sf, self.bw_khz)
         """Ordena al Heltec transmitir una trama ya construida."""
         line = "TX " + frame.hex().upper() + "\n"
         self.ser.write(line.encode("ascii"))
@@ -330,11 +339,16 @@ class GatewayService:
                          parsed.get("ts", 0), rssi, snr, reads_fmt,
                          "" if is_new else "  [dup]")
         else:
-            # HEARTBEAT: señaliza "vivo", no es dato. Se confirma sin
-            # pasar por el buffer (no tiene ts y no viaja al cloud).
-            LOG.info("heartbeat origin=%s seq=%d rssi=%.1f snr=%.1f",
+            # HEARTBEAT v3.1: diagnóstico sin ACK. Trae el contador de aire
+            # del transmisor (duty cycle normativo); se registra y punto.
+            # La pérdida de reportes la absorbe el esquema de deltas.
+            tx_ms = parsed.get("tx_ms")
+            if tx_ms is not None:
+                self.buf.airtime_report(parsed["origin_id"], tx_ms)
+            LOG.info("heartbeat origin=%s seq=%d tx_ms=%s rssi=%.1f snr=%.1f",
                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
-                     rssi, snr)
+                     tx_ms if tx_ms is not None else "-", rssi, snr)
+            return
 
         # Supresión de ACK duplicado por ventana (mac.md §4.2). El dato ya
         # está en buffer arriba; aquí solo se decide si reconfirmar. Si esta
@@ -487,6 +501,10 @@ class GatewayService:
                 if now - last_beacon >= self.beacon_s:
                     last_beacon = now
                     self.send_beacon()
+                    # Reporte propio de aire (v3.1): el gateway se mide a
+                    # sí mismo con la misma cadencia del beacon.
+                    self.buf.airtime_report(protocol.ADDR_GATEWAY,
+                                            self.gw_tx_ms)
                 if now - last_stats >= self.stats_s:
                     last_stats = now
                     self.report_stats()

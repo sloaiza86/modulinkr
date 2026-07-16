@@ -9,10 +9,10 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 
 | Archivo | Función |
 | --- | --- |
-| `protocol.py` | Librería del protocolo v2.2: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`, `build_welcome` y la seguridad v2.2 (AES-CCM, nonce, AAD). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
-| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. Expone `fetch_pending` / `mark_published` (telemetría) y sus equivalentes de catálogo para el drenado a cloud. |
+| `protocol.py` | Librería del protocolo v3.1: constantes, CRC16, `parse_frame`, los `build_*`, la seguridad v2.2 (AES-CCM, nonce, AAD) y `toa_ms` (Time-on-Air para el duty cycle propio). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
+| `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. Expone `fetch_pending` / `mark_published` (telemetría), sus equivalentes de catálogo, `node_status` (estado de red para el visor) y `node_airtime` (reportes `tx_ms` del duty cycle v3.1, totalizados por deltas en `airtime_duty`). |
 | `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría en el mensaje unificado de `batch-format.md` a `modulinkr/v1/255/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. |
-| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. |
+| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. Desde v3.1 registra los HEARTBEAT con `tx_ms` (sin confirmarlos) y contabiliza su propio aire en `_tx` con `toa_ms`, reportándose con la cadencia del beacon (duty cycle por transmisor, EN 300 220-1). |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
 | `heltec_rx_parser.py` | Visor de depuración anterior (solo lectura). Se conserva como herramienta; la lógica productiva vive en `gateway_service.py`. |
 
@@ -40,6 +40,8 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_BEACON_S` | `30` | Periodo del beacon en segundos |
 | `MODULINKR_DB` | `/home/practica/modulinkr_buffer.db` | Ruta del buffer SQLite |
 | `MODULINKR_BUFFER_MAX` | `1000` | Cota de entradas del buffer |
+| `MODULINKR_SF` | `7` | SF del despliegue, para el ToA del aire propio (v3.1) |
+| `MODULINKR_BW_KHZ` | `125` | BW del despliegue, ídem |
 | `MODULINKR_SEC_ENABLED` | `0` | Seguridad v2.2 de la interfaz aire (`frame-format.md` §14) |
 | `MODULINKR_SEC_KEY` | (sin default) | Clave de red, 32 caracteres hex. Obligatoria con `SEC_ENABLED=1`. **Debe coincidir** con `security.key` del config de todos los nodos |
 | `MODULINKR_MQTT_HOST` | (vacío) | Host del broker cloud. Vacío deja el MQTT desactivado y la telemetría se acumula en el buffer local |
