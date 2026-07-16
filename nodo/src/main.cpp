@@ -20,13 +20,25 @@
 // v2.1 (10-jul-2026), registro y timestamps (frame-format.md §13):
 //   - Al adoptar padre, el nodo se registra en el gateway (NODE_REGISTER
 //     con el catálogo de reads/writes del config) y no emite telemetría
-//     LoRa hasta recibir el WELCOME (hora + estado). Sin gateway sigue
-//     capturando y sale por NB-IoT (custodia o failover).
+//     LoRa hasta recibir el WELCOME (hora + estado).
 //   - Reloj del sistema en nodeclock: WELCOME y epoch de cada beacon lo
-//     sincronizan; NTP sobre NB-IoT queda como último recurso del batch.
+//     sincronizan.
 //   - TELEMETRY lleva el ts de captura (inmutable en reintentos, custodia
 //     y batch: es la identidad (origin, ts, seq) extremo a extremo).
 //   - El seq es efímero: nace en 1 en cada boot, nadie lo persiste.
+//
+// v3.0 (16-jul-2026), hora estricta y telemetría MQTT unificada:
+//   - Sin hora sincronizada no se muestrea (frame-format.md §13.4): toda
+//     muestra nace con ts válido y desaparecen boot_id y clock_synced.
+//   - Obtención de hora activa: el supernodo pide NTP desde que el módem
+//     está listo (ntpTick); el nodo huérfano emite SN_REQUEST también con
+//     la cola vacía, solo para el epoch del SN_OFFER (ya estaba en v2.3).
+//   - El batch pasa a ser el mensaje de telemetría unificado de
+//     batch-format.md: {schema_version, samples[], debug?}. El sobre
+//     debug (publisher, batch_id, trigger, fw_version) lo gobierna
+//     nbiot.debug del config.
+//   - TELEMETRY con ts=0 es inválida: el supernodo la rechaza en custodia
+//     con ACK DECODE_ERROR (spec §10 regla 11), igual que el gateway.
 //
 // Asignacion de UART (resolucion del conflicto, ver nodo/README.md):
 //   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  (baud del config)
@@ -54,7 +66,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.23-v23-node-timesync";
+constexpr const char* kFirmwareVersion = "0.0.24-v30-unified-telemetry";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -214,13 +226,14 @@ size_t buildCatalog(uint8_t* buf, size_t cap) {
     return p;
 }
 
-// ----- ts de captura (v2.1, frame-format.md §3.1) -----
+// ----- ts de captura (frame-format.md §3.1) -----
 
 // Fija el ts de una entrada de la outbox en su primera serialización
-// (trama LoRa o batch). Si el reloj sincronizó después de la captura, el
-// cálculo es retroactivo desde capture_ms (batch-format.md §6). Una vez
-// fijado (aunque sea a 0, "sin hora") no se recalcula jamás: la identidad
-// (origin, ts, seq) debe ser idéntica por todos los caminos de entrega.
+// (trama LoRa o batch). Con el gate de v3.0 (sin hora no se muestrea) el
+// reloj está siempre sincronizado en la captura y el ts queda fijado ahí
+// mismo; este cierre retroactivo se conserva como red de seguridad. Una
+// vez fijado no se recalcula jamás: la identidad (origin, ts, seq) debe
+// ser idéntica por todos los caminos de entrega.
 uint32_t fixOutboxTs(Outbox::Entry& e) {
     if (!e.ts_fixed) {
         e.ts       = nodeclock::epochAt(e.capture_ms);
@@ -326,31 +339,44 @@ void fireLora() {
     // cae el padre, se sigue muestreando (las muestras van a la outbox y
     // salen por NB-IoT o custodia).
     if (!g_sampling_started) {
+        // Gate de v3.0 (frame-format.md §13.4): sin hora sincronizada no se
+        // muestrea, sin excepciones. Toda muestra nace con ts válido, con
+        // lo que la identidad (origin, ts, seq) cubre todos los caminos y
+        // desaparecen las muestras sin fecha. La hora llega por WELCOME,
+        // beacon, SN_OFFER (huérfano) o NTP (supernodo, ntpTick).
+        if (!nodeclock::synced()) {
+            static uint32_t last_wait_log_ms = 0;
+            const uint32_t now = millis();
+            if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
+                last_wait_log_ms = now;
+                Serial.println(F("[sampler] sin hora sincronizada: muestreo en espera (v3.0)"));
+            }
+            return;
+        }
+
         const bool timed_out = millis() >= g_cfg.gateway_wait_ms;
         if (g_registered) {
             g_sampling_started = true;
             Serial.println(F("[sampler] registro completo: muestreo Modbus habilitado"));
         } else if (timed_out && g_cfg.super_node) {
-            // Supernodo aislado (v2.3): si tras gateway_wait_ms del boot no
-            // hubo registro, se asume que no hay gateway y se arranca igual.
-            // Las muestras no salen por LoRa (sin WELCOME quedan en la outbox)
-            // y las publica su propio NB-IoT como failover. Si más tarde
-            // aparece el gateway y se registra, la telemetría LoRa se reanuda.
+            // Supernodo aislado: sin registro tras gateway_wait_ms se asume
+            // que no hay gateway. Con hora (NTP) arranca igual: las muestras
+            // no salen por LoRa (sin WELCOME quedan en la outbox) y las
+            // publica su propio NB-IoT como failover. Si más tarde aparece
+            // el gateway y se registra, la telemetría LoRa se reanuda.
             g_sampling_started = true;
             Serial.println(F("[sampler] sin gateway tras timeout: muestreo autonomo (NB-IoT)"));
-        } else if (timed_out && !g_cfg.super_node && nodeclock::synced()) {
-            // Nodo normal sin gateway (v2.3): obtuvo la hora de un supernodo
-            // vía SN_OFFER. Ya puede muestrear con ts real y entregar por
-            // custodia. Sin hora todavía, sigue esperando (política estricta:
-            // no reporta hasta tener timestamp).
+        } else if (timed_out && !g_cfg.super_node) {
+            // Nodo normal sin gateway: la hora llegó de un supernodo vía
+            // SN_OFFER. Muestrea con ts real y entrega por custodia.
             g_sampling_started = true;
             Serial.println(F("[sampler] hora obtenida de supernodo: muestreo (custodia NB-IoT)"));
         } else {
-            static uint32_t last_wait_log_ms = 0;
+            static uint32_t last_gw_log_ms = 0;
             const uint32_t now = millis();
-            if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
-                last_wait_log_ms = now;
-                Serial.println(F("[sampler] esperando gateway/hora para muestrear"));
+            if (last_gw_log_ms == 0 || now - last_gw_log_ms > 10000) {
+                last_gw_log_ms = now;
+                Serial.println(F("[sampler] con hora, esperando registro o timeout de gateway"));
             }
             return;
         }
@@ -390,9 +416,8 @@ void fireLora() {
                       static_cast<unsigned long>(sampler.errCount()));
     }
 
-    // ts de captura: se toma AHORA, en el instante de la muestra. Si el
-    // reloj aún no sincronizó queda 0 (y sin fijar: puede recibirlo
-    // retroactivamente mientras no viaje, ver fixOutboxTs).
+    // ts de captura: se toma AHORA, en el instante de la muestra. Con el
+    // gate de v3.0 el reloj está sincronizado, así que nunca es 0.
     const uint32_t capture_ms = millis();
     const uint32_t ts         = nodeclock::epochNow();
 
@@ -503,16 +528,26 @@ void handleAck(const LoraP2P::RxFrame& f) {
 // para el respaldo NB-IoT (spec seccion 8.3). Solo aplica al supernodo.
 void acceptCustody(const LoraP2P::RxFrame& f) {
     if (!g_cfg.super_node) return;
-    // Payload v2.1: ts (4 B) + N float32.
+    // Payload: ts (4 B) + N float32.
     if (f.payload_length < 8 || ((f.payload_length - 4) % 4) != 0) return;
     const uint8_t n = (f.payload_length - 4) / 4;
     if (n > Outbox::kMaxValues) return;  // config ajeno mayor de lo soportado
 
     // El ts viaja tal como lo fijó el origen y es INMUTABLE: es la
-    // identidad (origin, ts, seq) que el backend deduplica. Si viene a 0
-    // (origen sin hora) se conserva el 0; el batch lo publica como null.
+    // identidad (origin, ts, seq) que el backend deduplica.
     uint32_t ts = 0;
     memcpy(&ts, f.payload, sizeof(ts));
+
+    // v3.0 (spec §10 regla 11): ts=0 es inválido. Se responde DECODE_ERROR
+    // para que el origen (firmware viejo o con bug de reloj) saque la
+    // trama de su cola y lo delate en su log, en vez de reintentar.
+    if (ts == 0) {
+        nextSeq();
+        lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckDecodeError);
+        Serial.printf("[custod] RECHAZO ts=0 origin=%u seq=%u (DECODE_ERROR)\n",
+                      f.origin_id, f.seq);
+        return;
+    }
     float values[Outbox::kMaxValues];
     memcpy(values, f.payload + 4, f.payload_length - 4);
 
@@ -965,12 +1000,27 @@ void offerTick(uint32_t now) {
                   static_cast<unsigned long>(epoch));
 }
 
-// Construcción y publicación del batch NB-IoT (batch-format.md v2.1).
-// v2.3: entrega confirmada (at-least-once) con stop-and-wait. Un batch en
-// vuelo a la vez; sus muestras siguen en la outbox marcadas in_flight
-// hasta que el servicio confirma el publish (lastPublishedBatchId). Si no
-// confirma en kBatchAckTimeoutMs se reintenta; el backend deduplica por
-// (origin, ts, seq) si el batch anterior sí había llegado.
+// Obtención ACTIVA de hora por NTP (v3.0, frame-format.md §13.4): desde
+// que el módem está listo, si el reloj sigue sin sincronizar se pide un
+// intento de NTP. El cooldown interno del servicio (kNtpCooldownMs) marca
+// el ritmo de los reintentos. Sustituye al NTP perezoso que solo se pedía
+// a punto de publicar un batch: sin él, un supernodo arrancado con el
+// gateway caído jamás conseguía hora (y con el gate de muestreo de v3.0,
+// jamás tendría nada que publicar: interbloqueo).
+void ntpTick() {
+    if (!g_cfg.super_node || nodeclock::synced() || !nbsvc.ready()) return;
+    nbsvc.requestNtpSync();
+}
+
+// Construcción y publicación del mensaje de telemetría MQTT
+// (batch-format.md v3.0, formato unificado con el gateway):
+//   {schema_version, samples[{origin, seq, ts, v}], debug?}
+// El sobre debug lo gobierna nbiot.debug del config. Entrega confirmada
+// (at-least-once) con stop-and-wait: un mensaje en vuelo a la vez; sus
+// muestras siguen en la outbox marcadas in_flight hasta que el servicio
+// confirma el publish (lastPublishedBatchId). Si no confirma en
+// kBatchAckTimeoutMs se reintenta; el backend deduplica por
+// (origin, ts, seq) si el mensaje anterior sí había llegado.
 void batchTick(uint32_t now) {
     if (!g_cfg.super_node) return;
 
@@ -1008,26 +1058,11 @@ void batchTick(uint32_t now) {
     // antigua por si están llegando más en ráfaga.
     if ((now - outbox.oldestCaptureMs()) < kBatchCoalesceMs) return;
 
-    // Último recurso de hora (batch-format.md §6): a punto de publicar
-    // sin reloj, se pide UN intento de NTP por el módem (ya despierto y
-    // registrado) y se le da una pasada para resolverse. Si falla, el
-    // cooldown del servicio evita reintentos en bucle y el batch sale
-    // sin hora, identificado por boot_id.
-    if (!nodeclock::synced()) {
-        nbsvc.requestNtpSync();
-        if (nbsvc.ntpPending()) return;
-    }
-
     // batch_id tentativo: solo se confirma (avanza g_batch_id) al encolar.
     const uint32_t batch_id = g_batch_id + 1;
 
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "2.1";
-    doc["node_id"]        = g_cfg.node_id;
-    doc["batch_id"]       = batch_id;
-    doc["boot_id"]        = nodeclock::bootId();
-    doc["clock_synced"]   = nodeclock::synced();
-    doc["fw_version"]     = kFirmwareVersion;
+    doc["schema_version"] = "3.0";
 
     JsonArray samples = doc["samples"].to<JsonArray>();
     Outbox::Entry* included[kBatchMaxSamples];
@@ -1037,19 +1072,22 @@ void batchTick(uint32_t now) {
     for (size_t i = 0; i < Outbox::capacity() && n_included < kBatchMaxSamples; ++i) {
         Outbox::Entry* e = outbox.at(i);
         if (e == nullptr) continue;
+
+        // ts de captura, inmutable (misma regla que la trama LoRa). Con el
+        // gate de v3.0 y el rechazo de custodia con ts=0, aquí es siempre
+        // válido; un 0 residual delataría un bug y se salta con log.
+        const uint32_t ts = fixOutboxTs(*e);
+        if (ts == 0) {
+            Serial.printf("[batch]  BUG: muestra sin ts en outbox origin=%u seq=%u, saltada\n",
+                          e->origin, e->seq);
+            continue;
+        }
         if (e->origin != g_cfg.node_id) all_own = false;
 
         JsonObject s = samples.add<JsonObject>();
         s["origin"] = e->origin;
         s["seq"]    = e->seq;
-        // ts de captura, con la misma regla de inmutabilidad que la trama
-        // LoRa (esta serialización también lo fija). 0 = sin hora -> null.
-        const uint32_t ts = fixOutboxTs(*e);
-        if (ts != 0) {
-            s["ts"] = ts;
-        } else {
-            s["ts"] = nullptr;
-        }
+        s["ts"]     = ts;
         JsonArray v = s["v"].to<JsonArray>();
         for (uint8_t k = 0; k < e->n_values; ++k) v.add(e->values[k]);
 
@@ -1057,8 +1095,16 @@ void batchTick(uint32_t now) {
     }
     if (n_included == 0) return;
 
-    // Muestras propias: failover. Cualquier ajena: relay (batch-format §8.9).
-    doc["trigger"] = all_own ? "failover" : "relay";
+    // Sobre debug opcional (batch-format.md §5), gobernado por el config.
+    // Muestras propias: failover. Cualquier ajena: relay.
+    const char* trigger = all_own ? "failover" : "relay";
+    if (g_cfg.nbiot_debug) {
+        JsonObject dbg = doc["debug"].to<JsonObject>();
+        dbg["publisher"]  = g_cfg.node_id;
+        dbg["batch_id"]   = batch_id;
+        dbg["trigger"]    = trigger;
+        dbg["fw_version"] = kFirmwareVersion;
+    }
 
     char json[1600];
     const size_t len = serializeJson(doc, json, sizeof(json));
@@ -1077,8 +1123,7 @@ void batchTick(uint32_t now) {
         g_batch_inflight    = true;
         g_batches++;
         Serial.printf("[batch]  encolado id=%lu trigger=%s samples=%u (%u B), esperando confirmacion\n",
-                      static_cast<unsigned long>(batch_id),
-                      all_own ? "failover" : "relay",
+                      static_cast<unsigned long>(batch_id), trigger,
                       static_cast<unsigned>(n_included),
                       static_cast<unsigned>(len));
     } else {
@@ -1115,7 +1160,7 @@ void setup() {
         }
     }
 
-    // ----- Reloj del sistema y boot_id (v2.1) -----
+    // ----- Reloj del sistema (v2.1; sin boot_id desde v3.0) -----
     nodeclock::begin();
 
     // ----- Catálogo del registro (v2.1, frame-format.md §13.2) -----
@@ -1128,9 +1173,8 @@ void setup() {
     }
 
     printBanner();
-    Serial.printf("  Reg   : catalogo=%u B en %u fragmento(s)  boot_id=%08lX\n",
-                  static_cast<unsigned>(g_reg_catalog_len), g_reg_frag_total,
-                  static_cast<unsigned long>(nodeclock::bootId()));
+    Serial.printf("  Reg   : catalogo=%u B en %u fragmento(s)\n",
+                  static_cast<unsigned>(g_reg_catalog_len), g_reg_frag_total);
     setLed(0x202000);
 
     // ----- Modbus sobre SoftwareSerial, parámetros del config -----
@@ -1250,6 +1294,7 @@ void loop() {
             registrationTick(tnow);
             snClientTick(tnow);
             outboxDrainTick(tnow);
+            ntpTick();
             batchTick(tnow);
         }
 

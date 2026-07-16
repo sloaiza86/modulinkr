@@ -79,8 +79,10 @@ public:
     int8_t  csqDbm() const { return csq_dbm_; }
     uint8_t csqRaw() const;  // 0-31, 0xFF si desconocida (spec §8.2)
 
-    // Encola un intento de NTP sobre NB-IoT (último recurso de hora,
-    // batch-format.md §6). Se ignora si ya hay uno pendiente o si el
+    // Encola un intento de NTP sobre NB-IoT. Desde v3.0 es la fuente
+    // ACTIVA de hora del supernodo (frame-format.md §13.4): ntpTick de
+    // main.cpp lo llama desde que el módem está listo mientras el reloj
+    // siga sin sincronizar. Se ignora si ya hay uno pendiente o si el
     // último intento fue hace menos de kNtpCooldownMs (para no
     // martillear un módem que no soporta el comando). El resultado, si
     // lo hay, entra al reloj del sistema vía nodeclock::sync().

@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x22` (= `v2.2`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x30` (= `v3.0`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.0 (16-jul-2026)**: replanteo de la hora del sistema y unificación de la telemetría MQTT. Toda muestra nace con hora: el nodo **no muestrea sin reloj sincronizado**, con lo que `ts = 0` en TELEMETRY pasa de "capturada sin hora" a **inválido** (§3.1, §10). La obtención de hora pasa de perezosa a activa (§13.4): el supernodo intenta NTP desde el arranque y el nodo huérfano emite SN_REQUEST aunque tenga la cola vacía, solo para obtener el `epoch` del SN_OFFER (§8.1). Desaparece el `boot_id` (§13.1): su única función fuerte era identificar muestras sin hora, que ya no existen. El mensaje MQTT de telemetría se unifica para las cuatro rutas de entrega (gateway y supernodo publican el mismo formato, ver [`batch-format.md`](batch-format.md)). El bump es de major: un receptor v2.x acepta `ts = 0` y el mensaje MQTT cambia de forma incompatible.
 
 ### 1.3 CRC de aplicación
 
@@ -58,7 +60,7 @@ El CRC cubre **todos los bytes anteriores**, desde el byte 0 hasta el byte inmed
 Todas las tramas comparten una cabecera de **11 bytes** seguida de un payload variable y el CRC:
 
 ```
-byte 0      schema_version   (1 B)      0x21 para v2.1
+byte 0      schema_version   (1 B)      0x30 para v3.0
 byte 1      network_id       (1 B)      identificador de red
 byte 2      hop_src          (1 B)      emisor de este salto
 byte 3      hop_dst          (1 B)      receptor de este salto
@@ -74,7 +76,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x21` para v2.1. |
+| `schema_version` | `0x30` para v3.0. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -193,7 +195,7 @@ uint32 LE    float32 LE   float32 LE        float32 LE
 (4 B)        (4 B)        (4 B)             (4 B)
 ```
 
-`ts` (añadido en v2.1) es el **instante de captura** de la muestra: epoch Unix en segundos, UTC. `ts = 0` significa "capturada sin hora sincronizada" (nodo aún sin WELCOME ni beacon con epoch, ver §13); el receptor usa entonces la hora de recepción como aproximación. El `ts` se fija **al construir la trama y no cambia nunca más**: los reintentos y la entrega en custodia reutilizan los mismos bytes, y el batch NB-IoT (`batch-format.md`) arrastra este mismo valor. Esta inmutabilidad es la que hace estable la identidad `(origin, ts, seq)` de §2.6 por todos los caminos de entrega.
+`ts` (añadido en v2.1) es el **instante de captura** de la muestra: epoch Unix en segundos, UTC. Desde v3.0 es **siempre válido**: el nodo no muestrea sin reloj sincronizado (§13.4), así que toda muestra nace con hora. Una TELEMETRY con `ts = 0` es inválida y el receptor la descarta (§10); en v2.x significaba "capturada sin hora" y el receptor aproximaba con la hora de recepción, semántica retirada junto con el `boot_id` que la sostenía. El `ts` se fija **al construir la trama y no cambia nunca más**: los reintentos y la entrega en custodia reutilizan los mismos bytes, y el mensaje de telemetría MQTT (`batch-format.md`) arrastra este mismo valor. Esta inmutabilidad es la que hace estable la identidad `(origin, ts, seq)` de §2.6 por todos los caminos de entrega.
 
 Cada valor es un `float32` IEEE 754 en little-endian. El **orden estricto** corresponde al orden del array `reads[]` del [`node-config.md`](node-config.md). El primer `read` del JSON va en los bytes 15 a 18 de la trama (tras el `ts`), el segundo en 19 a 22, y así sucesivamente (el payload empieza en el byte 11, justo después de `payload_length`).
 
@@ -206,7 +208,7 @@ Para el ejemplo §6.1 del `node-config.md` (XY-MD02 con `temp` y `hum`), nodo 1 
 ```
 Byte | Hex   | Significado
 ─────|───────|──────────────────────────
-0    | 0x21  | schema_version = v2.1
+0    | 0x30  | schema_version = v3.0
 1    | 0x01  | network_id = 1
 2    | 0x01  | hop_src = 1 (emite el propio nodo)
 3    | 0x05  | hop_dst = 5 (su padre)
@@ -284,7 +286,7 @@ ACK del gateway para la trama `seq=42` del ejemplo §3.2, devuelto vía el nodo 
 ```
 Byte | Hex   | Significado
 ─────|───────|──────────────────────────
-0    | 0x21  | schema_version = v2.1
+0    | 0x30  | schema_version = v3.0
 1    | 0x01  | network_id = 1
 2    | 0xFF  | hop_src = gateway
 3    | 0x05  | hop_dst = 5 (vecino por el que llegó el uplink)
@@ -409,6 +411,8 @@ Tamaño: **20 bytes**. ToA SF7 ≈ 54 ms por emisor. Con periodo de 30 s el cost
 
 Cuando un nodo **sin NB-IoT propio** se queda sin ruta al gateway (huérfano de §2.2, o failover disparado en §5.3), busca explícitamente un supernodo vecino que le sirva de salida celular. El flujo tiene tres pasos: solicitud broadcast, oferta unicast, y entrega en custodia.
 
+Desde v3.0 hay un segundo motivo de búsqueda: la **hora**. Un nodo huérfano sin reloj sincronizado no muestrea (§13.4), así que necesita el `epoch` del SN_OFFER antes de tener nada que entregar. Por eso el SN_REQUEST se emite también con la cola vacía (`queued = 0` es válido): la asociación puede ser solo para sincronizar, sin entrega en custodia posterior.
+
 El alcance es de **un salto**: el supernodo debe ser vecino directo del solicitante. Encadenar relays hacia un supernodo queda fuera del schema actual (ver §11).
 
 ### 8.1 SN_REQUEST (broadcast local, `frame_type = 0x11`)
@@ -429,7 +433,7 @@ queued      reserved
 
 `queued` informa cuántas muestras tiene el solicitante en cola (saturando a 255), para que el supernodo dimensione su oferta.
 
-Cadencia: el solicitante emite un SN_REQUEST y abre una ventana de escucha de `mesh.sn_offer_wait_ms`. Sin ofertas, reintenta con backoff (recomendado: duplicar el intervalo desde 5 s hasta un máximo de 60 s) mientras siga sin ruta.
+Cadencia: el solicitante emite un SN_REQUEST y abre una ventana de escucha de `mesh.sn_offer_wait_ms`. Sin ofertas, reintenta con backoff (recomendado: duplicar el intervalo desde 5 s hasta un máximo de 60 s) mientras siga sin ruta o sin hora (v3.0).
 
 ### 8.2 SN_OFFER (unicast local, `frame_type = 0x12`)
 
@@ -459,7 +463,7 @@ quality       queue_space   epoch
 
 ### 8.3 Entrega en custodia
 
-El solicitante espera `mesh.sn_offer_wait_ms`, elige la mejor oferta (mayor `quality`, desempate por RSSI de la recepción) y envía sus tramas TELEMETRY pendientes **unicast al supernodo**: `hop_dst = dest_id = id del supernodo`, mismo `seq` original de cada trama.
+El solicitante espera `mesh.sn_offer_wait_ms`, elige la mejor oferta (mayor `quality`, desempate por RSSI de la recepción) y envía sus tramas TELEMETRY pendientes **unicast al supernodo**: `hop_dst = dest_id = id del supernodo`, mismo `seq` original de cada trama. Si la cola está vacía (solicitud solo por hora, v3.0), el flujo termina aquí: el solicitante sincroniza con el `epoch` de la oferta, empieza a muestrear, y solo entrega en custodia cuando acumule tramas sin confirmar.
 
 El supernodo, al recibir una TELEMETRY con `dest_id == id propio`:
 
@@ -523,6 +527,7 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length != 0`, NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
 10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 4` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
+11. Para TELEMETRY en el receptor final (gateway o supernodo en custodia): `ts == 0` (ACK con `status = DECODE_ERROR`). Desde v3.0 ninguna muestra legítima se captura sin hora; un `ts` a cero delata un firmware desactualizado o con un bug de reloj.
 
 ## 11. Extensiones previstas
 
@@ -592,13 +597,13 @@ Sección añadida el 10-jul-2026. Define el proceso por el que un nodo (o supern
 
 ### 13.1 Secuencia de arranque
 
-1. El nodo arranca, carga su `config.json` y genera un **`boot_id`**: un aleatorio de 32 bits que identifica esta sesión de arranque. No se persiste (sin NVS). El `boot_id` no viaja por LoRa; solo aparece en los batches NB-IoT (`batch-format.md` §3) para identificar muestras capturadas sin hora.
+1. El nodo arranca y carga su `config.json`. Si la seguridad de aire está activa, genera el salt de sesión de §14.4 (aleatorio de 32 bits, sin persistencia). El `boot_id` de v2.1 queda **eliminado en v3.0**: identificaba muestras capturadas sin hora, que ya no existen (§13.4).
 2. Escucha beacons y adopta padre (§2.1-§2.2). Si un beacon trae `epoch != 0`, el nodo ya sincroniza reloj aquí.
 3. Envía **NODE_REGISTER** hacia el gateway (vía padre, con relays como cualquier uplink). Reintenta con el timeout de ACK normal y, agotados los reintentos, con backoff exponencial (recomendado: 5 s duplicando hasta 60 s) mientras tenga padre.
 4. El gateway procesa el registro (guarda/actualiza el catálogo del nodo, lo publica al backend) y responde **WELCOME** por la ruta inversa, con la hora y el estado del registro.
 5. Recibido el WELCOME con `status = OK`, el nodo arranca la telemetría con `seq = 1`.
 
-**Regla de bloqueo**: con padre adoptado, el nodo **no emite TELEMETRY hacia el gateway hasta recibir WELCOME**. Con gateway vivo son segundos. Sin gateway (sin beacons, nodo huérfano) la regla no aplica: el nodo captura y encola igual, y sus muestras salen por el respaldo NB-IoT (propio o en custodia, §8) identificadas por `boot_id` si aún no tiene hora. Al recuperar gateway, el registro se completa y la operación LoRa normal comienza.
+**Regla de bloqueo**: con padre adoptado, el nodo **no emite TELEMETRY hacia el gateway hasta recibir WELCOME**. Con gateway vivo son segundos. Sin gateway (sin beacons, nodo huérfano) la regla no aplica, pero rige la del reloj (v3.0): **sin hora sincronizada no se muestrea**. El huérfano primero consigue hora (NTP propio si es supernodo, `epoch` del SN_OFFER si no, §8.1); con hora, captura y encola, y sus muestras salen por el respaldo NB-IoT (propio o en custodia, §8) con `ts` válido siempre. Al recuperar gateway, el registro se completa y la operación LoRa normal comienza.
 
 El registro se repite en cada boot. Re-registrarse con un catálogo ya conocido es válido e idempotente: el gateway responde WELCOME igualmente (y así el nodo re-obtiene la hora).
 
@@ -656,13 +661,18 @@ Tamaño: **18 bytes**.
 
 ### 13.4 Fuentes de hora del sistema (resumen normativo)
 
+**Regla central (v3.0): sin hora sincronizada no se muestrea.** La captura de telemetría está condicionada a `synced == true`; HEARTBEAT, NODE_REGISTER y SN_REQUEST no lo están (no llevan `ts` de dato). Consecuencia: la obtención de hora es un objetivo **activo** del arranque, no un efecto secundario de tener datos que enviar (en v2.x el NTP solo se intentaba a punto de publicar un batch, y el SN_REQUEST solo se emitía con cola pendiente; sin muestras nunca se pedía hora, un interbloqueo).
+
 | Prioridad | Fuente | Quién | Cuándo |
 | --- | --- | --- | --- |
 | 1 | `epoch` del WELCOME | todos | al registrarse, en cada boot |
 | 2 | `epoch` del BEACON | todos | resincronización continua cada periodo de beacon |
-| 3 | NTP sobre NB-IoT | solo supernodos | **solo si es estrictamente necesario**: a punto de publicar un batch con `clock_synced == false` (módem ya despierto y registrado). Ver `batch-format.md` §6. |
+| 3 | `epoch` del SN_OFFER | nodos huérfanos sin NB-IoT | al solicitar supernodo, también con cola vacía (§8.1) |
+| 4 | NTP sobre NB-IoT | solo supernodos | **activo desde el arranque** si no hay hora por las vías 1-2: primer intento en cuanto el módem está registrado, reintentos al ritmo del cooldown del servicio NB-IoT (5 min) mientras `synced == false`. |
 
 El reloj local corre sobre el oscilador del nodo como `epoch_offset` respecto a `millis()`; cada fuente de las de arriba lo corrige. La hora de red LTE por `AT+CCLK?` (NITZ) queda **eliminada** del diseño: dependía de que el operador la implementara y en banco nunca la entregó.
+
+Ventana asumida: entre el boot y la primera fuente de hora no se captura nada. Con gateway vivo son los segundos hasta el WELCOME; supernodo con gateway caído, los segundos del NTP; huérfano sin NB-IoT, lo que tarde en oír un SN_OFFER. A las cadencias del proyecto, un puñado de muestras de arranque. El escenario sin ninguna fuente de hora (gateway caído y NTP fallando de forma persistente) no genera datos: bajo la premisa de v3.0, una muestra sin hora no tiene valor.
 
 ## 14. Seguridad de la interfaz aire (v2.2)
 
@@ -727,23 +737,23 @@ bytes 0-10 de la cabecera, con hop_src (byte 2), hop_dst (byte 3) y ttl (byte 9)
 puestos a 0x00, seguidos de sec_ts (4 B)
 ```
 
-Así el MIC liga el payload a `schema_version`, `network_id`, `origin_id`, `dest_id`, `seq`, `frame_type`, `payload_length` y `sec_ts` — exactamente los campos inmutables de §2.5 más el sobre — y permanece válido a través de cualquier número de saltos.
+Así el MIC liga el payload a `schema_version`, `network_id`, `origin_id`, `dest_id`, `seq`, `frame_type`, `payload_length` y `sec_ts` (exactamente los campos inmutables de §2.5 más el sobre) y permanece válido a través de cualquier número de saltos.
 
 ### 14.4 Emisor sin hora sincronizada
 
-Un nodo recién arrancado sin WELCOME ni beacon con epoch no tiene hora (§13). Para esas tramas, `sec_ts` toma un **salt de sesión**: un aleatorio de 32 bits en el rango `[1, 0x40000000)` generado en cada boot (puede derivarse del `boot_id` de §13.1 recortado al rango). El rango está deliberadamente por debajo de cualquier epoch plausible (0x40000000 ≈ año 2004), de modo que el receptor distingue sin ambigüedad "hora real" de "salt": los valores bajos quedan exentos del control de frescura (§14.5). La unicidad del nonce se mantiene: el salt difiere entre arranques (colisión 2⁻³², despreciable) y el `seq` es monotónico dentro del arranque. Caso extremo: si el `seq` envuelve (65536 tramas) sin que el nodo haya sincronizado nunca, el firmware regenera el salt antes de continuar.
+Un nodo recién arrancado sin WELCOME ni beacon con epoch no tiene hora (§13). Sus tramas de datos no existen (sin hora no se muestrea, §13.4), pero sí emite tramas sin `ts` de dato: NODE_REGISTER, SN_REQUEST, HEARTBEAT. Para esas tramas, `sec_ts` toma un **salt de sesión**: un aleatorio de 32 bits en el rango `[1, 0x40000000)` generado en cada boot (§13.1), sin persistencia. El rango está deliberadamente por debajo de cualquier epoch plausible (0x40000000 ≈ año 2004), de modo que el receptor distingue sin ambigüedad "hora real" de "salt": los valores bajos quedan exentos del control de frescura (§14.5). La unicidad del nonce se mantiene: el salt difiere entre arranques (colisión 2⁻³², despreciable) y el `seq` es monotónico dentro del arranque. Caso extremo: si el `seq` envuelve (65536 tramas) sin que el nodo haya sincronizado nunca, el firmware regenera el salt antes de continuar.
 
 En cuanto el nodo sincroniza, sus tramas nuevas llevan epoch real en `sec_ts`. Las ya construidas conservan sus bytes (inmutabilidad de §5.1).
 
 ### 14.5 Anti-replay: control de frescura
 
-El cifrado autentica al emisor pero no la actualidad: una trama grabada del aire y reemitida es criptográficamente válida. El sistema ya neutraliza el replay de **datos** sin ayuda: una TELEMETRY reemitida cae en la deduplicación del gateway (§2.6, memoria corta de seqs y la identidad persistente `(origin, ts, seq)`) y no se procesa como dato nuevo. Por eso el control de frescura **no aplica a las tramas de datos** — y no debe aplicar: el protocolo está diseñado para que una TELEMETRY llegue tarde legítimamente (espera de `beacon_timeout_ms`, reselección de padre, reintentos, custodia NB-IoT asíncrona). Una ventana de frescura sobre TELEMETRY descartaría datos buenos o sería tan ancha que no protegería.
+El cifrado autentica al emisor pero no la actualidad: una trama grabada del aire y reemitida es criptográficamente válida. El sistema ya neutraliza el replay de **datos** sin ayuda: una TELEMETRY reemitida cae en la deduplicación del gateway (§2.6, memoria corta de seqs y la identidad persistente `(origin, ts, seq)`) y no se procesa como dato nuevo. Por eso el control de frescura **no aplica a las tramas de datos**, y no debe aplicar: el protocolo está diseñado para que una TELEMETRY llegue tarde legítimamente (espera de `beacon_timeout_ms`, reselección de padre, reintentos, custodia NB-IoT asíncrona). Una ventana de frescura sobre TELEMETRY descartaría datos buenos o sería tan ancha que no protegería.
 
 Donde el replay sí hace daño es en las tramas de **control**, cuyo efecto no pasa por la deduplicación: un BEACON viejo desincroniza relojes y confunde la selección de padre; un WELCOME viejo entrega una hora pasada; un ACK de una sesión anterior podría liberar de la cola una trama actual que casualmente reutilice el mismo `seq`. Estas tramas, a diferencia de la telemetría, son de usar y tirar: viajan y mueren en segundos, así que una ventana estrecha no rechaza nada legítimo.
 
 **Regla**: el receptor descarta (con log) una trama de tipo **ACK (`0x01`), WELCOME (`0x05`), BEACON (`0x10`) o SN_OFFER (`0x12`)** si `|reloj_propio − sec_ts| > kSecFreshnessWindow`. Constante de firmware, no de config: **300 s** recomendados (cubre con margen holgado los segundos de vida real de estas tramas más la deriva del oscilador entre beacons).
 
-El control se **omite** cuando falta cualquiera de las dos horas: si el reloj propio del receptor no está sincronizado, o si `sec_ts < 0x40000000` (salt de emisor sin hora, §14.4). Riesgo residual aceptado y documentado: (a) un receptor sin hora no puede validar frescura — es la ventana entre el boot y el primer beacon/WELCOME; (b) tramas de control emitidas por un gateway sin hora (arranque sin NTP) viajan con salt y quedan exentas — ventana de exposición igual de corta. En ambos casos el atacante sigue sin poder **fabricar** tramas; solo reemitir, y solo durante esas ventanas.
+El control se **omite** cuando falta cualquiera de las dos horas: si el reloj propio del receptor no está sincronizado, o si `sec_ts < 0x40000000` (salt de emisor sin hora, §14.4). Riesgo residual aceptado y documentado: (a) un receptor sin hora no puede validar frescura (es la ventana entre el boot y el primer beacon/WELCOME); (b) tramas de control emitidas por un gateway sin hora (arranque sin NTP) viajan con salt y quedan exentas, con una ventana de exposición igual de corta. En ambos casos el atacante sigue sin poder **fabricar** tramas; solo reemitir, y solo durante esas ventanas.
 
 ### 14.6 Validación en recepción (complemento a §10)
 
@@ -757,7 +767,7 @@ Los relays ejecutan el paso 2 (verifican MIC y descifran, necesario para re-cifr
 
 ### 14.7 Gestión de claves
 
-La clave viaja en `transport.lora.security.key` (`node-config.md` §4.5): 32 caracteres hex = 128 bits, generada aleatoriamente por despliegue (nunca una frase ni un patrón). En la fase 1 del comisionamiento va embebida en el binario como el resto del config; nota de honestidad: quien extraiga la flash de un nodo obtiene la clave (el cifrado de flash del ESP32 y el almacenamiento en NVS quedan fuera del alcance de esta versión). En el gateway la clave vive en la configuración del servicio del Pi — el Heltec no la conoce (§12.1). La rotación de claves y el aprovisionamiento por aire son una mejora opcional, no un pendiente bloqueante: conectan con el proceso de registro (§13), como ya preveía §11, y quedan fuera del alcance de v2.2. Para el MVP basta una clave estática por despliegue.
+La clave viaja en `transport.lora.security.key` (`node-config.md` §4.5): 32 caracteres hex = 128 bits, generada aleatoriamente por despliegue (nunca una frase ni un patrón). En la fase 1 del comisionamiento va embebida en el binario como el resto del config; nota de honestidad: quien extraiga la flash de un nodo obtiene la clave (el cifrado de flash del ESP32 y el almacenamiento en NVS quedan fuera del alcance de esta versión). En el gateway la clave vive en la configuración del servicio del Pi; el Heltec no la conoce (§12.1). La rotación de claves y el aprovisionamiento por aire son una mejora opcional, no un pendiente bloqueante: conectan con el proceso de registro (§13), como ya preveía §11, y quedan fuera del alcance de v2.2. Para el MVP basta una clave estática por despliegue.
 
 ## 15. Cambios respecto a v1.0
 
@@ -785,8 +795,18 @@ Resumen para trazabilidad del TFM:
 3. Anti-replay por control de frescura sobre `sec_ts`, solo para tramas de control (ACK, WELCOME, BEACON, SN_OFFER); las tramas de datos quedan cubiertas por la deduplicación de §2.6.
 4. Con `security.enabled == false` la trama es idéntica a v2.1 salvo el byte de versión (`0x22`).
 
+**Cambios de v2.2 a v3.0 (16-jul-2026)**:
+
+1. Sin hora sincronizada no se muestrea (§13.4): toda muestra nace con `ts` válido. `ts = 0` en TELEMETRY pasa a inválido (regla 11 de §10, ACK `DECODE_ERROR`).
+2. Obtención de hora activa: NTP desde el arranque en supernodos, `epoch` del SN_OFFER como fuente formal para huérfanos, SN_REQUEST emisible con cola vacía (§8.1, §13.4).
+3. `boot_id` eliminado (§13.1): identificaba muestras sin hora. El salt de sesión de §14.4 lo sustituye en su papel criptográfico.
+4. Telemetría MQTT unificada para las cuatro rutas de entrega: gateway y supernodo publican el mismo mensaje, con sobre `debug` opcional ([`batch-format.md`](batch-format.md)). Desaparecen `boot_id` y `clock_synced` del JSON; la deduplicación del backend queda con la clave única `(origin, ts, seq)`.
+5. El bump es de major: `ts = 0` deja de ser tolerado y el mensaje MQTT cambia de forma incompatible. Sin consumidor cloud desplegado ni despliegue v2.x fuera del banco, la migración es reflashear todo a la vez, como en los bumps anteriores.
+
+(La v2.3, `epoch` en SN_OFFER, fue interna a la malla y no cambió el byte de versión; queda documentada en §8.2.)
+
 ## 16. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
-- [`batch-format.md`](batch-format.md): spec del batch NB-IoT que reempaqueta las tramas no confirmadas, propias o en custodia.
+- [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.
 - [`commands-format.md`](commands-format.md): spec de los comandos entrantes vía MQTT.

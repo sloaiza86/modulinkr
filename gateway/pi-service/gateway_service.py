@@ -292,6 +292,19 @@ class GatewayService:
             return
 
         if ft == protocol.FRAME_TELEMETRY:
+            # v3.0 (spec §10 regla 11): ts=0 es dato malformado, no entra
+            # al buffer y se responde DECODE_ERROR para que el nodo lo
+            # saque de su cola y lo delate en log.
+            if parsed.get("ts_zero"):
+                self.n_drop += 1
+                LOG.warning("drop TELEMETRY ts=0 origin=%s seq=%d (firmware "
+                            "desactualizado o bug de reloj)",
+                            protocol.addr_name(parsed["origin_id"]),
+                            parsed["seq"])
+                self.send_ack(parsed["origin_id"], parsed["hop_src"],
+                              parsed["seq"], protocol.ACK_DECODE_ERROR)
+                return
+
             # Aceptar en buffer (custodia) y confirmar. Nuevo o duplicado, se
             # confirma igual: un duplicado significa que el nodo perdió el ACK.
             # La identidad es (origin, ts, seq), ver buffer.py.

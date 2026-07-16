@@ -1,15 +1,15 @@
-// ModuLinkr, reloj del nodo y boot_id (v2.1)
+// ModuLinkr, reloj del nodo (v2.1; boot_id retirado en v3.0)
 //
 // Fuente normativa: frame-format.md §13.4 (jerarquía de fuentes de hora) y
 // batch-format.md §6. El reloj corre como un offset entre el epoch Unix y
-// millis(): cualquier fuente (WELCOME, epoch de beacon, NTP sobre NB-IoT)
-// llama a sync() y el offset se corrige. La deriva del oscilador deja de
-// importar porque los beacons resincronizan cada 30 s.
+// millis(): cualquier fuente (WELCOME, epoch de beacon o de SN_OFFER, NTP
+// sobre NB-IoT) llama a sync() y el offset se corrige. La deriva del
+// oscilador deja de importar porque los beacons resincronizan cada 30 s.
 //
-// El boot_id es un aleatorio de 32 bits generado una vez por arranque, sin
-// persistencia (sin NVS). Identifica la sesión de boot en los batches
-// NB-IoT: da identidad (origin, boot_id, seq) a las muestras propias
-// capturadas sin hora, que no pueden identificarse por (origin, ts, seq).
+// v3.0: sin hora sincronizada no se muestrea (synced() es el gate del
+// sampler en main.cpp), así que toda muestra nace con ts válido. El
+// boot_id desaparece: identificaba muestras sin hora, que ya no existen
+// (el salt criptográfico de §14.4 vive aparte, en lora.cpp).
 //
 // Seguridad de concurrencia: campos de 32 bits alineados con acceso
 // volatile, el mismo patrón lockless que NbiotService (escritura desde la
@@ -21,7 +21,7 @@
 
 namespace nodeclock {
 
-// Genera el boot_id. Llamar una vez en setup().
+// Inicializa el reloj. Llamar una vez en setup().
 void begin();
 
 // Fija el reloj: epoch corresponde a "ahora" (al millis() actual).
@@ -38,8 +38,5 @@ uint32_t epochNow();
 // todo el eje millis desde el boot (timestampado retroactivo de muestras
 // encoladas, batch-format.md §6).
 uint32_t epochAt(uint32_t ms);
-
-// Aleatorio de 32 bits de esta sesión de arranque.
-uint32_t bootId();
 
 }  // namespace nodeclock

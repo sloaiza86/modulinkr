@@ -1,19 +1,17 @@
-// ModuLinkr, reloj del nodo y boot_id (implementación)
+// ModuLinkr, reloj del nodo (implementación)
 
 #include "nodeclock.h"
-
-#include <esp_random.h>
 
 namespace nodeclock {
 
 namespace {
 volatile bool     g_synced  = false;
 volatile uint32_t g_offset  = 0;   // epoch - millis()/1000 al sincronizar
-uint32_t          g_boot_id = 0;
 }  // namespace
 
 void begin() {
-    g_boot_id = esp_random();
+    // Sin estado que generar desde v3.0 (el boot_id desapareció con las
+    // muestras sin hora). Se conserva el hook por simetría del arranque.
 }
 
 void sync(uint32_t epoch_now_s) {
@@ -33,10 +31,6 @@ uint32_t epochNow() {
 uint32_t epochAt(uint32_t ms) {
     if (!g_synced) return 0;
     return g_offset + ms / 1000u;
-}
-
-uint32_t bootId() {
-    return g_boot_id;
 }
 
 }  // namespace nodeclock

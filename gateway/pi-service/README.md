@@ -11,7 +11,7 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 | --- | --- |
 | `protocol.py` | Librería del protocolo v2.2: constantes, CRC16, `parse_frame`, `build_ack`, `build_beacon`, `build_welcome` y la seguridad v2.2 (AES-CCM, nonce, AAD). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
 | `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. Expone `fetch_pending` / `mark_published` (telemetría) y sus equivalentes de catálogo para el drenado a cloud. |
-| `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría a `modulinkr/v1/{origin}/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. |
+| `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría en el mensaje unificado de `batch-format.md` a `modulinkr/v1/255/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. |
 | `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
 | `heltec_rx_parser.py` | Visor de depuración anterior (solo lectura). Se conserva como herramienta; la lógica productiva vive en `gateway_service.py`. |
@@ -52,19 +52,22 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_MQTT_KEYFILE` | (vacío) | Clave del cert de cliente (opcional) |
 | `MODULINKR_MQTT_TLS_INSECURE` | `0` | `1` no valida el hostname del cert (solo banco con cert autofirmado) |
 | `MODULINKR_MQTT_DRAIN_S` | `2.0` | Periodo del drenado del buffer a cloud, en segundos |
-| `MODULINKR_MQTT_DRAIN_MAX` | `50` | Muestras de telemetría por vuelta de drenado |
+| `MODULINKR_MQTT_DRAIN_MAX` | `50` | Muestras de telemetría por vuelta de drenado (van en un solo mensaje) |
 | `MODULINKR_MQTT_PUB_TIMEOUT` | `5.0` | Espera del PUBACK antes de dejar la muestra pendiente, en segundos |
+| `MODULINKR_MQTT_DEBUG` | `1` | `1` = el mensaje de telemetría lleva el sobre `debug` (`batch-format.md` §5) |
 
 ## Publicación al broker cloud (MQTT)
 
 `mqtt_publisher.py` drena el buffer al broker cloud (Mosquitto self-hosted con
-TLS RSA, `Red V4.md` §Infraestructura cloud). La telemetría sale como una
-muestra por mensaje a `modulinkr/v1/{origin}/telemetry` (QoS 1, sin retener),
-con payload `{"schema_version","origin","seq","ts","v"}` (`ts` va `null` si la
-trama llegó sin hora). El catálogo de cada nodo se republica a
-`modulinkr/v1/{origin}/register` (QoS 1, retenido), en el formato de
-`batch-format.md` §10.2, para que el consumidor cloud tenga la leyenda de las
-lecturas antes que los datos.
+TLS RSA, `Red V4.md` §Infraestructura cloud). Desde v3.0 la telemetría sale en
+el **mensaje unificado** de `batch-format.md`: un publish por vuelta de drenado
+a `modulinkr/v1/255/telemetry` (QoS 1, sin retener; 255 = publisher gateway),
+con payload `{"schema_version","samples":[{"origin","seq","ts","v"},...]}` más
+el sobre `debug` opcional (`MODULINKR_MQTT_DEBUG`). Es el mismo formato que
+publican los supernodos por NB-IoT: el consumidor cloud tiene un solo parser.
+El catálogo de cada nodo se republica a `modulinkr/v1/{origin}/register`
+(QoS 1, retenido), en el formato de `batch-format.md` §10.2, para que el
+consumidor cloud tenga la leyenda de las lecturas antes que los datos.
 
 La marca `published=1` solo se pone tras el PUBACK del broker: un corte de
 Internet o un reinicio del servicio deja la muestra pendiente y se reintenta.

@@ -1,7 +1,7 @@
 // ModuLinkr, configs embebidos (fase 1 del comisionamiento)
 //
 // Un config.json completo por unidad física del banco, conforme a
-// node-config.md schema 2.0. El build_flag NODE_CONFIG (platformio.ini)
+// node-config.md schema 3.0. El build_flag NODE_CONFIG (platformio.ini)
 // selecciona cuál se embebe:
 //
 //   NODE_CONFIG=1  nodo 1, lejano, XY-MD02 (T/H ambiente) por Modbus
@@ -20,7 +20,7 @@
 #if NODE_CONFIG == 1
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.3",
+  "schema_version": "3.0",
   "node": {
     "id":          1,
     "type":        "node",
@@ -80,7 +80,7 @@ static const char kConfigJson[] = R"json({
 #elif NODE_CONFIG == 2
 
 static const char kConfigJson[] = R"json({
-  "schema_version": "2.3",
+  "schema_version": "3.0",
   "node": {
     "id":          2,
     "type":        "super_node",
@@ -122,8 +122,9 @@ static const char kConfigJson[] = R"json({
       "tls":                  true,
       "mqtt_user":            "modulinkr",
       "mqtt_pass":            "practica",
-      "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
+      "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
+      "debug":                true,
       "relay_enabled":        true,
       "relay_queue_max":      128
     }

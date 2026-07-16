@@ -20,9 +20,9 @@ Política:
     (frame-format.md §2.6). El ts de captura desambigua arranques del
     nodo: un seq reiniciado ya no colisiona con corridas anteriores
     (desaparece el paliativo de vaciar la BBDD tras reflashear).
-    ts = 0 significa "capturada sin hora"; en ese caso la dedup
-    degrada a (origin, 0, seq), suficiente porque un nodo con gateway
-    a la vista se registra y sincroniza antes de emitir telemetría.
+    Desde v3.0 el ts es siempre válido (sin hora no se muestrea,
+    frame-format.md §13.4); una TELEMETRY con ts=0 se rechaza con
+    DECODE_ERROR en gateway_service.py y no llega a este buffer.
   - Cota máxima de entradas (FIFO): al superarse, se borran las más
     antiguas por t_recv. Es un buffer de tolerancia, no un archivo; si
     Internet lleva mucho caído, los supernodos con NB-IoT ya están
@@ -95,7 +95,7 @@ class GatewayBuffer:
         si ya estaba (duplicado). En ambos casos el gateway confirma con
         ACK OK: si es duplicado, el nodo reintentó porque perdió el ACK
         anterior (frame-format.md §2.6). La identidad es (origin, ts, seq);
-        ts = 0 si la trama llegó sin hora de captura."""
+        el ts llega siempre válido (v3.0: ts=0 se rechaza antes)."""
         reads_json = None
         if 'reads' in parsed:
             reads_json = json.dumps(parsed['reads'])

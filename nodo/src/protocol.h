@@ -1,4 +1,4 @@
-// ModuLinkr, constantes del protocolo LoRa schema v2.2
+// ModuLinkr, constantes del protocolo LoRa schema v3.0
 //
 // Fuente normativa: shared/protocol/frame-format.md. Este archivo solo
 // materializa en C++ los valores de la spec; cualquier cambio se hace
@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x22;  // v2.2
+constexpr uint8_t kSchemaVersion = 0x30;  // v3.0
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ModuLinkr, librería del protocolo LoRa v2.2 para el gateway (lado Pi).
 
-Fuente normativa: firmware/shared/protocol/frame-format.md (schema v2.2,
+Fuente normativa: firmware/shared/protocol/frame-format.md (schema v3.0,
 cabecera de 11 bytes + payload + CRC16). Este módulo materializa en Python:
 
   - Las constantes del protocolo.
@@ -24,6 +24,11 @@ Cambios v2.2 (11-jul-2026): seguridad de la interfaz aire (spec §14). Con
 clave, parse_frame espera y valida el sobre (verifica MIC, descifra) y los
 build_* cifran y firman. Sin clave, todo queda como en v2.1 salvo el byte
 de versión (0x22).
+
+Cambios v3.0 (16-jul-2026): ts de captura siempre válido (sin hora no se
+muestrea, spec §13.4). parse_frame valida el major del schema (regla 5 de
+§10) y una TELEMETRY con ts=0 se marca con 'ts_zero' para que el servicio
+responda ACK DECODE_ERROR (regla 11).
 
 No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
 cualquier utilidad de diagnóstico.
@@ -51,7 +56,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x22          # v2.2 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x30          # v3.0 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -257,6 +262,12 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['error'] = 'CRC invalido'
         return out
 
+    # Regla 5 de §10: major distinto, trama incompatible.
+    if (schema_version & SCHEMA_MAJOR_MASK) != (SCHEMA_VERSION & SCHEMA_MAJOR_MASK):
+        out['error'] = (f'schema {out["schema_str"]} incompatible '
+                        f'(major esperado {(SCHEMA_VERSION >> 4) & 0xF})')
+        return out
+
     if key:
         # Sobre v2.2 (spec §14.6): verificar MIC y descifrar. La frescura
         # de tramas de control no aplica en el gateway: sus tramas de
@@ -277,12 +288,16 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
     out['payload'] = payload
 
     if frame_type == FRAME_TELEMETRY:
-        # v2.1: ts de captura (uint32 LE, 0 = sin hora) + N float32.
+        # ts de captura (uint32 LE) + N float32. Desde v3.0 el ts es
+        # siempre válido; ts=0 delata firmware desactualizado o bug de
+        # reloj y el servicio responde DECODE_ERROR (spec §10 regla 11).
         if payload_length < 8 or (payload_length - 4) % 4 != 0:
             out['error'] = (f'TELEMETRY payload_length={payload_length} '
                             f'invalido (esperado 4 + 4*N, N >= 1)')
             return out
         out['ts'] = struct.unpack_from('<I', payload, 0)[0]
+        if out['ts'] == 0:
+            out['ts_zero'] = True
         n = (payload_length - 4) // 4
         out['reads'] = [struct.unpack_from('<f', payload, 4 + i * 4)[0]
                         for i in range(n)]

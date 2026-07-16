@@ -9,13 +9,16 @@ publica y solo se marca published=1 tras el PUBACK del broker.
 Dos flujos, ambos hacia el broker cloud (Mosquitto self-hosted, TLS con
 cert RSA, Red V4.md §Infraestructura cloud):
 
-  1. Telemetría: una muestra por publish al topic
-     modulinkr/v1/{origin}/telemetry, QoS 1, retained=false. Payload:
-       {"schema_version": "2.1", "origin": N, "seq": S,
-        "ts": T_o_null, "v": [floats]}
-     El consumidor cloud deduplica por (origin, ts, seq): la misma muestra
-     llegada también por NB-IoT (batch del supernodo) es un duplicado y se
-     descarta (db-schema.md §2).
+  1. Telemetría: el mensaje unificado de batch-format.md (v3.0), un
+     publish por vuelta de drenado al topic modulinkr/v1/255/telemetry
+     (255 = publisher gateway), QoS 1, retained=false. Payload:
+       {"schema_version": "3.0",
+        "samples": [{"origin": N, "seq": S, "ts": T, "v": [floats]}, ...],
+        "debug": {...}}   (sobre opcional, MODULINKR_MQTT_DEBUG)
+     Mismo formato que publican los supernodos: el consumidor cloud tiene
+     un solo parser y deduplica por (origin, ts, seq); la misma muestra
+     llegada también por NB-IoT es un duplicado y se descarta
+     (db-schema.md §2).
 
   2. Catálogo: mensaje register retenido al topic
      modulinkr/v1/{origin}/register, QoS 1, retained=true, formato de
@@ -44,6 +47,8 @@ clave se pregunta al ejecutar, nunca se escribe en el código):
                               cert (solo para banco con cert autofirmado)
   MODULINKR_MQTT_DRAIN_MAX    (default 50) muestras por vuelta de drenado
   MODULINKR_MQTT_PUB_TIMEOUT  (default 5.0) espera del PUBACK, segundos
+  MODULINKR_MQTT_DEBUG        (default 1) 1 = el mensaje de telemetría
+                              lleva el sobre debug (batch-format.md §5)
 
 Requiere `pip install paho-mqtt` en el venv del servicio.
 """
@@ -59,8 +64,10 @@ import paho.mqtt.client as mqtt
 
 LOG = logging.getLogger("modulinkr.mqtt")
 
-SCHEMA_VERSION   = "2.1"
-TELEMETRY_TOPIC  = "modulinkr/v1/{origin}/telemetry"
+SCHEMA_VERSION   = "3.0"
+SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
+GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
+TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
 REGISTER_TOPIC   = "modulinkr/v1/{origin}/register"
 
 
@@ -79,6 +86,7 @@ class MqttPublisher:
         self.tls_insec  = os.environ.get("MODULINKR_MQTT_TLS_INSECURE", "0") == "1"
         self.drain_max  = int(os.environ.get("MODULINKR_MQTT_DRAIN_MAX", "50"))
         self.pub_timeout = float(os.environ.get("MODULINKR_MQTT_PUB_TIMEOUT", "5.0"))
+        self.debug_env  = os.environ.get("MODULINKR_MQTT_DEBUG", "1") == "1"
 
         # Sin host no hay cloud: el servicio sigue operando (recibe LoRa,
         # ACK, beacon) y las muestras se acumulan en el buffer local.
@@ -89,6 +97,7 @@ class MqttPublisher:
         # Contadores de diagnóstico (se vuelcan en el STATS del servicio).
         self.n_pub_tel = 0   # muestras de telemetría publicadas (con PUBACK)
         self.n_pub_cat = 0   # catálogos republicados (con PUBACK)
+        self.batch_id  = 0   # mensajes de telemetría enviados en esta sesión
 
     # ----- Conexión -----
 
@@ -196,29 +205,47 @@ class MqttPublisher:
         return confirmed
 
     def _drain_telemetry(self) -> int:
+        """Publica las muestras pendientes de la vuelta como UN mensaje
+        unificado (batch-format.md §3): un solo publish y un solo PUBACK
+        para hasta drain_max muestras. Solo tras el PUBACK se marcan
+        published; sin PUBACK, todas quedan pendientes y se rearma el
+        mensaje en la vuelta siguiente (el consumidor deduplica)."""
         rows = self.buf.fetch_pending(self.drain_max)
-        confirmed_keys: list[tuple[int, int, int]] = []
-        for r in rows:
-            origin, ts, seq = r["origin_id"], r["ts"], r["seq"]
-            payload = json.dumps({
-                "schema_version": SCHEMA_VERSION,
-                "origin": origin,
-                "seq":    seq,
-                "ts":     ts if ts else None,
-                "v":      r["v"],
-            }, separators=(",", ":"))
-            topic = TELEMETRY_TOPIC.format(origin=origin)
-            if self._publish(topic, payload, qos=1, retain=False):
-                confirmed_keys.append((origin, ts, seq))
-            else:
-                break
+        if not rows:
+            return 0
 
-        if confirmed_keys:
-            self.buf.mark_published(confirmed_keys)
-            self.n_pub_tel += len(confirmed_keys)
-            LOG.info("MQTT telemetria publicada: %d muestra(s)",
-                     len(confirmed_keys))
-        return len(confirmed_keys)
+        # Orden de batch-format.md §4.1: por origin y seq ascendente
+        # (fetch_pending viene por t_recv; con un solo origen coincide).
+        rows.sort(key=lambda r: (r["origin_id"], r["seq"]))
+
+        samples = [
+            {"origin": r["origin_id"], "seq": r["seq"],
+             "ts": r["ts"], "v": r["v"]}
+            for r in rows
+        ]
+        msg = {
+            "schema_version": SCHEMA_VERSION,
+            "samples":        samples,
+        }
+        if self.debug_env:
+            msg["debug"] = {
+                "publisher":  GATEWAY_ID,
+                "batch_id":   self.batch_id + 1,
+                "trigger":    "gateway",
+                "fw_version": SERVICE_VERSION,
+            }
+
+        payload = json.dumps(msg, separators=(",", ":"))
+        if not self._publish(TELEMETRY_TOPIC, payload, qos=1, retain=False):
+            return 0
+
+        self.batch_id += 1
+        keys = [(r["origin_id"], r["ts"], r["seq"]) for r in rows]
+        self.buf.mark_published(keys)
+        self.n_pub_tel += len(keys)
+        LOG.info("MQTT telemetria publicada: %d muestra(s) en 1 mensaje "
+                 "(batch_id=%d)", len(keys), self.batch_id)
+        return len(keys)
 
     def _publish(self, topic: str, payload: str, qos: int,
                  retain: bool) -> bool:
@@ -242,8 +269,7 @@ class MqttPublisher:
 
     def _register_payload(self, origin: int, catalog: dict) -> str:
         """Mensaje register retenido de batch-format.md §10.2 a partir del
-        catálogo decodificado guardado en node_catalog. boot_id no viaja por
-        LoRa (es identidad de sesión NB-IoT), así que va null."""
+        catálogo decodificado guardado en node_catalog."""
         reads = [
             {"id": rd.get("id"), "name": rd.get("name"),
              "unit": rd.get("unit") or None}
@@ -259,7 +285,6 @@ class MqttPublisher:
             "node_id":        origin,
             "name":           catalog.get("node_name"),
             "fw_version":     catalog.get("fw_version"),
-            "boot_id":        None,
             "reads":          reads,
             "writes":         writes,
         }, separators=(",", ":"))

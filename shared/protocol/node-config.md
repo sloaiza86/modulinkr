@@ -13,12 +13,14 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "2.2"
+"schema_version": "3.0"
 ```
 
 > **Nota v2.1 (10-jul-2026)**: el bump acompaña al de la trama LoRa (`frame-format.md` §1.2, byte `0x21`), con la que este string se corresponde uno a uno. La estructura del JSON **no cambia** en 2.1; lo nuevo es comportamiento: registro del nodo en la red (NODE_REGISTER / WELCOME), `ts` de captura en TELEMETRY y `boot_id` en el batch. Los ejemplos de este documento conservan `"2.0"` donde son históricos.
 
 > **Nota v2.2 (11-jul-2026)**: añade el sub-bloque **opcional** `transport.lora.security` (§4.5), que activa el cifrado y la autenticación de la interfaz aire (`frame-format.md` §14). Al ser opcional (ausente = desactivado), el bump es de minor: un config 2.1 sigue validando.
+
+> **Nota v3.0 (16-jul-2026)**: acompaña al bump de la trama LoRa (`frame-format.md` §1.2, byte `0x30`). En el JSON: `nbiot.topic_telemetry` cambia su default al topic unificado `modulinkr/v1/{node_id}/telemetry` y aparece `nbiot.debug` (opcional, default `true`), que gobierna el sobre de diagnóstico del mensaje de telemetría (`batch-format.md` §5). En comportamiento: sin hora sincronizada no se muestrea (`frame-format.md` §13.4, política que §4.2 ya aplicaba al nodo normal y ahora es global), la obtención de hora es activa (NTP desde el arranque en supernodos, SN_REQUEST con cola vacía en huérfanos) y desaparecen `boot_id` y `clock_synced` del mensaje MQTT.
 
 > **Nota v2.3 (11-jul-2026)**: varios cambios. En `nbiot`: `mqtt_user` / `mqtt_pass` (autenticación MQTT) y soporte real de `tls=true` en el firmware (TLS 1.2 sin verificar certificado en el SIM7028; el broker debe usar cert **RSA**, el SIM7028 no negocia ECDSA). En `modbus.devices[]`: `read_mode` (`grouped`/`individual`) e `inter_read_ms` para controlar si las lecturas van agrupadas o una a una, y **se elimina `poll_interval_ms`** (un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`; para leer más lento se sube ese intervalo). Además el firmware ya admite funciones de lectura de bits (`read_coils` 0x01, `read_discrete_inputs` 0x02), no solo registros. La eliminación de `poll_interval_ms` es el único cambio no aditivo; como el firmware lo ignora si aparece, no rompe configs previos en la práctica.
 
@@ -142,7 +144,7 @@ Presente en ambos tipos de dispositivo. Todos los campos son obligatorios. Gobie
 | `parent_hysteresis_db` | integer | `0`-`30` | Mejora mínima de RSSI para cambiar de padre a igualdad de `hop_count`. Evita oscilaciones entre padres equivalentes. |
 | `parent_missed_frames` | integer | `≥ 1` | Tramas consecutivas con reintentos agotados sin ACK que invalidan al padre actual y fuerzan reselección. |
 | `sn_offer_wait_ms` | integer | `≥ 200` | Ventana de escucha de ofertas tras emitir un SN_REQUEST (`frame-format.md` §8). |
-| `gateway_wait_ms` | integer | opcional (v2.3), default `90000`, `≥ 1000` | Tiempo desde el arranque sin registrarse en la red LoRa (sin WELCOME del gateway) tras el cual el nodo actúa por su cuenta. **Supernodo**: empieza a muestrear y saca sus datos por NB-IoT (failover autónomo). **Nodo normal**: busca un supernodo vecino, le pide la hora (viaja en el `SN_OFFER`, `frame-format.md` §8.2) y, una vez sincronizado, muestrea y entrega por custodia. Sin gateway ni hora de un supernodo, no reporta (política estricta: nada de timestamps nulos). |
+| `gateway_wait_ms` | integer | opcional (v2.3), default `90000`, `≥ 1000` | Tiempo desde el arranque sin registrarse en la red LoRa (sin WELCOME del gateway) tras el cual el nodo actúa por su cuenta. **Supernodo**: consigue hora por NTP (activo desde el arranque, `frame-format.md` §13.4), empieza a muestrear y saca sus datos por NB-IoT (failover autónomo). **Nodo normal**: busca un supernodo vecino, le pide la hora (viaja en el `SN_OFFER`, `frame-format.md` §8.2) y, una vez sincronizado, muestrea y entrega por custodia. Sin gateway ni hora de un supernodo, no reporta (política estricta: nada de timestamps nulos). |
 
 ### 4.3 Sub-bloque `nbiot`
 
@@ -154,8 +156,9 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
   "mqtt_broker":          "broker.hivemq.com",
   "mqtt_port":            8883,
   "tls":                  true,
-  "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
+  "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
   "topic_commands":       "modulinkr/v1/{node_id}/cmd",
+  "debug":                true,
   "relay_enabled":        true,
   "relay_queue_max":      128
 }
@@ -171,8 +174,9 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. En el SIM7028 (v2.3) el TLS se establece **sin verificar el certificado del servidor** (`authmode=0`), por lo que no requiere cargar ninguna CA. POR VALIDAR EN BANCO. |
 | `mqtt_user` | string | opcional (v2.3), default `""` | Usuario de autenticación MQTT. Se envía en `AT+CMQTTCONNECT`. Vacío = conexión anónima. |
 | `mqtt_pass` | string | opcional (v2.3), default `""` | Contraseña de autenticación MQTT. Solo se usa si `mqtt_user` no está vacío. |
-| `topic_telemetry` | string | template MQTT | Topic donde publica los batches. `{node_id}` se sustituye por el `node.id` decimal. |
+| `topic_telemetry` | string | template MQTT | Topic donde publica los mensajes de telemetría (`batch-format.md` §2). `{node_id}` se sustituye por el `node.id` decimal. |
 | `topic_commands` | string | template MQTT | Topic al que se suscribe para recibir comandos (ver `commands-format.md`). |
+| `debug` | boolean | opcional (v3.0), default `true` | Si `true`, cada mensaje de telemetría lleva el sobre `debug` (`batch-format.md` §5: `publisher`, `batch_id`, `trigger`, `fw_version`). El mensaje de `test_batch` lo lleva siempre. |
 | `relay_enabled` | boolean | `true`, `false` | Si `true`, el supernodo responde SN_OFFER a los SN_REQUEST de vecinos sin ruta y acepta sus tramas en custodia (`frame-format.md` §8). Con `false` nunca ofrece su salida celular. |
 | `relay_queue_max` | integer | `≥ 1` | Tope de muestras ajenas en cola de custodia. Alcanzado el tope, el supernodo deja de responder SN_OFFER hasta liberar espacio. |
 
@@ -214,7 +218,7 @@ Activa la seguridad de la interfaz aire: cifrado AES-CCM del payload y autentica
 
 | Campo | Tipo | Valores válidos | Notas |
 | --- | --- | --- | --- |
-| `enabled` | boolean | `true`, `false` | Si `true`, toda trama emitida viaja cifrada y autenticada, y toda trama recibida sin MIC válido se descarta. **Ajuste de toda la red**: debe coincidir en todos los dispositivos del despliegue, gateway (Pi) incluido — como `network_id`. No existe modo mixto ni flag en el aire (decisión anti-downgrade, `frame-format.md` §14.1). |
+| `enabled` | boolean | `true`, `false` | Si `true`, toda trama emitida viaja cifrada y autenticada, y toda trama recibida sin MIC válido se descarta. **Ajuste de toda la red**: debe coincidir en todos los dispositivos del despliegue, gateway (Pi) incluido, como `network_id`. No existe modo mixto ni flag en el aire (decisión anti-downgrade, `frame-format.md` §14.1). |
 | `key` | string | 32 caracteres hex (128 bits) | Clave de red compartida. Generar **aleatoriamente** por despliegue (p. ej. `openssl rand -hex 16`), nunca una frase ni un patrón. Debe coincidir en todos los dispositivos y en la configuración del servicio del Pi. El Heltec no la conoce. Obligatoria si `enabled == true`; con `enabled == false` puede omitirse. |
 
 Bloque ausente = `enabled: false` (interfaz en claro, comportamiento idéntico a v2.1). El sobrecoste con seguridad activa es de +8 bytes por trama; el payload máximo de TELEMETRY baja en la misma medida (`frame-format.md` §14.2).
@@ -534,7 +538,7 @@ Notas:
       "mqtt_broker":          "broker.hivemq.com",
       "mqtt_port":            8883,
       "tls":                  true,
-      "topic_telemetry":      "modulinkr/v1/{node_id}/batch",
+      "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
       "topic_commands":       "modulinkr/v1/{node_id}/cmd",
       "relay_enabled":        true,
       "relay_queue_max":      128

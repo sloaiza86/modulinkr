@@ -118,7 +118,8 @@ public:
     //
     // Usa AT+CNTP (SIM7028 §8.2.1). POR VALIDAR EN BANCO el <cid> correcto
     // (0 ó 1, según el contexto de datos activo); si el módulo no resuelve,
-    // falla limpio y devuelve 0 (el batch sale sin hora, con boot_id).
+    // falla limpio y devuelve 0 (v3.0: sin hora no se muestrea, así que
+    // el reintento con backoff corre a cargo de ntpTick en main.cpp).
     uint32_t ntpSync(const char* server = "pool.ntp.org");
 
     bool sendAT(const char* cmd,

@@ -9,6 +9,14 @@ MODULINKR_ETC="/etc/modulinkr"
 GW_ENV_FILE="$MODULINKR_ETC/gateway.env"
 GW_UNIT="/etc/systemd/system/modulinkr-gateway.service"
 
+# run CMD...: muestra el comando antes de ejecutarlo y deja su salida a la vista.
+# En los pasos largos (apt, pip) así se ve el avance, en vez de un silencio que
+# parece colgado.
+run() {
+    printf "%b   \$ %s%b\n" "$C_STEP" "$*" "$C_RESET"
+    "$@"
+}
+
 # gw_load_env: idempotencia de secretos. Si ya existe una instalación previa,
 # carga sus valores para que ask/ask_secret no vuelvan a preguntar lo definido.
 gw_load_env() {
@@ -198,10 +206,11 @@ gather_gateway() {
 # en el Pi (el venv las verá con --system-site-packages).
 gw_install_packages() {
     step "Dependencias del sistema"
+    echo "Instalando paquetes del sistema. Puede tardar unos minutos la primera vez."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y python3 python3-venv python3-pip \
-                       python3-serial python3-cryptography >/dev/null
+    run apt-get update
+    run apt-get install -y python3 python3-venv python3-pip \
+                           python3-serial python3-cryptography
     ok "Paquetes base instalados (python3, venv, pyserial, cryptography)"
 }
 
@@ -211,13 +220,13 @@ gw_setup_venv() {
     if [ ! -d "$GW_VENV" ]; then
         # --system-site-packages: el venv ve pyserial y cryptography de apt
         # (evita compilar cryptography en el Pi) y añade paho-mqtt encima.
-        sudo -u "$GW_USER" -H python3 -m venv --system-site-packages "$GW_VENV"
+        run sudo -u "$GW_USER" -H python3 -m venv --system-site-packages "$GW_VENV"
         ok "Venv creado en $GW_VENV"
     else
         ok "Venv ya existe en $GW_VENV (se reutiliza)"
     fi
-    sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install --quiet --upgrade pip
-    sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install --quiet paho-mqtt pyserial
+    run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install --upgrade pip
+    run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install paho-mqtt pyserial
     ok "paho-mqtt instalado en el venv"
 }
 

@@ -183,9 +183,8 @@ bool load(Config& c, char* err, size_t err_len) {
     // estructura del JSON son opcionales hacia atrás (node-config.md §1:
     // 2.1 no cambió estructura, 2.2 añade el bloque opcional security).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "2.3") != 0 && strcmp(schema, "2.2") != 0 &&
-        strcmp(schema, "2.1") != 0 && strcmp(schema, "2.0") != 0) {
-        return failf(err, err_len, "schema_version '%s' no soportado (se espera 2.x)", schema);
+    if (strcmp(schema, "3.0") != 0) {
+        return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.0)", schema);
     }
 
     // ----- node (reglas 2 y 3) -----
@@ -345,6 +344,8 @@ bool load(Config& c, char* err, size_t err_len) {
         }
         c.nb_relay_enabled     = nb["relay_enabled"].as<bool>();
         c.relay_queue_max      = nb["relay_queue_max"].as<uint16_t>();
+        // Sobre debug del mensaje de telemetría (v3.0, batch-format.md §5).
+        c.nbiot_debug          = nb["debug"] | true;
     }
 
     // ----- modbus -----

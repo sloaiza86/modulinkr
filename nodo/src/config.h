@@ -147,6 +147,7 @@ struct Config {
     char     topic_batch[64] = {0};   // con {node_id} ya sustituido
     bool     nb_relay_enabled     = true;
     uint16_t relay_queue_max      = 128;
+    bool     nbiot_debug          = true;  // sobre debug del mensaje (v3.0)
 
     // modbus (bus)
     uint32_t baudrate = 9600;

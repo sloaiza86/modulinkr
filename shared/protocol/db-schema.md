@@ -7,6 +7,8 @@ Documento normativo del schema **PostgreSQL** donde el consumidor cloud persiste
 
 > **Decisiones de diseño (12-jul-2026)**: motor **PostgreSQL** (misma VM que el broker Mosquitto; extensión TimescaleDB opcional a futuro sin cambiar el schema). Modelo **narrow** (una fila por valor). Ante un cambio de dispositivo Modbus en un nodo, **serie nueva siempre** (opción A): se cierran los canales anteriores y se crean nuevos, aunque el nuevo dispositivo anuncie reads con el mismo `id` y unidad. Razón: trazabilidad de instrumento (cada canal corresponde a un sensor físico concreto con sus fechas de servicio); el comportamiento de "serie continua" se recupera en consulta agrupando por `(node_id, read_id)`, mientras que la operación inversa (separar datos de dos sensores fundidos en una serie) es irrecuperable.
 
+> **Actualización del 16-jul-2026 (v3.0)**: sin hora no se muestrea (`frame-format.md` §13.4), así que toda muestra llega con `ts` válido. Consecuencias en el schema: `samples.ts` pasa a `NOT NULL`, desaparece la columna `boot_id` (y su índice de identidad secundaria), y la deduplicación queda con un único índice sobre `(origin, ts, seq)`. La telemetría llega además en un único formato de mensaje para las cuatro rutas de entrega (`batch-format.md`), publicado por el gateway (topic `modulinkr/v1/255/telemetry`) y por los supernodos (`modulinkr/v1/{id}/telemetry`). En la base desplegada, el cambio lo aplica la migración `002_v30_ts_not_null.sql` (el DDL de §2 refleja el estado final).
+
 > **Replanteo del mismo 12-jul-2026 (alta zero-touch)**: **no existe alta manual de nodos en el cloud**. El `config.json` de un nodo puede generarse offline y a distancia; el nodo, al encenderse, debe poder darse de alta solo, por cualquiera de sus dos canales: NODE_REGISTER por LoRa (republicado al cloud por el gateway) o mensaje register retenido por NB-IoT (`batch-format.md` §10). El alta en `nodes` es automática al recibir el primer catálogo. Las muestras que lleguen **antes** que el catálogo de su origen (caso principal: custodia de un nodo que nunca ha visto al gateway) no se rechazan: esperan crudas en `quarantine` hasta poder materializarse. Esto sustituye la regla 2/4 de `batch-format.md` §8 ("rechazar origen no registrado"), que queda obsoleta: rechazar perdería datos ya confirmados con PUBACK al supernodo.
 
 ## 1. Modelo de entidades
@@ -63,18 +65,15 @@ CREATE UNIQUE INDEX channels_active_read
 CREATE TABLE samples (
     sample_id   bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     origin      smallint    NOT NULL REFERENCES nodes(node_id),
-    ts          timestamptz,            -- instante de captura; NULL si el origen no tenía hora
+    ts          timestamptz NOT NULL,   -- instante de captura (v3.0: siempre presente)
     seq         integer     NOT NULL CHECK (seq BETWEEN 0 AND 65535),
-    boot_id     bigint      CHECK (boot_id BETWEEN 0 AND 4294967295),
     source      text        NOT NULL CHECK (source IN ('lora', 'nbiot')),
     received_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Identidades de batch-format.md §8.1, en el mismo orden de prioridad
-CREATE UNIQUE INDEX samples_identity_ts
-    ON samples (origin, ts, seq)      WHERE ts IS NOT NULL;
-CREATE UNIQUE INDEX samples_identity_boot
-    ON samples (origin, boot_id, seq) WHERE ts IS NULL AND boot_id IS NOT NULL;
+-- Identidad única de batch-format.md §8.1
+CREATE UNIQUE INDEX samples_identity
+    ON samples (origin, ts, seq);
 
 CREATE TABLE sample_values (
     sample_id  bigint NOT NULL REFERENCES samples(sample_id) ON DELETE CASCADE,
@@ -91,9 +90,8 @@ CREATE INDEX sample_values_by_channel ON sample_values (channel_id, sample_id);
 CREATE TABLE quarantine (
     quarantine_id bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     origin        smallint    NOT NULL CHECK (origin BETWEEN 1 AND 254),
-    ts            timestamptz,
+    ts            timestamptz NOT NULL,
     seq           integer     NOT NULL CHECK (seq BETWEEN 0 AND 65535),
-    boot_id       bigint,
     source        text        NOT NULL CHECK (source IN ('lora', 'nbiot')),
     v             jsonb       NOT NULL,   -- el array de valores crudo, tal como llegó
     reason        text        NOT NULL,   -- 'unknown_node' | 'no_channels' | 'length_mismatch'
@@ -105,9 +103,8 @@ CREATE INDEX quarantine_by_origin ON quarantine (origin);
 
 Notas sobre columnas:
 
-- `samples.boot_id` se guarda **solo en muestras propias** (`origin == node_id` del batch): es la política de §8.1, donde `(origin, boot_id, seq)` identifica únicamente muestras propias sin hora. En muestras en custodia va `NULL` siempre (el `boot_id` de la raíz del batch es el del supernodo, no el del origen).
-- El **residuo aceptado** de §8.1 (muestra en custodia con `ts` nulo) entra con `ts NULL` y `boot_id NULL`: ningún índice único la cubre, se almacena sin deduplicación fuerte y su referencia temporal es `received_at`. Tal como lo documenta la spec.
-- `source` distingue el camino de entrega (LoRa vía gateway o batch NB-IoT). No participa en la identidad: la misma muestra llegada por ambos caminos es un duplicado y se descarta.
+- `ts` es `NOT NULL` desde v3.0: sin hora no se muestrea (`frame-format.md` §13.4), así que una muestra sin `ts` es un dato malformado y se descarta en la validación del consumidor (`batch-format.md` §8), nunca llega a esta tabla. Desaparecen con ello la identidad secundaria por `boot_id` y el residuo sin deduplicación fuerte de v2.x.
+- `source` distingue el camino de entrega y se deriva del publisher del topic: `255` (gateway) es `'lora'`, cualquier otro es `'nbiot'`. No participa en la identidad: la misma muestra llegada por ambos caminos es un duplicado y se descarta.
 
 ## 3. Sincronización del catálogo de canales (alta zero-touch)
 
@@ -135,7 +132,7 @@ Con esto, ni el despliegue de un nodo nuevo ni el cambio de su dispositivo Modbu
 
 Para cada muestra (trama TELEMETRY decodificada o elemento de `samples[]` de un batch):
 
-1. **Resolver canales por instante de captura**: si `ts` no es nulo, los canales del origen vigentes en `ts` (`active_from <= ts AND (active_to IS NULL OR ts < active_to)`); si `ts` es nulo, los vigentes ahora. Esto cubre la carrera de una muestra capturada bajo el config viejo pero entregada (p. ej. por failover NB-IoT) después de un re-registro: se acredita a los canales que estaban vigentes cuando se capturó.
+1. **Resolver canales por instante de captura**: los canales del origen vigentes en `ts` (`active_from <= ts AND (active_to IS NULL OR ts < active_to)`). Esto cubre la carrera de una muestra capturada bajo el config viejo pero entregada (p. ej. por failover NB-IoT) después de un re-registro: se acredita a los canales que estaban vigentes cuando se capturó.
 2. **Validar longitud**: `len(v)` debe coincidir con el número de canales resueltos.
 3. **Insertar con deduplicación**: `INSERT INTO samples ... ON CONFLICT DO NOTHING`. Si la fila ya existía (llegó antes por el otro camino), fin: no se insertan valores.
 4. **Insertar valores**: `v[i]` se guarda contra el canal con `position = i` del juego resuelto.
@@ -156,7 +153,7 @@ Serie de un sensor físico concreto (un canal):
 SELECT s.ts, v.value
 FROM sample_values v
 JOIN samples s ON s.sample_id = v.sample_id
-WHERE v.channel_id = 42 AND s.ts IS NOT NULL
+WHERE v.channel_id = 42
 ORDER BY s.ts;
 ```
 
@@ -167,7 +164,7 @@ SELECT s.ts, v.value, c.channel_id, c.unit
 FROM sample_values v
 JOIN samples  s ON s.sample_id  = v.sample_id
 JOIN channels c ON c.channel_id = v.channel_id
-WHERE c.node_id = 5 AND c.read_id = 'temp' AND s.ts IS NOT NULL
+WHERE c.node_id = 5 AND c.read_id = 'temp'
 ORDER BY s.ts;
 ```
 
