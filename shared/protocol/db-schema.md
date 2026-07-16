@@ -119,7 +119,7 @@ Al recibir un register (por cualquiera de los dos), el consumidor:
 2. Construye la lista anunciada `[(read_id, name, unit)]` ordenada por posición.
 3. La compara con los canales vigentes del nodo (`active_to IS NULL`) ordenados por `position`.
 4. Si son idénticas (misma longitud, mismos `read_id`, `name`, `unit`, mismo orden), no hace nada: re-registro tras reboot sin cambio de config.
-5. Si difieren en cualquier cosa, **cierra todos los canales vigentes** (`active_to = now()`) y **crea el juego nuevo completo**. Sin excepciones por coincidencia de `read_id` (decisión A).
+5. Si difieren en cualquier cosa, **cierra todos los canales vigentes** (`active_to = now()`) y **crea el juego nuevo completo**. Sin excepciones por coincidencia de `read_id` (decisión A). Matiz del alta inicial (16-jul-2026, observado en banco): el **primer** juego de canales de un nodo nace con `active_from = to_timestamp(0)`, no `now()`. La resolución por instante de captura (§4 paso 1) exige que las muestras capturadas antes de que el cloud procesara el primer register (carrera register/telemetría) encuentren canales vigentes en su `ts`; sin este matiz quedarían en cuarentena para siempre. Los juegos posteriores sí nacen en su instante: ahí el corte temporal es real (cambio de dispositivo físico).
 6. Revisa `quarantine`: si hay muestras del nodo, intenta materializarlas (§4.1).
 
 Con esto, ni el despliegue de un nodo nuevo ni el cambio de su dispositivo Modbus tocan la base de datos a mano: el catálogo del cloud se mantiene solo.

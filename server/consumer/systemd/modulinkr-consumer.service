@@ -1,0 +1,19 @@
+[Unit]
+Description=ModuLinkr cloud consumer (MQTT a PostgreSQL)
+# El orden es cortesía, no dependencia dura: el consumidor reintenta solo
+# tanto el broker (paho) como la base (reconexión perezosa en db.py).
+After=network-online.target postgresql.service mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=modulinkr-consumer
+WorkingDirectory=/opt/modulinkr/consumer
+# Credenciales fuera del repo (solo root), escritas por el instalador.
+EnvironmentFile=/etc/modulinkr/consumer.env
+ExecStart=/opt/modulinkr/consumer/.venv/bin/python3 /opt/modulinkr/consumer/consumer_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

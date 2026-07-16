@@ -1,6 +1,6 @@
 # ModuLinkr Server Installer
 
-Instalador del servidor cloud de ModuLinkr. Instala dos componentes, el broker MQTT (Mosquitto con TLS) y la base de datos (PostgreSQL con el esquema de telemetría), por separado o juntos. Está pensado para una VM Ubuntu de poca memoria y para ser reejecutable sin romper una instalación previa.
+Instalador del servidor cloud de ModuLinkr. Instala tres componentes, el broker MQTT (Mosquitto con TLS), la base de datos (PostgreSQL con el esquema de telemetría) y el consumidor cloud (servicio de ingesta MQTT a PostgreSQL, ver [`consumer/README.md`](consumer/README.md)), por separado o juntos. Está pensado para una VM Ubuntu de poca memoria y para ser reejecutable sin romper una instalación previa.
 
 ## Uso
 
@@ -11,11 +11,11 @@ sudo ./install.sh --components all -y       # todo, sin preguntas
 sudo ./install.sh --config modulinkr-server.conf --components all
 ```
 
-El menú pregunta qué instalar (`broker`, `database` o `all`) y luego los detalles de cada componente. Con `--components` se salta el menú, y con `-y` se corre sin preguntas tomando defaults y lo que traiga el config.
+El menú pregunta qué instalar (`broker`, `database`, `consumer` o `all`) y luego los detalles de cada componente. Con `--components` se salta el menú, y con `-y` se corre sin preguntas tomando defaults y lo que traiga el config.
 
 ## Componentes
 
-El componente `database` instala PostgreSQL 16 (con la extensión TimescaleDB si `ENABLE_TIMESCALEDB=1`), crea el rol y la base de la aplicación, ajusta la memoria para la VM, configura swap, aplica las migraciones del esquema y concede al rol de la aplicación los permisos sobre el esquema. El componente `broker` instala Mosquitto, provisiona el certificado TLS (Let's Encrypt con dominio, autofirmado RSA sin él), configura el listener TLS en 8883 con autenticación por usuario y contraseña, y deja el servicio bajo systemd.
+El componente `database` instala PostgreSQL 16 (con la extensión TimescaleDB si `ENABLE_TIMESCALEDB=1`), crea el rol y la base de la aplicación, ajusta la memoria para la VM, configura swap, aplica las migraciones del esquema y concede al rol de la aplicación los permisos sobre el esquema. El componente `broker` instala Mosquitto, provisiona el certificado TLS (Let's Encrypt con dominio, autofirmado RSA sin él), configura el listener TLS en 8883 con autenticación por usuario y contraseña, y deja el servicio bajo systemd. El componente `consumer` despliega el servicio de ingesta en `/opt/modulinkr/consumer` (venv con paho-mqtt y psycopg2, usuario de sistema propio, unidad systemd) y reutiliza las credenciales de la base de `database.env`; en la instalación `all` va el último por esa razón.
 
 ## Broker MQTT y TLS
 
@@ -57,6 +57,8 @@ server/
   lib/common.sh              registro, preguntas, comprobaciones, idempotencia
   lib/database.sh            módulo PostgreSQL + TimescaleDB
   lib/mosquitto.sh           módulo broker MQTT (Mosquitto + TLS RSA)
+  lib/consumer.sh            módulo consumidor cloud (MQTT a PostgreSQL)
+  consumer/                  código del consumidor y su unidad systemd
   db/migrations/001_init.sql esquema base de la telemetría
   db/apply_migrations.sh     runner idempotente de migraciones
   config/modulinkr-server.conf.example
@@ -64,4 +66,4 @@ server/
 
 ## Estado
 
-La base de datos y el broker están desplegados y corriendo en la VM de Azure (`modulinkr.loaiza.co`): PostgreSQL con las cinco tablas del esquema más `schema_migrations`, y Mosquitto sirviendo TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. Pendiente de validar en hardware el handshake TLS del SIM7028 contra el broker. Pendiente de implementar el consumidor cloud que ingiere del broker a la base (fase 3).
+La base de datos y el broker están desplegados y corriendo en la VM de Azure (`modulinkr.loaiza.co`): PostgreSQL con las cinco tablas del esquema más `schema_migrations`, y Mosquitto sirviendo TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. Pendiente de validar en hardware el handshake TLS del SIM7028 contra el broker. El consumidor cloud (fase 3) está implementado como componente `consumer` del instalador (16-jul-2026), pendiente de desplegar y validar en la VM.
