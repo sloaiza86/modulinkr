@@ -16,6 +16,11 @@
 *.map
 *.lst
 
+# Excepción deliberada: el binario único del Heltec que el Pi flashea en
+# la instalación fresca (lo genera heltec-radio/make_dist.sh y viaja con
+# el scp del pi-service).
+!gateway/pi-service/heltec-radio.bin
+
 # Dependencias instaladas localmente
 node_modules/
 __pycache__/

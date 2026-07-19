@@ -189,6 +189,15 @@ gather_gateway() {
     echo "El gateway se comunica con la radio LoRa por USB."
     gw_pick_serial_port
     echo
+    # Flasheo del firmware de la radio: se pregunta AQUÍ, con el resto de
+    # decisiones, y se ejecuta luego en la fase de instalación. Solo si el
+    # binario (make_dist.sh) acompaña al pi-service.
+    GW_FLASH_HELTEC=0
+    if [ -f "$APP_DIR/heltec-radio.bin" ]; then
+        if confirm "¿Instalar el firmware de la radio Heltec (heltec-radio.bin)?" "n"; then
+            GW_FLASH_HELTEC=1
+        fi
+    fi
     ask MODULINKR_NETWORK_ID "Identificador de red, debe coincidir con los nodos" "1"
     gw_ask_key
 
@@ -226,8 +235,8 @@ gw_setup_venv() {
         ok "Venv ya existe en $GW_VENV (se reutiliza)"
     fi
     run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install --upgrade pip
-    run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install paho-mqtt pyserial
-    ok "paho-mqtt instalado en el venv"
+    run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install paho-mqtt pyserial esptool
+    ok "paho-mqtt y esptool instalados en el venv"
 }
 
 # gw_write_env: escribe la config y los secretos en un archivo solo-root.
@@ -302,12 +311,23 @@ gw_enable() {
 }
 
 # install_gateway: orquesta el módulo completo.
+# gw_flash_heltec: ejecuta el flasheo decidido en gather_gateway. El
+# binario único lo genera make_dist.sh en el Mac y viaja con el scp del
+# pi-service; el flasheo real lo hace flash_heltec.sh (esptool del venv,
+# imagen completa desde 0x0, auto-reset por el CP2102).
+gw_flash_heltec() {
+    [ "${GW_FLASH_HELTEC:-0}" = "1" ] || return 0
+    step "Firmware de la radio Heltec"
+    run bash "$APP_DIR/flash_heltec.sh" "$APP_DIR/heltec-radio.bin"
+}
+
 install_gateway() {
     require_root
     gw_install_packages
     gw_setup_venv
     gw_write_env
     gw_write_unit
+    gw_flash_heltec
     gw_enable
     step "Gateway listo"
     log "App: $APP_DIR   venv: $GW_VENV   usuario: $GW_USER"

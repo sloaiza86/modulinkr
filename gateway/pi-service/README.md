@@ -14,6 +14,7 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 | `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría en el mensaje unificado de `batch-format.md` a `modulinkr/v1/255/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. |
 | `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. Desde v3.1 registra los HEARTBEAT con `tx_ms` (sin confirmarlos) y contabiliza su propio aire en `_tx` con `toa_ms`, reportándose con la cadencia del beacon (duty cycle por transmisor, EN 300 220-1). |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
+| `flash_heltec.sh` | Flashea el firmware de la radio Heltec (ESP32-S3) por USB con el esptool del venv: imagen única desde `0x0`, auto-reset por el CP2102 (sin botones), servicio parado y rearrancado alrededor. El binario `heltec-radio.bin` lo genera `heltec-radio/make_dist.sh` en el Mac (merge de los artefactos de PlatformIO) y viaja con el mismo scp del pi-service; el instalador lo ofrece como paso opcional para la instalación fresca. |
 | `heltec_rx_parser.py` | Visor de depuración anterior (solo lectura). Se conserva como herramienta; la lógica productiva vive en `gateway_service.py`. |
 
 ## Rol del gateway y semántica del ACK
