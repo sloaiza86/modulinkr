@@ -1,21 +1,49 @@
-// ModuLinkr, visor web del gateway: lógica de las vistas de red y
-// topología. Vanilla JS: la página consulta la API y repinta; el refresco
-// es por sondeo (5 s la tabla, 10 s el mapa), suficiente para un panel
-// local y más simple que websockets.
+// ModuLinkr, visor web del gateway: lógica de la interfaz (shell con
+// sidebar, tarjetas de red, topología y datos). Vanilla JS: la página
+// consulta la API y repinta; el refresco es por sondeo (5 s las
+// tarjetas, 10 s el mapa) y se pausa con la pestaña oculta.
 
 "use strict";
 
-// ----- Navegación entre vistas -----
+// ----- Paleta desde CSS: un solo sitio para cambiar colores -----
 
-document.querySelectorAll(".tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
-    document.getElementById("view-" + btn.dataset.view).hidden = false;
-    if (btn.dataset.view === "topologia") refrescarMapa();
-  });
-});
+const CSS = getComputedStyle(document.documentElement);
+const COLOR = {
+  accent: CSS.getPropertyValue("--accent").trim(),
+  ok:     CSS.getPropertyValue("--ok").trim(),
+  off:    CSS.getPropertyValue("--off").trim(),
+  dim:    CSS.getPropertyValue("--dim").trim(),
+  text:   CSS.getPropertyValue("--text").trim(),
+  border: CSS.getPropertyValue("--border").trim(),
+};
+
+// ----- Iconos SVG (trazo, heredan currentColor) -----
+
+const ICONO = {
+  termometro: '<path d="M10 13.5V4a2 2 0 0 1 4 0v9.5a4.5 4.5 0 1 1-4 0z"/><line x1="12" y1="9" x2="12" y2="15"/>',
+  gota: '<path d="M12 3c3 4 6 7.2 6 10.8a6 6 0 0 1-12 0C6 10.2 9 7 12 3z"/>',
+  rayo: '<polygon points="13 2 3 14 11 14 10 22 21 9 13 9 13 2"/>',
+  sol: '<circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/>',
+  actividad: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  nube: '<path d="M18 18H7a4 4 0 1 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/>',
+  chip: '<rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/>',
+  antena: '<line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/>',
+  nodos: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>',
+};
+
+// Icono por nombre de medida, con actividad como genérico.
+function iconoMedida(id) {
+  const s = String(id).toLowerCase();
+  if (/temp|° ?c/.test(s)) return ICONO.termometro;
+  if (/hum|rh|moist/.test(s)) return ICONO.gota;
+  if (/volt|curr|amp|power|watt|bat/.test(s)) return ICONO.rayo;
+  if (/lux|luz|light|illum/.test(s)) return ICONO.sol;
+  if (/co2|gas|aire|air/.test(s)) return ICONO.nube;
+  return ICONO.actividad;
+}
+function svg(contenido, cls = "") {
+  return `<svg viewBox="0 0 24 24" class="${cls}">${contenido}</svg>`;
+}
 
 // ----- Utilidades -----
 
@@ -23,67 +51,475 @@ function fmtAgo(s) {
   if (s == null) return "";
   if (s < 60) return Math.round(s) + " s";
   if (s < 3600) return Math.round(s / 60) + " min";
-  if (s < 86400) return (s / 3600).toFixed(1) + " h";
-  return (s / 86400).toFixed(1) + " d";
+  if (s < 86400) return (s / 3600).toFixed(1).replace(".", ",") + " h";
+  return (s / 86400).toFixed(1).replace(".", ",") + " d";
 }
-function fmtNum(x, dec = 1) { return x == null ? "" : Number(x).toFixed(dec); }
+function fmtNum(x, dec = 1) {
+  return x == null ? "" : Number(x).toFixed(dec).replace(".", ",");
+}
+// Valores de sensor: coma decimal, sin ceros de más.
+function fmtValor(v) {
+  if (v == null) return "";
+  return Number(v).toLocaleString("es-ES", { maximumFractionDigits: 2 });
+}
 function nombrePadre(id) {
   if (id == null) return "";
   return id === 255 ? "Gateway" : String(id);
 }
+// Unidad para mostrar: los catálogos anuncian abreviaturas crudas
+// ("C"); aquí se traducen a la forma tipográfica correcta.
+function unidad(u) {
+  return ({ "C": "°C", "c": "°C" })[u] ?? (u ?? "");
+}
+
+// fetch con sesión: un 401 significa sesión caducada, se vuelve al login.
+async function fetchApi(url) {
+  const r = await fetch(url);
+  if (r.status === 401) {
+    window.location.href = "/login";
+    throw new Error("sesión caducada");
+  }
+  return r;
+}
+
+function toast(msg) {
+  const cont = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  cont.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
 
 // Chip de duty cycle: verde lejos del límite del 10 % del g3, ámbar
-// acercándose, rojo por encima. null = sin reportes aún (firmware sin
-// heartbeat v3.1, o ventana sin dos reportes todavía).
+// acercándose, rojo por encima. null = sin reportes aún.
 function chipDuty(d) {
   if (d == null) return '<span class="chip off">sin datos</span>';
-  const pct = (d * 100).toFixed(2) + " %";
+  const pct = (d * 100).toFixed(2).replace(".", ",") + " %";
   const cls = d > 0.10 ? "rojo" : (d > 0.05 ? "ambar" : "on");
   return `<span class="chip ${cls}">${pct}</span>`;
 }
 
-// ----- Vista de red -----
+// Miniatura de serie (sparkline): polyline SVG normalizada al rango.
+function sparkline(serie, w = 64, h = 22) {
+  if (!serie || serie.length < 2) return "";
+  const ts = serie.map((p) => p[0]);
+  const vs = serie.map((p) => p[1]);
+  const t0 = Math.min(...ts), t1 = Math.max(...ts);
+  const v0 = Math.min(...vs), v1 = Math.max(...vs);
+  const dx = t1 - t0 || 1, dy = v1 - v0 || 1;
+  const pts = serie.map(([t, v]) => {
+    const x = ((t - t0) / dx) * (w - 2) + 1;
+    const y = h - 2 - ((v - v0) / dy) * (h - 4) + 1;
+    return x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+  return `<svg class="s-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}"/></svg>`;
+}
+
+// ----- Navegación: sidebar contraible y rutas por hash -----
+
+const TITULOS = { red: "Red", topologia: "Topología", datos: "Datos",
+                  configuracion: "Configuración" };
+
+document.getElementById("btn-menu").addEventListener("click", () => {
+  document.body.classList.toggle("sb-contraida");
+  localStorage.setItem("modulinkr_sb",
+    document.body.classList.contains("sb-contraida") ? "1" : "0");
+});
+if (localStorage.getItem("modulinkr_sb") === "1") {
+  document.body.classList.add("sb-contraida");
+}
+
+function vistaActual() {
+  const v = location.hash.replace("#/", "");
+  return TITULOS[v] ? v : "red";
+}
+
+function navegar() {
+  const v = vistaActual();
+  document.querySelectorAll(".nav-item[data-view]").forEach((a) =>
+    a.classList.toggle("active", a.dataset.view === v));
+  document.querySelectorAll(".view").forEach((s) => { s.hidden = true; });
+  document.getElementById("view-" + v).hidden = false;
+  document.getElementById("titulo-vista").textContent = TITULOS[v];
+  if (v === "topologia") refrescarMapa();
+  if (v === "datos" && catalogo === null) cargarCatalogo();
+}
+window.addEventListener("hashchange", navegar);
+
+// ----- Vista de red: tarjetas por nodo -----
+
+let ultimoRefresco = null;   // epoch ms del último repintado con éxito
+let cacheEstado = null;      // última respuesta de /api/red/estado
+let cacheUltimos = null;     // última respuesta de /api/red/ultimos
+let detalleOrigen = null;    // nodo abierto en el panel de detalle
+
+function tarjetaGateway(data) {
+  const online = data.nodes.filter((n) => n.online).length;
+  const total = data.nodes.length;
+  return `
+  <div class="card tarjeta-nodo tarjeta-gw" data-origin="255">
+    <div class="tn-cabecera">
+      <div class="tn-icono">${svg(ICONO.antena)}</div>
+      <div class="tn-info">
+        <div class="tn-nombre">Gateway</div>
+        <div class="tn-sub">coordinador de la red</div>
+      </div>
+      <span class="tn-estado chip on">en línea</span>
+    </div>
+    <div class="tn-sensores">
+      <div class="sensor fila-info">
+        ${svg(ICONO.nodos)}
+        <span class="s-nombre">nodos en línea</span>
+        <span class="s-valor">${online}/${total}</span>
+      </div>
+      <div class="sensor fila-info">
+        ${svg(ICONO.actividad)}
+        <span class="s-nombre">duty cycle 1h</span>
+        <span class="s-valor">${chipDuty(data.gateway_duty_1h)}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Estado en tres niveles: en línea con telemetría fresca (verde), en
+// línea pero sin medidas recientes (ámbar: el nodo responde por LoRa
+// pero su sensor no entrega), y sin señal (gris). El margen de la
+// telemetría es más laxo que el de conexión (5x) porque el muestreo
+// puede ser más lento que los beacons. Único punto de verdad: lo usan
+// la tarjeta y el panel de detalle.
+function chipEstado(n, ult, onlineS) {
+  let cls = "off", txt = "sin señal";
+  if (n.online) {
+    if (ult && ult.ago_s <= onlineS * 5) { cls = "on"; txt = "en línea"; }
+    else { cls = "ambar"; txt = "en línea · sin datos"; }
+  }
+  return { cls, txt };
+}
+
+function tarjetaNodo(n, ult, onlineS) {
+  const canales = ult ? ult.channels : [];
+  const filas = canales.map((c, i) => `
+    <div class="sensor" data-origin="${n.origin}" data-canal="${i}" title="Ver el histórico">
+      ${svg(iconoMedida(c.read_id))}
+      <span class="s-nombre">${c.read_id}</span>
+      ${sparkline(c.serie)}
+      <span class="s-valor">${fmtValor(c.value)}${c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""}</span>
+    </div>`).join("");
+  // Dos tiempos distintos: la última trama oída por LoRa (de
+  // node_status, incluye beacons) y la última telemetría con valores.
+  const visto = `última vez visto hace ${fmtAgo(n.ago_s)}`;
+  const medida = ult
+    ? `última medida recibida hace ${fmtAgo(ult.ago_s)}` : "sin telemetría";
+  return `
+  <div class="card tarjeta-nodo" data-origin="${n.origin}">
+    <div class="tn-cabecera">
+      <div class="tn-icono ${n.online ? "" : "off"}">${svg(ICONO.chip)}</div>
+      <div class="tn-info">
+        <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
+        <div class="tn-sub">${visto}</div>
+        <div class="tn-sub">${medida}</div>
+      </div>
+      <span class="tn-estado chip ${chipEstado(n, ult, onlineS).cls}">${chipEstado(n, ult, onlineS).txt}</span>
+    </div>
+    <div class="tn-sensores">
+      ${filas || '<div class="tn-vacio">Sin telemetría todavía.</div>'}
+    </div>
+  </div>`;
+}
+
+function pintarBadge(data) {
+  const badge = document.getElementById("badge-red");
+  if (!data || !data.nodes.length) { badge.hidden = true; return; }
+  const online = data.nodes.filter((n) => n.online).length;
+  const total = data.nodes.length;
+  badge.textContent = `${online}/${total} en línea`;
+  badge.className = "badge " + (online === total ? "" : (online === 0 ? "bad" : "warn"));
+  badge.hidden = false;
+}
 
 async function refrescarRed() {
+  if (document.hidden) return;
   const aviso = document.getElementById("red-aviso");
-  let r;
+  const cont = document.getElementById("tarjetas");
+  let estado, ultimos;
   try {
-    r = await fetch("/api/red/estado");
+    const [r1, r2] = await Promise.all([
+      fetchApi("/api/red/estado"), fetchApi("/api/red/ultimos"),
+    ]);
+    if (!r1.ok) {
+      aviso.textContent = "Estado no disponible (" + r1.status +
+        "): ¿servicio del gateway arrancado?";
+      return;
+    }
+    estado = await r1.json();
+    ultimos = r2.ok ? await r2.json() : { nodes: [] };
   } catch (e) {
     aviso.textContent = "Sin conexión con el visor.";
     return;
   }
-  if (!r.ok) {
-    aviso.textContent = "Estado no disponible (" + r.status + "): ¿servicio del gateway arrancado?";
+
+  cacheEstado = estado;
+  cacheUltimos = ultimos;
+  ultimoRefresco = Date.now();
+  pintarBadge(estado);
+
+  aviso.textContent = estado.nodes.length
+    ? "" : "Sin nodos vistos todavía. Las tarjetas aparecen con la primera trama oída.";
+
+  const porOrigen = new Map(ultimos.nodes.map((u) => [u.origin, u]));
+  cont.innerHTML = tarjetaGateway(estado) +
+    estado.nodes.map((n) =>
+      tarjetaNodo(n, porOrigen.get(n.origin), estado.online_s)).join("");
+
+  cont.querySelectorAll(".tarjeta-nodo").forEach((el) => {
+    el.addEventListener("click", () => abrirDetalle(Number(el.dataset.origin)));
+  });
+  // La fila de una medida abre su minigráfica, no el detalle del nodo.
+  // Solo las filas con data-canal (las del gateway son informativas).
+  cont.querySelectorAll(".sensor[data-canal]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      abrirModal(Number(el.dataset.origin), Number(el.dataset.canal));
+    });
+  });
+  if (detalleOrigen !== null) pintarDetalle(detalleOrigen);
+  // El refresco solo actualiza la cabecera del modal; la gráfica se
+  // carga al abrirlo (evita pedir el histórico cloud cada 5 s).
+  if (modalSel !== null) pintarModalCabecera();
+}
+
+// ----- Modal de minigráfica de una medida -----
+//
+// Fuente única: el histórico cloud de los últimos días, por la misma
+// cadena que la pestaña Datos (el navegador pide al Pi, y el Pi lanza el
+// SQL a la base de la VM con el rol de solo lectura; las credenciales
+// nunca salen del Pi). Zoom temporal con la rueda del ratón y barra de
+// desplazamiento abajo; el eje de magnitud se ajusta al rango visible.
+
+const MODAL_DIAS = 5;    // ventana del histórico del modal
+let modalSel = null;     // {origin, canal} de la medida abierta
+let modalChart = null;   // instancia de ECharts del modal
+let modalToken = 0;      // invalida respuestas tardías al cambiar de medida
+
+function pintarModalCabecera() {
+  const nodo = cacheUltimos?.nodes.find((x) => x.origin === modalSel.origin);
+  const c = nodo?.channels[modalSel.canal];
+  if (!c) return;
+  const n = cacheEstado?.nodes.find((x) => x.origin === modalSel.origin);
+  document.getElementById("modal-titulo").textContent =
+    `${c.read_id} · ${n?.name ?? "nodo " + modalSel.origin}`;
+  document.getElementById("modal-cuando").textContent =
+    "última medida recibida hace " + fmtAgo(nodo.ago_s);
+  document.getElementById("modal-valor").innerHTML =
+    fmtValor(c.value) +
+    (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
+}
+
+// Fechas del eje y del tooltip en castellano: horas normales como HH:mm
+// y el cambio de día como "19 jul" destacado (patrón Home Assistant).
+function fmtDia(d) {
+  return d.toLocaleDateString("es-ES", { day: "numeric", month: "short" });
+}
+function fmtHora(d) {
+  return d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+}
+
+function opcionesModal(puntos, unit) {
+  return {
+    backgroundColor: "transparent",
+    grid: { left: 52, right: 16, top: 30, bottom: 64 },
+    tooltip: {
+      trigger: "axis",
+      formatter: (ps) => {
+        const [t, v] = ps[0].value;
+        const d = new Date(t);
+        return `${fmtDia(d)} ${fmtHora(d)}<br><b>${fmtValor(v)}` +
+               (unit ? " " + unit : "") + "</b>";
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLabel: {
+        color: COLOR.dim,
+        formatter: (val) => {
+          const d = new Date(val);
+          if (d.getHours() === 0 && d.getMinutes() === 0) {
+            return "{dia|" + fmtDia(d) + "}";
+          }
+          return fmtHora(d);
+        },
+        rich: { dia: { fontWeight: "bold", color: COLOR.text } },
+      },
+    },
+    yAxis: {
+      // scale: el eje de magnitud se recalcula con el rango visible; la
+      // unidad se rotula en la cabecera del eje.
+      type: "value", scale: true, name: unit,
+      nameTextStyle: { color: COLOR.dim },
+      axisLabel: { color: COLOR.dim },
+      splitLine: { lineStyle: { color: COLOR.border } },
+    },
+    dataZoom: [
+      // Rueda del ratón: zoom temporal (sin arrastre con la rueda).
+      { type: "inside", zoomOnMouseWheel: true, moveOnMouseWheel: false },
+      // Barra de desplazamiento por el tiempo.
+      { type: "slider", height: 22, bottom: 10,
+        borderColor: COLOR.border, textStyle: { color: COLOR.dim } },
+    ],
+    series: [{
+      type: "line", showSymbol: false, smooth: 0.2,
+      lineStyle: { color: COLOR.accent, width: 2 },
+      areaStyle: { color: COLOR.accent, opacity: 0.08 },
+      data: puntos,
+    }],
+  };
+}
+
+async function cargarModalGrafica() {
+  const token = ++modalToken;
+  const cont = document.getElementById("modal-grafico");
+  if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
+  if (typeof echarts === "undefined") {
+    cont.innerHTML = '<p class="modal-vacio">Gráficos no disponibles (assets vendor sin descargar).</p>';
     return;
   }
-  const data = await r.json();
-  aviso.innerHTML = data.nodes.length
-    ? (data.gateway_duty_1h != null
-        ? "Gateway: duty 1h " + chipDuty(data.gateway_duty_1h) +
-          ' <span class="leyenda">(medido en cada transmisor, EN 300 220-1; límite 10 % en g3)</span>'
-        : "")
-    : "Sin nodos vistos todavía. La tabla se llena con la primera trama oída.";
+  cont.innerHTML = '<p class="modal-vacio">Cargando histórico...</p>';
 
-  const tbody = document.querySelector("#tabla-red tbody");
-  tbody.innerHTML = "";
-  for (const n of data.nodes) {
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td class="num">${n.origin}</td>` +
-      `<td>${n.name ?? ""}</td>` +
-      `<td><span class="chip ${n.online ? "on" : "off"}">${n.online ? "en línea" : "sin señal"}</span></td>` +
-      `<td class="num">hace ${fmtAgo(n.ago_s)}</td>` +
-      `<td>${n.last_frame ?? ""}</td>` +
-      `<td class="num">${fmtNum(n.rssi, 0)}</td>` +
-      `<td class="num">${fmtNum(n.snr)}</td>` +
-      `<td>${nombrePadre(n.parent_id)}</td>` +
-      `<td class="num">${n.hop_count ?? ""}</td>` +
-      `<td>${chipDuty(n.duty_1h)}</td>` +
-      `<td>${n.fw_version ?? ""}</td>`;
-    tbody.appendChild(tr);
+  const nodo = cacheUltimos?.nodes.find((x) => x.origin === modalSel.origin);
+  const c = nodo?.channels[modalSel.canal];
+  let puntos = null;
+  let error = "Sin histórico para esta medida en los últimos " +
+              MODAL_DIAS + " días.";
+
+  // Se localiza el channel_id por nodo y medida en el catálogo de la
+  // pestaña Datos (se carga aquí si aún no se abrió).
+  try {
+    if (catalogo === null) await cargarCatalogo();
+    const cn = catalogo?.find((x) => x.node_id === modalSel.origin);
+    const canal = cn?.channels.find((x) => x.read_id === c.read_id);
+    if (canal) {
+      const q = new URLSearchParams({
+        channels: String(canal.channel_id),
+        desde: new Date(Date.now() - MODAL_DIAS * 86400 * 1000).toISOString(),
+        hasta: new Date().toISOString(),
+        max_puntos: "1000",
+      });
+      const r = await fetchApi("/api/datos/series?" + q);
+      if (r.ok) {
+        const pts = (await r.json()).series[0]?.points ?? [];
+        if (pts.length >= 2) puntos = pts.map(([t, v]) => [t * 1000, v]);
+      } else {
+        error = "Histórico no disponible: " +
+                ((await r.json()).detail ?? r.status);
+      }
+    } else if (catalogo !== null) {
+      error = "Esta medida aún no está en el catálogo cloud.";
+    } else {
+      error = "Histórico no disponible (¿sin Internet?).";
+    }
+  } catch (e) {
+    error = "Histórico no disponible (¿sin Internet?).";
   }
+
+  // El modal pudo cerrarse o cambiar de medida mientras se consultaba.
+  if (token !== modalToken || modalSel === null) return;
+
+  if (puntos === null) {
+    cont.innerHTML = `<p class="modal-vacio">${error}</p>`;
+    return;
+  }
+  cont.innerHTML = "";
+  modalChart = echarts.init(cont);
+  modalChart.setOption(opcionesModal(puntos, unidad(c?.unit)));
 }
+
+function abrirModal(origin, canal) {
+  modalSel = { origin, canal };
+  document.getElementById("modal").hidden = false;
+  document.getElementById("modal-fondo").hidden = false;
+  pintarModalCabecera();
+  cargarModalGrafica();
+}
+function cerrarModal() {
+  modalSel = null;
+  modalToken++;
+  if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
+  document.getElementById("modal").hidden = true;
+  document.getElementById("modal-fondo").hidden = true;
+}
+document.getElementById("modal-cerrar").addEventListener("click", cerrarModal);
+document.getElementById("modal-fondo").addEventListener("click", cerrarModal);
+
+// ----- Panel de detalle de nodo -----
+
+function filaDet(k, v) {
+  return `<div class="det-fila"><span class="k">${k}</span><span>${v}</span></div>`;
+}
+
+function pintarDetalle(origin) {
+  const cuerpo = document.getElementById("detalle-cuerpo");
+  const titulo = document.getElementById("detalle-titulo");
+
+  if (origin === 255) {
+    titulo.textContent = "Gateway";
+    cuerpo.innerHTML = `<div class="det-grupo"><h3>Radio</h3>
+      ${filaDet("Duty cycle 1h", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
+      ${filaDet("Límite normativo", "10 % (EN 300 220-1, banda g3)")}
+    </div>
+    <p class="leyenda">El duty se mide en cada transmisor con el contador
+    de aire acumulado de los heartbeats.</p>`;
+    return;
+  }
+
+  const n = cacheEstado?.nodes.find((x) => x.origin === origin);
+  if (!n) return;
+  const u = cacheUltimos?.nodes.find((x) => x.origin === origin);
+  titulo.textContent = n.name ?? "nodo " + n.origin;
+
+  const sensores = (u?.channels ?? []).map((c) =>
+    filaDet(c.read_id, fmtValor(c.value) + (c.unit ? " " + unidad(c.unit) : ""))).join("");
+
+  cuerpo.innerHTML = `
+    <div class="det-grupo"><h3>Estado</h3>
+      ${filaDet("Dirección", n.origin)}
+      ${filaDet("Estado", (() => {
+        const e = chipEstado(n, u, cacheEstado?.online_s ?? 60);
+        return `<span class="chip ${e.cls}">${e.txt}</span>`;
+      })())}
+      ${filaDet("Última trama", (n.last_frame ?? "") + " · hace " + fmtAgo(n.ago_s))}
+      ${filaDet("Firmware", n.fw_version ?? "")}
+    </div>
+    <div class="det-grupo"><h3>Radio</h3>
+      ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
+      ${filaDet("SNR", fmtNum(n.snr) + " dB")}
+      ${filaDet("Padre", nombrePadre(n.parent_id))}
+      ${filaDet("Saltos", n.hop_count ?? "")}
+      ${filaDet("Duty cycle 1h", chipDuty(n.duty_1h))}
+    </div>
+    ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>${sensores}</div>` : ""}
+    <div class="det-grupo">
+      <a href="#/datos" onclick="document.getElementById('detalle-cerrar').click()">Ver histórico en Datos</a>
+    </div>`;
+}
+
+function abrirDetalle(origin) {
+  detalleOrigen = origin;
+  pintarDetalle(origin);
+  document.getElementById("detalle").hidden = false;
+  document.getElementById("detalle-fondo").hidden = false;
+}
+function cerrarDetalle() {
+  detalleOrigen = null;
+  document.getElementById("detalle").hidden = true;
+  document.getElementById("detalle-fondo").hidden = true;
+}
+document.getElementById("detalle-cerrar").addEventListener("click", cerrarDetalle);
+document.getElementById("detalle-fondo").addEventListener("click", cerrarDetalle);
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (modalSel !== null) cerrarModal(); else cerrarDetalle();
+});
 
 // ----- Vista de topología (vis-network, estilo mapa Zigbee2MQTT) -----
 
@@ -92,7 +528,7 @@ let red = null;  // instancia vis.Network
 async function refrescarMapa() {
   let r;
   try {
-    r = await fetch("/api/topologia");
+    r = await fetchApi("/api/topologia");
   } catch (e) { return; }
   if (!r.ok) return;
   const g = await r.json();
@@ -102,12 +538,12 @@ async function refrescarMapa() {
     label: n.label + (n.hop != null ? `\nhop ${n.hop}` : ""),
     shape: n.role === "gateway" ? "hexagon" : "dot",
     size: n.role === "gateway" ? 28 : 16,
-    color: n.role === "gateway" ? "#3aa0ff" : (n.online ? "#38c172" : "#6b7684"),
-    font: { color: "#dbe4ee" },
+    color: n.role === "gateway" ? COLOR.accent : (n.online ? COLOR.ok : COLOR.off),
+    font: { color: COLOR.text },
   }));
   const edges = g.edges.map((e) => ({
     from: e.from, to: e.to, arrows: "to",
-    color: { color: e.online ? "#38c172" : "#4a5563" },
+    color: { color: e.online ? COLOR.ok : COLOR.border },
     width: e.online ? 2 : 1,
   }));
 
@@ -158,7 +594,7 @@ async function cargarCatalogo() {
   const cont = document.getElementById("selector-canales");
   let r;
   try {
-    r = await fetch("/api/datos/nodos");
+    r = await fetchApi("/api/datos/nodos");
   } catch (e) {
     cont.innerHTML = '<p class="aviso">Sin conexión con el visor.</p>';
     return;
@@ -332,11 +768,11 @@ function rango() {
 
 const EJE_Y = {
   type: "value", scale: true,
-  axisLabel: { color: "#7d8ea3" },
-  splitLine: { lineStyle: { color: "#232c38" } },
-  nameTextStyle: { color: "#7d8ea3" },
+  axisLabel: { color: COLOR.dim },
+  splitLine: { lineStyle: { color: COLOR.border } },
+  nameTextStyle: { color: COLOR.dim },
 };
-const EJE_X = { type: "time", axisLabel: { color: "#7d8ea3" } };
+const EJE_X = { type: "time", axisLabel: { color: COLOR.dim } };
 
 function opcionesGrafico(series) {
   const unidades = [...new Set(series.map((s) => s.unit ?? ""))];
@@ -351,7 +787,7 @@ function opcionesGrafico(series) {
     return {
       backgroundColor: "transparent",
       tooltip: { trigger: "axis" },
-      legend: { type: "scroll", textStyle: { color: "#dbe4ee" } },
+      legend: { type: "scroll", textStyle: { color: COLOR.text } },
       xAxis: EJE_X,
       yAxis: unidades.map((u, i) => ({
         ...EJE_Y, name: u, position: i === 0 ? "left" : "right",
@@ -368,7 +804,7 @@ function opcionesGrafico(series) {
   return {
     backgroundColor: "transparent",
     tooltip: { trigger: "axis" },
-    legend: { type: "scroll", textStyle: { color: "#dbe4ee" } },
+    legend: { type: "scroll", textStyle: { color: COLOR.text } },
     axisPointer: { link: [{ xAxisIndex: "all" }] },
     grid: unidades.map((u, i) => ({
       left: 70, right: 30, top: `${10 + i * alto}%`, height: `${alto - 6}%`,
@@ -396,7 +832,7 @@ async function graficar() {
   const q = new URLSearchParams({ channels: [...seleccion].join(","), ...rg });
   let r;
   try {
-    r = await fetch("/api/datos/series?" + q);
+    r = await fetchApi("/api/datos/series?" + q);
   } catch (e) { aviso.textContent = "Sin conexión con el visor."; return; }
   if (!r.ok) {
     aviso.textContent = "Error: " + ((await r.json()).detail ?? r.status);
@@ -437,17 +873,28 @@ document.querySelectorAll(".modo-btn").forEach((btn) => {
 });
 document.getElementById("desde").value = isoDefault(24);
 document.getElementById("hasta").value = isoDefault(0);
-document.querySelector('[data-view="datos"]').addEventListener("click", () => {
-  if (catalogo === null) cargarCatalogo();
-});
 
-// ----- Refresco periódico y reloj -----
+// ----- Arranque, refresco periódico y reloj -----
 
+// Esqueletos mientras llega la primera respuesta.
+document.getElementById("tarjetas").innerHTML =
+  '<div class="skeleton"></div>'.repeat(3);
+
+navegar();
 refrescarRed();
 setInterval(refrescarRed, 5000);
 setInterval(() => {
-  if (!document.getElementById("view-topologia").hidden) refrescarMapa();
+  if (!document.hidden && vistaActual() === "topologia") refrescarMapa();
 }, 10000);
+document.addEventListener("visibilitychange", () => {
+  // Al volver a la pestaña se refresca al momento, sin esperar al sondeo.
+  if (!document.hidden) { refrescarRed(); if (vistaActual() === "topologia") refrescarMapa(); }
+});
 setInterval(() => {
   document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+  const ind = document.getElementById("refresco");
+  if (ultimoRefresco !== null) {
+    ind.textContent = "actualizado hace " +
+      fmtAgo((Date.now() - ultimoRefresco) / 1000);
+  }
 }, 1000);

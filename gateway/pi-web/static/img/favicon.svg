@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Created with Linearity Curve (http://linearity.io/curve) -->
+<svg height="100%" stroke-miterlimit="10" style="fill-rule:nonzero;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;" version="1.1" viewBox="0 0 160.517 160.452" width="100%" xml:space="preserve" xmlns="http://www.w3.org/2000/svg" xmlns:vectornator="http://vectornator.io" xmlns:xlink="http://www.w3.org/1999/xlink">
+<defs>
+<linearGradient gradientTransform="matrix(160 160 -160 160 0.324037 0.355998)" gradientUnits="userSpaceOnUse" id="LinearGradient" x1="0" x2="1" y1="0" y2="0">
+<stop offset="0" stop-color="#0c7cf2"/>
+<stop offset="0.58" stop-color="#0963e6"/>
+<stop offset="1" stop-color="#0349d4"/>
+</linearGradient>
+<linearGradient gradientTransform="matrix(138 138 -138 138 11.324 11.356)" gradientUnits="userSpaceOnUse" id="LinearGradient_2" x1="0" x2="1" y1="0" y2="0">
+<stop offset="0" stop-color="#1858df"/>
+<stop offset="0.52" stop-color="#0834c5"/>
+<stop offset="1" stop-color="#071a9e"/>
+</linearGradient>
+<filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="149" id="Filter" width="149" x="6.82403" y="7.856">
+<feDropShadow dx="0.999998" dy="2" flood-color="#00165d" flood-opacity="0.2" in="SourceGraphic" result="Shadow" stdDeviation="2.2"/>
+</filter>
+</defs>
+<g id="layer-blue-connectors" vectornator:layerName="layer-blue-connectors"/>
+<g id="layer-blue-nodes" vectornator:layerName="layer-blue-nodes"/>
+<g id="layer-blue-signal" vectornator:layerName="layer-blue-signal"/>
+<g id="layer-green-connector" vectornator:layerName="layer-green-connector"/>
+<g id="layer-green-antenna" vectornator:layerName="layer-green-antenna"/>
+<g id="layer-central-badge" vectornator:layerName="layer-central-badge">
+<path d="M0.324037 80.356C0.324037 36.173 36.141 0.355998 80.324 0.355998C124.507 0.355998 160.324 36.173 160.324 80.356C160.324 124.539 124.507 160.356 80.324 160.356C36.141 160.356 0.324037 124.539 0.324037 80.356Z" fill="url(#LinearGradient)" fill-rule="nonzero" opacity="1" stroke="none" vectornator:layerName="Óvalo 1"/>
+<path d="M11.324 80.356C11.324 42.248 42.216 11.356 80.324 11.356C118.432 11.356 149.324 42.248 149.324 80.356C149.324 118.464 118.432 149.356 80.324 149.356C42.216 149.356 11.324 118.464 11.324 80.356Z" fill="url(#LinearGradient_2)" fill-rule="nonzero" filter="url(#Filter)" stroke="none" vectornator:layerName="Óvalo 2" vectornator:shadowAngle="1.10715" vectornator:shadowColor="#00165d" vectornator:shadowOffset="2.23607" vectornator:shadowOpacity="0.2" vectornator:shadowRadius="4.4"/>
+</g>
+<g id="layer-letter-m" vectornator:layerName="layer-letter-m">
+<path d="M29.824 113.585L40.824 49.585C41.291 46.918 42.957 45.585 45.824 45.585L60.824 45.585C62.824 45.585 64.324 46.918 65.324 49.585L79.824 91.585L106.324 49.585C107.991 46.918 110.157 45.585 112.824 45.585L130.824 45.585L119.824 113.585L99.824 113.585L107.324 69.585L86.824 110.085C85.491 112.418 83.491 113.585 80.824 113.585L73.824 113.585C71.157 113.585 69.324 112.252 68.324 109.585L55.324 69.585L49.824 113.585L29.824 113.585Z" fill="#ffffff" fill-rule="nonzero" opacity="1" stroke="none" vectornator:layerName="Curva 1"/>
+</g>
+</svg>

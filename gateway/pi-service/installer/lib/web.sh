@@ -102,6 +102,10 @@ web_write_env() {
         echo "MODULINKR_WEB_PORT=$MODULINKR_WEB_PORT"
         echo "MODULINKR_WEB_USER=$MODULINKR_WEB_USER"
         echo "MODULINKR_WEB_PASS=$MODULINKR_WEB_PASS"
+        # Clave de firma de las cookies de sesión: autogenerada, no se
+        # pregunta; se conserva del env existente en reinstalaciones para
+        # no invalidar las sesiones abiertas.
+        echo "MODULINKR_WEB_SECRET=${MODULINKR_WEB_SECRET:-$(openssl rand -hex 32)}"
         echo "MODULINKR_WEB_ONLINE_S=${MODULINKR_WEB_ONLINE_S:-60}"
         if [ -n "${MODULINKR_PG_HOST:-}" ]; then
             echo "MODULINKR_PG_HOST=$MODULINKR_PG_HOST"

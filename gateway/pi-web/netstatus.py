@@ -123,6 +123,65 @@ def topology() -> dict:
     return {"nodes": graph_nodes, "edges": edges}
 
 
+def _catalog_reads() -> dict:
+    """Definiciones de reads por nodo (id y unidad, en orden de posición),
+    para etiquetar los valores planos de reads_json."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT origin_id, catalog_json FROM node_catalog").fetchall()
+    return {r[0]: json.loads(r[1]).get("reads", []) for r in rows}
+
+
+def last_values(window_s: float = 3600.0) -> dict:
+    """Últimos valores por nodo para las tarjetas de /api/red/ultimos.
+
+    Fuente: filas del buffer con reads_json (telemetría ya parseada por el
+    gateway). Por nodo se devuelve la última muestra (aunque quede fuera
+    de la ventana) y la serie de la ventana para las miniaturas. El buffer
+    está acotado (max_entries), así que la consulta es barata.
+    """
+    now = time.time()
+    reads_def = _catalog_reads()
+    with _conn() as c:
+        last_rows = c.execute(
+            """SELECT b.origin_id, b.t_recv, b.reads_json
+               FROM buffer b
+               JOIN (SELECT origin_id, MAX(t_recv) AS t FROM buffer
+                     WHERE reads_json IS NOT NULL
+                     GROUP BY origin_id) m
+                 ON m.origin_id = b.origin_id AND m.t = b.t_recv
+               WHERE b.reads_json IS NOT NULL""").fetchall()
+        win_rows = c.execute(
+            """SELECT origin_id, t_recv, reads_json FROM buffer
+               WHERE reads_json IS NOT NULL AND t_recv >= ?
+               ORDER BY origin_id, t_recv""",
+            (now - window_s,)).fetchall()
+
+    nodes: dict[int, dict] = {}
+    for origin, t, rj in last_rows:
+        vals = json.loads(rj)
+        defs = reads_def.get(origin, [])
+        channels = []
+        for i, v in enumerate(vals):
+            d = defs[i] if i < len(defs) else {}
+            channels.append({"read_id": d.get("id") or f"canal {i}",
+                             "unit": d.get("unit"),
+                             "value": v,
+                             "serie": []})
+        nodes[origin] = {"origin": origin, "t_last": t,
+                         "ago_s": round(now - t, 1), "channels": channels}
+
+    for origin, t, rj in win_rows:
+        node = nodes.get(origin)
+        if node is None:
+            continue
+        for i, v in enumerate(json.loads(rj)):
+            if i < len(node["channels"]):
+                node["channels"][i]["serie"].append([round(t, 1), v])
+
+    return {"window_s": window_s, "nodes": list(nodes.values())}
+
+
 def catalogs() -> list[dict]:
     """Catálogo anunciado por nodo (para el selector del módulo de datos
     y como ficha en la vista de red)."""

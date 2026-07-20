@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ModuLinkr · Iniciar sesión</title>
+<link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+<style>
+/* Paleta compartida con style.css (colores del logo); página autónoma
+   para no cargar la hoja completa del panel antes de autenticar. */
+:root {
+  --bg: #f4f6f9; --card: #ffffff; --text: #17224d; --dim: #5d6b85;
+  --accent: #0756eb; --border: #e2e7f0; --error: #d64545;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center;
+  background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.tarjeta {
+  background: var(--card); border-radius: 16px; width: min(92vw, 470px);
+  padding: 2.4rem 2.8rem 2.2rem;
+  box-shadow: 0 8px 30px rgba(20, 40, 60, 0.10);
+}
+/* Logo a todo el ancho de la tarjeta: el lema bajo la marca debe leerse
+   sin esfuerzo. */
+.logo { display: block; width: 100%; max-width: 390px; margin: 0 auto 0.8rem; }
+.sub { color: var(--dim); text-align: center; margin: 0 0 1.4rem; font-size: 0.9rem; }
+label { display: block; color: var(--dim); font-size: 0.85rem; margin: 0.9rem 0 0.25rem; }
+input {
+  width: 100%; padding: 0.6rem 0.8rem; font: inherit; color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; background: #fff;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+button {
+  width: 100%; margin-top: 1.4rem; padding: 0.65rem; font: inherit;
+  font-weight: 600; color: #fff; background: var(--accent);
+  border: none; border-radius: 10px; cursor: pointer;
+}
+button:hover { filter: brightness(0.94); }
+.error {
+  display: none; margin: 1rem 0 0; padding: 0.55rem 0.8rem;
+  border-radius: 10px; font-size: 0.88rem;
+  background: rgba(214, 69, 69, 0.10); color: var(--error);
+}
+body.con-error .error { display: block; }
+</style>
+</head>
+<body>
+<form class="tarjeta" method="post" action="/login">
+  <img class="logo" src="/static/img/logo.svg" alt="ModuLinkr">
+  <p class="sub">Panel del gateway</p>
+  <label for="user">Usuario</label>
+  <input id="user" name="user" autocomplete="username" autofocus required>
+  <label for="pass">Contraseña</label>
+  <input id="pass" name="pass" type="password" autocomplete="current-password" required>
+  <p class="error">Usuario o contraseña incorrectos.</p>
+  <button type="submit">Entrar</button>
+</form>
+<script>
+if (new URLSearchParams(location.search).has("e")) {
+  document.body.classList.add("con-error");
+}
+</script>
+</body>
+</html>
