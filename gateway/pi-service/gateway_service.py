@@ -294,6 +294,22 @@ class GatewayService:
                 self.n_notconf += 1
             return
 
+        # MODBUS_DEBUG (v3.2, spec §15.3): diagnóstico best-effort. Sin ACK
+        # y sin buffer: se registra en el log del Pi y ahí termina (decisión
+        # del 20-jul-2026: sin publicación MQTT; el Pi es el punto de debug).
+        if ft == protocol.FRAME_MODBUS_DEBUG:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                LOG.info("modbus-debug origin=%s dev=%d status=%s exc=%d "
+                         "req=%s resp=%s",
+                         protocol.addr_name(parsed["origin_id"]),
+                         parsed["mb_dev"], parsed["mb_status_name"],
+                         parsed["mb_exception"],
+                         bytes(parsed["mb_req"]).hex().upper(),
+                         bytes(parsed["mb_resp"]).hex().upper() or "-")
+            else:
+                self.n_notconf += 1
+            return
+
         # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
@@ -334,6 +350,14 @@ class GatewayService:
             reads = parsed.get("reads")
             if reads is not None:
                 reads_fmt = "  ".join(f"read[{i}]={v:.3f}" for i, v in enumerate(reads))
+                sts = parsed.get("st")
+                if sts and any(sts):
+                    # v3.2: estados Modbus distintos de ok, en claro.
+                    st_fmt = ",".join(
+                        protocol.MODBUS_STATUS_NAMES.get(b & 0x0F, "?") +
+                        (f"[exc={b >> 4}]" if (b >> 4) else "")
+                        for b in sts)
+                    reads_fmt += f"  st={st_fmt}"
                 LOG.info("rx origin=%s seq=%d ts=%d rssi=%.1f snr=%.1f  %s%s",
                          protocol.addr_name(parsed["origin_id"]), parsed["seq"],
                          parsed.get("ts", 0), rssi, snr, reads_fmt,

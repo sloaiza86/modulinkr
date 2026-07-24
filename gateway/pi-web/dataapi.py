@@ -29,6 +29,7 @@ import csv
 import io
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
@@ -98,6 +99,52 @@ def _parse_channels(channels: str) -> list[int]:
     if not ids or len(ids) > 50:
         raise HTTPException(400, "channels: entre 1 y 50 canales")
     return ids
+
+
+# ----- Último valor bueno por canal (respaldo del visor de red, v3.2) -----
+#
+# Cuando un sensor lleva caído más que la retención del buffer local
+# (~1000 muestras), el visor no tiene ningún valor sano que congelar en la
+# tarjeta; el histórico cloud sí lo tiene. Cache en memoria con TTL: el
+# sondeo de la vista de red es cada 5 s y no puede pagar ni la consulta ni
+# el connect_timeout de 5 s con Internet caído, así que también se cachea
+# el resultado vacío (negativo) durante el mismo TTL.
+_LGV_TTL_S = 300.0
+_lgv_cache: dict[int, tuple[float, dict]] = {}
+
+
+def last_good_cloud(node_id: int) -> dict:
+    """{read_id: [epoch_s, value]} con el último valor de cada canal
+    vigente del nodo en la base cloud. {} sin conexión o sin datos."""
+    now = time.time()
+    hit = _lgv_cache.get(node_id)
+    if hit is not None and (now - hit[0]) < _LGV_TTL_S:
+        return hit[1]
+    out: dict = {}
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT channel_id, read_id FROM channels
+                   WHERE node_id = %s AND active_to IS NULL
+                   ORDER BY position""", (node_id,))
+            for cid, rid in cur.fetchall():
+                # Una fila por canal vía el índice (channel_id, sample_id);
+                # sample_id descendente equivale al último insertado.
+                cur.execute(
+                    """SELECT extract(epoch FROM s.ts), v.value
+                       FROM sample_values v
+                       JOIN samples s ON s.sample_id = v.sample_id
+                       WHERE v.channel_id = %s
+                       ORDER BY v.sample_id DESC LIMIT 1""", (cid,))
+                row = cur.fetchone()
+                if row is not None:
+                    out[rid] = [float(row[0]), float(row[1])]
+    except HTTPException:
+        pass                                          # sin PG configurado o caído
+    except Exception as e:                            # noqa: BLE001
+        LOG.warning("last_good_cloud(%d): %s", node_id, e)
+    _lgv_cache[node_id] = (now, out)
+    return out
 
 
 @router.get("/nodos")

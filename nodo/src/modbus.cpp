@@ -2,6 +2,8 @@
 
 #include "modbus.h"
 
+#include <cstring>
+
 namespace {
 
 // Modbus RTU permite hasta 125 registros por petición de read.
@@ -60,6 +62,18 @@ ModbusRTU::Status ModbusRTU::readCoils(uint8_t slave_id, uint16_t address,
 ModbusRTU::Status ModbusRTU::readDiscreteInputs(uint8_t slave_id, uint16_t address,
                                                 uint8_t count, uint8_t* out) {
     return readBits(kFuncReadDiscreteInputs, slave_id, address, count, out);
+}
+
+void ModbusRTU::recordFail(Status st, const uint8_t* req, size_t req_len,
+                           const uint8_t* rx, size_t rx_len) {
+    fail_.status    = st;
+    fail_.exception = (st == Status::EXCEPTION) ? last_exception_ : 0;
+    if (req_len > sizeof(fail_.req)) req_len = sizeof(fail_.req);
+    std::memcpy(fail_.req, req, req_len);
+    fail_.req_len = static_cast<uint8_t>(req_len);
+    if (rx_len > sizeof(fail_.resp)) rx_len = sizeof(fail_.resp);
+    std::memcpy(fail_.resp, rx, rx_len);
+    fail_.resp_len = static_cast<uint8_t>(rx_len);
 }
 
 const char* ModbusRTU::statusToString(Status s) {
@@ -122,12 +136,14 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     uart_->write(req, sizeof(req));
     uart_->flush();  // espera a que se vacíe el shift register
 
-    // Volcado de evidencia ante cualquier fallo (ver kDiag arriba).
-    // Imprime las cuatro piezas y escucha la cola tardía. Solo corre en
-    // el camino de error, así que no toca el timing del camino feliz.
+    // Ante cualquier fallo: guarda la evidencia para MODBUS_DEBUG (v3.2)
+    // y, con kDiag, imprime las cuatro piezas y escucha la cola tardía.
+    // Solo corre en el camino de error, así que no toca el timing del
+    // camino feliz.
     uint8_t resp[kMaxResponseSize];
-    auto diagFail = [&](const char* etapa, size_t rx_len) {
-        if (!kDiag) return;
+    auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
+        recordFail(st, req, sizeof(req), resp, rx_len);
+        if (!kDiag) return st;
         Serial.printf("[mb-dbg] fallo '%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
         if (pre_total > 0) {
@@ -152,6 +168,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         } else {
             Serial.println(F("[mb-dbg]   cola tardia: nada en 120 ms"));
         }
+        return st;
     };
 
     // Lee los primeros 3 bytes para discriminar entre respuesta normal o
@@ -159,8 +176,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     // (sid + fc + byte_count o sid + fc | 0x80 + exception_code).
     const size_t got_head = readWithTimeout(resp, 3);
     if (got_head < 3) {
-        diagFail("timeout cabecera", got_head);
-        return Status::TIMEOUT;
+        return failRet(Status::TIMEOUT, "timeout cabecera", got_head);
     }
 
     // Resincronización de trama: el transceptor auto-dirección puede
@@ -174,8 +190,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         resp[0] = resp[1];
         resp[1] = resp[2];
         if (readWithTimeout(resp + 2, 1) < 1) {
-            diagFail("timeout en resincronizacion", 2);
-            return Status::TIMEOUT;
+            return failRet(Status::TIMEOUT, "timeout en resincronizacion", 2);
         }
         skipped++;
     }
@@ -185,8 +200,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     }
 
     if (resp[0] != slave_id) {
-        diagFail("slave inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "slave inesperado", 3);
     }
 
     // ¿Excepción? El esclavo pone el bit alto del function code.
@@ -194,42 +208,41 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         // Esperamos 2 bytes más (CRC). El byte de excepción ya está en resp[2].
         const size_t got_exc = readWithTimeout(resp + 3, 2);
         if (got_exc < 2) {
-            diagFail("timeout excepcion", 3 + got_exc);
-            return Status::TIMEOUT;
+            return failRet(Status::TIMEOUT, "timeout excepcion", 3 + got_exc);
         }
         const uint16_t recv_crc = static_cast<uint16_t>(resp[3]) |
                                   (static_cast<uint16_t>(resp[4]) << 8);
         if (crc16(resp, 3) != recv_crc) {
-            diagFail("crc excepcion", 5);
-            return Status::CRC_ERROR;
+            return failRet(Status::CRC_ERROR, "crc excepcion", 5);
         }
         last_exception_ = resp[2];
+        // Respuesta bien formada pero de fallo: evidencia sin traza serie
+        // (el log de sampler ya reporta la excepción).
+        recordFail(Status::EXCEPTION, req, sizeof(req), resp, 5);
         return Status::EXCEPTION;
     }
 
     // Respuesta normal: validar function code.
     if (resp[1] != function_code) {
-        diagFail("function inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "function inesperado", 3);
     }
 
     // byte_count debe ser 2 * count (registros de 16 bits big-endian).
     const uint8_t byte_count = resp[2];
     if (byte_count != 2 * count) {
-        diagFail("byte_count inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "byte_count inesperado", 3);
     }
 
     // Lee los bytes restantes: byte_count de datos + 2 de CRC.
     const size_t remaining = static_cast<size_t>(byte_count) + 2;
     if (3 + remaining > kMaxResponseSize) {
         // Sanidad: nunca debería pasar dado el límite kMaxRegistersPerRequest.
+        recordFail(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
         return Status::INVALID_RESPONSE;
     }
     const size_t got_body = readWithTimeout(resp + 3, remaining);
     if (got_body < remaining) {
-        diagFail("timeout datos", 3 + got_body);
-        return Status::TIMEOUT;
+        return failRet(Status::TIMEOUT, "timeout datos", 3 + got_body);
     }
 
     // CRC sobre [sid, fc, byte_count, data...].
@@ -237,8 +250,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     const uint16_t recv_crc = static_cast<uint16_t>(resp[crc_payload_len]) |
                               (static_cast<uint16_t>(resp[crc_payload_len + 1]) << 8);
     if (crc16(resp, crc_payload_len) != recv_crc) {
-        diagFail("crc datos", 3 + remaining);
-        return Status::CRC_ERROR;
+        return failRet(Status::CRC_ERROR, "crc datos", 3 + remaining);
     }
 
     // Decodifica registros (big-endian → host order).
@@ -292,18 +304,19 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
     uart_->flush();
 
     uint8_t resp[kMaxResponseSize];
-    auto diagFail = [&](const char* etapa, size_t rx_len) {
-        if (!kDiag) return;
+    auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
+        recordFail(st, req, sizeof(req), resp, rx_len);
+        if (!kDiag) return st;
         Serial.printf("[mb-dbg] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
         diagHex("peticion", req, sizeof(req));
         diagHex("recibido", resp, rx_len);
+        return st;
     };
 
     const size_t got_head = readWithTimeout(resp, 3);
     if (got_head < 3) {
-        diagFail("timeout cabecera", got_head);
-        return Status::TIMEOUT;
+        return failRet(Status::TIMEOUT, "timeout cabecera", got_head);
     }
 
     // Resincronización de trama (byte espurio del transceptor auto-dirección).
@@ -313,62 +326,56 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
         resp[0] = resp[1];
         resp[1] = resp[2];
         if (readWithTimeout(resp + 2, 1) < 1) {
-            diagFail("timeout en resincronizacion", 2);
-            return Status::TIMEOUT;
+            return failRet(Status::TIMEOUT, "timeout en resincronizacion", 2);
         }
         skipped++;
     }
     if (resp[0] != slave_id) {
-        diagFail("slave inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "slave inesperado", 3);
     }
 
     // Excepción.
     if (resp[1] & 0x80) {
         const size_t got_exc = readWithTimeout(resp + 3, 2);
         if (got_exc < 2) {
-            diagFail("timeout excepcion", 3 + got_exc);
-            return Status::TIMEOUT;
+            return failRet(Status::TIMEOUT, "timeout excepcion", 3 + got_exc);
         }
         const uint16_t recv_crc = static_cast<uint16_t>(resp[3]) |
                                   (static_cast<uint16_t>(resp[4]) << 8);
         if (crc16(resp, 3) != recv_crc) {
-            diagFail("crc excepcion", 5);
-            return Status::CRC_ERROR;
+            return failRet(Status::CRC_ERROR, "crc excepcion", 5);
         }
         last_exception_ = resp[2];
+        recordFail(Status::EXCEPTION, req, sizeof(req), resp, 5);
         return Status::EXCEPTION;
     }
 
     if (resp[1] != function_code) {
-        diagFail("function inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "function inesperado", 3);
     }
 
     // byte_count = ceil(count / 8).
     const uint8_t expected_bytes = static_cast<uint8_t>((count + 7) / 8);
     const uint8_t byte_count = resp[2];
     if (byte_count != expected_bytes) {
-        diagFail("byte_count inesperado", 3);
-        return Status::INVALID_RESPONSE;
+        return failRet(Status::INVALID_RESPONSE, "byte_count inesperado", 3);
     }
 
     const size_t remaining = static_cast<size_t>(byte_count) + 2;  // datos + CRC
     if (3 + remaining > kMaxResponseSize) {
+        recordFail(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
         return Status::INVALID_RESPONSE;
     }
     const size_t got_body = readWithTimeout(resp + 3, remaining);
     if (got_body < remaining) {
-        diagFail("timeout datos", 3 + got_body);
-        return Status::TIMEOUT;
+        return failRet(Status::TIMEOUT, "timeout datos", 3 + got_body);
     }
 
     const size_t crc_payload_len = 3 + byte_count;
     const uint16_t recv_crc = static_cast<uint16_t>(resp[crc_payload_len]) |
                               (static_cast<uint16_t>(resp[crc_payload_len + 1]) << 8);
     if (crc16(resp, crc_payload_len) != recv_crc) {
-        diagFail("crc datos", 3 + remaining);
-        return Status::CRC_ERROR;
+        return failRet(Status::CRC_ERROR, "crc datos", 3 + remaining);
     }
 
     // Desempaqueta: bit i en el byte i/8, posición i%8 (LSB primero).

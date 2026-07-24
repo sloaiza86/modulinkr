@@ -3,7 +3,7 @@
 #include "outbox.h"
 
 bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
-                  uint8_t n_values, uint32_t capture_ms,
+                  const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
                   uint32_t ts, bool ts_fixed) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
@@ -35,7 +35,10 @@ bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
     slot->ts         = ts;
     slot->ts_fixed   = ts_fixed;
     slot->n_values   = n_values;
-    for (uint8_t i = 0; i < n_values; ++i) slot->values[i] = values[i];
+    for (uint8_t i = 0; i < n_values; ++i) {
+        slot->values[i] = values[i];
+        slot->st[i]     = (st != nullptr) ? st[i] : 0;
+    }
     return had_room;
 }
 

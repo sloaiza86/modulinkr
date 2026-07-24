@@ -207,8 +207,10 @@ def _materialize_quarantine(cur, origin: int) -> int:
     rows = cur.fetchall()
     freed = 0
     for qid, ts, seq, source, v in rows:
+        # v3.2: v puede traer null (lectura fallida) desde la cuarentena.
         res = ingest_sample(cur, origin, seq, int(ts),
-                            [float(x) for x in v], source)
+                            [None if x is None else float(x) for x in v],
+                            source)
         if res in ("inserted", "dup"):
             cur.execute("DELETE FROM quarantine WHERE quarantine_id = %s", (qid,))
             freed += 1

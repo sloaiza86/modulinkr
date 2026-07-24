@@ -123,6 +123,29 @@ def topology() -> dict:
     return {"nodes": graph_nodes, "edges": edges}
 
 
+# Estados Modbus del nibble bajo del byte st (frame-format.md §3.1). El 0
+# (ok) no aparece: solo se decodifican fallos.
+MODBUS_STATUS = {
+    0x1: "timeout",
+    0x2: "crc_error",
+    0x3: "exception",
+    0x4: "invalid_response",
+    0x5: "short_response",
+    0x6: "not_initialized",
+}
+
+
+def _reads_row(rj: str) -> tuple[list, list]:
+    """(valores, estados) de una fila reads_json. v3.2: puede ser la lista
+    plana de siempre (todo ok, estados vacíos) o el objeto {"v": [...],
+    "st": [...]} cuando hubo estados Modbus distintos de ok; una lectura
+    fallida es null."""
+    data = json.loads(rj)
+    if isinstance(data, dict):
+        return data.get("v", []), data.get("st") or []
+    return data, []
+
+
 def _catalog_reads() -> dict:
     """Definiciones de reads por nodo (id y unidad, en orden de posición),
     para etiquetar los valores planos de reads_json."""
@@ -159,15 +182,65 @@ def last_values(window_s: float = 3600.0) -> dict:
 
     nodes: dict[int, dict] = {}
     for origin, t, rj in last_rows:
-        vals = json.loads(rj)
+        vals, sts = _reads_row(rj)
         defs = reads_def.get(origin, [])
         channels = []
+        pendientes = []  # posiciones falladas: buscarles el último valor bueno
         for i, v in enumerate(vals):
             d = defs[i] if i < len(defs) else {}
-            channels.append({"read_id": d.get("id") or f"canal {i}",
-                             "unit": d.get("unit"),
-                             "value": v,
-                             "serie": []})
+            ch = {"read_id": d.get("id") or f"canal {i}",
+                  "unit": d.get("unit"),
+                  "value": v,
+                  "serie": []}
+            # v3.2: estado Modbus de la última muestra, solo si no es ok.
+            b = sts[i] if i < len(sts) else 0
+            if b:
+                ch["st_code"] = b & 0x0F
+                ch["st_name"] = MODBUS_STATUS.get(b & 0x0F, "error")
+                ch["st_exc"]  = (b >> 4) & 0x0F
+            if v is None:
+                pendientes.append(i)
+            channels.append(ch)
+
+        # Canales fallados: se rescata el último valor bueno del buffer
+        # (con su antigüedad en value_ago_s) para que la UI muestre el dato
+        # congelado en vez de nada. El buffer está acotado (max_entries =
+        # 1000), así que el barrido descendente completo es barato.
+        if pendientes:
+            with _conn() as c:
+                prev = c.execute(
+                    """SELECT t_recv, reads_json FROM buffer
+                       WHERE origin_id = ? AND reads_json IS NOT NULL
+                       ORDER BY t_recv DESC LIMIT 1000""",
+                    (origin,)).fetchall()
+            for tp, rjp in prev:
+                if not pendientes:
+                    break
+                vp = _reads_row(rjp)[0]
+                for i in list(pendientes):
+                    if i < len(vp) and vp[i] is not None:
+                        channels[i]["value"] = vp[i]
+                        channels[i]["value_ago_s"] = round(now - tp, 1)
+                        pendientes.remove(i)
+
+        # Sensor caído más que la retención del buffer: todas las filas
+        # locales son null y el valor bueno solo existe en el histórico
+        # cloud. dataapi lo sirve con cache TTL (5 min) para que el sondeo
+        # de 5 s no toque la VM cada vez; sin Internet devuelve vacío y el
+        # canal queda con el motivo en texto.
+        if pendientes:
+            try:
+                from dataapi import last_good_cloud
+                cloud = last_good_cloud(origin)
+            except Exception:                        # noqa: BLE001
+                cloud = {}
+            for i in list(pendientes):
+                got = cloud.get(channels[i]["read_id"])
+                if got:
+                    channels[i]["value"] = got[1]
+                    channels[i]["value_ago_s"] = round(now - got[0], 1)
+                    pendientes.remove(i)
+
         nodes[origin] = {"origin": origin, "t_last": t,
                          "ago_s": round(now - t, 1), "channels": channels}
 
@@ -175,7 +248,7 @@ def last_values(window_s: float = 3600.0) -> dict:
         node = nodes.get(origin)
         if node is None:
             continue
-        for i, v in enumerate(json.loads(rj)):
+        for i, v in enumerate(_reads_row(rj)[0]):
             if i < len(node["channels"]):
                 node["channels"][i]["serie"].append([round(t, 1), v])
 

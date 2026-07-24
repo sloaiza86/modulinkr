@@ -239,20 +239,24 @@ void LoraP2P::buildAad(uint8_t aad[protocol::kHeaderBytes + protocol::kSecTsByte
 LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                                        uint32_t ts,
                                        const float* values,
+                                       const uint8_t* st,
                                        uint8_t n_values,
                                        uint8_t hop_dst) {
     if (!initialized_) return Status::NOT_INITIALIZED;
-    if (n_values == 0 || n_values > kMaxValues || values == nullptr) {
+    if (n_values == 0 || n_values > kMaxValues || values == nullptr ||
+        st == nullptr) {
         return Status::INVALID_ARGS;
     }
 
-    // Payload v2.1: ts de captura (uint32 LE) + cada float32 en
-    // little-endian (ESP32 ya es LE nativo, basta con un memcpy).
-    uint8_t payload[4u + 4u * kMaxValues];
+    // Payload v3.2 (spec §3.1): ts de captura (uint32 LE) + cada float32
+    // en little-endian (ESP32 ya es LE nativo, basta con un memcpy) + un
+    // byte de estado por read al final.
+    uint8_t payload[4u + 5u * kMaxValues];
     std::memcpy(&payload[0], &ts, sizeof(ts));
     for (uint8_t i = 0; i < n_values; ++i) {
         std::memcpy(&payload[4u + 4u * i], &values[i], sizeof(float));
     }
+    std::memcpy(&payload[4u + 4u * n_values], st, n_values);
 
     return buildAndSend(hop_dst,
                         node_id_,
@@ -261,7 +265,39 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
                         protocol::kFrameTelemetry,
                         ttl_,
                         payload,
-                        static_cast<uint8_t>(4u + 4u * n_values));
+                        static_cast<uint8_t>(4u + 5u * n_values));
+}
+
+LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
+                                         uint8_t status,
+                                         const uint8_t* req, uint8_t req_len,
+                                         const uint8_t* resp, uint8_t resp_len,
+                                         uint8_t hop_dst) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (req == nullptr || req_len == 0 ||
+        (resp == nullptr && resp_len > 0) ||
+        static_cast<size_t>(4u + req_len + resp_len) > protocol::kMaxPayload) {
+        return Status::INVALID_ARGS;
+    }
+
+    // Payload MODBUS_DEBUG v3.2 (spec §15.1):
+    //   dev_index + status + req_len + resp_len + req + resp
+    uint8_t payload[protocol::kMaxPayload];
+    payload[0] = dev_index;
+    payload[1] = status;
+    payload[2] = req_len;
+    payload[3] = resp_len;
+    std::memcpy(&payload[4], req, req_len);
+    if (resp_len > 0) std::memcpy(&payload[4u + req_len], resp, resp_len);
+
+    return buildAndSend(hop_dst,
+                        node_id_,
+                        protocol::kAddrGateway,
+                        seq,
+                        protocol::kFrameModbusDebug,
+                        ttl_,
+                        payload,
+                        static_cast<uint8_t>(4u + req_len + resp_len));
 }
 
 LoraP2P::Status LoraP2P::sendHeartbeat(uint16_t seq, uint32_t tx_ms,
@@ -372,23 +408,26 @@ LoraP2P::Status LoraP2P::sendNodeRegister(uint8_t hop_dst, uint8_t frag_idx,
 LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
                                               uint32_t ts,
                                               const float* values,
+                                              const uint8_t* st,
                                               uint8_t n_values,
                                               uint8_t sn_id) {
     if (!initialized_) return Status::NOT_INITIALIZED;
-    if (n_values == 0 || n_values > kMaxValues || values == nullptr) {
+    if (n_values == 0 || n_values > kMaxValues || values == nullptr ||
+        st == nullptr) {
         return Status::INVALID_ARGS;
     }
 
-    uint8_t payload[4u + 4u * kMaxValues];
+    uint8_t payload[4u + 5u * kMaxValues];
     std::memcpy(&payload[0], &ts, sizeof(ts));
     for (uint8_t i = 0; i < n_values; ++i) {
         std::memcpy(&payload[4u + 4u * i], &values[i], sizeof(float));
     }
+    std::memcpy(&payload[4u + 4u * n_values], st, n_values);
 
     // Entrega directa al supernodo: dest_id = hop_dst = sn (spec §8.3).
     return buildAndSend(sn_id, node_id_, sn_id, seq,
                         protocol::kFrameTelemetry, 1,
-                        payload, static_cast<uint8_t>(4u + 4u * n_values));
+                        payload, static_cast<uint8_t>(4u + 5u * n_values));
 }
 
 LoraP2P::Status LoraP2P::sendSnRequest(uint16_t seq, uint8_t queued) {

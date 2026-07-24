@@ -36,6 +36,7 @@ public:
         bool     ts_fixed   = false;  // true: el ts ya viajó y es inmutable
         uint8_t  n_values   = 0;
         float    values[kMaxValues] = {};
+        uint8_t  st[kMaxValues] = {};  // v3.2: byte de estado por read
     };
 
     // Añade una muestra. Con la bandeja llena descarta la más antigua
@@ -43,8 +44,10 @@ public:
     //   ts / ts_fixed  ts de captura según la regla de inmutabilidad de
     //                  arriba (para custodia: el ts de la trama recibida,
     //                  siempre fijado).
+    //   st             byte de estado por read (v3.2), mismo orden que
+    //                  values; nullptr = todo ok.
     bool push(uint8_t origin, uint16_t seq, const float* values,
-              uint8_t n_values, uint32_t capture_ms,
+              const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
               uint32_t ts, bool ts_fixed);
 
     // Elimina la entrada de un origen+seq (confirmada por otra vía).

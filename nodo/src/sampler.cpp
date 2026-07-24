@@ -126,6 +126,16 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
     }
     if (st != ModbusRTU::Status::OK) {
         err_count_++;
+        last_fail_dev_ = g.dev;
+        // v3.2: byte de estado para los miembros del grupo (nibble bajo
+        // estado, nibble alto código de excepción, frame-format.md §3.1).
+        const uint8_t exc = (st == ModbusRTU::Status::EXCEPTION)
+                                ? bus_->lastException() : 0;
+        const uint8_t status_byte = static_cast<uint8_t>(
+            (static_cast<uint8_t>(st) & 0x0F) | ((exc & 0x0F) << 4));
+        for (uint8_t m = 0; m < g.n_reads; ++m) {
+            slots_[globalIndex(g.dev, g.first_read + m)].status = status_byte;
+        }
         Serial.printf("[modbus] err %s dev=%s grupo@%u(x%u fn=0x%02X)  ok=%lu err=%lu\n",
                       ModbusRTU::statusToString(st), dev.name,
                       g.address, g.n_regs, g.function,
@@ -149,6 +159,7 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
         }
         s.fresh_ms = now_ms;
         s.ever_ok  = true;
+        s.status   = 0;  // ok (v3.2)
         off = static_cast<uint8_t>(off + cfg::typeRegisters(rd.type));
     }
     ok_count_++;
@@ -177,8 +188,8 @@ void Sampler::pollDue() {
     }
 }
 
-bool Sampler::snapshot(float* out, uint8_t max_values, uint8_t& n_out,
-                       uint32_t now_ms) const {
+bool Sampler::snapshot(float* out, uint8_t* st_out, uint8_t max_values,
+                       uint8_t& n_out, uint32_t now_ms) const {
     n_out = cfg_->total_reads;
     if (n_out == 0 || n_out > max_values) return false;
 
@@ -191,10 +202,20 @@ bool Sampler::snapshot(float* out, uint8_t max_values, uint8_t& n_out,
         if (max_age < 2000) max_age = 2000;
         for (uint8_t r = 0; r < dev.n_reads; ++r) {
             const Slot& s = slots_[idx];
-            if (!s.ever_ok || (now_ms - s.fresh_ms) > max_age) {
-                return false;
+            const bool fresh = s.ever_ok && (now_ms - s.fresh_ms) <= max_age;
+            if (s.status == 0 && fresh) {
+                out[idx]    = s.value;
+                st_out[idx] = 0;
+            } else {
+                // Fallo o valor rancio: NaN con su estado. El caso
+                // "status == 0 pero rancio" no debería darse (pollDue
+                // precede siempre al snapshot); se reporta como timeout
+                // por prudencia, nunca un valor viejo como si fuera actual.
+                out[idx]    = NAN;
+                st_out[idx] = (s.status != 0)
+                                  ? s.status
+                                  : static_cast<uint8_t>(ModbusRTU::Status::TIMEOUT);
             }
-            out[idx] = s.value;
             idx++;
         }
     }

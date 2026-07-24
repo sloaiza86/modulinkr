@@ -393,14 +393,16 @@ void fireLora() {
     sampler.pollDue();
 
     // Snapshot de todas las lecturas, en el orden global de reads[] (el
-    // mismo del payload TELEMETRY, frame-format.md §3.1).
+    // mismo del payload TELEMETRY, frame-format.md §3.1). v3.2: siempre
+    // completa; una lectura fallida o rancia sale como NaN con su byte de
+    // estado y la trama se emite igual. Antes el nodo callaba (el sensor
+    // desconectado del supernodo del banco era indistinguible de un nodo
+    // muerto); ahora el gateway ve la trama de NaN con su estado.
     float   values[cfg::kMaxReadsTotal];
+    uint8_t sts[cfg::kMaxReadsTotal];
     uint8_t n_values = 0;
-    if (!sampler.snapshot(values, cfg::kMaxReadsTotal, n_values, millis())) {
-        // Lecturas incompletas o rancias: sin trama este ciclo. Con el
-        // sensor desconectado (caso del supernodo del banco) esto es lo
-        // normal y el nodo sigue haciendo mesh y custodia.
-        return;
+    if (!sampler.snapshot(values, sts, cfg::kMaxReadsTotal, n_values, millis())) {
+        return;  // sin reads en el config o no caben: nada que enviar
     }
     if (!g_lora_ready) {
         Serial.println(F("[lora]   tx skip, driver no inicializado"));
@@ -431,8 +433,8 @@ void fireLora() {
         // asignado. Saldrá por un supernodo (custodia) o por el padre
         // cuando la ruta vuelva.
         nextSeq();
-        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, capture_ms,
-                    ts, nodeclock::synced());
+        outbox.push(g_cfg.node_id, g_lora_seq, values, sts, n_values,
+                    capture_ms, ts, nodeclock::synced());
         Serial.printf("[outbox] sin padre, muestra retenida seq=%u  outbox=%u vecinos=%u\n",
                       g_lora_seq,
                       static_cast<unsigned>(outbox.count()),
@@ -445,19 +447,19 @@ void fireLora() {
         // registro (frame-format.md §13.1). La muestra no se pierde: se
         // retiene y el drenaje la saca en cuanto llegue el WELCOME.
         nextSeq();
-        outbox.push(g_cfg.node_id, g_lora_seq, values, n_values, capture_ms,
-                    ts, nodeclock::synced());
+        outbox.push(g_cfg.node_id, g_lora_seq, values, sts, n_values,
+                    capture_ms, ts, nodeclock::synced());
         Serial.printf("[outbox] sin registro, muestra retenida seq=%u  outbox=%u\n",
                       g_lora_seq, static_cast<unsigned>(outbox.count()));
         return;
     }
 
     nextSeq();
-    const auto st = lora.sendTelemetry(g_lora_seq, ts, values, n_values,
+    const auto st = lora.sendTelemetry(g_lora_seq, ts, values, sts, n_values,
                                        mesh.parentId());
     if (st == LoraP2P::Status::OK) {
         g_lora_ok++;
-        if (!pending.push(g_lora_seq, values, n_values, millis(),
+        if (!pending.push(g_lora_seq, values, sts, n_values, millis(),
                           protocol::kAddrGateway, capture_ms, ts)) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
@@ -474,6 +476,28 @@ void fireLora() {
                       LoraP2P::statusToString(st), g_lora_seq,
                       static_cast<unsigned long>(g_lora_ok),
                       static_cast<unsigned long>(g_lora_err));
+    }
+
+    // MODBUS_DEBUG (v3.2, spec §15): la última transacción Modbus fallida
+    // del ciclo, solo con modbus.debug activo en el config. Best-effort
+    // como el HEARTBEAT: sin ACK, sin reintentos, sin cola. Se emite tras
+    // la TELEMETRY, con ruta ya garantizada (los caminos sin padre o sin
+    // registro salieron antes de este punto). La evidencia se limpia tras
+    // reportarla: cada trama corresponde a un fallo del ciclo en curso.
+    if (g_cfg.modbus_debug && modbus.lastFailValid()) {
+        const ModbusRTU::FailEvidence& fe = modbus.lastFail();
+        const uint8_t status_byte = static_cast<uint8_t>(
+            (static_cast<uint8_t>(fe.status) & 0x0F) |
+            ((fe.exception & 0x0F) << 4));
+        nextSeq();
+        lora.sendModbusDebug(g_lora_seq, sampler.lastFailDev(), status_byte,
+                             fe.req, fe.req_len, fe.resp, fe.resp_len,
+                             mesh.parentId());
+        Serial.printf("[mb-dbg] trama debug dev=%u status=%s exc=%u req=%uB resp=%uB\n",
+                      sampler.lastFailDev(),
+                      ModbusRTU::statusToString(fe.status), fe.exception,
+                      fe.req_len, fe.resp_len);
+        modbus.clearLastFail();
     }
 }
 
@@ -533,9 +557,9 @@ void handleAck(const LoraP2P::RxFrame& f) {
 // para el respaldo NB-IoT (spec seccion 8.3). Solo aplica al supernodo.
 void acceptCustody(const LoraP2P::RxFrame& f) {
     if (!g_cfg.super_node) return;
-    // Payload: ts (4 B) + N float32.
-    if (f.payload_length < 8 || ((f.payload_length - 4) % 4) != 0) return;
-    const uint8_t n = (f.payload_length - 4) / 4;
+    // Payload v3.2: ts (4 B) + N float32 + N bytes de estado (spec §3.1).
+    if (f.payload_length < 9 || ((f.payload_length - 4) % 5) != 0) return;
+    const uint8_t n = (f.payload_length - 4) / 5;
     if (n > Outbox::kMaxValues) return;  // config ajeno mayor de lo soportado
 
     // El ts viaja tal como lo fijó el origen y es INMUTABLE: es la
@@ -553,13 +577,16 @@ void acceptCustody(const LoraP2P::RxFrame& f) {
                       f.origin_id, f.seq);
         return;
     }
-    float values[Outbox::kMaxValues];
-    memcpy(values, f.payload + 4, f.payload_length - 4);
+    float   values[Outbox::kMaxValues];
+    uint8_t sts[Outbox::kMaxValues];
+    memcpy(values, f.payload + 4, 4u * n);
+    memcpy(sts, f.payload + 4 + 4u * n, n);
 
     // Reintento de custodia (ACK anterior perdido): se reemplaza la
     // entrada en vez de duplicarla.
     const bool dup = outbox.remove(f.origin_id, f.seq);
-    outbox.push(f.origin_id, f.seq, values, n, millis(), ts, /*ts_fixed=*/true);
+    outbox.push(f.origin_id, f.seq, values, sts, n, millis(), ts,
+                /*ts_fixed=*/true);
     if (!dup) g_custody_rx++;
 
     nextSeq();
@@ -801,8 +828,8 @@ void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
     // El push reemplaza la posible entrada previa del mismo seq. El ts ya
     // viajó en la trama (fijado): se conserva tal cual, inmutable.
     outbox.remove(g_cfg.node_id, e.seq);
-    outbox.push(g_cfg.node_id, e.seq, e.values, e.n_values, e.capture_ms,
-                e.ts, /*ts_fixed=*/true);
+    outbox.push(g_cfg.node_id, e.seq, e.values, e.st, e.n_values,
+                e.capture_ms, e.ts, /*ts_fixed=*/true);
     g_outbox_inflight = false;
     Serial.printf("[outbox] seq=%u retenida (%s)  outbox=%u lost=%lu\n",
                   e.seq, motivo,
@@ -831,8 +858,8 @@ void processAckTimeouts() {
     // Entrega en custodia a un supernodo (dest != gateway).
     if (e->dest != protocol::kAddrGateway) {
         if (e->retries < g_cfg.max_retries) {
-            lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->n_values,
-                                      e->dest);
+            lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->st,
+                                      e->n_values, e->dest);
             pending.markRetry(*e, now);
             e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
             g_lora_retx++;
@@ -862,7 +889,7 @@ void processAckTimeouts() {
     if (e->retries < g_cfg.max_retries) {
         // El reintento sale hacia el padre actual, que puede haber
         // cambiado desde el envío original. Mismo seq y MISMO ts.
-        const auto st = lora.sendTelemetry(e->seq, e->ts, e->values,
+        const auto st = lora.sendTelemetry(e->seq, e->ts, e->values, e->st,
                                            e->n_values, mesh.parentId());
         pending.markRetry(*e, now);
         e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
@@ -953,9 +980,9 @@ void snClientTick(uint32_t now) {
                 Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
                 const uint32_t ts = fixOutboxTs(*e);  // primera serialización
-                lora.sendTelemetryCustody(e->seq, ts, e->values, e->n_values,
-                                          g_sn_target);
-                pending.push(e->seq, e->values, e->n_values, now,
+                lora.sendTelemetryCustody(e->seq, ts, e->values, e->st,
+                                          e->n_values, g_sn_target);
+                pending.push(e->seq, e->values, e->st, e->n_values, now,
                              g_sn_target, e->capture_ms, ts);
                 g_outbox_inflight = true;
                 Serial.printf("[sn]     entregando seq=%u a sn=%u  outbox=%u\n",
@@ -977,8 +1004,9 @@ void outboxDrainTick(uint32_t now) {
     if (e == nullptr) return;
 
     const uint32_t ts = fixOutboxTs(*e);
-    lora.sendTelemetry(e->seq, ts, e->values, e->n_values, mesh.parentId());
-    pending.push(e->seq, e->values, e->n_values, now,
+    lora.sendTelemetry(e->seq, ts, e->values, e->st, e->n_values,
+                       mesh.parentId());
+    pending.push(e->seq, e->values, e->st, e->n_values, now,
                  protocol::kAddrGateway, e->capture_ms, ts);
     g_outbox_inflight = true;
     Serial.printf("[outbox] drenando seq=%u via padre=%u  outbox=%u\n",
@@ -1084,7 +1112,7 @@ void batchTick(uint32_t now) {
     const uint32_t batch_id = g_batch_id + 1;
 
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "3.1";
+    doc["schema_version"] = "3.2";
 
     JsonArray samples = doc["samples"].to<JsonArray>();
     Outbox::Entry* included[kBatchMaxSamples];
@@ -1111,7 +1139,18 @@ void batchTick(uint32_t now) {
         s["seq"]    = e->seq;
         s["ts"]     = ts;
         JsonArray v = s["v"].to<JsonArray>();
-        for (uint8_t k = 0; k < e->n_values; ++k) v.add(e->values[k]);
+        bool any_st = false;
+        for (uint8_t k = 0; k < e->n_values; ++k) {
+            // v3.2: NaN (lectura fallida) se publica como null.
+            if (isnan(e->values[k])) v.add(nullptr); else v.add(e->values[k]);
+            if (e->st[k] != 0) any_st = true;
+        }
+        // Array st solo cuando hay algo que contar (batch-format.md §4:
+        // ausente equivale a todo ok).
+        if (any_st) {
+            JsonArray st_arr = s["st"].to<JsonArray>();
+            for (uint8_t k = 0; k < e->n_values; ++k) st_arr.add(e->st[k]);
+        }
 
         included[n_included++] = e;
     }

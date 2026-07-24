@@ -105,13 +105,24 @@ def _ingest_sample_checked(cur, s: dict, source: str, stats: dict):
         LOG.warning("sample descartada: ts=%r invalido (origin=%d seq=%s)",
                     ts, origin, seq)
         return "sample_bad"
+    # v3.2 (batch-format.md §4): una posición de v puede ser null (lectura
+    # fallida, NaN en la trama LoRa).
     if (not isinstance(v, list) or not v or
-            not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+            not all(x is None or
+                    (isinstance(x, (int, float)) and not isinstance(x, bool))
                     for x in v)):
         LOG.warning("sample descartada: v invalido (origin=%d seq=%d)", origin, seq)
         return "sample_bad"
 
-    return ingest_sample(cur, origin, seq, ts, [float(x) for x in v], source)
+    # st (v3.2, regla 8 de §8): diagnóstico, no dato. Se valida best-effort
+    # con log y no se persiste; la muestra se procesa igual.
+    st = s.get("st")
+    if st is not None and (not isinstance(st, list) or len(st) != len(v) or
+                           not all(isinstance(x, int) for x in st)):
+        LOG.warning("sample: st invalido, ignorado (origin=%d seq=%d)", origin, seq)
+
+    return ingest_sample(cur, origin, seq, ts,
+                         [None if x is None else float(x) for x in v], source)
 
 
 def ingest_sample(cur, origin: int, seq: int, ts: int, v: list, source: str):
@@ -156,9 +167,11 @@ def ingest_sample(cur, origin: int, seq: int, ts: int, v: list, source: str):
     if row is None:
         return "dup"   # ya llego por el otro camino: no se insertan valores
 
-    # 4. Valores contra el canal de cada posición.
+    # 4. Valores contra el canal de cada posición. v3.2: una posición null
+    #    (lectura fallida) no genera fila; la ausencia en sample_values es
+    #    la representación del hueco (value es NOT NULL por schema).
     sample_id = row[0]
     cur.executemany(
         "INSERT INTO sample_values (sample_id, channel_id, value) VALUES (%s, %s, %s)",
-        [(sample_id, ch, val) for ch, val in zip(channels, v)])
+        [(sample_id, ch, val) for ch, val in zip(channels, v) if val is not None])
     return "inserted"

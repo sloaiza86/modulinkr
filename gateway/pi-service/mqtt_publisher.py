@@ -64,7 +64,7 @@ import paho.mqtt.client as mqtt
 
 LOG = logging.getLogger("modulinkr.mqtt")
 
-SCHEMA_VERSION   = "3.1"
+SCHEMA_VERSION   = "3.2"
 SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
 TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
@@ -218,11 +218,15 @@ class MqttPublisher:
         # (fetch_pending viene por t_recv; con un solo origen coincide).
         rows.sort(key=lambda r: (r["origin_id"], r["seq"]))
 
-        samples = [
-            {"origin": r["origin_id"], "seq": r["seq"],
-             "ts": r["ts"], "v": r["v"]}
-            for r in rows
-        ]
+        # v3.2: v puede llevar null (lectura fallida) y st acompaña cuando
+        # hay estados distintos de ok (batch-format.md §4).
+        samples = []
+        for r in rows:
+            s = {"origin": r["origin_id"], "seq": r["seq"],
+                 "ts": r["ts"], "v": r["v"]}
+            if r.get("st"):
+                s["st"] = r["st"]
+            samples.append(s)
         msg = {
             "schema_version": SCHEMA_VERSION,
             "samples":        samples,

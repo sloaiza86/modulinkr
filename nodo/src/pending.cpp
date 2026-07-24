@@ -2,9 +2,9 @@
 
 #include "pending.h"
 
-bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
-                        uint32_t now_ms, uint8_t dest, uint32_t capture_ms,
-                        uint32_t ts) {
+bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
+                        uint8_t n_values, uint32_t now_ms, uint8_t dest,
+                        uint32_t capture_ms, uint32_t ts) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     // Busca un hueco libre.
@@ -20,7 +20,10 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
             e.retries    = 0;
             e.dest       = dest;
             e.n_values   = n_values;
-            for (uint8_t v = 0; v < n_values; ++v) e.values[v] = values[v];
+            for (uint8_t v = 0; v < n_values; ++v) {
+                e.values[v] = values[v];
+                e.st[v]     = (st != nullptr) ? st[v] : 0;
+            }
             count_++;
             return true;
         }
@@ -38,7 +41,10 @@ bool PendingQueue::push(uint16_t seq, const float* values, uint8_t n_values,
     e.retries    = 0;
     e.dest       = dest;
     e.n_values   = n_values;
-    for (uint8_t v = 0; v < n_values; ++v) e.values[v] = values[v];
+    for (uint8_t v = 0; v < n_values; ++v) {
+        e.values[v] = values[v];
+        e.st[v]     = (st != nullptr) ? st[v] : 0;
+    }
     return false;
 }
 

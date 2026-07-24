@@ -179,11 +179,12 @@ bool load(Config& c, char* err, size_t err_len) {
     }
 
     // ----- schema_version (regla 1) -----
-    // 2.2 es la actual; 2.0 y 2.1 se aceptan porque los cambios de
+    // 3.2 es la actual; 3.0 y 3.1 se aceptan porque los cambios de
     // estructura del JSON son opcionales hacia atrás (node-config.md §1:
-    // 2.1 no cambió estructura, 2.2 añade el bloque opcional security).
+    // 3.1 no cambió estructura, 3.2 añade el campo opcional modbus.debug).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "3.1") != 0 && strcmp(schema, "3.0") != 0) {
+    if (strcmp(schema, "3.2") != 0 && strcmp(schema, "3.1") != 0 &&
+        strcmp(schema, "3.0") != 0) {
         return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.x)", schema);
     }
 
@@ -364,6 +365,7 @@ bool load(Config& c, char* err, size_t err_len) {
     c.parity = par[0];
     c.stopbits = mb["stopbits"] | 0;
     if (c.stopbits != 1 && c.stopbits != 2) return fail(err, err_len, "modbus.stopbits invalido");
+    c.modbus_debug = mb["debug"] | false;  // v3.2, opcional
 
     JsonArrayConst devices = mb["devices"];
     if (devices.isNull() || devices.size() == 0) {

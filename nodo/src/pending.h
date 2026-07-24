@@ -35,6 +35,8 @@ public:
         uint8_t  dest    = 0xFF;  // destino final: 0xFF gateway, otro = supernodo (custodia)
         uint8_t  n_values = 0;
         float    values[kMaxValues] = {};
+        uint8_t  st[kMaxValues] = {};  // v3.2: byte de estado por read; los
+                                       // reintentos reutilizan los mismos
     };
 
     // Registra una trama recién enviada. Si la cola está llena, sobrescribe
@@ -45,9 +47,10 @@ public:
     //   capture_ms  millis() de la captura de la muestra.
     //   ts          epoch de captura tal como se serializó en la trama
     //               (0 = sin hora). Viaja con la entrada hacia la outbox.
-    bool push(uint16_t seq, const float* values, uint8_t n_values,
-              uint32_t now_ms, uint8_t dest, uint32_t capture_ms,
-              uint32_t ts);
+    //   st          byte de estado por read (v3.2), mismo orden que values.
+    bool push(uint16_t seq, const float* values, const uint8_t* st,
+              uint8_t n_values, uint32_t now_ms, uint8_t dest,
+              uint32_t capture_ms, uint32_t ts);
 
     // Procesa un ACK entrante. Devuelve true si el seq estaba en cola
     // (la entrada se libera) y deja en dest_out el destino que llevaba.

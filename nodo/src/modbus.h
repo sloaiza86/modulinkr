@@ -67,6 +67,24 @@ public:
     // fue Status::EXCEPTION. 0 si no aplica.
     uint8_t lastException() const { return last_exception_; }
 
+    // Evidencia de la última transacción fallida (v3.2): la petición tal
+    // cual salió al bus y los bytes recibidos hasta el fallo. Alimenta la
+    // trama MODBUS_DEBUG (frame-format.md §15) y el JSON de batch-format.md
+    // §11. Se sobreescribe en cada fallo; una transacción exitosa no la
+    // borra (la semántica es "última fallida"). El consumidor la limpia
+    // con clearLastFail() tras reportarla.
+    struct FailEvidence {
+        Status  status    = Status::OK;   // OK = sin evidencia
+        uint8_t exception = 0;            // código Modbus, solo con EXCEPTION
+        uint8_t req[8];
+        uint8_t req_len   = 0;
+        uint8_t resp[32];                 // tope de volcado, spec §15.1
+        uint8_t resp_len  = 0;
+    };
+    const FailEvidence& lastFail() const { return fail_; }
+    bool lastFailValid() const { return fail_.status != Status::OK; }
+    void clearLastFail() { fail_.status = Status::OK; }
+
     // Devuelve un literal estático con el nombre del estado, útil para logs.
     static const char* statusToString(Status s);
 
@@ -74,6 +92,7 @@ private:
     Stream*  uart_ = nullptr;
     uint32_t response_timeout_ms_ = 1000;
     uint8_t  last_exception_ = 0;
+    FailEvidence fail_;
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);
@@ -82,6 +101,12 @@ private:
     // byte (0/1) por posición en `out`.
     Status readBits(uint8_t function_code, uint8_t slave_id,
                     uint16_t address, uint8_t count, uint8_t* out);
+
+    // Guarda la evidencia del fallo (v3.2): copia petición y bytes
+    // recibidos en fail_. Con st == EXCEPTION toma el código de
+    // last_exception_, que el caller ya fijó.
+    void recordFail(Status st, const uint8_t* req, size_t req_len,
+                    const uint8_t* rx, size_t rx_len);
 
     // Lee exactamente `len` bytes en `buf` con timeout total de
     // `response_timeout_ms_`. Devuelve número de bytes leídos.

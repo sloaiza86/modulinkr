@@ -35,6 +35,11 @@ ACK con tx_ms (4 B LE), el aire acumulado del transmisor para el duty
 cycle normativo (EN 300 220-1). toa_ms() calcula el Time-on-Air de las
 tramas que el propio gateway ordena transmitir.
 
+Cambios v3.2 (20-jul-2026): TELEMETRY lleva un byte de estado Modbus por
+read tras los valores (spec §3.1: nibble bajo estado, nibble alto código
+de excepción; lecturas fallidas viajan como NaN) y aparece MODBUS_DEBUG
+(0x06, spec §15): la transacción Modbus fallida en crudo.
+
 No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
 cualquier utilidad de diagnóstico.
 """
@@ -75,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x31          # v3.1 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x32          # v3.2 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -119,6 +124,7 @@ FRAME_HEARTBEAT     = 0x02
 FRAME_ALARM         = 0x03
 FRAME_NODE_REGISTER = 0x04
 FRAME_WELCOME       = 0x05
+FRAME_MODBUS_DEBUG  = 0x06
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -130,9 +136,21 @@ FRAME_TYPE_NAMES = {
     FRAME_ALARM:         'ALARM',
     FRAME_NODE_REGISTER: 'NODE_REGISTER',
     FRAME_WELCOME:       'WELCOME',
+    FRAME_MODBUS_DEBUG:  'MODBUS_DEBUG',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
+}
+
+# Estados Modbus del byte st[] (spec §3.1, nibble bajo).
+MODBUS_STATUS_NAMES = {
+    0x0: 'ok',
+    0x1: 'timeout',
+    0x2: 'crc_error',
+    0x3: 'exception',
+    0x4: 'invalid_response',
+    0x5: 'short_response',
+    0x6: 'not_initialized',
 }
 
 # Status de ACK (§4.2).
@@ -307,19 +325,21 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
     out['payload'] = payload
 
     if frame_type == FRAME_TELEMETRY:
-        # ts de captura (uint32 LE) + N float32. Desde v3.0 el ts es
+        # v3.2 (spec §3.1): ts de captura (uint32 LE) + N float32 + N bytes
+        # de estado. Lecturas fallidas viajan como NaN. Desde v3.0 el ts es
         # siempre válido; ts=0 delata firmware desactualizado o bug de
         # reloj y el servicio responde DECODE_ERROR (spec §10 regla 11).
-        if payload_length < 8 or (payload_length - 4) % 4 != 0:
+        if payload_length < 9 or (payload_length - 4) % 5 != 0:
             out['error'] = (f'TELEMETRY payload_length={payload_length} '
-                            f'invalido (esperado 4 + 4*N, N >= 1)')
+                            f'invalido (esperado 4 + 5*N, N >= 1)')
             return out
         out['ts'] = struct.unpack_from('<I', payload, 0)[0]
         if out['ts'] == 0:
             out['ts_zero'] = True
-        n = (payload_length - 4) // 4
+        n = (payload_length - 4) // 5
         out['reads'] = [struct.unpack_from('<f', payload, 4 + i * 4)[0]
                         for i in range(n)]
+        out['st'] = list(payload[4 + 4 * n:4 + 5 * n])
 
     elif frame_type == FRAME_ACK:
         if payload_length != 3:
@@ -367,6 +387,30 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
             return out
         out['epoch'] = struct.unpack_from('<I', payload, 0)[0]
         out['welcome_status'] = payload[4]
+
+    elif frame_type == FRAME_MODBUS_DEBUG:
+        # v3.2 (spec §15.1): dev_index + status + req_len + resp_len +
+        # req + resp. Regla 8 de §10: los tamaños deben cuadrar.
+        if payload_length < 4:
+            out['error'] = (f'MODBUS_DEBUG payload_length={payload_length}, '
+                            f'esperado >= 4')
+            return out
+        dev_index = payload[0]
+        status_b  = payload[1]
+        req_len   = payload[2]
+        resp_len  = payload[3]
+        if payload_length != 4 + req_len + resp_len:
+            out['error'] = (f'MODBUS_DEBUG tamaños incoherentes '
+                            f'(payload={payload_length}, req={req_len}, '
+                            f'resp={resp_len})')
+            return out
+        out['mb_dev']         = dev_index
+        out['mb_status']      = status_b & 0x0F
+        out['mb_status_name'] = MODBUS_STATUS_NAMES.get(
+            status_b & 0x0F, f'unknown(0x{status_b & 0x0F:X})')
+        out['mb_exception']   = (status_b >> 4) & 0x0F
+        out['mb_req']         = payload[4:4 + req_len]
+        out['mb_resp']        = payload[4 + req_len:4 + req_len + resp_len]
 
     return out
 

@@ -2,6 +2,8 @@
 
 Documento normativo del **formato JSON** con el que la telemetría del despliegue llega al broker cloud. Es un formato **único para las cuatro rutas de entrega**: LoRa directo y LoRa multi-salto (publica el gateway) y NB-IoT propio y NB-IoT en custodia (publica el supernodo). El consumidor cloud procesa un solo formato, un solo topic con wildcard y una sola clave de deduplicación.
 
+> **Actualización del 20-jul-2026 (v3.2)**: acompaña al estado Modbus por read de la trama LoRa (`frame-format.md` §3.1). Cada sample puede llevar `null` en `v[]` (lectura fallida, NaN en la trama) y un array opcional `st` con los bytes de estado (§4). El debug Modbus crudo (trama MODBUS_DEBUG, `frame-format.md` §15) **no pasa por MQTT**: se observa en el log del Pi del gateway.
+
 > **Reescritura del 16-jul-2026 (v3.0)**: hasta v2.x este documento describía solo el batch NB-IoT del supernodo, y el gateway publicaba aparte un mensaje por muestra con formato propio. v3.0 unifica ambos caminos en este mensaje. Cambios respecto al batch v2.x: desaparecen `boot_id` y `clock_synced` (sin hora no se muestrea, `frame-format.md` §13.4, así que toda muestra lleva `ts` válido), y los metadatos de diagnóstico (`publisher`, `batch_id`, `trigger`, `fw_version`) pasan a un sobre `debug` opcional activable por configuración. El nombre del archivo se conserva por las referencias cruzadas del repo.
 
 Este formato es complemento de:
@@ -55,7 +57,8 @@ Cada elemento de `samples` representa **una muestra capturada en un instante**, 
   "origin": 3,
   "seq":    220,
   "ts":     1718000105,
-  "v":      [22.1, 63.0]
+  "v":      [22.1, null],
+  "st":     [0, 1]
 }
 ```
 
@@ -64,7 +67,8 @@ Cada elemento de `samples` representa **una muestra capturada en un instante**, 
 | `origin` | integer | sí | `node.id` del nodo que **capturó** la muestra (el `origin_id` de la trama LoRa). Rango 1-254. |
 | `seq` | integer | sí | `seq` original (uint16) de la trama LoRa. Contador efímero de enlace; desempata muestras del mismo segundo. |
 | `ts` | integer | sí, **nunca nulo** | Instante de captura, epoch Unix en segundos, UTC. Arrastrado tal cual desde la trama LoRa por cualquier ruta (inmutabilidad de `frame-format.md` §3.1). Desde v3.0 no existe muestra sin hora: el nodo no muestrea sin reloj sincronizado. |
-| `v` | array de floats | sí | Valores en el orden estricto de `reads[]` del config del nodo **origen**, ya convertidos a unidad real (edge computing). El emisor no valida la longitud contra el catálogo del origen; esa validación es del consumidor. |
+| `v` | array de floats o null | sí | Valores en el orden estricto de `reads[]` del config del nodo **origen**, ya convertidos a unidad real (edge computing). Desde v3.2 una posición puede ser `null`: lectura fallida ese ciclo (NaN en la trama LoRa); el estado correspondiente en `st` dice por qué. El emisor no valida la longitud contra el catálogo del origen; esa validación es del consumidor. |
+| `st` | array de integers | no (v3.2) | Bytes de estado `st[]` de la trama LoRa (`frame-format.md` §3.1: nibble bajo estado, nibble alto código de excepción), misma longitud y orden que `v`. Se **omite cuando todos son 0** (todo `ok`), que es el caso normal; su ausencia equivale a todo cero. |
 
 ### 4.1 Orden de las muestras
 
@@ -178,7 +182,8 @@ Y por muestra (una muestra inválida se descarta con log; las demás del mensaje
 4. `origin` ausente o fuera de 1-254.
 5. `seq` ausente o fuera de uint16 (0 a 65535).
 6. `ts` ausente, nulo o 0. Desde v3.0 no hay semántica de "sin hora": es un dato malformado.
-7. `v` ausente, vacío o con no-números.
+7. `v` ausente, vacío o con elementos que no son número ni `null` (v3.2: `null` = lectura fallida; la posición no genera fila en `sample_values`, la ausencia es la representación del hueco).
+8. `st` presente con longitud distinta de la de `v` o con no-enteros: se ignora el array con log, la muestra se procesa igual (el estado es diagnóstico, no dato).
 
 La longitud de `v` contra el catálogo del origen **no es motivo de rechazo**: una muestra de un origen sin catálogo, o cuya longitud no cuadra con los canales vigentes, va a la cuarentena de `db-schema.md` §4 (alta zero-touch: rechazarla perdería datos ya confirmados con PUBACK al emisor).
 

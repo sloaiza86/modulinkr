@@ -72,6 +72,49 @@ function unidad(u) {
   return ({ "C": "°C", "c": "°C" })[u] ?? (u ?? "");
 }
 
+// ----- Estado Modbus por canal (v3.2, frame-format.md §3.1) -----
+// La API adjunta st_code/st_name/st_exc al canal cuando la última muestra
+// llegó con fallo; el valor viene null. Aquí se traduce a texto de UI.
+const EXC_MODBUS = {
+  1: "función no soportada",
+  2: "dirección inexistente",
+  3: "valor inválido",
+  4: "fallo interno del dispositivo",
+  6: "dispositivo ocupado",
+};
+function motivoFallo(c) {
+  if (!c || !c.st_code) return "";
+  switch (c.st_name) {
+    case "timeout":          return "sin respuesta";
+    case "exception":
+      return "excepción: " + (EXC_MODBUS[c.st_exc] ?? "código " + c.st_exc);
+    case "crc_error":        return "respuesta corrupta";
+    case "invalid_response": return "respuesta inválida";
+    default:                 return c.st_name ?? "fallo";
+  }
+}
+// Detalle técnico para el title (hover): estado crudo y excepción en hex.
+function motivoTitle(c) {
+  if (!c || !c.st_code) return "";
+  return c.st_name + (c.st_exc ? ` 0x${c.st_exc.toString(16).padStart(2, "0").toUpperCase()}` : "");
+}
+// Celda de valor de un canal con fallo: si hay último valor bueno
+// rescatado (value + value_ago_s de la API), se muestra congelado en
+// ámbar con el motivo y la antigüedad en el hover; sin valor histórico,
+// el motivo en texto.
+function tituloFallo(c) {
+  let t = motivoFallo(c) + " (" + motivoTitle(c) + ")";
+  if (c.value != null && c.value_ago_s != null) {
+    t += " · último valor bueno hace " + fmtAgo(c.value_ago_s);
+  }
+  return t;
+}
+function valorFallo(c) {
+  if (c.value == null) return motivoFallo(c);
+  return fmtValor(c.value) +
+    (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
+}
+
 // fetch con sesión: un 401 significa sesión caducada, se vuelve al login.
 async function fetchApi(url) {
   const r = await fetch(url);
@@ -101,8 +144,11 @@ function chipDuty(d) {
 }
 
 // Miniatura de serie (sparkline): polyline SVG normalizada al rango.
+// v3.2: los puntos null (lectura fallida) se saltan; el trazo une los
+// valores reales que haya alrededor del hueco.
 function sparkline(serie, w = 64, h = 22) {
-  if (!serie || serie.length < 2) return "";
+  serie = (serie ?? []).filter((p) => p[1] != null);
+  if (serie.length < 2) return "";
   const ts = serie.map((p) => p[0]);
   const vs = serie.map((p) => p[1]);
   const t0 = Math.min(...ts), t1 = Math.max(...ts);
@@ -182,17 +228,30 @@ function tarjetaGateway(data) {
   </div>`;
 }
 
-// Estado en tres niveles: en línea con telemetría fresca (verde), en
-// línea pero sin medidas recientes (ámbar: el nodo responde por LoRa
-// pero su sensor no entrega), y sin señal (gris). El margen de la
-// telemetría es más laxo que el de conexión (5x) porque el muestreo
-// puede ser más lento que los beacons. Único punto de verdad: lo usan
-// la tarjeta y el panel de detalle.
+// Estado del nodo: en línea con telemetría sana (verde); en línea con
+// fallo Modbus reportado en la última muestra (ámbar con el motivo,
+// v3.2: la telemetría sigue llegando con st != ok y valores null); en
+// línea sin medidas recientes (ámbar: nodo con firmware previo a v3.2
+// que calla cuando su sensor no entrega); y sin señal (gris). El margen
+// de la telemetría es más laxo que el de conexión (5x) porque el
+// muestreo puede ser más lento que los beacons. Único punto de verdad:
+// lo usan la tarjeta y el panel de detalle.
 function chipEstado(n, ult, onlineS) {
   let cls = "off", txt = "sin señal";
   if (n.online) {
-    if (ult && ult.ago_s <= onlineS * 5) { cls = "on"; txt = "en línea"; }
-    else { cls = "ambar"; txt = "en línea · sin datos"; }
+    if (ult && ult.ago_s <= onlineS * 5) {
+      const canales = ult.channels ?? [];
+      const malos = canales.filter((c) => c.st_code);
+      if (!malos.length) { cls = "on"; txt = "en línea"; }
+      else {
+        cls = "ambar";
+        const todos = malos.length === canales.length;
+        const timeout = malos.every((c) => c.st_name === "timeout");
+        txt = "en línea · " + (todos
+          ? (timeout ? "sensor sin respuesta" : "fallo de sensor")
+          : "fallo parcial de sensor");
+      }
+    } else { cls = "ambar"; txt = "en línea · sin datos"; }
   }
   return { cls, txt };
 }
@@ -204,7 +263,9 @@ function tarjetaNodo(n, ult, onlineS) {
       ${svg(iconoMedida(c.read_id))}
       <span class="s-nombre">${c.read_id}</span>
       ${sparkline(c.serie)}
-      <span class="s-valor">${fmtValor(c.value)}${c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""}</span>
+      ${c.st_code
+        ? `<span class="s-valor s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
+        : `<span class="s-valor">${fmtValor(c.value)}${c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""}</span>`}
     </div>`).join("");
   // Dos tiempos distintos: la última trama oída por LoRa (de
   // node_status, incluye beacons) y la última telemetría con valores.
@@ -311,9 +372,10 @@ function pintarModalCabecera() {
     `${c.read_id} · ${n?.name ?? "nodo " + modalSel.origin}`;
   document.getElementById("modal-cuando").textContent =
     "última medida recibida hace " + fmtAgo(nodo.ago_s);
-  document.getElementById("modal-valor").innerHTML =
-    fmtValor(c.value) +
-    (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
+  document.getElementById("modal-valor").innerHTML = c.st_code
+    ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
+    : fmtValor(c.value) +
+      (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
 }
 
 // Fechas del eje y del tooltip en castellano: horas normales como HH:mm
@@ -478,7 +540,9 @@ function pintarDetalle(origin) {
   titulo.textContent = n.name ?? "nodo " + n.origin;
 
   const sensores = (u?.channels ?? []).map((c) =>
-    filaDet(c.read_id, fmtValor(c.value) + (c.unit ? " " + unidad(c.unit) : ""))).join("");
+    filaDet(c.read_id, c.st_code
+      ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
+      : fmtValor(c.value) + (c.unit ? " " + unidad(c.unit) : ""))).join("");
 
   cuerpo.innerHTML = `
     <div class="det-grupo"><h3>Estado</h3>

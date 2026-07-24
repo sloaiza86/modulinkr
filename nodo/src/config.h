@@ -153,6 +153,8 @@ struct Config {
     uint32_t baudrate = 9600;
     char     parity   = 'N';
     uint8_t  stopbits = 1;
+    bool     modbus_debug = false;  // v3.2: transmitir la última transacción
+                                    // fallida (MODBUS_DEBUG / batch §11)
 
     DeviceDef devices[kMaxDevices];
     uint8_t   n_devices   = 0;

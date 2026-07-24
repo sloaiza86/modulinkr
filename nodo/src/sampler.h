@@ -41,9 +41,12 @@
 // orden del array devices[] y, dentro de cada uno, sus reads[] en orden.
 // Ese mismo orden es el del payload TELEMETRY (frame-format.md §3.1).
 //
-// La trama solo se considera enviable cuando TODAS las lecturas tienen
-// valor y este no supera el doble del ciclo de envío de antigüedad: una
-// lectura rancia no se envía como si fuera actual.
+// ESTADO POR READ (v3.2): el snapshot ya no es todo-o-nada. Cada read
+// sale con su byte de estado (frame-format.md §3.1: nibble bajo estado
+// de la transacción, nibble alto código de excepción Modbus) y, si su
+// última transacción falló o el valor está rancio, el valor viaja como
+// NaN. Así la trama TELEMETRY sale en cada ciclo y el gateway distingue
+// "sensor desconectado" de "nodo muerto".
 
 #pragma once
 
@@ -64,13 +67,19 @@ public:
     // transmitir. El nombre pollDue se conserva por compatibilidad.
     void pollDue();
 
-    // Copia el snapshot completo en el orden global de reads[]. Devuelve
-    // false si alguna lectura falta o está rancia (la trama no debe salir).
-    bool snapshot(float* out, uint8_t max_values, uint8_t& n_out,
-                  uint32_t now_ms) const;
+    // Copia el snapshot en el orden global de reads[] (v3.2). Siempre
+    // completa: una lectura fallida o rancia sale como NaN y su byte de
+    // estado en st_out (frame-format.md §3.1). Devuelve false solo si no
+    // hay reads o no caben en max_values.
+    bool snapshot(float* out, uint8_t* st_out, uint8_t max_values,
+                  uint8_t& n_out, uint32_t now_ms) const;
 
     uint32_t okCount() const { return ok_count_; }
     uint32_t errCount() const { return err_count_; }
+
+    // Índice en devices[] del último grupo fallido del ciclo (v3.2).
+    // Válido solo si el driver tiene evidencia (bus->lastFailValid()).
+    uint8_t lastFailDev() const { return last_fail_dev_; }
 
     // Cuántas transacciones por ciclo de poll quedaron tras agrupar
     // (diagnóstico para el banner).
@@ -87,6 +96,9 @@ private:
         float    value    = 0.0f;
         uint32_t fresh_ms = 0;      // millis() de la última lectura OK
         bool     ever_ok  = false;
+        uint8_t  status   = 0;      // v3.2: byte de estado de la última
+                                    // transacción que cubrió este read
+                                    // (nibble bajo estado, alto excepción)
     };
 
     // Un grupo = una transacción Modbus que cubre 1..N reads contiguos
@@ -111,6 +123,7 @@ private:
 
     uint32_t ok_count_  = 0;
     uint32_t err_count_ = 0;
+    uint8_t  last_fail_dev_ = 0;   // v3.2: device del último grupo fallido
 
     // Índice global del read `r` del device `d` en el snapshot.
     uint8_t globalIndex(uint8_t d, uint8_t r) const;

@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x31` (= `v3.1`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x32` (= `v3.2`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.2 (20-jul-2026)**: visibilidad del estado Modbus desde el gateway. TELEMETRY gana un byte de estado por read (§3.1) y **se emite en cada ciclo con reloj sincronizado, incluso con todas las lecturas fallidas**: una lectura fallida viaja como NaN con su estado, en lugar del silencio de v3.1 (que hacía indistinguible "sensor desconectado" de "nodo muerto"). Aparece la trama MODBUS_DEBUG (`frame_type = 0x06`, §15): la transacción Modbus fallida en crudo, activable con `modbus.debug` del config (`node-config.md` §5). Misma nota de honestidad que en v2.1: el cambio de layout de TELEMETRY se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
 **v3.0 (16-jul-2026)**: replanteo de la hora del sistema y unificación de la telemetría MQTT. Toda muestra nace con hora: el nodo **no muestrea sin reloj sincronizado**, con lo que `ts = 0` en TELEMETRY pasa de "capturada sin hora" a **inválido** (§3.1, §10). La obtención de hora pasa de perezosa a activa (§13.4): el supernodo intenta NTP desde el arranque y el nodo huérfano emite SN_REQUEST aunque tenga la cola vacía, solo para obtener el `epoch` del SN_OFFER (§8.1). Desaparece el `boot_id` (§13.1): su única función fuerte era identificar muestras sin hora, que ya no existen. El mensaje MQTT de telemetría se unifica para las cuatro rutas de entrega (gateway y supernodo publican el mismo formato, ver [`batch-format.md`](batch-format.md)). El bump es de major: un receptor v2.x acepta `ts = 0` y el mensaje MQTT cambia de forma incompatible.
 
@@ -60,7 +62,7 @@ El CRC cubre **todos los bytes anteriores**, desde el byte 0 hasta el byte inmed
 Todas las tramas comparten una cabecera de **11 bytes** seguida de un payload variable y el CRC:
 
 ```
-byte 0      schema_version   (1 B)      0x30 para v3.0
+byte 0      schema_version   (1 B)      0x32 para v3.2
 byte 1      network_id       (1 B)      identificador de red
 byte 2      hop_src          (1 B)      emisor de este salto
 byte 3      hop_dst          (1 B)      receptor de este salto
@@ -76,7 +78,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x30` para v3.0. |
+| `schema_version` | `0x32` para v3.2. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -113,12 +115,13 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 
 | Valor | Nombre | Dirección | Payload (resumen) |
 | --- | --- | --- | --- |
-| `0x00` | TELEMETRY | uplink | Valores float32 de los `reads[]` del config. Ver §3. |
+| `0x00` | TELEMETRY | uplink | Valores float32 + estado Modbus por read. Ver §3. |
 | `0x01` | ACK | downlink | Referencia a `seq` original + estado. Ver §4. |
 | `0x02` | HEARTBEAT | uplink | Sin payload. Señaliza "vivo" sin lecturas. Ver §6. |
-| `0x03` | ALARM | uplink | Evento asíncrono (sobreumbral, fallo Modbus, etc.). Spec en futuras versiones. |
+| `0x03` | ALARM | uplink | Evento asíncrono (sobreumbral, etc.). Spec en futuras versiones. |
 | `0x04` | NODE_REGISTER | uplink | Registro del nodo al arrancar: fw, catálogo de reads y writes. Ver §13. |
 | `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
+| `0x06` | MODBUS_DEBUG | uplink | Transacción Modbus fallida en crudo (v3.2). Ver §15. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
@@ -190,8 +193,8 @@ Es la trama principal: el envío periódico de telemetría desde el nodo hacia e
 ### 3.1 Estructura del payload
 
 ```
-ts           reads[0]     reads[1]    ...   reads[N-1]
-uint32 LE    float32 LE   float32 LE        float32 LE
+ts           reads[0]     reads[1]    ...   reads[N-1]    st[0]   ...   st[N-1]
+uint32 LE    float32 LE   float32 LE        float32 LE    (1 B)         (1 B)
 (4 B)        (4 B)        (4 B)             (4 B)
 ```
 
@@ -199,7 +202,23 @@ uint32 LE    float32 LE   float32 LE        float32 LE
 
 Cada valor es un `float32` IEEE 754 en little-endian. El **orden estricto** corresponde al orden del array `reads[]` del [`node-config.md`](node-config.md). El primer `read` del JSON va en los bytes 15 a 18 de la trama (tras el `ts`), el segundo en 19 a 22, y así sucesivamente (el payload empieza en el byte 11, justo después de `payload_length`).
 
-Tamaño total: `4 + 4 × N` bytes de payload, donde `N` = número de `reads[]` activos en el config.
+Tamaño total: `4 + 5 × N` bytes de payload, donde `N` = número de `reads[]` activos en el config (4 del valor más 1 de estado por read).
+
+**Bytes de estado `st[]` (v3.2)**: tras los N valores van N bytes de estado, uno por read, en el mismo orden. Cada byte codifica en el nibble bajo el resultado de la última transacción Modbus que cubrió ese read, y en el nibble alto el código de excepción cuando el estado es `exception` (los códigos Modbus van de `0x01` a `0x0B`, caben en el nibble):
+
+| Nibble bajo | Estado | Significado |
+| --- | --- | --- |
+| `0x0` | `ok` | Lectura válida este ciclo. El valor es real. |
+| `0x1` | `timeout` | El esclavo no respondió. Sostenido en todos los reads del dispositivo: desconectado. |
+| `0x2` | `crc_error` | Respuesta recibida pero corrupta (ruido, baudrate, eco del transceptor). |
+| `0x3` | `exception` | El esclavo respondió con excepción Modbus: conectado pero la petición no procede. Código en el nibble alto. |
+| `0x4` | `invalid_response` | Respuesta de otro slave o función inesperada. |
+| `0x5` | `short_response` | Reservado (el driver actual no lo emite). |
+| `0x6` | `not_initialized` | Driver sin inicializar (error interno de arranque). |
+
+Con estado distinto de `ok`, el hueco float32 del read lleva **NaN** (`0x7FC00000`): el valor no existe este ciclo y nada puede confundirlo con un dato real. El receptor lo traduce a `null` en el mensaje MQTT ([`batch-format.md`](batch-format.md) §4).
+
+**Cadencia (v3.2)**: la trama se emite en cada ciclo de `send_interval_ms` siempre que el reloj esté sincronizado, **incluso con todas las lecturas fallidas**. Hasta v3.1 el nodo callaba si el snapshot no estaba completo y fresco, lo que hacía indistinguible en el gateway "sensor desconectado" de "nodo muerto"; desde v3.2 el sensor caído se ve como una trama de NaN con su estado. La regla "sin hora no se muestrea" (§13.4) no cambia.
 
 ### 3.2 Frame completo TELEMETRY (ejemplo con 2 reads)
 
@@ -208,7 +227,7 @@ Para el ejemplo §6.1 del `node-config.md` (XY-MD02 con `temp` y `hum`), nodo 1 
 ```
 Byte | Hex   | Significado
 ─────|───────|──────────────────────────
-0    | 0x30  | schema_version = v3.0
+0    | 0x32  | schema_version = v3.2
 1    | 0x01  | network_id = 1
 2    | 0x01  | hop_src = 1 (emite el propio nodo)
 3    | 0x05  | hop_dst = 5 (su padre)
@@ -218,7 +237,7 @@ Byte | Hex   | Significado
 7    | 0x00  | seq high
 8    | 0x00  | frame_type = TELEMETRY
 9    | 0x04  | ttl = 4 (mesh.max_ttl)
-10   | 0x0C  | payload_length = 12 bytes (ts + 2 reads × 4 B/read)
+10   | 0x0E  | payload_length = 14 bytes (ts + 2 reads × 5 B/read)
 11   | 0x80  | ts = 1718000000
 12   | 0x99  |   uint32 LE
 13   | 0x66  |   bytes 11-14
@@ -231,19 +250,23 @@ Byte | Hex   | Significado
 20   | 0xCC  |   float32 LE
 21   | 0x4C  |   bytes 19-22
 22   | 0x42  |   valor 51,2 %RH
-23   | 0xXX  | crc16 low
-24   | 0xXX  | crc16 high
+23   | 0x00  | st[0] = ok
+24   | 0x00  | st[1] = ok
+25   | 0xXX  | crc16 low
+26   | 0xXX  | crc16 high
 ```
 
-Tamaño total: **25 bytes** (= 11 cabecera + 12 payload + 2 CRC).
+Tamaño total: **27 bytes** (= 11 cabecera + 14 payload + 2 CRC).
 
-Time-on-Air a SF7 BW125 CR 4/5: ≈ 62 ms por salto. Cada relay repite ese ToA, así que una ruta de 3 saltos consume ≈ 186 ms de aire agregado en la red (el duty cycle regulatorio se evalúa por emisor individual).
+Con el XY-MD02 desconectado, los bytes 15 a 22 llevarían NaN (`0x00 0x00 0xC0 0x7F` cada valor) y los bytes 23-24 valdrían `0x01` (`timeout`). Con el sensor conectado pero un `address` errado en el config, `0x23` (`exception` con código `0x02`, illegal data address).
+
+Time-on-Air a SF7 BW125 CR 4/5: ≈ 64 ms por salto. Cada relay repite ese ToA, así que una ruta de 3 saltos consume ≈ 192 ms de aire agregado en la red (el duty cycle regulatorio se evalúa por emisor individual).
 
 ### 3.3 Cuántos `reads[]` caben
 
-El payload máximo de LoRa por trama depende de SF, BW y CR. Para SF7 BW125 (la combinación de referencia del proyecto) el límite práctico es ~242 bytes. Restando 13 de cabecera + CRC y 4 del `ts`: **225 bytes** para valores, **56 reads como tope teórico**. Más que suficiente para cualquier nodo realista de este TFM.
+El payload máximo de LoRa por trama depende de SF, BW y CR. Para SF7 BW125 (la combinación de referencia del proyecto) el límite práctico es ~242 bytes. Restando 13 de cabecera + CRC y 4 del `ts`: **225 bytes** para valores y estados, **45 reads como tope teórico** a 5 B por read (v3.2). Más que suficiente para cualquier nodo realista de este TFM.
 
-Para SF12 BW125 (alcance máximo, baja velocidad), el payload PHY baja a ~51 bytes: 34 de payload útil tras el `ts`, 8 reads tope. Sigue siendo holgado para los casos típicos.
+Para SF12 BW125 (alcance máximo, baja velocidad), el payload PHY baja a ~51 bytes: 34 de payload útil tras el `ts`, 6 reads tope. Sigue siendo holgado para los casos típicos.
 
 ## 4. Trama ACK (downlink, `frame_type = 0x01`)
 
@@ -512,10 +535,11 @@ Para SF7 BW125 CR 4/5, preámbulo 8 símbolos, banda g3 EU868 (10 % duty cycle) 
 | SN_OFFER | 15 B | ≈ 46 ms |
 | ACK | 16 B | ≈ 51 ms |
 | WELCOME | 18 B | ≈ 53 ms |
-| TELEMETRY 1 read | 21 B | ≈ 57 ms |
-| TELEMETRY 2 reads | 25 B | ≈ 62 ms |
-| TELEMETRY 5 reads | 37 B | ≈ 77 ms |
-| TELEMETRY 10 reads | 57 B | ≈ 108 ms |
+| TELEMETRY 1 read (v3.2) | 22 B | ≈ 58 ms |
+| TELEMETRY 2 reads (v3.2) | 27 B | ≈ 64 ms |
+| TELEMETRY 5 reads (v3.2) | 42 B | ≈ 83 ms |
+| TELEMETRY 10 reads (v3.2) | 67 B | ≈ 121 ms |
+| MODBUS_DEBUG (v3.2, resp de 7 B) | 32 B | ≈ 70 ms (solo con `modbus.debug` y fallo) |
 | NODE_REGISTER (XY-MD02, 2 reads) | ~75 B | ≈ 130 ms (una vez por boot) |
 
 El presupuesto de duty cycle por nodo suma su tráfico propio más el que relaya. Para el caso de referencia (2 reads cada 5 s, ACK de vuelta, un hijo relayado), un nodo emite ≈ 175 ms cada 5 s: 3,5 %, dentro del 10 % del g3 con margen. A cadencias de 1 s con relay conviene US915 o repartir hijos.
@@ -533,9 +557,9 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
 7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
-8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 8` o con `payload_length - 4` no múltiplo de 4, ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length ∉ {0, 4}` (0 = legado v3.0, 4 = con `tx_ms`, v3.1), NODE_REGISTER con payload menor que el mínimo de §13.2).
+8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 9` o con `payload_length - 4` no múltiplo de 5 (v3.2: 4 B de valor + 1 B de estado por read), ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length ∉ {0, 4}` (0 = legado v3.0, 4 = con `tx_ms`, v3.1), MODBUS_DEBUG con `payload_length < 4` o `payload_length != 4 + req_len + resp_len` (§15), NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
-10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 4` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
+10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 5` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
 11. Para TELEMETRY en el receptor final (gateway o supernodo en custodia): `ts == 0` (ACK con `status = DECODE_ERROR`). Desde v3.0 ninguna muestra legítima se captura sin hora; un `ts` a cero delata un firmware desactualizado o con un bug de reloj.
 
 ## 11. Extensiones previstas
@@ -778,7 +802,43 @@ Los relays ejecutan el paso 2 (verifican MIC y descifran, necesario para re-cifr
 
 La clave viaja en `transport.lora.security.key` (`node-config.md` §4.5): 32 caracteres hex = 128 bits, generada aleatoriamente por despliegue (nunca una frase ni un patrón). En la fase 1 del comisionamiento va embebida en el binario como el resto del config; nota de honestidad: quien extraiga la flash de un nodo obtiene la clave (el cifrado de flash del ESP32 y el almacenamiento en NVS quedan fuera del alcance de esta versión). En el gateway la clave vive en la configuración del servicio del Pi; el Heltec no la conoce (§12.1). La rotación de claves y el aprovisionamiento por aire son una mejora opcional, no un pendiente bloqueante: conectan con el proceso de registro (§13), como ya preveía §11, y quedan fuera del alcance de v2.2. Para el MVP basta una clave estática por despliegue.
 
-## 15. Cambios respecto a v1.0
+## 15. Trama MODBUS_DEBUG (uplink, `frame_type = 0x06`, v3.2)
+
+Transporta en crudo la evidencia de una transacción Modbus fallida: la petición tal cual salió al bus y los bytes recibidos hasta el fallo. Es la versión por aire de la traza `[mb-dbg]` que el driver vuelca al log serie, pensada para diagnosticar un sensor remoto sin conectarle un portátil.
+
+La emisión la gobierna `modbus.debug` del config ([`node-config.md`](node-config.md) §5, default `false`). Con el flag desactivado la trama no existe y el coste es cero.
+
+### 15.1 Estructura del payload
+
+```
+dev_index   status   req_len   resp_len   req           resp
+(1 B)       (1 B)    (1 B)     (1 B)      (req_len B)   (resp_len B)
+```
+
+| Campo | Contenido |
+| --- | --- |
+| `dev_index` | Índice del dispositivo en `modbus.devices[]` del config del origen. |
+| `status` | Mismo formato que `st[]` de §3.1: nibble bajo estado, nibble alto código de excepción. Nunca vale `ok`: la trama solo existe ante fallo. |
+| `req_len` | Longitud de la petición volcada. Con las funciones de lectura actuales, siempre 8. |
+| `resp_len` | Bytes recibidos hasta el fallo, tope 32. Puede ser 0 (timeout sin respuesta alguna). |
+| `req` | La petición Modbus RTU tal cual se escribió al bus, CRC incluido. |
+| `resp` | Los bytes crudos recibidos, truncados a 32. |
+
+`payload_length = 4 + req_len + resp_len` (validación en regla 8 de §10). Tamaño típico: 12 a 44 bytes de payload.
+
+### 15.2 Reglas de emisión
+
+1. Solo con `modbus.debug == true` en el config del origen.
+2. Máximo **una por ciclo de envío**: la última transacción fallida del ciclo. Un ciclo con varios fallos reporta solo el último; los contadores agregados viajan igualmente en los `st[]` de TELEMETRY.
+3. Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay), emitida inmediatamente después de la TELEMETRY del ciclo.
+4. **Sin ACK, sin reintentos, sin cola de pendientes y sin custodia NB-IoT**: es diagnóstico best-effort, como el HEARTBEAT (§6). Perder una no compromete nada: mientras el fallo persista, el ciclo siguiente emite otra.
+5. La trama solo viaja por LoRa. Un supernodo sin ruta LoRa no la saca por NB-IoT: el punto de observación del debug es el Pi del gateway (decisión del 20-jul-2026; el estado agregado sigue llegando por los `st[]` de la telemetría, que sí viaja por todos los caminos).
+
+### 15.3 En el gateway
+
+El gateway decodifica la trama y la escribe en su log (journal del servicio), y ahí termina: sin ACK, sin buffer de telemetría y sin publicación MQTT (decisión del 20-jul-2026: el debug se observa en el Pi, no en el broker).
+
+## 16. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -820,7 +880,14 @@ Resumen para trazabilidad del TFM:
 2. El gateway contabiliza su propio aire (beacons, ACKs, WELCOME) con la misma fórmula de ToA y se reporta a sí mismo.
 3. Nota de honestidad habitual: un receptor v3.0 rechaza el HEARTBEAT de 4 bytes, pero todo el despliegue se flashea a la vez y el resto de tramas es idéntico; se acepta como minor.
 
-## 16. Documentos relacionados
+**Cambios de v3.1 a v3.2 (20-jul-2026)**:
+
+1. TELEMETRY gana N bytes de estado `st[]` tras los valores (§3.1): nibble bajo estado de la transacción Modbus, nibble alto código de excepción. Lecturas fallidas viajan como NaN. Reglas 8 y 10 de §10 actualizadas (5 B por read).
+2. La TELEMETRY se emite en cada ciclo con reloj sincronizado aunque todas las lecturas fallen: el gateway distingue "sensor desconectado" (trama de NaN con `timeout`) de "nodo muerto" (silencio).
+3. Trama nueva MODBUS_DEBUG (`0x06`, §15): transacción fallida en crudo, activable con `modbus.debug` del config, best-effort sin ACK.
+4. Nota de honestidad habitual: el layout de TELEMETRY no es parseable por un receptor v3.1, pero todo el despliegue se flashea a la vez; se acepta como minor.
+
+## 17. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.

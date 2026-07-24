@@ -39,6 +39,7 @@ buffer_v20_legacy y se crea la nueva. No se borra nada.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from typing import Optional
@@ -128,7 +129,18 @@ class GatewayBuffer:
         el ts llega siempre válido (v3.0: ts=0 se rechaza antes)."""
         reads_json = None
         if 'reads' in parsed:
-            reads_json = json.dumps(parsed['reads'])
+            # v3.2: una lectura fallida llega como NaN, que no es JSON
+            # válido; se guarda como null (batch-format.md §4). Si hay
+            # estados distintos de ok, se guardan junto a los valores en
+            # un objeto {"v": [...], "st": [...]}; si todo es ok, la lista
+            # plana de siempre (compatible con entradas previas).
+            v = [None if isinstance(x, float) and math.isnan(x) else x
+                 for x in parsed['reads']]
+            st = parsed.get('st')
+            if st and any(st):
+                reads_json = json.dumps({'v': v, 'st': st})
+            else:
+                reads_json = json.dumps(v)
 
         try:
             self.conn.execute(
@@ -232,12 +244,21 @@ class GatewayBuffer:
         ).fetchall()
         out = []
         for origin_id, ts, seq, reads_json in rows:
-            out.append({
+            data = json.loads(reads_json) if reads_json else []
+            # v3.2: objeto {"v", "st"} cuando hay estados; lista plana si no.
+            if isinstance(data, dict):
+                v, st = data.get("v", []), data.get("st")
+            else:
+                v, st = data, None
+            entry = {
                 "origin_id": origin_id,
                 "ts": ts,
                 "seq": seq,
-                "v": json.loads(reads_json) if reads_json else [],
-            })
+                "v": v,
+            }
+            if st:
+                entry["st"] = st
+            out.append(entry)
         return out
 
     def mark_published(self, keys: list[tuple[int, int, int]]) -> None:
