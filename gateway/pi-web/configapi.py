@@ -29,8 +29,10 @@ import glob
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
+from pathlib import Path
 
 import serial
 from fastapi import APIRouter, Request
@@ -45,6 +47,25 @@ RESP_TIMEOUT_S = 10.0   # espera de una respuesta CFG: (= timeout del nodo)
 HELLO_RETRY_S = 0.5     # cadencia del sondeo CFG.HELLO tras abrir
 HELLO_TIMEOUT_S = 12.0  # techo del sondeo (cubre un boot completo)
 MAX_CONFIG_LEN = 16384
+
+# Flasheo del firmware del nodo (Atom, ESP32) por USB. El árbol pi-service
+# viaja junto a pi-web; nodo.bin lo genera nodo/make_dist.sh y se copia allí.
+SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
+FLASH_NODO_SH = SERVICE_DIR / "flash_nodo.sh"
+GET_NET_SH = SERVICE_DIR / "get_net.sh"
+NODO_BIN = SERVICE_DIR / "nodo.bin"
+NODO_VER = SERVICE_DIR / "nodo.bin.version"
+FLASH_TIMEOUT_S = 180   # esptool a 460800 sobre ESP32 clásico: margen amplio
+
+# Firmware que el nodo anuncia en CFG.HELLO (main.cpp kFirmwareName): sirve
+# para distinguir un Atom con firmware ModuLinkr de uno virgen o ajeno.
+NODE_FW_NAME = "ModuLinkr/nodo"
+
+# Parámetros de radio que el gateway no guarda en su config (viven en el
+# firmware del Heltec): se fijan al despliegue. El resto de fijos de red
+# (network_id, sf, bw, seguridad) se leen del gateway con get_net.sh.
+LORA_REGION = os.environ.get("MODULINKR_LORA_REGION", "EU868")
+LORA_FREQ_HZ = int(os.environ.get("MODULINKR_LORA_FREQ_HZ", "869525000"))
 
 _serial_lock = threading.Lock()
 
@@ -311,5 +332,128 @@ async def subir(request: Request):
         return _err(422, _node_msg(resp))
     except (serial.SerialException, TimeoutError, ValueError) as e:
         return _err(502, str(e))
+    finally:
+        _serial_lock.release()
+
+
+# ----- Flasheo del firmware del nodo (Atom, ESP32) por USB -----
+
+def _sudo(cmd: list[str], timeout_s: float) -> tuple[bool, str]:
+    """Acción privilegiada con sudo no interactivo (regla acotada del
+    instalador). Devuelve (ok, salida)."""
+    try:
+        r = subprocess.run(["sudo", "-n"] + cmd, capture_output=True,
+                           text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return False, "la operación excedió el tiempo máximo"
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0 and "password is required" in out:
+        return False, ("sudo sin regla para el visor: reejecutar el "
+                       "instalador (sudoers de modulinkr-web)")
+    return r.returncode == 0, out
+
+
+@router.get("/firmware")
+def firmware_info():
+    """Presencia, versión y metadatos de nodo.bin, para las páginas de
+    firmware y del asistente. La versión (nodo.bin.version) la escribe
+    make_dist.sh; el asistente la compara con la que anuncia el nodo."""
+    info = None
+    if NODO_BIN.is_file():
+        st = NODO_BIN.stat()
+        info = {"size": st.st_size,
+                "mtime": time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(st.st_mtime))}
+    version = None
+    if NODO_VER.is_file():
+        try:
+            version = NODO_VER.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            version = None
+    return {"bin": info, "version": version, "fw_name": NODE_FW_NAME,
+            "flash_ready": FLASH_NODO_SH.is_file()}
+
+
+@router.get("/red")
+def red_params():
+    """Parámetros de red que un nodo debe compartir con el gateway para
+    unirse (el asistente los bloquea a estos valores). Los de radio que el
+    gateway no guarda (región, frecuencia) se fijan al despliegue; el resto
+    se leen de gateway.env con get_net.sh (incluida la clave)."""
+    out = {"region": LORA_REGION, "frequency_hz": LORA_FREQ_HZ,
+           "network_id": None, "max_ttl": None, "sf": None, "bw_khz": None,
+           "security": {"enabled": False, "key": ""},
+           "mqtt": {"host": "", "port": None, "user": "", "password": "",
+                    "tls": True},
+           "source": "defaults"}
+    if not GET_NET_SH.is_file():
+        return out
+    ok, txt = _sudo([str(GET_NET_SH)], timeout_s=15)
+    if not ok:
+        LOG.warning("get_net.sh fallido: %s", txt)
+        return out
+    env = {}
+    for line in txt.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            env[k.strip()] = v
+    def _int(key):
+        try:
+            return int(env.get(key, "") or 0) or None
+        except ValueError:
+            return None
+    out["network_id"] = _int("MODULINKR_NETWORK_ID")
+    out["max_ttl"] = _int("MODULINKR_MAX_TTL")
+    out["sf"] = _int("MODULINKR_SF")
+    out["bw_khz"] = _int("MODULINKR_BW_KHZ")
+    out["security"] = {
+        "enabled": env.get("MODULINKR_SEC_ENABLED", "0") == "1",
+        "key": env.get("MODULINKR_SEC_KEY", ""),
+    }
+    # El nodo debe publicar por NB-IoT al MISMO broker que el gateway (canal
+    # de respaldo hacia la misma nube): esos campos se fijan a los del
+    # gateway. El default de TLS es 1 (como en el servicio).
+    out["mqtt"] = {
+        "host":     env.get("MODULINKR_MQTT_HOST", ""),
+        "port":     _int("MODULINKR_MQTT_PORT"),
+        "user":     env.get("MODULINKR_MQTT_USER", ""),
+        "password": env.get("MODULINKR_MQTT_PASS", ""),
+        "tls":      env.get("MODULINKR_MQTT_TLS", "1") != "0",
+    }
+    out["source"] = "gateway"
+    return out
+
+
+@router.post("/flash")
+async def flash(request: Request):
+    """Flashea nodo.bin en el Atom conectado al puerto indicado (esptool,
+    ESP32). El puerto debe ser un candidato no excluido (el del gateway
+    queda fuera). Bajo el lock serie: no se puede flashear y comisionar a
+    la vez."""
+    try:
+        body = json.loads((await request.body()) or b"{}")
+    except json.JSONDecodeError:
+        return _err(400, "body JSON inválido")
+    port = body.get("port", "")
+    if not port or not _port_allowed(port):
+        return _err(400, "puerto no admitido (no es un candidato o es el "
+                         "del gateway)")
+    if not FLASH_NODO_SH.is_file():
+        return _err(501, "flash_nodo.sh no está junto a pi-service")
+    if not NODO_BIN.is_file():
+        return _err(409, "no hay nodo.bin en pi-service (generarlo con "
+                         "nodo/make_dist.sh y copiarlo)")
+
+    if not _serial_lock.acquire(blocking=False):
+        return _busy()
+    try:
+        LOG.info("flasheo del nodo iniciado en %s", port)
+        ok, out = _sudo([str(FLASH_NODO_SH), port], timeout_s=FLASH_TIMEOUT_S)
+        cola = "\n".join(out.splitlines()[-15:])   # esptool imprime mucho
+        if not ok:
+            LOG.warning("flasheo del nodo fallido: %s", cola)
+            return _err(502, cola)
+        LOG.info("flasheo del nodo completado")
+        return {"ok": True, "port": port, "output": cola}
     finally:
         _serial_lock.release()

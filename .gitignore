@@ -16,10 +16,12 @@
 *.map
 *.lst
 
-# Excepción deliberada: el binario único del Heltec que el Pi flashea en
-# la instalación fresca (lo genera heltec-radio/make_dist.sh y viaja con
-# el scp del pi-service).
+# Excepción deliberada: los binarios únicos que el Pi flashea por USB (el
+# del Heltec en la instalación fresca, el del nodo desde la página "Cargar
+# firmware"). Los generan los make_dist.sh y viajan con el scp del
+# pi-service.
 !gateway/pi-service/heltec-radio.bin
+!gateway/pi-service/nodo.bin
 
 # Dependencias instaladas localmente
 node_modules/

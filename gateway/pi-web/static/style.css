@@ -347,13 +347,49 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 .cfg-form { display: flex; flex-direction: column; gap: 0.7rem; margin: 0.9rem 0 0; max-width: 480px; }
 .cfg-campo { display: flex; align-items: center; gap: 0.8rem; }
 .cfg-campo > span { flex: none; width: 130px; color: var(--dim); font-size: 0.9rem; }
-.cfg-campo > input {
+.cfg-campo > input, .cfg-campo > select {
   flex: 1; min-width: 0; padding: 0.4rem 0.6rem; font: inherit;
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px;
 }
+.cfg-campo > input:disabled, .cfg-campo > select:disabled {
+  opacity: 0.55; cursor: not-allowed; background: var(--card);
+}
+.volver-btn {
+  display: inline-block; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.9rem;
+  text-decoration: none; font-size: 0.9rem;
+}
+.volver-btn:hover { filter: brightness(0.96); }
 .cfg-check { display: flex; align-items: center; gap: 0.6rem; font-size: 0.9rem; color: var(--text); }
 .cfg-check > input { flex: none; width: 16px; height: 16px; }
+
+/* Formulario de configuración de nodo: secciones plegables, dispositivos y
+   filas de lecturas/escrituras Modbus con +/-. */
+.form-avz { margin-top: 0.8rem; }
+.form-avz > summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; padding: 0.2rem 0; user-select: none; }
+.form-avz[open] > summary { margin-bottom: 0.4rem; }
+.fdev { border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 0.9rem; margin: 0.9rem 0; background: var(--bg); }
+.fdev-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.fdev-del { background: none; border: 1px solid var(--border); color: var(--bad); border-radius: 8px; padding: 0.15rem 0.6rem; cursor: pointer; font-size: 0.85rem; }
+.freads { margin-top: 0.6rem; }
+.fread, .fwrite-block { margin: 0.5rem 0; }
+.fread-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; font-weight: 600; color: var(--dim); margin-bottom: 0.3rem; }
+.fread-add, .fwrite-add { background: none; border: 1px solid var(--border); color: var(--accent); border-radius: 8px; padding: 0.1rem 0.6rem; cursor: pointer; font-size: 0.82rem; font-weight: 600; }
+.fin-note { font-weight: 400; font-style: normal; color: var(--dim); }
+.frow { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-bottom: 0.35rem; }
+.frow input, .frow select {
+  padding: 0.3rem 0.4rem; font: inherit; font-size: 0.85rem;
+  background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+}
+.frow .fin-id { width: 5.5rem; }
+.frow .fin { width: 8rem; }
+.frow .fin-n { width: 5rem; }
+.frow .fin-u { width: 4.5rem; }
+.frow .fin-s { width: 6rem; }
+.frow-del { flex: none; width: 1.7rem; height: 1.7rem; border: 1px solid var(--border); background: var(--card); color: var(--bad); border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1; }
+#f-preview { width: 100%; box-sizing: border-box; min-height: 220px; margin-top: 0.7rem; padding: 0.6rem 0.7rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.82rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; resize: vertical; }
+.aviso.mal { color: var(--bad); }
 
 .cfg-nodo { margin-top: 0.9rem; border-top: 1px solid var(--border); }
 .cfg-nodo .sensor svg { width: 18px; height: 18px; }

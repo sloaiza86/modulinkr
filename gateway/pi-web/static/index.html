@@ -156,26 +156,63 @@
           <h2>Configurar nodo</h2>
         </div>
         <div class="card lista-ajustes">
-          <div class="ajuste-item desactivado">
-            <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
+          <a class="ajuste-item" href="#/configuracion/nodo/firmware">
+            <div class="ai-icono ai-azul">
+              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="15" x2="4" y2="15"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="15" x2="22" y2="15"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Comisionar nodo</div>
-              <div class="ai-sub">Alta guiada de un nodo nuevo en la red</div>
+              <div class="ai-titulo">Cargar firmware</div>
+              <div class="ai-sub">Flashear el firmware del nodo en un Atom conectado por USB</div>
             </div>
-            <span class="chip off">próximamente</span>
-          </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
           <a class="ajuste-item" href="#/configuracion/nodo/usb">
             <div class="ai-icono ai-naranja">
               <svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="7"/><circle cx="12" cy="21" r="1.4"/><polyline points="12 15 7.5 12.5 7.5 9.5"/><rect x="6.3" y="6.6" width="2.4" height="2.4"/><polyline points="12 12 16.5 9.8 16.5 7.5"/><circle cx="16.5" cy="5.8" r="1.3"/><polyline points="9.5 4.5 12 7 14.5 4.5"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Cargar JSON vía USB</div>
+              <div class="ai-titulo">Cargar nodo vía USB</div>
               <div class="ai-sub">Subir un config.json a un Atom conectado al puerto USB del Pi</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/nodo/form">
+            <div class="ai-icono ai-verde">
+              <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Asistente de configuración de nodo</div>
+              <div class="ai-sub">Rellenar los datos del nodo y enviarlos sin escribir el JSON a mano</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <!-- Nivel 3: cargar firmware del nodo por USB -->
+      <div class="ajustes" id="cfg-fw" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion/nodo" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Cargar firmware</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Firmware del nodo</h3>
+          <p class="aviso" id="fw-bin-info">Comprobando el binario...</p>
+          <p class="aviso">Conectar el Atom a un puerto USB del Pi y buscarlo. El
+            puerto de la radio del gateway queda excluido. El flasheo borra el
+            firmware anterior del Atom (su config.json en flash se conserva).</p>
+          <div class="cfg-fila">
+            <button id="fw-buscar" class="btn-primario">Buscar nodo</button>
+            <select id="fw-puertos" hidden></select>
+            <span id="fw-busqueda-aviso" class="aviso"></span>
+          </div>
+          <div class="cfg-fila">
+            <button id="fw-flash" class="btn-primario" disabled>Flashear firmware</button>
+            <span id="fw-resultado" class="aviso"></span>
+          </div>
         </div>
       </div>
 
@@ -339,6 +376,150 @@
             <button id="mqtt-probar">Probar conexión</button>
             <button id="mqtt-guardar" class="btn-primario">Guardar</button>
             <span id="mqtt-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 3: asistente de configuración de nodo -->
+      <div class="ajustes" id="cfg-form" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion/nodo" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Asistente de configuración de nodo</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Leer configuración de nodo</h3>
+          <p class="aviso">Opcional: leer el config.json de un Atom ya configurado
+            (conectado por USB) para rellenar el formulario y editarlo desde ahí.</p>
+          <div class="cfg-fila">
+            <button id="f-leer" class="btn-primario">Leer del nodo</button>
+            <select id="f-leer-puertos" hidden></select>
+            <span id="f-leer-aviso" class="aviso"></span>
+          </div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Identidad</h3>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>ID del nodo</span><input id="f-id" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Tipo</span>
+              <select id="f-type"><option value="node">Nodo</option><option value="super_node">Supernodo (con NB-IoT)</option></select>
+            </label>
+            <label class="cfg-campo"><span>Nombre</span><input id="f-name" type="text" maxlength="64" placeholder="Nodo banco TFM"></label>
+            <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="opcional"></label>
+          </div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>LoRa</h3>
+          <p class="aviso" id="f-red-nota">Los campos atenuados (aquí y en NB-IoT)
+            los fija la red del gateway: región, frecuencia, SF, ancho de banda,
+            Network ID, TTL, seguridad y el broker MQTT. Se muestran para
+            referencia y no se editan, porque cambiarlos impediría al nodo unirse
+            a la red o publicar en la misma nube.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Región</span>
+              <select id="f-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
+            </label>
+            <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="f-freq" type="number" value="869525000"></label>
+            <label class="cfg-campo"><span>SF</span><input id="f-sf" type="number" min="7" max="12" value="7"></label>
+            <label class="cfg-campo"><span>Potencia (dBm)</span><input id="f-txpow" type="number" min="2" max="22" value="14"></label>
+            <label class="cfg-campo"><span>Network ID</span><input id="f-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Intervalo envío (ms)</span><input id="f-interval" type="number" min="100" value="5000"></label>
+          </div>
+          <details class="form-avz">
+            <summary>Avanzado LoRa</summary>
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Ancho banda (kHz)</span>
+                <select id="f-bw"><option>125</option><option>250</option><option>500</option></select>
+              </label>
+              <label class="cfg-check"><input id="f-ack" type="checkbox" checked><span>Esperar ACK del gateway</span></label>
+              <label class="cfg-campo"><span>ACK timeout (ms)</span><input id="f-acktimeout" type="number" min="100" value="3000"></label>
+              <label class="cfg-campo"><span>Reintentos máx.</span><input id="f-retries" type="number" min="0" max="10" value="2"></label>
+              <label class="cfg-check"><input id="f-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
+              <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="f-seckey" type="text" maxlength="32" placeholder="32 caracteres hex"></label>
+            </div>
+          </details>
+        </div>
+
+        <details class="card cfg-card form-avz">
+          <summary><h3 style="display:inline">Mesh (avanzado)</h3></summary>
+          <div class="cfg-form">
+            <label class="cfg-check"><input id="f-relay" type="checkbox" checked><span>Reenviar tramas de otros (relay)</span></label>
+            <label class="cfg-campo"><span>Max TTL</span><input id="f-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-campo"><span>Beacon timeout (ms)</span><input id="f-beacon" type="number" min="10000" value="90000"></label>
+            <label class="cfg-campo"><span>RSSI mín. padre</span><input id="f-minrssi" type="number" min="-120" max="0" value="-100"></label>
+            <label class="cfg-campo"><span>Histéresis (dB)</span><input id="f-hyst" type="number" min="0" max="30" value="6"></label>
+            <label class="cfg-campo"><span>Tramas perdidas</span><input id="f-missed" type="number" min="1" value="3"></label>
+            <label class="cfg-campo"><span>Espera oferta SN (ms)</span><input id="f-snwait" type="number" min="200" value="1000"></label>
+          </div>
+        </details>
+
+        <div class="card cfg-card" id="f-nbiot-card" hidden>
+          <h3>NB-IoT (supernodo)</h3>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>APN</span><input id="f-apn" type="text" placeholder="nb.wlapn.com"></label>
+            <label class="cfg-campo"><span>Broker MQTT</span><input id="f-mbroker" type="text" placeholder="modulinkr.ejemplo.com"></label>
+            <label class="cfg-campo"><span>Puerto MQTT</span><input id="f-mport" type="number" min="1" max="65535" value="8883"></label>
+            <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>TLS (cert RSA en el broker)</span></label>
+            <label class="cfg-campo"><span>Usuario MQTT</span><input id="f-muser" type="text" placeholder="opcional"></label>
+            <label class="cfg-campo"><span>Contraseña MQTT</span><input id="f-mpass" type="text" placeholder="opcional"></label>
+          </div>
+          <details class="form-avz">
+            <summary>Avanzado NB-IoT</summary>
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Usuario APN</span><input id="f-apnuser" type="text" placeholder="opcional"></label>
+              <label class="cfg-campo"><span>Contraseña APN</span><input id="f-apnpass" type="text" placeholder="opcional"></label>
+              <label class="cfg-campo"><span>Topic telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
+              <label class="cfg-campo"><span>Topic comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
+              <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Sobre debug en la telemetría</span></label>
+              <label class="cfg-check"><input id="f-nbrelay" type="checkbox" checked><span>Ofrecer salida celular a vecinos</span></label>
+              <label class="cfg-campo"><span>Cola custodia máx.</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
+            </div>
+          </details>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Modbus</h3>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Baudrate</span>
+              <select id="f-baud"><option>2400</option><option>4800</option><option selected>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option></select>
+            </label>
+            <label class="cfg-campo"><span>Paridad</span>
+              <select id="f-parity"><option value="N">Ninguna (N)</option><option value="E">Par (E)</option><option value="O">Impar (O)</option></select>
+            </label>
+            <label class="cfg-campo"><span>Stop bits</span>
+              <select id="f-stopbits"><option>1</option><option>2</option></select>
+            </label>
+            <label class="cfg-check"><input id="f-mbdebug" type="checkbox"><span>Debug Modbus (trama de la última transacción fallida)</span></label>
+          </div>
+          <div id="f-devices"></div>
+          <div class="cfg-fila">
+            <button id="f-add-device">+ Añadir dispositivo</button>
+          </div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Validar y enviar</h3>
+          <p class="aviso">Primero validar el formulario. Con la configuración
+            válida se habilita buscar el nodo (conectado por USB); el nodo lo
+            valida de nuevo y solo graba si pasa sus reglas.</p>
+          <div class="cfg-fila">
+            <button id="f-generar" class="btn-primario">Validar configuración</button>
+            <span id="f-resultado" class="aviso"></span>
+          </div>
+          <textarea id="f-preview" spellcheck="false" placeholder="El config.json generado aparece aquí tras validar, para revisarlo antes de enviar."></textarea>
+          <div class="cfg-fila">
+            <button id="f-buscar" disabled>Buscar nodo</button>
+            <select id="f-puertos" hidden></select>
+            <span id="f-busqueda-aviso" class="aviso"></span>
+          </div>
+          <p class="aviso" id="f-fw-estado" hidden></p>
+          <div class="cfg-fila">
+            <button id="f-enviar" class="btn-primario" disabled>Enviar al nodo</button>
+            <span id="f-envio-aviso" class="aviso"></span>
           </div>
         </div>
       </div>

@@ -133,12 +133,13 @@ web_write_sudoers() {
     # set_db.sh reciben los valores por stdin (sin argumentos), así que su
     # entrada en la regla no lleva comodín.
     chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" \
-             "$APP_DIR/set_mqtt.sh" "$APP_DIR/set_db.sh" 2>/dev/null || true
+             "$APP_DIR/set_mqtt.sh" "$APP_DIR/set_db.sh" \
+             "$APP_DIR/flash_nodo.sh" "$APP_DIR/get_net.sh" 2>/dev/null || true
     cat > /etc/sudoers.d/modulinkr-web <<EOF
 # Generado por el instalador de ModuLinkr. Acciones privilegiadas de las
-# páginas de configuración del visor (radio LoRa, MQTT, base de datos). No
-# editar a mano.
-$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh
+# páginas de configuración del visor (radio LoRa, MQTT, base de datos,
+# firmware del nodo, parámetros de red). No editar a mano.
+$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh, $APP_DIR/flash_nodo.sh *, $APP_DIR/get_net.sh
 EOF
     chmod 440 /etc/sudoers.d/modulinkr-web
     if visudo -cf /etc/sudoers.d/modulinkr-web >/dev/null 2>&1; then

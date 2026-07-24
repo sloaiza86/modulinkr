@@ -1003,10 +1003,14 @@ function cfgRuta() {
   document.getElementById("cfg-zona").hidden     = sub !== "zona";
   document.getElementById("cfg-bd").hidden       = sub !== "bd";
   document.getElementById("cfg-mqtt").hidden     = sub !== "mqtt";
+  document.getElementById("cfg-fw").hidden       = sub !== "nodo/firmware";
+  document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
   if (sub === "zona") tzCargar();
   if (sub === "bd") bdCargar();
   if (sub === "mqtt") mqttCargar();
+  if (sub === "nodo/firmware") fwCargar();
+  if (sub === "nodo/form") formInit();
 }
 
 function cfgBotones(bloquear) {
@@ -1565,6 +1569,764 @@ document.getElementById("bd-probar").addEventListener("click", bdProbar);
 document.getElementById("bd-guardar").addEventListener("click", bdGuardar);
 document.getElementById("mqtt-probar").addEventListener("click", mqttProbar);
 document.getElementById("mqtt-guardar").addEventListener("click", mqttGuardar);
+
+// ----- Configurar nodo: cargar firmware del Atom por USB -----
+
+let fwPuerto = null;
+
+async function fwCargar() {
+  document.getElementById("fw-resultado").textContent = "";
+  document.getElementById("fw-flash").disabled = true;
+  document.getElementById("fw-busqueda-aviso").textContent = "";
+  document.getElementById("fw-puertos").hidden = true;
+  fwPuerto = null;
+  const info = document.getElementById("fw-bin-info");
+  try {
+    const r = await fetchApi("/api/config/firmware");
+    const d = await r.json();
+    if (d.bin) {
+      info.textContent = `Binario nodo.bin presente (${Math.round(d.bin.size / 1024)} kB, ${d.bin.mtime}).`;
+    } else {
+      info.textContent = "No hay nodo.bin en el gateway. Generarlo con "
+        + "nodo/make_dist.sh en el Mac y copiarlo con el resto del pi-service.";
+    }
+  } catch (e) { info.textContent = "Error consultando el binario: " + e.message; }
+}
+
+// El flasheo no usa CFG (un Atom sin firmware no responde): solo elige el
+// puerto candidato, sin sondear.
+async function fwBuscar() {
+  const aviso = document.getElementById("fw-busqueda-aviso");
+  const sel = document.getElementById("fw-puertos");
+  aviso.textContent = "buscando puertos...";
+  try {
+    const r = await fetchApi("/api/config/puertos");
+    const d = await r.json();
+    const cands = (d.ports || []).filter((p) => !p.gateway);
+    if (!cands.length) {
+      aviso.textContent = "sin puertos candidatos: ¿Atom conectado por USB?";
+      document.getElementById("fw-flash").disabled = true;
+      sel.hidden = true;
+      return;
+    }
+    if (cands.length === 1) {
+      fwPuerto = cands[0].port;
+      sel.hidden = true;
+      aviso.textContent = "puerto: " + fwPuerto.split("/").pop();
+    } else {
+      sel.innerHTML = cands.map((p) =>
+        `<option value="${p.port}">${p.port.split("/").pop()}</option>`).join("");
+      sel.hidden = false;
+      fwPuerto = sel.value;
+      aviso.textContent = "varios puertos: elegir cuál flashear";
+    }
+    document.getElementById("fw-flash").disabled = false;
+  } catch (e) { aviso.textContent = "error: " + e.message; }
+}
+
+function fwFlash() {
+  const sel = document.getElementById("fw-puertos");
+  const port = (!sel.hidden && sel.value) ? sel.value : fwPuerto;
+  if (!port) {
+    document.getElementById("fw-resultado").textContent = "buscar primero el puerto";
+    return;
+  }
+  const T = "Flashear firmware del nodo";
+  cfgConfirmarCb = async () => {
+    document.getElementById("fw-flash").disabled = true;
+    cfgDialogo(T, SPIN + "flasheando el nodo por USB (esptool, cerca de un minuto)...");
+    try {
+      const r = await fetchApi("/api/config/flash", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port }) });
+      const d = await r.json();
+      if (!r.ok) { cfgDialogo(T, "Error:<pre>" + (d.error ?? "error") + "</pre>", { cerrar: true }); return; }
+      cfgDialogo(T, "Firmware escrito. El Atom arranca con el binario nuevo.<pre>"
+                    + (d.output || "") + "</pre>", { cerrar: true });
+    } catch (e) {
+      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    } finally {
+      document.getElementById("fw-flash").disabled = false;
+    }
+  };
+  cfgDialogo(T, "¿Flashear el firmware del nodo en el puerto " + port.split("/").pop()
+              + "? Se borra el firmware anterior del Atom (su config.json en flash "
+              + "se conserva).", { cancelar: true, confirmar: true });
+}
+
+document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
+document.getElementById("fw-flash").addEventListener("click", fwFlash);
+document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
+
+// ----- Configurar nodo: formulario que arma el config.json -----
+
+let formPuerto = null;
+let formInited = false;
+
+// Clases de lectura Modbus (orden del array reads[] = orden de telemetría).
+const MB_READS = [
+  { key: "read_discrete_inputs",   label: "Entradas discretas",     bits: true },
+  { key: "read_coils",             label: "Bobinas (coils)",        bits: true },
+  { key: "read_input_registers",   label: "Registros de entrada",   bits: false },
+  { key: "read_holding_registers", label: "Registros de retención", bits: false },
+];
+const REG32 = new Set(["uint32", "int32", "float32"]);
+
+function readRowHtml(bits) {
+  const reg = bits ? "" : `
+    <select data-f="type" class="fin-s">
+      <option value="uint16">uint16</option><option value="int16">int16</option>
+      <option value="uint32">uint32</option><option value="int32">int32</option>
+      <option value="float32">float32</option>
+    </select>
+    <select data-f="byte_order" class="fin-s fbo" title="Orden de bytes (solo 32 bits)">
+      <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
+      <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
+    </select>
+    <input data-f="scale" class="fin-n" type="number" step="any" placeholder="escala">
+    <input data-f="offset" class="fin-n" type="number" step="any" placeholder="offset">`;
+  return `<div class="frow">
+    <input data-f="id" class="fin-id" placeholder="id" maxlength="8">
+    <input data-f="name" class="fin" placeholder="nombre">
+    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
+    <input data-f="count" class="fin-n" type="number" min="1" max="125" value="1" title="cantidad">
+    ${reg}
+    <input data-f="unit" class="fin-u" placeholder="unidad">
+    <button type="button" class="frow-del" title="Quitar">−</button>
+  </div>`;
+}
+
+function writeRowHtml() {
+  return `<div class="frow">
+    <select data-f="function" class="fin-s">
+      <option value="write_single_coil">bobina</option>
+      <option value="write_single_register">registro</option>
+      <option value="write_multiple_coils">bobinas múlt.</option>
+      <option value="write_multiple_registers">registros múlt.</option>
+    </select>
+    <input data-f="id" class="fin-id" placeholder="id" maxlength="8">
+    <input data-f="name" class="fin" placeholder="nombre">
+    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
+    <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1">
+    <select data-f="type" class="fin-s freg">
+      <option value="">tipo</option>
+      <option value="uint16">uint16</option><option value="int16">int16</option>
+      <option value="uint32">uint32</option><option value="int32">int32</option>
+      <option value="float32">float32</option>
+    </select>
+    <select data-f="byte_order" class="fin-s freg fbo">
+      <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
+      <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
+    </select>
+    <input data-f="scale" class="fin-n freg" type="number" step="any" placeholder="escala">
+    <input data-f="offset" class="fin-n freg" type="number" step="any" placeholder="offset">
+    <input data-f="unit" class="fin-u" placeholder="unidad">
+    <button type="button" class="frow-del" title="Quitar">−</button>
+  </div>`;
+}
+
+function deviceHtml(idx) {
+  const reads = MB_READS.map((c) => `
+    <div class="fread" data-fn="${c.key}">
+      <div class="fread-head"><span>${c.label}</span>
+        <button type="button" class="fread-add" data-bits="${c.bits ? 1 : 0}">+ añadir</button>
+      </div>
+      <div class="frows"></div>
+    </div>`).join("");
+  return `<div class="fdev">
+    <div class="fdev-head"><strong>Dispositivo ${idx}</strong>
+      <button type="button" class="fdev-del" title="Quitar dispositivo">Quitar</button>
+    </div>
+    <div class="cfg-form">
+      <label class="cfg-campo"><span>Nombre</span><input data-fd="name" placeholder="amb"></label>
+      <label class="cfg-campo"><span>Descripción</span><input data-fd="description" placeholder="opcional"></label>
+      <label class="cfg-campo"><span>Slave ID (fábrica)</span><input data-fd="default_slave_id" type="number" min="1" max="247" value="1"></label>
+      <label class="cfg-campo"><span>Slave ID (deseado)</span><input data-fd="desired_slave_id" type="number" min="1" max="247" value="1"></label>
+    </div>
+    <details class="form-avz">
+      <summary>Avanzado del dispositivo</summary>
+      <div class="cfg-form">
+        <div class="fchange" hidden>
+          <label class="cfg-campo"><span>Cambio slave: función</span>
+            <select data-fd="change_function"><option value="">(ninguna)</option><option value="write_single_register">write_single_register</option><option value="write_single_coil">write_single_coil</option></select>
+          </label>
+          <label class="cfg-campo"><span>Cambio slave: dirección</span><input data-fd="change_address" type="number" min="0" max="65535" placeholder="opcional"></label>
+        </div>
+        <label class="cfg-campo"><span>Modo lectura</span>
+          <select data-fd="read_mode"><option value="grouped">agrupada</option><option value="individual">individual</option></select>
+        </label>
+        <label class="cfg-campo"><span>Respiro lecturas (ms)</span><input data-fd="inter_read_ms" type="number" min="0" max="5000" value="250"></label>
+      </div>
+    </details>
+    <div class="freads">${reads}</div>
+    <div class="fwrite-block">
+      <div class="fread-head"><span>Salidas / escrituras <em class="fin-note">(declarativas por ahora)</em></span>
+        <button type="button" class="fwrite-add">+ añadir</button>
+      </div>
+      <div class="fwrites"></div>
+    </div>
+  </div>`;
+}
+
+function formRenumber() {
+  document.querySelectorAll("#f-devices .fdev").forEach((d, i) => {
+    d.querySelector(".fdev-head strong").textContent = "Dispositivo " + (i + 1);
+  });
+}
+
+function formNbiotVis() {
+  document.getElementById("f-nbiot-card").hidden =
+    document.getElementById("f-type").value !== "super_node";
+}
+
+function formInit() {
+  if (!formInited) {
+    document.getElementById("f-add-device").click();
+    formLockRed();
+    formInited = true;
+  }
+  formNbiotVis();
+}
+
+// Campos fijados por la red del gateway: se muestran (referencia) pero no
+// se editan, porque cambiarlos impediría al nodo unirse. Los valores reales
+// se leen del gateway (get_net.sh); región y frecuencia, que el gateway no
+// guarda, se fijan al despliegue.
+// Campos que, cambiados, impedirían al nodo unirse a la red o publicar en la
+// misma nube: LoRa (región, frecuencia, SF, BW), Network ID, TTL, seguridad y
+// el broker MQTT (host, puerto, TLS, usuario, clave). Se bloquean y se fijan
+// a los valores reales del gateway.
+const FLOCK = ["f-region", "f-freq", "f-sf", "f-bw", "f-netid", "f-ttl",
+               "f-sec", "f-seckey", "f-mbroker", "f-mport", "f-mtls",
+               "f-muser", "f-mpass"];
+function formLockRed() {
+  FLOCK.forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
+  fetchApi("/api/config/red").then((r) => r.json()).then((d) => {
+    const sV = (id, v) => { if (v != null && v !== "") document.getElementById(id).value = v; };
+    sV("f-region", d.region); sV("f-freq", d.frequency_hz); sV("f-sf", d.sf);
+    sV("f-bw", d.bw_khz); sV("f-netid", d.network_id); sV("f-ttl", d.max_ttl);
+    const sec = d.security || {};
+    document.getElementById("f-sec").checked = !!sec.enabled;
+    document.getElementById("f-seckey").value = sec.key || "";
+    const m = d.mqtt || {};
+    sV("f-mbroker", m.host); sV("f-mport", m.port); sV("f-muser", m.user);
+    sV("f-mpass", m.password);
+    document.getElementById("f-mtls").checked = m.tls !== false;
+    if (d.source !== "gateway") {
+      const nota = document.getElementById("f-red-nota");
+      nota.textContent += " (Aviso: no se pudo leer la config del gateway; se "
+        + "muestran valores por defecto.)";
+    }
+  }).catch(() => {});
+}
+
+// Principio general: un campo que no aplica se oculta. En una fila de
+// lectura/escritura, byte_order solo para tipos de 32 bits; en escrituras,
+// los campos de registro desaparecen con una función de bobina y count solo
+// aparece en las funciones múltiples.
+function fRowVis(row) {
+  if (!row) return;
+  const fnEl = row.querySelector('[data-f="function"]');   // solo escrituras
+  const typeEl = row.querySelector('[data-f="type"]');
+  const boEl = row.querySelector('[data-f="byte_order"]');
+  const isWrite = !!fnEl;
+  let bits = false;
+  if (isWrite) {
+    const fn = fnEl.value;
+    bits = fn === "write_single_coil" || fn === "write_multiple_coils";
+    row.querySelectorAll(".freg").forEach((el) => { el.style.display = bits ? "none" : ""; });
+    const countEl = row.querySelector(".fcount");
+    if (countEl) {
+      const multi = fn === "write_multiple_coils" || fn === "write_multiple_registers";
+      countEl.style.display = multi ? "" : "none";
+    }
+  }
+  if (boEl) {
+    const t = typeEl ? typeEl.value : "";
+    boEl.style.display = (!bits && REG32.has(t)) ? "" : "none";
+  }
+}
+
+function fDevVis(dev) {
+  if (!dev) return;
+  const d = dev.querySelector('[data-fd="default_slave_id"]');
+  const w = dev.querySelector('[data-fd="desired_slave_id"]');
+  const ch = dev.querySelector(".fchange");
+  if (d && w && ch) ch.hidden = (d.value.trim() === w.value.trim());
+}
+
+// ----- Recolección del DOM a un objeto plano -----
+
+function fRows(container, funcFromBlock) {
+  if (!container) return [];
+  return [...container.querySelectorAll(":scope > .frow")].map((row) => {
+    const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
+    return {
+      function: funcFromBlock || g("function"),
+      id: g("id"), name: g("name"), address: g("address"), count: g("count"),
+      type: g("type"), byte_order: g("byte_order"), scale: g("scale"),
+      offset: g("offset"), unit: g("unit"),
+    };
+  });
+}
+
+function collectForm() {
+  const gv = (id) => document.getElementById(id).value.trim();
+  const gc = (id) => document.getElementById(id).checked;
+  const devices = [...document.querySelectorAll("#f-devices > .fdev")].map((dev) => {
+    const g = (f) => { const el = dev.querySelector(`[data-fd="${f}"]`); return el ? el.value.trim() : ""; };
+    let reads = [];
+    dev.querySelectorAll(".fread").forEach((blk) => {
+      reads = reads.concat(fRows(blk.querySelector(".frows"), blk.dataset.fn));
+    });
+    const writes = fRows(dev.querySelector(".fwrites"), null);
+    return {
+      name: g("name"), description: g("description"),
+      default_slave_id: g("default_slave_id"), desired_slave_id: g("desired_slave_id"),
+      change_function: g("change_function"), change_address: g("change_address"),
+      read_mode: g("read_mode"), inter_read_ms: g("inter_read_ms"),
+      reads, writes,
+    };
+  });
+  return {
+    node: { id: gv("f-id"), type: gv("f-type"), name: gv("f-name"), description: gv("f-desc") },
+    lora: { region: gv("f-region"), frequency_hz: gv("f-freq"), sf: gv("f-sf"),
+            bw_khz: gv("f-bw"), tx_power_dbm: gv("f-txpow"), network_id: gv("f-netid"),
+            send_interval_ms: gv("f-interval"), ack_enabled: gc("f-ack"),
+            ack_timeout_ms: gv("f-acktimeout"), max_retries: gv("f-retries"),
+            security_enabled: gc("f-sec"), security_key: gv("f-seckey") },
+    mesh: { relay_enabled: gc("f-relay"), max_ttl: gv("f-ttl"), beacon_timeout_ms: gv("f-beacon"),
+            parent_min_rssi: gv("f-minrssi"), parent_hysteresis_db: gv("f-hyst"),
+            parent_missed_frames: gv("f-missed"), sn_offer_wait_ms: gv("f-snwait") },
+    nbiot: { apn: gv("f-apn"), apn_user: gv("f-apnuser"), apn_pass: gv("f-apnpass"),
+             mqtt_broker: gv("f-mbroker"), mqtt_port: gv("f-mport"), tls: gc("f-mtls"),
+             mqtt_user: gv("f-muser"), mqtt_pass: gv("f-mpass"),
+             topic_telemetry: gv("f-ttel"), topic_commands: gv("f-tcmd"),
+             debug: gc("f-mdebug"), relay_enabled: gc("f-nbrelay"), relay_queue_max: gv("f-relayqueue") },
+    modbus: { baudrate: gv("f-baud"), parity: gv("f-parity"), stopbits: gv("f-stopbits"),
+              debug: gc("f-mbdebug"), devices },
+  };
+}
+
+// ----- Construcción pura del config.json (aplica las reglas del schema) -----
+
+function fNum(v, def) {
+  if (v === "" || v == null) return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+function buildRW(r) {
+  const bits = ["read_coils", "read_discrete_inputs",
+                "write_single_coil", "write_multiple_coils"].includes(r.function);
+  const o = { id: r.id || "", name: r.name || "", function: r.function,
+              address: fNum(r.address, 0) };
+  const count = fNum(r.count, 1);
+  if (count !== 1) o.count = count;
+  if (!bits) {
+    if (r.type) o.type = r.type;
+    if (r.type && REG32.has(r.type)) o.byte_order = r.byte_order || "ABCD";
+    const sc = fNum(r.scale, 1); if (r.scale !== "" && sc !== 1) o.scale = sc;
+    const of = fNum(r.offset, 0); if (r.offset !== "" && of !== 0) o.offset = of;
+  }
+  if (r.unit) o.unit = r.unit;
+  return o;
+}
+
+function buildDevice(d) {
+  const dev = { name: d.name || "", addressing: {
+    default_slave_id: fNum(d.default_slave_id, 1),
+    desired_slave_id: fNum(d.desired_slave_id, 1) } };
+  if (d.description) dev.description = d.description;
+  if (dev.addressing.default_slave_id !== dev.addressing.desired_slave_id) {
+    if (d.change_function) dev.addressing.change_function = d.change_function;
+    if (d.change_address !== "") dev.addressing.change_address = fNum(d.change_address, 0);
+  }
+  if (d.read_mode && d.read_mode !== "grouped") dev.read_mode = d.read_mode;
+  if (d.inter_read_ms !== "" && fNum(d.inter_read_ms, 250) !== 250)
+    dev.inter_read_ms = fNum(d.inter_read_ms, 250);
+  dev.reads = d.reads.map(buildRW);
+  if (d.writes.length) dev.writes = d.writes.map(buildRW);
+  return dev;
+}
+
+function buildConfig(f) {
+  const cfg = { schema_version: "3.2", node: {}, transport: {}, modbus: {} };
+  cfg.node.id = fNum(f.node.id, 1);
+  cfg.node.type = f.node.type;
+  cfg.node.name = f.node.name || "";
+  if (f.node.description) cfg.node.description = f.node.description;
+
+  const lora = {
+    region: f.lora.region, frequency_hz: fNum(f.lora.frequency_hz, 0),
+    sf: fNum(f.lora.sf, 7), bw_khz: fNum(f.lora.bw_khz, 125),
+    tx_power_dbm: fNum(f.lora.tx_power_dbm, 14), network_id: fNum(f.lora.network_id, 1),
+    send_interval_ms: fNum(f.lora.send_interval_ms, 5000), ack_enabled: !!f.lora.ack_enabled,
+    ack_timeout_ms: fNum(f.lora.ack_timeout_ms, 3000), max_retries: fNum(f.lora.max_retries, 2),
+  };
+  if (f.lora.security_enabled) lora.security = { enabled: true, key: f.lora.security_key || "" };
+  cfg.transport.lora = lora;
+
+  cfg.transport.mesh = {
+    relay_enabled: !!f.mesh.relay_enabled, max_ttl: fNum(f.mesh.max_ttl, 4),
+    beacon_timeout_ms: fNum(f.mesh.beacon_timeout_ms, 90000),
+    parent_min_rssi: fNum(f.mesh.parent_min_rssi, -100),
+    parent_hysteresis_db: fNum(f.mesh.parent_hysteresis_db, 6),
+    parent_missed_frames: fNum(f.mesh.parent_missed_frames, 3),
+    sn_offer_wait_ms: fNum(f.mesh.sn_offer_wait_ms, 1000),
+  };
+
+  if (f.node.type === "super_node") {
+    const nb = {
+      apn: f.nbiot.apn || "", mqtt_broker: f.nbiot.mqtt_broker || "",
+      mqtt_port: fNum(f.nbiot.mqtt_port, 8883), tls: !!f.nbiot.tls,
+      topic_telemetry: f.nbiot.topic_telemetry || "modulinkr/v1/{node_id}/telemetry",
+      topic_commands: f.nbiot.topic_commands || "modulinkr/v1/{node_id}/cmd",
+      debug: !!f.nbiot.debug, relay_enabled: !!f.nbiot.relay_enabled,
+      relay_queue_max: fNum(f.nbiot.relay_queue_max, 128),
+    };
+    if (f.nbiot.apn_user) nb.apn_user = f.nbiot.apn_user;
+    if (f.nbiot.apn_pass) nb.apn_pass = f.nbiot.apn_pass;
+    if (f.nbiot.mqtt_user) nb.mqtt_user = f.nbiot.mqtt_user;
+    if (f.nbiot.mqtt_pass) nb.mqtt_pass = f.nbiot.mqtt_pass;
+    cfg.transport.nbiot = nb;
+  }
+
+  const mb = { baudrate: fNum(f.modbus.baudrate, 9600), parity: f.modbus.parity,
+               stopbits: fNum(f.modbus.stopbits, 1) };
+  if (f.modbus.debug) mb.debug = true;
+  mb.devices = f.modbus.devices.map(buildDevice);
+  cfg.modbus = mb;
+  return cfg;
+}
+
+// ----- Validación de todos los campos contra el schema -----
+
+function fValidate(f) {
+  const e = [];
+  const id = Number(f.node.id);
+  if (!(id >= 1 && id <= 254)) e.push("ID del nodo 1-254");
+  if (!f.node.name) e.push("nombre del nodo requerido");
+  const sf = Number(f.lora.sf); if (!(sf >= 7 && sf <= 12)) e.push("SF 7-12");
+  const tx = Number(f.lora.tx_power_dbm); if (!(tx >= 2 && tx <= 22)) e.push("potencia 2-22 dBm");
+  if (!(Number(f.lora.send_interval_ms) >= 100)) e.push("intervalo ≥100 ms");
+  if (f.lora.security_enabled && !/^[0-9a-fA-F]{32}$/.test(f.lora.security_key || ""))
+    e.push("clave de red de 32 hex");
+  if (f.node.type === "super_node") {
+    if (!f.nbiot.apn) e.push("NB-IoT: APN requerido");
+    if (!f.nbiot.mqtt_broker) e.push("NB-IoT: broker requerido");
+  }
+  if (!f.modbus.devices.length) e.push("al menos un dispositivo Modbus");
+  f.modbus.devices.forEach((d, i) => {
+    const p = `disp ${i + 1}: `;
+    if (!d.name) e.push(p + "nombre requerido");
+    const ds = Number(d.default_slave_id), de = Number(d.desired_slave_id);
+    if (!(ds >= 1 && ds <= 247)) e.push(p + "slave fábrica 1-247");
+    if (!(de >= 1 && de <= 247)) e.push(p + "slave deseado 1-247");
+    if (ds !== de && !d.change_function) e.push(p + "slave distinto exige función de cambio");
+    if (!d.reads.length) e.push(p + "sin lecturas");
+    [...d.reads, ...d.writes].forEach((r) => {
+      const rp = p + (r.id || "(sin id)") + ": ";
+      if (!r.id || r.id.length < 2 || r.id.length > 8) e.push(rp + "id de 2-8 caracteres");
+      if (!r.name) e.push(rp + "nombre requerido");
+      const a = Number(r.address); if (!(a >= 0 && a <= 65535)) e.push(rp + "dirección 0-65535");
+      const bits = ["read_coils", "read_discrete_inputs", "write_single_coil",
+                    "write_multiple_coils"].includes(r.function);
+      if (!bits && !r.type) e.push(rp + "tipo requerido para registros");
+      if (!bits && REG32.has(r.type) && Number(r.count || 1) !== 2) e.push(rp + "count=2 para 32 bits");
+    });
+  });
+  return e;
+}
+
+// ----- Llenado del formulario desde un config.json (leer del nodo) -----
+
+function fillRow(row, r) {
+  const s = (f, v) => { const el = row.querySelector(`[data-f="${f}"]`); if (el != null && v != null) el.value = v; };
+  s("function", r.function); s("id", r.id); s("name", r.name); s("address", r.address);
+  s("count", r.count != null ? r.count : 1); s("type", r.type); s("byte_order", r.byte_order);
+  s("scale", r.scale); s("offset", r.offset); s("unit", r.unit);
+  fRowVis(row);
+}
+
+function fillForm(cfg) {
+  const sV = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+  const sC = (id, v) => { const el = document.getElementById(id); if (el != null) el.checked = !!v; };
+  const node = cfg.node || {}, tr = cfg.transport || {}, lora = tr.lora || {},
+        mesh = tr.mesh || {}, nb = tr.nbiot, mb = cfg.modbus || {};
+  sV("f-id", node.id); sV("f-type", node.type || "node"); sV("f-name", node.name); sV("f-desc", node.description);
+  sV("f-txpow", lora.tx_power_dbm); sV("f-interval", lora.send_interval_ms);
+  sC("f-ack", lora.ack_enabled !== false); sV("f-acktimeout", lora.ack_timeout_ms); sV("f-retries", lora.max_retries);
+  sC("f-relay", mesh.relay_enabled !== false); sV("f-ttl", mesh.max_ttl); sV("f-beacon", mesh.beacon_timeout_ms);
+  sV("f-minrssi", mesh.parent_min_rssi); sV("f-hyst", mesh.parent_hysteresis_db);
+  sV("f-missed", mesh.parent_missed_frames); sV("f-snwait", mesh.sn_offer_wait_ms);
+  if (nb) {
+    sV("f-apn", nb.apn); sV("f-mbroker", nb.mqtt_broker); sV("f-mport", nb.mqtt_port);
+    sC("f-mtls", nb.tls !== false); sV("f-muser", nb.mqtt_user); sV("f-mpass", nb.mqtt_pass);
+    sV("f-apnuser", nb.apn_user); sV("f-apnpass", nb.apn_pass);
+    sV("f-ttel", nb.topic_telemetry); sV("f-tcmd", nb.topic_commands);
+    sC("f-mdebug", nb.debug !== false); sC("f-nbrelay", nb.relay_enabled !== false); sV("f-relayqueue", nb.relay_queue_max);
+  }
+  formNbiotVis();
+  sV("f-baud", mb.baudrate); sV("f-parity", mb.parity); sV("f-stopbits", mb.stopbits); sC("f-mbdebug", mb.debug);
+  const cont = document.getElementById("f-devices");
+  cont.innerHTML = "";
+  (mb.devices || []).forEach((dev, i) => {
+    cont.insertAdjacentHTML("beforeend", deviceHtml(i + 1));
+    const card = cont.lastElementChild;
+    const sd = (f, v) => { const el = card.querySelector(`[data-fd="${f}"]`); if (el != null && v != null) el.value = v; };
+    const addr = dev.addressing || {};
+    sd("name", dev.name); sd("description", dev.description);
+    sd("default_slave_id", addr.default_slave_id); sd("desired_slave_id", addr.desired_slave_id);
+    sd("change_function", addr.change_function); sd("change_address", addr.change_address);
+    sd("read_mode", dev.read_mode || "grouped");
+    sd("inter_read_ms", dev.inter_read_ms != null ? dev.inter_read_ms : 250);
+    (dev.reads || []).forEach((rd) => {
+      const blk = card.querySelector(`.fread[data-fn="${rd.function}"]`);
+      if (!blk) return;
+      const bits = rd.function === "read_coils" || rd.function === "read_discrete_inputs";
+      const rows = blk.querySelector(".frows");
+      rows.insertAdjacentHTML("beforeend", readRowHtml(bits));
+      fillRow(rows.lastElementChild, rd);
+    });
+    (dev.writes || []).forEach((wr) => {
+      const rows = card.querySelector(".fwrites");
+      rows.insertAdjacentHTML("beforeend", writeRowHtml());
+      fillRow(rows.lastElementChild, wr);
+    });
+    fDevVis(card);
+  });
+}
+
+async function fLeer() {
+  const aviso = document.getElementById("f-leer-aviso");
+  const sel = document.getElementById("f-leer-puertos");
+  const body = {};
+  if (!sel.hidden && sel.value) body.port = sel.value;
+  document.getElementById("f-leer").disabled = true;
+  aviso.textContent = "detectando y leyendo el nodo...";
+  try {
+    const rd = await fetchApi("/api/config/detectar", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const dd = await rd.json();
+    if (rd.status === 300 && dd.need_port) {
+      sel.innerHTML = dd.ports.map((p) => `<option value="${p}">${p.split("/").pop()}</option>`).join("");
+      sel.hidden = false; aviso.textContent = "varios puertos: elegir y reintentar"; return;
+    }
+    if (!rd.ok) { aviso.textContent = dd.error ?? "error"; return; }
+    const r = await fetchApi("/api/config/nodo?port=" + encodeURIComponent(dd.port));
+    const data = await r.json();
+    if (!r.ok) { aviso.textContent = data.error ?? "el nodo no devolvió config"; return; }
+    let cfg;
+    try { cfg = JSON.parse(data.config); } catch (e) { aviso.textContent = "config del nodo no es JSON válido"; return; }
+    fillForm(cfg);
+    formPuerto = dd.port;
+    aviso.textContent = "formulario rellenado desde el nodo en " + dd.port.split("/").pop();
+  } catch (e) {
+    aviso.textContent = "error: " + e.message;
+  } finally {
+    document.getElementById("f-leer").disabled = false;
+  }
+}
+
+// ----- Validar configuración: si pasa, generar preview y habilitar buscar -----
+
+function formGenerar() {
+  const res = document.getElementById("f-resultado");
+  const form = collectForm();
+  const errs = fValidate(form);
+  document.getElementById("f-enviar").disabled = true;
+  if (errs.length) {
+    res.className = "aviso mal";
+    res.textContent = "Corrige: " + errs.slice(0, 4).join("; ")
+      + (errs.length > 4 ? ` (+${errs.length - 4} más)` : "");
+    document.getElementById("f-buscar").disabled = true;
+    return;
+  }
+  document.getElementById("f-preview").value = JSON.stringify(buildConfig(form), null, 2);
+  document.getElementById("f-buscar").disabled = false;
+  res.className = "aviso"; res.textContent = "Configuración válida. Ahora buscar el nodo.";
+}
+
+// Estado del firmware tras encontrar el nodo. formMode gobierna lo que hará
+// "Enviar al nodo": "config" (solo configuración) o "flash" (cargar el
+// firmware y luego la configuración).
+let formMode = "config";
+
+async function formCheckFw(node) {
+  const est = document.getElementById("f-fw-estado");
+  const enviar = document.getElementById("f-enviar");
+  est.hidden = false; enviar.disabled = true;
+  const fw = node.fw || "", ver = node.version || "";
+  let latest = null;
+  try { const fr = await fetchApi("/api/config/firmware"); latest = (await fr.json()).version; } catch (e) { /* sin versión */ }
+
+  if (fw.startsWith("ModuLinkr") && (!latest || !ver || ver === latest)) {
+    formMode = "config";
+    est.className = "aviso";
+    est.textContent = (latest && ver ? `Firmware ModuLinkr ${ver} (última versión). `
+                                     : `Firmware ModuLinkr ${ver || "detectado"}. `)
+      + "Al enviar se cargará solo la configuración.";
+    enviar.disabled = false;
+    return;
+  }
+  // Desactualizado, o no responde como ModuLinkr: Enviar carga el firmware y
+  // después la configuración.
+  formMode = "flash";
+  est.className = "aviso";
+  if (fw.startsWith("ModuLinkr")) {
+    est.textContent = `Firmware ModuLinkr ${ver}, desactualizado (última: ${latest}). `
+      + "Al enviar se actualizará el firmware y luego se cargará la configuración.";
+  } else {
+    est.textContent = "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
+      + "Al enviar se cargará el firmware y luego la configuración.";
+  }
+  enviar.disabled = false;
+}
+
+async function formBuscar() {
+  const aviso = document.getElementById("f-busqueda-aviso");
+  const sel = document.getElementById("f-puertos");
+  const body = {};
+  if (!sel.hidden && sel.value) body.port = sel.value;
+  document.getElementById("f-buscar").disabled = true;
+  aviso.textContent = "buscando nodo (se reinicia al abrir el puerto)...";
+  try {
+    const r = await fetchApi("/api/config/detectar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    const data = await r.json();
+    if (r.status === 300 && data.need_port) {
+      sel.innerHTML = data.ports.map((p) =>
+        `<option value="${p}">${p.split("/").pop()}</option>`).join("");
+      sel.hidden = false;
+      aviso.textContent = "varios puertos candidatos: elegir y volver a buscar";
+      return;
+    }
+    if (!r.ok) {
+      // La detección CFG falló: puede ser un Atom virgen (sin firmware que
+      // responda). Se busca el puerto para poder flashear y enviar.
+      const chosen = (!sel.hidden && sel.value) ? sel.value : null;
+      await formVirgen(aviso, sel, chosen);
+      return;
+    }
+    formPuerto = data.port;
+    aviso.textContent = `nodo en ${data.port.split("/").pop()}`;
+    await formCheckFw(data.node || {});
+  } catch (e) {
+    aviso.textContent = "error: " + e.message;
+  } finally {
+    document.getElementById("f-buscar").disabled = false;
+  }
+}
+
+async function formVirgen(aviso, sel, chosenPort) {
+  try {
+    const r = await fetchApi("/api/config/puertos");
+    const d = await r.json();
+    const cands = (d.ports || []).filter((p) => !p.gateway);
+    let port = chosenPort;
+    if (!port) {
+      if (cands.length === 1) {
+        port = cands[0].port;
+      } else if (cands.length > 1) {
+        sel.innerHTML = cands.map((p) =>
+          `<option value="${p.port}">${p.port.split("/").pop()}</option>`).join("");
+        sel.hidden = false;
+        aviso.textContent = "no respondió el protocolo: elegir el puerto del Atom y reintentar";
+        return;
+      } else {
+        aviso.textContent = "sin puertos candidatos: ¿Atom conectado por USB?";
+        return;
+      }
+    }
+    formPuerto = port;
+    aviso.textContent = "Atom en " + port.split("/").pop()
+      + " sin responder el protocolo ModuLinkr.";
+    await formCheckFw({});
+  } catch (e) {
+    aviso.textContent = "error: " + e.message;
+  }
+}
+
+async function formEnviar() {
+  const res = document.getElementById("f-envio-aviso");
+  const texto = document.getElementById("f-preview").value.trim();
+  if (!formPuerto) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
+  if (!texto) { res.className = "aviso mal"; res.textContent = "validar primero la configuración"; return; }
+  try { JSON.parse(texto); } catch (e) {
+    res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
+  }
+  const T = "Enviar al nodo";
+  try {
+    if (formMode === "flash") {
+      cfgDialogo(T, SPIN + "cargando el firmware del nodo por USB (cerca de un minuto)...");
+      const rf = await fetchApi("/api/config/flash", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port: formPuerto }) });
+      const df = await rf.json();
+      if (!rf.ok) {
+        cfgDialogo(T, "No se pudo cargar el firmware:<pre>" + (df.error ?? "error") + "</pre>", { cerrar: true });
+        return;
+      }
+    }
+    cfgDialogo(T, SPIN + "enviando y validando la configuración en el nodo...");
+    const r = await fetchApi("/api/config/subir", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: formPuerto, config: texto }) });
+    const data = await r.json();
+    if (!r.ok) {
+      cfgDialogo(T, "El nodo rechazó el config:<pre>" + (data.error ?? "error") + "</pre>", { cerrar: true });
+      return;
+    }
+    const pre = formMode === "flash"
+      ? "Firmware cargado y configuración aceptada. "
+      : "Configuración aceptada. ";
+    cfgDialogo(T, pre + "El nodo arranca con la configuración nueva.<pre>"
+                  + (data.detail ?? "") + "</pre>", { cerrar: true });
+  } catch (e) {
+    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+  }
+}
+
+document.getElementById("f-add-device").addEventListener("click", () => {
+  const cont = document.getElementById("f-devices");
+  cont.insertAdjacentHTML("beforeend",
+    deviceHtml(cont.querySelectorAll(".fdev").length + 1));
+});
+document.getElementById("f-devices").addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.classList.contains("frow-del")) { t.closest(".frow").remove(); return; }
+  if (t.classList.contains("fdev-del")) { t.closest(".fdev").remove(); formRenumber(); return; }
+  if (t.classList.contains("fread-add")) {
+    const rows = t.closest(".fread").querySelector(".frows");
+    rows.insertAdjacentHTML("beforeend", readRowHtml(t.dataset.bits === "1"));
+    fRowVis(rows.lastElementChild);
+    return;
+  }
+  if (t.classList.contains("fwrite-add")) {
+    const rows = t.closest(".fwrite-block").querySelector(".fwrites");
+    rows.insertAdjacentHTML("beforeend", writeRowHtml());
+    fRowVis(rows.lastElementChild);
+  }
+});
+// Visibilidad condicional: cambia el tipo o la función de una fila, o el
+// slave_id de un dispositivo, y aparecen/desaparecen los campos que aplican.
+document.getElementById("f-devices").addEventListener("change", (e) => {
+  const f = e.target.getAttribute && e.target.getAttribute("data-f");
+  if (f === "type" || f === "function") { fRowVis(e.target.closest(".frow")); return; }
+  const fd = e.target.getAttribute && e.target.getAttribute("data-fd");
+  if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
+});
+document.getElementById("f-devices").addEventListener("input", (e) => {
+  const fd = e.target.getAttribute && e.target.getAttribute("data-fd");
+  if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
+});
+document.getElementById("f-type").addEventListener("change", formNbiotVis);
+document.getElementById("f-leer").addEventListener("click", fLeer);
+document.getElementById("f-buscar").addEventListener("click", formBuscar);
+document.getElementById("f-generar").addEventListener("click", formGenerar);
+document.getElementById("f-enviar").addEventListener("click", formEnviar);
 document.getElementById("cfg-archivo-btn").addEventListener("click", () =>
   document.getElementById("cfg-archivo").click());
 document.getElementById("cfg-archivo").addEventListener("change", (e) => {
