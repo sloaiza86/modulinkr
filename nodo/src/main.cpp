@@ -1,10 +1,11 @@
 // ModuLinkr, firmware del nodo (V2)
-// Modo H7: configuración por config.json (node-config.md schema 2.0).
+// Modo H7: configuración por config.json (node-config.md schema 3.x).
 //
-//   - El JSON embebido (configs_embebidos.h, fase 1 del comisionamiento)
-//     dicta la identidad del nodo, la red LoRa y mesh, el bloque NB-IoT y
-//     el bus Modbus completo. Los build_flags de parámetros desaparecen;
-//     queda NODE_CONFIG para elegir qué config se embebe.
+//   - El config.json dicta la identidad del nodo, la red LoRa y mesh, el
+//     bloque NB-IoT y el bus Modbus completo. Desde la fase 2 del
+//     comisionamiento vive en la flash del nodo (/config.json en
+//     LittleFS, configstore.h) y se carga por USB (commission.h): el
+//     binario es único, sin build_flags de despliegue.
 //   - El rol de supernodo ya no es de compilación: lo decide node.type en
 //     runtime (un solo firmware, dos configs).
 //   - El sensor cableado desaparece: el sampler recorre devices[]/reads[]
@@ -40,6 +41,13 @@
 //   - TELEMETRY con ts=0 es inválida: el supernodo la rechaza en custodia
 //     con ACK DECODE_ERROR (spec §10 regla 11), igual que el gateway.
 //
+// v3.3 (24-jul-2026), comisionamiento por USB (fase 2):
+//   - El config deja de viajar embebido en el binario: vive en
+//     /config.json (LittleFS) y se carga o reemplaza por el protocolo
+//     CFG.* de la consola USB (commission.h) sin recompilar.
+//   - Sin config válido el nodo no opera: LED violeta (config ausente) o
+//     rojo (inválido) y el protocolo de comisionamiento a la espera.
+//
 // Asignacion de UART (resolucion del conflicto, ver nodo/README.md):
 //   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  (baud del config)
 //   LoRa    Serial1         GPIO 19 RX / GPIO 22 TX  a 115200
@@ -60,13 +68,15 @@
 #include "outbox.h"
 #include "nbiot_service.h"
 #include "config.h"
+#include "configstore.h"
+#include "commission.h"
 #include "sampler.h"
 #include "nodeclock.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.25-v31-duty-cycle";
+constexpr const char* kFirmwareVersion = "0.0.26-usb-config";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -112,10 +122,16 @@ constexpr const char* kModemLabel = "SIM7080G";
 constexpr const char* kModemLabel = "?";
 #endif
 
-// Configuración del dispositivo, cargada del JSON embebido en setup().
-// Todo parámetro de despliegue (identidad, red, mesh, NB-IoT, Modbus)
-// sale de aquí (node-config.md schema 2.0).
+// Configuración del dispositivo, cargada de /config.json (LittleFS) en
+// setup(). Todo parámetro de despliegue (identidad, red, mesh, NB-IoT,
+// Modbus) sale de aquí (node-config.md schema 3.x).
 cfg::Config g_cfg;
+
+// Estado del comisionamiento (fase 2): sin config válido el nodo no opera
+// y el loop queda en modo espera atendiendo el protocolo CFG.* por USB.
+bool g_configured  = false;
+bool g_cfg_missing = false;   // config ausente (LED violeta) o inválido (rojo)
+char g_cfg_err[96] = {0};
 
 // client_id MQTT derivado del node_id (se rellena en setup).
 char g_client_id[24] = {0};
@@ -1204,21 +1220,51 @@ EspSoftwareSerial::Config swserialConfig(char parity, uint8_t stopbits) {
 }  // namespace
 
 void setup() {
-    M5.begin(/*serial_enable=*/true, /*i2c_enable=*/false, /*led_enable=*/true);
+    // El buffer RX de Serial se amplía ANTES de begin: el payload de
+    // CFG.PUT llega a ráfagas de 115200 baud y el buffer por defecto
+    // (256 B) se desbordaría entre vueltas del loop.
+    M5.begin(/*serial_enable=*/false, /*i2c_enable=*/false, /*led_enable=*/true);
+    Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     delay(200);
 
-    // ----- Config del dispositivo (JSON embebido, node-config.md) -----
-    // Se carga ANTES que todo: el resto del arranque depende de él. Un
-    // config inválido detiene el nodo (LED rojo y regla violada en el log).
-    char cfg_err[96];
-    if (!cfg::load(g_cfg, cfg_err, sizeof(cfg_err))) {
-        Serial.begin(115200);
-        while (true) {
-            Serial.printf("[config] INVALIDO: %s\n", cfg_err);
-            M5.dis.drawpix(0, 0x200000);
-            delay(3000);
+    // ----- Config del dispositivo (/config.json en LittleFS) -----
+    // Se carga ANTES que todo: el resto del arranque depende de él. Sin
+    // config o con config inválido el nodo no opera: el loop queda en
+    // modo comisionamiento esperando un CFG.PUT por USB.
+    if (!configstore::begin()) {
+        snprintf(g_cfg_err, sizeof(g_cfg_err),
+                 "LittleFS no monta ni tras formatear");
+    } else {
+        size_t cfg_len = 0;
+        char* cfg_text = configstore::read(cfg_len);
+        if (cfg_text == nullptr) {
+            g_cfg_missing = true;
+            snprintf(g_cfg_err, sizeof(g_cfg_err), "sin config.json en flash");
+        } else {
+            g_configured = cfg::load(cfg_text, g_cfg, g_cfg_err,
+                                     sizeof(g_cfg_err));
+            free(cfg_text);
         }
+    }
+
+    // El comisionamiento atiende SIEMPRE, configurado o no: es la vía
+    // para cargar el primer config y para reemplazarlo sin recompilar.
+    {
+        commission::Identity ident;
+        ident.fw_name    = kFirmwareName;
+        ident.fw_version = kFirmwareVersion;
+        ident.configured = g_configured;
+        ident.config     = &g_cfg;
+        ident.err        = g_cfg_err;
+        commission::begin(ident);
+    }
+
+    if (!g_configured) {
+        Serial.printf("[config] %s: %s (esperando CFG.PUT por USB)\n",
+                      g_cfg_missing ? "SIN CONFIG" : "INVALIDO", g_cfg_err);
+        setLed(g_cfg_missing ? 0x200020 : 0x200000);
+        return;  // el resto del arranque requiere config
     }
 
     // ----- Reloj del sistema (v2.1; sin boot_id desde v3.0) -----
@@ -1315,6 +1361,31 @@ void setup() {
 }
 
 void loop() {
+    // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
+    commission::poll();
+
+    // Sin config válido: LED parpadeando (violeta ausente, rojo inválido),
+    // recordatorio periódico en el log y nada más que hacer.
+    if (!g_configured) {
+        const uint32_t wait_now = millis();
+        static uint32_t last_log_ms   = 0;
+        static uint32_t last_blink_ms = 0;
+        static bool     led_on        = false;
+        if (wait_now - last_log_ms >= 5000) {
+            last_log_ms = wait_now;
+            Serial.printf("[config] %s: %s (esperando CFG.PUT por USB)\n",
+                          g_cfg_missing ? "sin config" : "config invalido",
+                          g_cfg_err);
+        }
+        if (wait_now - last_blink_ms >= 500) {
+            last_blink_ms = wait_now;
+            led_on = !led_on;
+            setLed(led_on ? (g_cfg_missing ? 0x200020 : 0x200000) : 0x000000);
+        }
+        delay(20);
+        return;
+    }
+
     static uint32_t last_lora_ms = 0;
     static bool     first_loop   = true;
     const uint32_t now = millis();

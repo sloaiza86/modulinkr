@@ -1,0 +1,74 @@
+{
+  "schema_version": "3.1",
+  "node": {
+    "id":          2,
+    "type":        "super_node",
+    "name":        "Supernodo banco TFM",
+    "description": "Atom Lite + DTU EU868 + NB-IoT 2 Unit (SIM7028) + WT901C485"
+  },
+  "transport": {
+    "lora": {
+      "region":           "EU868",
+      "frequency_hz":     869525000,
+      "sf":               7,
+      "bw_khz":           125,
+      "tx_power_dbm":     10,
+      "network_id":       1,
+      "send_interval_ms": 5000,
+      "ack_enabled":      true,
+      "ack_timeout_ms":   3000,
+      "max_retries":      2,
+      "security": {
+        "enabled": true,
+        "key":     "5A4EFF35533E51AF54C00C46C530FABE"
+      }
+    },
+    "mesh": {
+      "relay_enabled":        true,
+      "max_ttl":              4,
+      "beacon_timeout_ms":    90000,
+      "parent_min_rssi":      -100,
+      "parent_hysteresis_db": 6,
+      "parent_missed_frames": 3,
+      "sn_offer_wait_ms":     1000
+    },
+    "nbiot": {
+      "apn":                  "nb.wlapn.com",
+      "apn_user":             "ENERBOSS",
+      "apn_pass":             "ENERBOSS",
+      "mqtt_broker":          "modulinkr.loaiza.co",
+      "mqtt_port":            8883,
+      "tls":                  true,
+      "mqtt_user":            "modulinkr",
+      "mqtt_pass":            "practica",
+      "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
+      "topic_commands":       "modulinkr/v1/{node_id}/cmd",
+      "debug":                true,
+      "relay_enabled":        true,
+      "relay_queue_max":      128
+    }
+  },
+  "modbus": {
+    "baudrate": 9600,
+    "parity":   "N",
+    "stopbits": 1,
+    "devices": [
+      {
+        "name":             "imu",
+        "description":      "WitMotion WT901C485, aceleracion XYZ",
+        "addressing": {
+          "default_slave_id": 80,
+          "desired_slave_id": 80
+        },
+        "reads": [
+          { "id": "ax", "name": "accel_x", "function": "read_holding_registers",
+            "address": 52, "type": "int16", "scale": 0.000488, "unit": "g" },
+          { "id": "ay", "name": "accel_y", "function": "read_holding_registers",
+            "address": 53, "type": "int16", "scale": 0.000488, "unit": "g" },
+          { "id": "az", "name": "accel_z", "function": "read_holding_registers",
+            "address": 54, "type": "int16", "scale": 0.000488, "unit": "g" }
+        ]
+      }
+    ]
+  }
+}

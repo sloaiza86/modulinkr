@@ -6,8 +6,6 @@
 #include <cstring>
 #include <cstdio>
 
-#include "configs_embebidos.h"
-
 namespace cfg {
 
 namespace {
@@ -171,9 +169,12 @@ const char* valTypeName(ValType t) {
     return "?";
 }
 
-bool load(Config& c, char* err, size_t err_len) {
+bool load(const char* json_text, Config& c, char* err, size_t err_len) {
+    if (json_text == nullptr || json_text[0] == '\0') {
+        return fail(err, err_len, "config vacio");
+    }
     JsonDocument doc;  // ArduinoJson 7 (heap; solo vive durante el parse)
-    const DeserializationError derr = deserializeJson(doc, kConfigJson);
+    const DeserializationError derr = deserializeJson(doc, json_text);
     if (derr) {
         return failf(err, err_len, "JSON malformado: %s", derr.c_str());
     }

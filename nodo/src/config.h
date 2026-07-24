@@ -5,12 +5,11 @@
 // mesh, el bloque NB-IoT (solo supernodos) y el bus Modbus completo
 // (dispositivos, lecturas, escrituras).
 //
-// Fase 1 del plan de comisionamiento: el JSON viaja EMBEBIDO en el binario
-// (configs_embebidos.h, seleccionado por el build_flag NODE_CONFIG).
-// Cambiarlo implica recompilar, igual que antes con los build_flags, pero
-// el formato ya es el definitivo. Las fases siguientes (carga desde flash,
-// CLI de comisionamiento) no cambian este módulo, solo de dónde viene el
-// texto.
+// Fase 2 del plan de comisionamiento: el JSON vive en la flash del nodo
+// (/config.json en LittleFS, ver configstore.h) y se carga por USB con el
+// protocolo de commission.h. Este módulo no sabe de dónde viene el texto:
+// recibe el JSON como parámetro y lo valida, tanto en el arranque como al
+// recibir un config nuevo por USB.
 //
 // Política de fallo: un config inválido detiene el arranque (LED rojo y
 // mensaje con la regla violada). Un nodo con configuración corrupta no debe
@@ -161,9 +160,10 @@ struct Config {
     uint8_t   total_reads = 0;   // suma de reads[] de todos los dispositivos
 };
 
-// Parsea y valida el JSON embebido. Con error, devuelve false y deja en
-// `err` la regla violada (para el log de arranque).
-bool load(Config& out, char* err, size_t err_len);
+// Parsea y valida el texto JSON recibido. Con error, devuelve false y
+// deja en `err` la regla violada (para el log de arranque o la respuesta
+// CFG:ERR del comisionamiento).
+bool load(const char* json_text, Config& out, char* err, size_t err_len);
 
 // Bytes de bus que ocupa un tipo (§5.6).
 uint8_t typeRegisters(ValType t);
