@@ -416,13 +416,21 @@ function pintarModalCabecera() {
       (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
 }
 
+// Zona horaria de visualización (ajuste del gateway, GET /api/ajustes).
+// null = automática: cada llamada toLocale usa la zona del navegador. Con
+// una zona IANA fija, se pasa como timeZone a todas las horas mostradas.
+let ZONA_HORARIA = null;
+function opcHora(o) {
+  return ZONA_HORARIA ? { ...o, timeZone: ZONA_HORARIA } : o;
+}
+
 // Fechas del eje y del tooltip en castellano: horas normales como HH:mm
 // y el cambio de día como "19 jul" destacado (patrón Home Assistant).
 function fmtDia(d) {
-  return d.toLocaleDateString("es-ES", { day: "numeric", month: "short" });
+  return d.toLocaleDateString("es-ES", opcHora({ day: "numeric", month: "short" }));
 }
 function fmtHora(d) {
-  return d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString("es-ES", opcHora({ hour: "2-digit", minute: "2-digit" }));
 }
 
 function opcionesModal(puntos, unit) {
@@ -992,7 +1000,9 @@ function cfgRuta() {
   document.getElementById("cfg-sub-nodo").hidden = sub !== "nodo";
   document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
   document.getElementById("cfg-radio").hidden    = sub !== "radio";
+  document.getElementById("cfg-zona").hidden     = sub !== "zona";
   if (sub === "radio") radioCargar();
+  if (sub === "zona") tzCargar();
 }
 
 function cfgBotones(bloquear) {
@@ -1321,8 +1331,92 @@ async function radioFlash() {
                 "fuera ese tiempo.", { cancelar: true, confirmar: true });
 }
 
+// ----- Ajustes: zona horaria de visualización -----
+
+async function cargarAjustes() {
+  // Carga el ajuste de zona al arrancar. Sin respuesta del backend, la
+  // zona queda automática (la del navegador).
+  try {
+    const r = await fetchApi("/api/ajustes");
+    if (!r.ok) return;
+    const a = await r.json();
+    ZONA_HORARIA = (a.timezone && a.timezone !== "auto") ? a.timezone : null;
+  } catch (e) { /* visor sin backend de ajustes: zona automática */ }
+}
+
+// Zonas IANA que el navegador conoce; si no expone el catálogo, una lista
+// corta de respaldo con las de uso probable.
+function zonasDisponibles() {
+  try {
+    if (typeof Intl.supportedValuesOf === "function") {
+      return Intl.supportedValuesOf("timeZone");
+    }
+  } catch (e) { /* respaldo abajo */ }
+  return ["UTC", "Europe/Madrid", "America/Bogota", "America/Mexico_City",
+          "America/New_York", "America/Argentina/Buenos_Aires"];
+}
+
+let tzPoblado = false;
+function tzPoblarSelect() {
+  if (tzPoblado) return;
+  const sel = document.getElementById("tz-select");
+  const auto = document.createElement("option");
+  auto.value = "auto";
+  auto.textContent = "Automática (zona del navegador)";
+  sel.appendChild(auto);
+  for (const z of zonasDisponibles()) {
+    const o = document.createElement("option");
+    o.value = z;
+    o.textContent = z;
+    sel.appendChild(o);
+  }
+  tzPoblado = true;
+}
+
+function tzCargar() {
+  tzPoblarSelect();
+  document.getElementById("tz-select").value = ZONA_HORARIA || "auto";
+  document.getElementById("tz-resultado").textContent = "";
+}
+
+function tzDetectar() {
+  const z = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const sel = document.getElementById("tz-select");
+  if (![...sel.options].some((o) => o.value === z)) {
+    const o = document.createElement("option");
+    o.value = z;
+    o.textContent = z;
+    sel.appendChild(o);
+  }
+  sel.value = z;
+  document.getElementById("tz-resultado").textContent =
+    "Zona del navegador: " + z + ". Pulsar Guardar para aplicarla.";
+}
+
+async function tzGuardar() {
+  const sel = document.getElementById("tz-select");
+  const res = document.getElementById("tz-resultado");
+  const tz = sel.value;
+  res.textContent = "Guardando...";
+  try {
+    const r = await fetchApi("/api/ajustes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timezone: tz }) });
+    const d = await r.json();
+    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    ZONA_HORARIA = (tz && tz !== "auto") ? tz : null;
+    res.textContent = "Zona guardada.";
+    // Repinta las tarjetas con la zona nueva sin esperar al sondeo.
+    refrescarRed();
+  } catch (e) {
+    res.textContent = "Error: " + e.message;
+  }
+}
+
 document.getElementById("radio-aplicar").addEventListener("click", radioAplicarPuerto);
 document.getElementById("radio-flash").addEventListener("click", radioFlash);
+document.getElementById("tz-detectar").addEventListener("click", tzDetectar);
+document.getElementById("tz-guardar").addEventListener("click", tzGuardar);
 document.getElementById("cfg-archivo-btn").addEventListener("click", () =>
   document.getElementById("cfg-archivo").click());
 document.getElementById("cfg-archivo").addEventListener("change", (e) => {
@@ -1339,6 +1433,9 @@ document.getElementById("tarjetas").innerHTML =
   '<div class="skeleton"></div>'.repeat(3);
 
 navegar();
+// La zona de visualización se carga antes del primer repintado con hora;
+// hasta que llega, el reloj y las gráficas usan la del navegador.
+cargarAjustes().then(refrescarRed);
 refrescarRed();
 setInterval(refrescarRed, 5000);
 setInterval(() => {
@@ -1349,7 +1446,8 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { refrescarRed(); if (vistaActual() === "topologia") refrescarMapa(); }
 });
 setInterval(() => {
-  document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("es-ES", opcHora({}));
   const ind = document.getElementById("refresco");
   if (ultimoRefresco !== null) {
     ind.textContent = "actualizado hace " +

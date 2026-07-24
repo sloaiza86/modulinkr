@@ -36,6 +36,11 @@ Config por variables de entorno (/etc/modulinkr/web.env en el Pi):
                           caducan al reiniciar el servicio)
   MODULINKR_WEB_PORT      (default 8080; lo usa el arranque uvicorn)
   MODULINKR_WEB_ONLINE_S  (default 60) umbral de "conectado", segundos
+  MODULINKR_WEB_HEARTBEAT_S (default 15) frescura del latido del servicio
+                          (gateway_status); pasado este plazo sin refresco,
+                          el servicio se da por caído (ver netstatus.py)
+  MODULINKR_WEB_SETTINGS  ruta del JSON de preferencias del visor (zona
+                          horaria). Vacía = junto al buffer.db (settingsapi.py)
 
 Arranque manual (banco):
   uvicorn web_service:app --host 0.0.0.0 --port 8080
@@ -224,6 +229,10 @@ import configapi  # noqa: E402
 
 import radioapi  # noqa: E402
 
+# ----- Módulo: ajustes del visor (preferencias del panel) -----
+
+import settingsapi  # noqa: E402
+
 # ----- Stub de fase futura -----
 
 cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
@@ -244,6 +253,7 @@ for r in (red, topo, cats, cmds):
 app.include_router(dataapi.router, dependencies=[Depends(require_auth)])
 app.include_router(configapi.router, dependencies=[Depends(require_auth)])
 app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
+app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
 
 
 # ----- Frontend estático -----

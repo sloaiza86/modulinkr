@@ -114,6 +114,16 @@
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/zona">
+            <div class="ai-icono ai-azul">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="13.5"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar zona horaria</div>
+              <div class="ai-sub">Zona de visualización del reloj y las gráficas del visor</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
         </div>
       </div>
 
@@ -216,6 +226,32 @@
           <p class="aviso" id="radio-bin-info"></p>
           <div class="cfg-fila">
             <button id="radio-flash" class="btn-primario">Actualizar firmware de la radio</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: zona horaria de visualización del visor -->
+      <div class="ajustes" id="cfg-zona" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar zona horaria</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Zona de visualización</h3>
+          <p class="aviso">Zona en la que el visor muestra el reloj de la cabecera
+            y las horas de las gráficas. Se guarda en el gateway y la comparten
+            todos los navegadores. La opción automática usa la zona de cada
+            navegador.</p>
+          <div class="cfg-fila">
+            <select id="tz-select"></select>
+            <button id="tz-detectar">Detectar del navegador</button>
+          </div>
+          <div class="cfg-fila">
+            <button id="tz-guardar" class="btn-primario">Guardar</button>
+            <span id="tz-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
