@@ -109,6 +109,21 @@ class GatewayBuffer:
                 hop_count       INTEGER
             )
         """)
+        # Latido de estado del servicio para el visor (fila única id=1). El
+        # servicio lo refresca cada pocos segundos: su frescura delata al
+        # servicio caído, y lora_link cae a 0 en el instante en que el
+        # Heltec se desconecta, sin esperar el hueco del auto-reporte de
+        # aire (origen 255). Separa el estado del enlace LoRa del de la
+        # conexión MQTT: cada uno es independiente del otro.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS gateway_status (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                t_updated      REAL    NOT NULL,
+                lora_link      INTEGER NOT NULL,
+                mqtt_enabled   INTEGER NOT NULL,
+                mqtt_connected INTEGER NOT NULL
+            )
+        """)
         self.conn.commit()
 
     def _migrate_v20_if_needed(self) -> None:
@@ -327,6 +342,25 @@ class GatewayBuffer:
                    hop_count       = COALESCE(excluded.hop_count, hop_count)""",
             (origin, time.time(), frame_type, rssi, snr,
              parent_id, hop_count))
+        self.conn.commit()
+
+    def status_heartbeat(self, lora_link: bool, mqtt_enabled: bool,
+                         mqtt_connected: bool) -> None:
+        """Refresca el latido de estado del servicio (fila id=1). El visor
+        lo lee en solo lectura: su t_updated marca si el servicio sigue
+        vivo, lora_link si el puerto del Heltec está abierto y mqtt_* el
+        estado de la conexión al broker cloud."""
+        self.conn.execute(
+            """INSERT INTO gateway_status
+                   (id, t_updated, lora_link, mqtt_enabled, mqtt_connected)
+               VALUES (1, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   t_updated      = excluded.t_updated,
+                   lora_link      = excluded.lora_link,
+                   mqtt_enabled   = excluded.mqtt_enabled,
+                   mqtt_connected = excluded.mqtt_connected""",
+            (time.time(), int(lora_link), int(mqtt_enabled),
+             int(mqtt_connected)))
         self.conn.commit()
 
     def status_all(self) -> list[dict]:

@@ -63,7 +63,7 @@ La vista Configuración adopta el patrón de ajustes de los paneles domóticos (
 
 **Configurar radio LoRa** (`radioapi.py`, `/api/radio`): estado del servicio y del puerto, cambio del puerto del Heltec (`set_lora_port.sh`: `gateway.env`, `web.env` y reinicio del servicio) y flasheo de `heltec-radio.bin` (`flash_heltec.sh`). Ambas acciones corren con `sudo -n` bajo la regla acotada que el instalador deja en `/etc/sudoers.d/modulinkr-web`, limitada a esos dos scripts.
 
-La tarjeta del gateway en la vista Red usa como latido el auto-reporte de aire del servicio (origen 255, cadencia del beacon): sin reporte fresco muestra "sin señal" con la antigüedad.
+La tarjeta del gateway en la vista Red muestra dos enlaces independientes desde el latido de estado del servicio (`gateway_status`): un chip LoRa (radio del Heltec) y un chip MQTT (conexión al broker cloud). El servicio refresca el latido cada `MODULINKR_HEARTBEAT_S`, y ante una desconexión del Heltec marca `lora_link=0` en el acto: el chip LoRa pasa a "sin señal" en el siguiente sondeo de la web (unos segundos), sin esperar el hueco del auto-reporte de aire (antes hasta `MODULINKR_WEB_ONLINE_S`). El chip MQTT distingue conectado, sin conexión y no configurado, y es ortogonal al de LoRa (la nube puede estar arriba con la radio caída y viceversa). `netstatus.gateway_link_state` da el servicio por caído si el latido no se refresca dentro de `MODULINKR_WEB_HEARTBEAT_S` (default 15 s); un buffer anterior a la tabla `gateway_status` cae al veredicto antiguo del auto-reporte de aire con un solo chip.
 
 ## 7. Descartes razonados
 

@@ -132,12 +132,17 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
 .tn-nombre { font-weight: 600; }
 .tn-sub { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
 .tn-estado { flex: none; align-self: flex-start; margin-top: 0.15rem; }
+/* Pila de estados del gateway (LoRa y MQTT), alineada arriba a la derecha. */
+.tn-estados { flex: none; align-self: flex-start; margin-top: 0.15rem;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem; }
 
 .chip { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
-.chip.on    { background: var(--ok-suave);   color: var(--ok); }
-.chip.off   { background: var(--off-suave);  color: var(--off); }
-.chip.ambar { background: var(--warn-suave); color: var(--warn); }
-.chip.rojo  { background: var(--bad-suave);  color: var(--bad); }
+.chip.on     { background: var(--ok-suave);   color: var(--ok); }
+.chip.off    { background: var(--off-suave);  color: var(--off); }
+.chip.ambar  { background: var(--warn-suave); color: var(--warn); }
+.chip.rojo   { background: var(--bad-suave);  color: var(--bad); }
+/* MQTT no configurado: presente pero atenuado, no es una alarma. */
+.chip.neutro { background: var(--off-suave);  color: var(--off); opacity: 0.6; }
 
 .tn-sensores { display: flex; flex-direction: column; }
 .sensor {

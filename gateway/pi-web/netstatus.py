@@ -26,6 +26,11 @@ DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
 # offline. Debe cubrir varios intervalos de muestreo (banco: 5 s).
 ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "60"))
 
+# Frescura del latido de estado del servicio (gateway_status). Más corto
+# que ONLINE_S: gobierna el veredicto de "servicio caído". Debe cubrir
+# varios periodos del latido del servicio (MODULINKR_HEARTBEAT_S, 3 s).
+HEARTBEAT_S = float(os.environ.get("MODULINKR_WEB_HEARTBEAT_S", "15"))
+
 GATEWAY_ID = 255
 
 
@@ -65,6 +70,36 @@ def duty_by_origin(window_s: float = 3600.0) -> dict:
         span = st["t_last"] - st["t_first"]
         out[origin] = (st["on_ms"] / (span * 1000.0)) if span > 0 else None
     return out
+
+
+def gateway_link_state() -> dict:
+    """Estado de los enlaces del gateway (LoRa y MQTT) desde el latido que
+    el servicio escribe en gateway_status. Si el latido no se refresca
+    dentro de HEARTBEAT_S, el servicio se da por caído y ambos enlaces por
+    abajo. En un buffer anterior a la tabla (gateway de una versión previa)
+    devuelve None en los campos: el visor cae al veredicto antiguo."""
+    now = time.time()
+    unknown = {"service_online": None, "lora_link": None,
+               "mqtt_enabled": None, "mqtt_connected": None,
+               "status_ago_s": None}
+    try:
+        with _conn() as c:
+            row = c.execute(
+                """SELECT t_updated, lora_link, mqtt_enabled, mqtt_connected
+                   FROM gateway_status WHERE id = 1""").fetchone()
+    except sqlite3.OperationalError:
+        return unknown
+    if row is None:
+        return unknown
+    t_updated, lora, mqtt_en, mqtt_up = row
+    fresh = (now - t_updated) <= HEARTBEAT_S
+    return {
+        "service_online": fresh,
+        "lora_link":      bool(lora) if fresh else False,
+        "mqtt_enabled":   bool(mqtt_en),
+        "mqtt_connected": bool(mqtt_up) if fresh else False,
+        "status_ago_s":   round(now - t_updated, 1),
+    }
 
 
 def network_state() -> dict:
@@ -117,7 +152,8 @@ def network_state() -> dict:
     return {"nodes": nodes,
             "gateway_duty_1h": duty.get(GATEWAY_ID),
             "gateway_online": None if gw_ago is None else gw_ago <= ONLINE_S,
-            "gateway_ago_s": gw_ago}
+            "gateway_ago_s": gw_ago,
+            **gateway_link_state()}
 
 
 def topology() -> dict:

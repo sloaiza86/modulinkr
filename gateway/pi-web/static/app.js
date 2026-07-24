@@ -203,26 +203,53 @@ let cacheEstado = null;      // última respuesta de /api/red/estado
 let cacheUltimos = null;     // última respuesta de /api/red/ultimos
 let detalleOrigen = null;    // nodo abierto en el panel de detalle
 
+// Estado del gateway: dos enlaces independientes (LoRa y MQTT) desde el
+// latido del servicio (gateway_status). LoRa cae a "sin señal" en el acto
+// al desconectar el Heltec; MQTT refleja la conexión al broker cloud. Un
+// buffer anterior a la tabla de estado (lora_link null) cae al veredicto
+// antiguo del auto-reporte de aire, con un solo chip.
+function estadoGateway(data) {
+  if (data.lora_link == null && data.service_online == null) {
+    const caido = data.gateway_online === false;
+    return {
+      caido,
+      sub: caido ? `radio sin reportar hace ${fmtAgo(data.gateway_ago_s)}`
+                 : "coordinador de la red",
+      chips: [caido ? { cls: "off", txt: "sin señal" }
+                    : { cls: "on", txt: "en línea" }],
+    };
+  }
+  const servDown = data.service_online === false;
+  const loraUp = data.lora_link === true;
+  const chips = [loraUp ? { cls: "on", txt: "LoRa" }
+                        : { cls: "off", txt: "LoRa sin señal" }];
+  if (data.mqtt_enabled) {
+    chips.push(data.mqtt_connected ? { cls: "on", txt: "MQTT" }
+                                   : { cls: "off", txt: "MQTT sin conexión" });
+  } else if (data.mqtt_enabled === false) {
+    chips.push({ cls: "neutro", txt: "MQTT off" });
+  }
+  const sub = servDown
+    ? `servicio sin responder hace ${fmtAgo(data.status_ago_s)}`
+    : (loraUp ? "coordinador de la red" : "radio del gateway desconectada");
+  return { caido: !loraUp, sub, chips };
+}
+
 function tarjetaGateway(data) {
   const online = data.nodes.filter((n) => n.online).length;
   const total = data.nodes.length;
-  // Estado real del gateway: el servicio se auto-reporta en el buffer con
-  // cada beacon; sin reporte fresco (Heltec desconectado o servicio
-  // caído) la tarjeta lo dice. null = buffer viejo sin el dato: se asume
-  // en línea como antes.
-  const caido = data.gateway_online === false;
-  const sub = caido
-    ? `radio sin reportar hace ${fmtAgo(data.gateway_ago_s)}`
-    : "coordinador de la red";
+  const e = estadoGateway(data);
+  const chips = e.chips
+    .map((c) => `<span class="chip ${c.cls}">${c.txt}</span>`).join("");
   return `
   <div class="card tarjeta-nodo tarjeta-gw" data-origin="255">
     <div class="tn-cabecera">
-      <div class="tn-icono${caido ? " off" : ""}">${svg(ICONO.antena)}</div>
+      <div class="tn-icono${e.caido ? " off" : ""}">${svg(ICONO.antena)}</div>
       <div class="tn-info">
         <div class="tn-nombre">Gateway</div>
-        <div class="tn-sub">${sub}</div>
+        <div class="tn-sub">${e.sub}</div>
       </div>
-      <span class="tn-estado chip ${caido ? "off" : "on"}">${caido ? "sin señal" : "en línea"}</span>
+      <div class="tn-estados">${chips}</div>
     </div>
     <div class="tn-sensores">
       <div class="sensor fila-info">

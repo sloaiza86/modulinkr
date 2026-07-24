@@ -39,6 +39,7 @@ código:
   MODULINKR_DB          (default /home/practica/modulinkr_buffer.db)
   MODULINKR_BUFFER_MAX  (default 1000)
   MODULINKR_STATS_S     (default 60)      periodo del reporte STATS
+  MODULINKR_HEARTBEAT_S (default 3)       periodo del latido de estado (visor)
   MODULINKR_ACK_WINDOW_S (default 1.0)    ventana de supresión de ACK dup
   MODULINKR_SEC_ENABLED (default 0)       seguridad v2.2 (frame-format §14)
   MODULINKR_SEC_KEY     (sin default)     clave de red, 32 caracteres hex;
@@ -135,6 +136,12 @@ class GatewayService:
 
         # Periodo del reporte de estadísticas de tráfico (segundos).
         self.stats_s = float(os.environ.get("MODULINKR_STATS_S", "60"))
+
+        # Periodo del latido de estado hacia el visor (segundos). Corto:
+        # su frescura es lo que le da al visor un veredicto rápido de
+        # "servicio caído". La caída del enlace LoRa no espera a este
+        # periodo, se escribe en el acto al fallar el puerto.
+        self.hb_s = float(os.environ.get("MODULINKR_HEARTBEAT_S", "3"))
 
         # Ventana de supresión de ACK duplicado (mac.md §4.2). Si la misma
         # (origin, seq) llega dos veces dentro de esta ventana, es multi-
@@ -495,12 +502,32 @@ class GatewayService:
             "up" if mqtt_up else "down", pub_tel, pub_cat, pending,
         )
 
+    # ----- Estado hacia el visor -----
+
+    def _open_serial(self) -> bool:
+        """Abre el puerto del Heltec. True si quedó abierto; False si el
+        puerto no está o falla (el Heltec no está conectado todavía). No
+        lanza: el bucle reintenta hasta que la radio aparece."""
+        try:
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser.reset_input_buffer()
+            return True
+        except serial.SerialException as e:
+            LOG.warning("no se pudo abrir %s: %s", self.port, e)
+            self.ser = None
+            return False
+
+    def _heartbeat(self, lora_link: bool) -> None:
+        """Escribe el latido de estado al buffer. mqtt_enabled y
+        mqtt_connected salen del publicador; lora_link lo pasa el llamador
+        según tenga o no el puerto del Heltec abierto y operativo."""
+        mqtt_en = bool(self.mqtt and self.mqtt.enabled)
+        mqtt_up = bool(self.mqtt and self.mqtt.connected)
+        self.buf.status_heartbeat(lora_link, mqtt_en, mqtt_up)
+
     # ----- Bucle principal -----
 
     def run(self) -> int:
-        LOG.info("abriendo %s @ %d baud", self.port, self.baud)
-        self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
-        self.ser.reset_input_buffer()
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
         LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
                  self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
@@ -517,32 +544,66 @@ class GatewayService:
         last_beacon = 0.0
         last_stats  = time.monotonic()
         last_drain  = 0.0
+        last_hb     = 0.0
         rx_buf = b""
 
         try:
             while True:
-                now = time.monotonic()
-                if now - last_beacon >= self.beacon_s:
-                    last_beacon = now
-                    self.send_beacon()
-                    # Reporte propio de aire (v3.1): el gateway se mide a
-                    # sí mismo con la misma cadencia del beacon.
-                    self.buf.airtime_report(protocol.ADDR_GATEWAY,
-                                            self.gw_tx_ms)
-                if now - last_stats >= self.stats_s:
-                    last_stats = now
-                    self.report_stats()
-                if now - last_drain >= self.drain_s:
-                    last_drain = now
-                    self.mqtt.drain()
+                # Fase sin radio: el Heltec no está (desenchufado o aún no
+                # abierto). El servicio no muere por eso: sigue latiendo con
+                # lora abajo (el visor lo ve al instante), drena lo pendiente
+                # al broker y reintenta abrir el puerto una vez por segundo.
+                if self.ser is None:
+                    if not self._open_serial():
+                        self._heartbeat(lora_link=False)
+                        now = time.monotonic()
+                        if now - last_drain >= self.drain_s:
+                            last_drain = now
+                            self.mqtt.drain()
+                        time.sleep(1.0)
+                        continue
+                    LOG.info("radio abierta en %s @ %d baud", self.port, self.baud)
+                    rx_buf = b""
+                    last_beacon = 0.0   # beacon inmediato al recuperar la radio
 
-                chunk = self.ser.read(self.ser.in_waiting or 1)
-                if not chunk:
-                    continue
-                rx_buf += chunk
-                while b"\n" in rx_buf:
-                    raw, rx_buf = rx_buf.split(b"\n", 1)
-                    self.handle_rx_line(raw.decode(errors="ignore"))
+                try:
+                    now = time.monotonic()
+                    if now - last_beacon >= self.beacon_s:
+                        last_beacon = now
+                        self.send_beacon()
+                        # Reporte propio de aire (v3.1): el gateway se mide a
+                        # sí mismo con la misma cadencia del beacon.
+                        self.buf.airtime_report(protocol.ADDR_GATEWAY,
+                                                self.gw_tx_ms)
+                    if now - last_stats >= self.stats_s:
+                        last_stats = now
+                        self.report_stats()
+                    if now - last_drain >= self.drain_s:
+                        last_drain = now
+                        self.mqtt.drain()
+                    if now - last_hb >= self.hb_s:
+                        last_hb = now
+                        self._heartbeat(lora_link=True)
+
+                    chunk = self.ser.read(self.ser.in_waiting or 1)
+                    if chunk:
+                        rx_buf += chunk
+                        while b"\n" in rx_buf:
+                            raw, rx_buf = rx_buf.split(b"\n", 1)
+                            self.handle_rx_line(raw.decode(errors="ignore"))
+                except (serial.SerialException, OSError) as e:
+                    # Heltec desconectado (lectura o TX del beacon): se delata
+                    # en el acto en el estado (lora abajo) y se cierra el
+                    # puerto para volver a la fase de reintento de apertura.
+                    # OSError cubre el ENODEV/ENXIO que asoma cuando el
+                    # /dev/ttyUSB* se evapora en pleno acceso.
+                    LOG.warning("radio desconectada (%s): reintentando", e)
+                    self._heartbeat(lora_link=False)
+                    try:
+                        self.ser.close()
+                    except Exception:                    # noqa: BLE001
+                        pass
+                    self.ser = None
         except KeyboardInterrupt:
             LOG.info("interrumpido por usuario")
             self.report_stats()
