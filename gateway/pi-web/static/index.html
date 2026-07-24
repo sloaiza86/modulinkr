@@ -90,10 +90,134 @@
     </section>
 
     <section id="view-configuracion" class="view" hidden>
-      <div class="card construccion">
-        <svg viewBox="0 0 24 24"><line x1="5" y1="4" x2="5" y2="10"/><circle cx="5" cy="13" r="2.4"/><line x1="5" y1="15.4" x2="5" y2="20"/><line x1="12" y1="4" x2="12" y2="6"/><circle cx="12" cy="9" r="2.4"/><line x1="12" y1="11.4" x2="12" y2="20"/><line x1="19" y1="4" x2="19" y2="13"/><circle cx="19" cy="16" r="2.4"/><line x1="19" y1="18.4" x2="19" y2="20"/></svg>
-        <h2>En construcción</h2>
-        <p>La configuración del gateway y de los nodos se gestionará desde aquí.</p>
+
+      <!-- Nivel 1: menú de ajustes (patrón de panel domótico) -->
+      <div class="ajustes" id="cfg-menu">
+        <div class="card lista-ajustes">
+          <a class="ajuste-item" href="#/configuracion/nodo">
+            <div class="ai-icono ai-azul">
+              <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar nodo</div>
+              <div class="ai-sub">Comisionamiento y configuración de los nodos de la red</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
+          <a class="ajuste-item" href="#/configuracion/radio">
+            <div class="ai-icono ai-verde">
+              <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar radio LoRa</div>
+              <div class="ai-sub">Puerto serie del Heltec y actualización de su firmware</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <!-- Nivel 2: Configurar nodo -->
+      <div class="ajustes" id="cfg-sub-nodo" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar nodo</h2>
+        </div>
+        <div class="card lista-ajustes">
+          <div class="ajuste-item desactivado">
+            <div class="ai-icono ai-verde">
+              <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Comisionar nodo</div>
+              <div class="ai-sub">Alta guiada de un nodo nuevo en la red</div>
+            </div>
+            <span class="chip off">próximamente</span>
+          </div>
+          <a class="ajuste-item" href="#/configuracion/nodo/usb">
+            <div class="ai-icono ai-naranja">
+              <svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="7"/><circle cx="12" cy="21" r="1.4"/><polyline points="12 15 7.5 12.5 7.5 9.5"/><rect x="6.3" y="6.6" width="2.4" height="2.4"/><polyline points="12 12 16.5 9.8 16.5 7.5"/><circle cx="16.5" cy="5.8" r="1.3"/><polyline points="9.5 4.5 12 7 14.5 4.5"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Cargar JSON vía USB</div>
+              <div class="ai-sub">Subir un config.json a un Atom conectado al puerto USB del Pi</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
+        </div>
+      </div>
+
+      <!-- Nivel 3: carga del config.json por USB -->
+      <div class="ajustes" id="cfg-usb" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion/nodo" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Cargar JSON vía USB</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Nodo por USB</h3>
+          <p class="aviso">Conectar un nodo Atom a un puerto USB del Pi y buscarlo.
+            El puerto de la radio del gateway queda excluido de la búsqueda.</p>
+          <div class="cfg-fila">
+            <button id="cfg-buscar" class="btn-primario">Buscar nodo</button>
+            <select id="cfg-puertos" hidden></select>
+            <span id="cfg-busqueda-aviso" class="aviso"></span>
+          </div>
+          <div id="cfg-nodo" class="cfg-nodo" hidden></div>
+        </div>
+
+        <div class="card cfg-card" id="cfg-editor" hidden>
+          <h3>config.json</h3>
+          <div class="cfg-fila">
+            <button id="cfg-leer">Leer del nodo</button>
+            <button id="cfg-archivo-btn">Cargar archivo</button>
+            <input type="file" id="cfg-archivo" accept=".json,application/json" hidden>
+          </div>
+          <textarea id="cfg-texto" spellcheck="false"
+                    placeholder="Pegar aquí el config.json, cargarlo de un archivo o leerlo del nodo..."></textarea>
+          <div class="cfg-fila">
+            <button id="cfg-enviar" class="btn-primario">Enviar al nodo</button>
+            <button id="cfg-borrar" class="peligro-borde">Borrar config del nodo</button>
+            <span id="cfg-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: radio LoRa del gateway -->
+      <div class="ajustes" id="cfg-radio" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar radio LoRa</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Radio del gateway</h3>
+          <div id="radio-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Puerto serie del Heltec</h3>
+          <p class="aviso">Cambiarlo actualiza la configuración del gateway y
+            reinicia su servicio (la radio queda fuera unos segundos).</p>
+          <div class="cfg-fila">
+            <select id="radio-puertos"></select>
+            <button id="radio-aplicar" class="btn-primario">Aplicar puerto</button>
+          </div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Firmware de la radio</h3>
+          <p class="aviso" id="radio-bin-info"></p>
+          <div class="cfg-fila">
+            <button id="radio-flash" class="btn-primario">Actualizar firmware de la radio</button>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -125,6 +249,18 @@
     <span class="m-actual" id="modal-valor"></span>
   </div>
   <div id="modal-grafico"></div>
+</div>
+
+<!-- Diálogo de progreso y confirmación del comisionamiento -->
+<div id="cfg-dialogo-fondo" hidden></div>
+<div id="cfg-dialogo" class="dialogo" hidden>
+  <h3 id="cfg-dialogo-titulo"></h3>
+  <p id="cfg-dialogo-texto"></p>
+  <div class="cfg-fila dialogo-botones">
+    <button id="cfg-dialogo-cancelar" hidden>Cancelar</button>
+    <button id="cfg-dialogo-confirmar" class="peligro" hidden>Borrar</button>
+    <button id="cfg-dialogo-cerrar" class="btn-primario" hidden>Cerrar</button>
+  </div>
 </div>
 
 <div id="toasts"></div>

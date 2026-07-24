@@ -43,10 +43,11 @@
 //
 // v3.3 (24-jul-2026), comisionamiento por USB (fase 2):
 //   - El config deja de viajar embebido en el binario: vive en
-//     /config.json (LittleFS) y se carga o reemplaza por el protocolo
-//     CFG.* de la consola USB (commission.h) sin recompilar.
-//   - Sin config válido el nodo no opera: LED violeta (config ausente) o
-//     rojo (inválido) y el protocolo de comisionamiento a la espera.
+//     /config.json (LittleFS) y se carga, reemplaza o borra por el
+//     protocolo CFG.* de la consola USB (commission.h) sin recompilar.
+//   - Sin config válido (ausente o inválido) el nodo no opera: LED rojo
+//     parpadeando y el protocolo de comisionamiento a la espera; el log
+//     distingue el motivo.
 //
 // Asignacion de UART (resolucion del conflicto, ver nodo/README.md):
 //   Modbus  SoftwareSerial  GPIO 33 RX / GPIO 23 TX  (baud del config)
@@ -130,7 +131,7 @@ cfg::Config g_cfg;
 // Estado del comisionamiento (fase 2): sin config válido el nodo no opera
 // y el loop queda en modo espera atendiendo el protocolo CFG.* por USB.
 bool g_configured  = false;
-bool g_cfg_missing = false;   // config ausente (LED violeta) o inválido (rojo)
+bool g_cfg_missing = false;   // config ausente o inválido (solo para el log)
 char g_cfg_err[96] = {0};
 
 // client_id MQTT derivado del node_id (se rellena en setup).
@@ -1263,7 +1264,7 @@ void setup() {
     if (!g_configured) {
         Serial.printf("[config] %s: %s (esperando CFG.PUT por USB)\n",
                       g_cfg_missing ? "SIN CONFIG" : "INVALIDO", g_cfg_err);
-        setLed(g_cfg_missing ? 0x200020 : 0x200000);
+        setLed(0x200000);
         return;  // el resto del arranque requiere config
     }
 
@@ -1364,8 +1365,8 @@ void loop() {
     // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
     commission::poll();
 
-    // Sin config válido: LED parpadeando (violeta ausente, rojo inválido),
-    // recordatorio periódico en el log y nada más que hacer.
+    // Sin config válido: LED rojo parpadeando, recordatorio periódico en
+    // el log (con el motivo: ausente o inválido) y nada más que hacer.
     if (!g_configured) {
         const uint32_t wait_now = millis();
         static uint32_t last_log_ms   = 0;
@@ -1380,7 +1381,7 @@ void loop() {
         if (wait_now - last_blink_ms >= 500) {
             last_blink_ms = wait_now;
             led_on = !led_on;
-            setLed(led_on ? (g_cfg_missing ? 0x200020 : 0x200000) : 0x000000);
+            setLed(led_on ? 0x200000 : 0x000000);
         }
         delay(20);
         return;

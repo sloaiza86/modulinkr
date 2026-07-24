@@ -128,19 +128,46 @@ pio device monitor --filter time   # monitor con timestamps
 
 Atajos en VS Code: `PlatformIO: Build`, `PlatformIO: Upload`, `PlatformIO: Monitor`.
 
+## Comisionamiento por USB (fase 2)
+
+El binario es único: no lleva ningún parámetro de despliegue. La identidad, la red LoRa y mesh, el bloque NB-IoT y el bus Modbus salen del `config.json` del nodo (spec en [`node-config.md`](../shared/protocol/node-config.md)), que vive en la flash (`/config.json` en LittleFS) y se gestiona por el puerto USB con el protocolo `CFG.*` (`src/commission.h`): identidad, lectura, carga con sha256 y borrado. Un config nuevo se valida con las reglas del arranque y solo se graba si pasa; el nodo se reinicia para aplicarlo.
+
+Sin config en flash (primer flasheo o tras `CFG.DEL`) el nodo no opera: LED rojo parpadeando y el protocolo a la espera. Los config del banco están en `configs/` (nodo1 y nodo2).
+
+Vías de carga: la página "Cargar JSON vía USB" del visor web del gateway (Atom conectado al Pi), o `tools/cfgtool.py` desde cualquier equipo con pyserial:
+
+```bash
+python3 tools/cfgtool.py list                          # puertos candidatos
+python3 tools/cfgtool.py hello -p <puerto>             # identidad
+python3 tools/cfgtool.py put   -p <puerto> configs/nodo1.json
+python3 tools/cfgtool.py get   -p <puerto> -o actual.json
+python3 tools/cfgtool.py del   -p <puerto>             # deja sin configurar
+```
+
 ## Estructura
 
 ```
 nodo/
-├── platformio.ini          Configuración del proyecto (incluye REGION_*, MODEM_*, LORA_TX_DBM, NODE_ID, NBIOT_APN, MQTT_*)
+├── platformio.ini          Configuración del proyecto (sin build_flags de despliegue)
+├── configs/                config.json de cada unidad del banco (nodo1, nodo2)
+├── tools/
+│   └── cfgtool.py          Cliente serie del comisionamiento (list, hello, get, put, del)
 ├── src/
-│   ├── main.cpp            Punto de entrada (varía según el hito en curso)
-│   ├── modbus.{cpp,h}      Driver Modbus RTU sobre RS-485 (existe)
-│   ├── lora.{cpp,h}        Driver LoRa P2P sobre la librería M5-LoRaWAN-RAK (existe, modo TX)
-│   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028 con MQTT nativo (existe, modo single-channel)
-│   ├── buffer.{cpp,h}      Cola circular FreeRTOS para tramas con ACK pendiente (pendiente, H4)
-│   └── console.{cpp,h}     Logging estructurado por Serial (pendiente, H6)
+│   ├── main.cpp            Punto de entrada y orquestación
+│   ├── config.{cpp,h}      Carga y validación del config.json (node-config.md)
+│   ├── configstore.{cpp,h} Almacén del config en LittleFS (/config.json)
+│   ├── commission.{cpp,h}  Protocolo CFG.* de comisionamiento por USB
+│   ├── modbus.{cpp,h}      Driver Modbus RTU sobre RS-485
+│   ├── sampler.{cpp,h}     Muestreo Modbus dirigido por el config
+│   ├── lora.{cpp,h}        Driver LoRa P2P (RAK3172, M5-LoRaWAN-RAK)
+│   ├── mesh.{cpp,h}        Árbol mesh: beacons, padre, rutas
+│   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028
+│   ├── nbiot_service.{cpp,h}  Servicio NB-IoT en el núcleo 0
+│   ├── pending.{cpp,h}     Cola de tramas con ACK pendiente
+│   ├── outbox.{cpp,h}      Retención de muestras sin ruta (custodia, batch)
+│   ├── nodeclock.{cpp,h}   Reloj del sistema (epoch de red)
+│   └── protocol.h          Constantes del frame-format
 └── lib/                    Librerías propias específicas del nodo
 ```
 
-Las constantes regionales (`REGION_US915` / `REGION_EU868`) y los parámetros del nodo (`NODE_ID`, `LORA_TX_DBM`) viven en `platformio.ini` como `build_flags`, no en un header dedicado.
+Todo parámetro de despliegue vive en el `config.json` del nodo; `platformio.ini` solo conserva flags de hardware del banco (etiqueta del módem) y de compilación.

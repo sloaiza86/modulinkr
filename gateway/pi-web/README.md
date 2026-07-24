@@ -55,7 +55,17 @@ La web abre `buffer.db` en modo solo lectura; no comparte proceso ni sockets con
 4. Instalador del visor (patrón del pi-service: venv, systemd, credenciales preguntadas, idempotente).
 5. Módulo de comandos, cuando el firmware lo soporte.
 
-## 6. Descartes razonados
+## 6. Configuración desde el visor (24-jul-2026)
+
+La vista Configuración adopta el patrón de ajustes de los paneles domóticos (items con icono, subtítulo y chevron; subrutas con volver) y aloja dos páginas operativas:
+
+**Cargar JSON vía USB** (`configapi.py`, `/api/config`): comisionamiento de un nodo Atom conectado por USB al Pi con el protocolo `CFG.*` del firmware (detección por sondeo de `CFG.HELLO`, lectura, carga con sha256 y borrado). El veredicto de validación es el del nodo; tras cargar o borrar, el visor re-detecta para confirmar el reinicio. El puerto del Heltec queda excluido de la búsqueda (`MODULINKR_GATEWAY_PORT` en `web.env`) y las operaciones serie van bajo un lock global.
+
+**Configurar radio LoRa** (`radioapi.py`, `/api/radio`): estado del servicio y del puerto, cambio del puerto del Heltec (`set_lora_port.sh`: `gateway.env`, `web.env` y reinicio del servicio) y flasheo de `heltec-radio.bin` (`flash_heltec.sh`). Ambas acciones corren con `sudo -n` bajo la regla acotada que el instalador deja en `/etc/sudoers.d/modulinkr-web`, limitada a esos dos scripts.
+
+La tarjeta del gateway en la vista Red usa como latido el auto-reporte de aire del servicio (origen 255, cadencia del beacon): sin reporte fresco muestra "sin señal" con la antigüedad.
+
+## 7. Descartes razonados
 
 - **Grafana**: cubre solo la función 1, pesa 150-300 MB (inviable en el Zero 2W) y obligaría a construir igualmente el resto. Queda como opción futura en la VM apuntando al mismo Postgres si algún día hace falta análisis avanzado.
 - **Home Assistant**: el patrón modular se copia; la plataforma no (dimensionada para cientos de integraciones domóticas, ajena a este dominio).

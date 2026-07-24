@@ -214,6 +214,17 @@ void handlePut(const char* args) {
     ESP.restart();
 }
 
+void handleDel() {
+    if (!configstore::remove()) {
+        respondErr("fallo borrando el config de flash");
+        return;
+    }
+    respond("CFG:OK config borrado, reiniciando");
+    Serial.flush();
+    delay(300);
+    ESP.restart();
+}
+
 void handleLine(const char* line) {
     if (strcmp(line, "CFG.HELLO") == 0) {
         handleHello();
@@ -221,6 +232,8 @@ void handleLine(const char* line) {
         handleGet();
     } else if (strncmp(line, "CFG.PUT ", 8) == 0) {
         handlePut(line + 8);
+    } else if (strcmp(line, "CFG.DEL") == 0) {
+        handleDel();
     }
     // Cualquier otra línea (logs ajenos, ruido del monitor) se ignora.
 }

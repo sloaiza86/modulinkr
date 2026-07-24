@@ -10,6 +10,7 @@ Uso:
   cfgtool.py hello -p PUERTO           identidad del nodo
   cfgtool.py get   -p PUERTO [-o F]    config actual (a stdout o archivo)
   cfgtool.py put   -p PUERTO ARCHIVO   sube y activa un config nuevo
+  cfgtool.py del   -p PUERTO           borra el config (nodo sin configurar)
 
 Requiere pyserial (pip install pyserial).
 
@@ -133,6 +134,14 @@ def cmd_put(args: argparse.Namespace) -> int:
     return 0 if resp.startswith("CFG:OK") else 1
 
 
+def cmd_del(args: argparse.Namespace) -> int:
+    with open_port(args.port) as ser:
+        send_line(ser, "CFG.DEL")
+        resp = read_response(ser)
+    print(resp)
+    return 0 if resp.startswith("CFG:OK") else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -150,9 +159,12 @@ def main() -> int:
     p_put.add_argument("-p", "--port", required=True)
     p_put.add_argument("file", help="config.json a subir")
 
+    p_del = sub.add_parser("del", help="borra el config del nodo")
+    p_del.add_argument("-p", "--port", required=True)
+
     args = parser.parse_args()
     handlers = {"list": cmd_list, "hello": cmd_hello,
-                "get": cmd_get, "put": cmd_put}
+                "get": cmd_get, "put": cmd_put, "del": cmd_del}
     try:
         return handlers[args.cmd](args)
     except (serial.SerialException, TimeoutError, OSError) as e:

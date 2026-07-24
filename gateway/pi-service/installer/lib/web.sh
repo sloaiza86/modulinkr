@@ -72,8 +72,8 @@ web_setup_venv() {
     fi
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install --upgrade pip
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install \
-        fastapi uvicorn psycopg2-binary
-    ok "fastapi, uvicorn y psycopg2 en el venv del visor"
+        fastapi uvicorn psycopg2-binary pyserial
+    ok "fastapi, uvicorn, psycopg2 y pyserial en el venv del visor"
 }
 
 web_fetch_vendor() {
@@ -107,6 +107,11 @@ web_write_env() {
         # no invalidar las sesiones abiertas.
         echo "MODULINKR_WEB_SECRET=${MODULINKR_WEB_SECRET:-$(openssl rand -hex 32)}"
         echo "MODULINKR_WEB_ONLINE_S=${MODULINKR_WEB_ONLINE_S:-60}"
+        # Puerto serie del Heltec: el comisionamiento por USB lo excluye
+        # de la detección (abrirlo resetearía la radio del gateway).
+        if [ -n "${MODULINKR_PORT:-}" ]; then
+            echo "MODULINKR_GATEWAY_PORT=$MODULINKR_PORT"
+        fi
         if [ -n "${MODULINKR_PG_HOST:-}" ]; then
             echo "MODULINKR_PG_HOST=$MODULINKR_PG_HOST"
             echo "MODULINKR_PG_PORT=${MODULINKR_PG_PORT:-5432}"
@@ -117,6 +122,27 @@ web_write_env() {
     } > "$WEB_ENV_FILE"
     chmod 600 "$WEB_ENV_FILE"
     ok "Guardado en $WEB_ENV_FILE (solo root)"
+}
+
+web_write_sudoers() {
+    step "Permisos sudo acotados del visor"
+    # La página "Configurar radio LoRa" ejecuta exactamente dos acciones
+    # privilegiadas. La regla protege frente a una sesión web comprometida
+    # (la API no puede ejecutar otra cosa); no pretende aislar al usuario
+    # del servicio, que es dueño de los scripts.
+    chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" 2>/dev/null || true
+    cat > /etc/sudoers.d/modulinkr-web <<EOF
+# Generado por el instalador de ModuLinkr. Acciones privilegiadas de la
+# página "Configurar radio LoRa" del visor. No editar a mano.
+$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh
+EOF
+    chmod 440 /etc/sudoers.d/modulinkr-web
+    if visudo -cf /etc/sudoers.d/modulinkr-web >/dev/null 2>&1; then
+        ok "Regla sudo en /etc/sudoers.d/modulinkr-web"
+    else
+        rm -f /etc/sudoers.d/modulinkr-web
+        warn "Regla sudo inválida, retirada; la página de la radio quedará en solo lectura"
+    fi
 }
 
 web_write_unit() {
@@ -166,6 +192,7 @@ install_web() {
     web_setup_venv
     web_fetch_vendor
     web_write_env
+    web_write_sudoers
     web_write_unit
     web_enable
 }

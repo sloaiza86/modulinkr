@@ -98,7 +98,26 @@ def network_state() -> dict:
         }
         for r in rows
     ]
-    return {"nodes": nodes, "gateway_duty_1h": duty.get(GATEWAY_ID)}
+
+    # Latido del gateway: el servicio se auto-reporta en node_airtime
+    # (origen 255) con la cadencia del beacon. Si el Heltec se desconecta
+    # el servicio muere (y systemd lo recicla sin poder abrir el puerto),
+    # así que el reporte cesa: reporte fresco = gateway operativo. En un
+    # buffer anterior a v3.1 (sin la tabla) se devuelve None (desconocido).
+    gw_last = None
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT MAX(t_recv) FROM node_airtime WHERE origin = ?",
+                (GATEWAY_ID,)).fetchone()
+        gw_last = row[0] if row else None
+    except sqlite3.OperationalError:
+        pass
+    gw_ago = round(now - gw_last, 1) if gw_last is not None else None
+    return {"nodes": nodes,
+            "gateway_duty_1h": duty.get(GATEWAY_ID),
+            "gateway_online": None if gw_ago is None else gw_ago <= ONLINE_S,
+            "gateway_ago_s": gw_ago}
 
 
 def topology() -> dict:

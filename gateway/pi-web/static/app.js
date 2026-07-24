@@ -116,8 +116,8 @@ function valorFallo(c) {
 }
 
 // fetch con sesión: un 401 significa sesión caducada, se vuelve al login.
-async function fetchApi(url) {
-  const r = await fetch(url);
+async function fetchApi(url, opts) {
+  const r = await fetch(url, opts);
   if (r.status === 401) {
     window.location.href = "/login";
     throw new Error("sesión caducada");
@@ -177,7 +177,9 @@ if (localStorage.getItem("modulinkr_sb") === "1") {
 }
 
 function vistaActual() {
-  const v = location.hash.replace("#/", "");
+  // La vista es el primer tramo del hash; Configuración tiene subrutas
+  // (#/configuracion/nodo, #/configuracion/nodo/usb) dentro de su vista.
+  const v = location.hash.replace("#/", "").split("/")[0];
   return TITULOS[v] ? v : "red";
 }
 
@@ -190,6 +192,7 @@ function navegar() {
   document.getElementById("titulo-vista").textContent = TITULOS[v];
   if (v === "topologia") refrescarMapa();
   if (v === "datos" && catalogo === null) cargarCatalogo();
+  if (v === "configuracion") cfgRuta();
 }
 window.addEventListener("hashchange", navegar);
 
@@ -203,15 +206,23 @@ let detalleOrigen = null;    // nodo abierto en el panel de detalle
 function tarjetaGateway(data) {
   const online = data.nodes.filter((n) => n.online).length;
   const total = data.nodes.length;
+  // Estado real del gateway: el servicio se auto-reporta en el buffer con
+  // cada beacon; sin reporte fresco (Heltec desconectado o servicio
+  // caído) la tarjeta lo dice. null = buffer viejo sin el dato: se asume
+  // en línea como antes.
+  const caido = data.gateway_online === false;
+  const sub = caido
+    ? `radio sin reportar hace ${fmtAgo(data.gateway_ago_s)}`
+    : "coordinador de la red";
   return `
   <div class="card tarjeta-nodo tarjeta-gw" data-origin="255">
     <div class="tn-cabecera">
-      <div class="tn-icono">${svg(ICONO.antena)}</div>
+      <div class="tn-icono${caido ? " off" : ""}">${svg(ICONO.antena)}</div>
       <div class="tn-info">
         <div class="tn-nombre">Gateway</div>
-        <div class="tn-sub">coordinador de la red</div>
+        <div class="tn-sub">${sub}</div>
       </div>
-      <span class="tn-estado chip on">en línea</span>
+      <span class="tn-estado chip ${caido ? "off" : "on"}">${caido ? "sin señal" : "en línea"}</span>
     </div>
     <div class="tn-sensores">
       <div class="sensor fila-info">
@@ -937,6 +948,362 @@ document.querySelectorAll(".modo-btn").forEach((btn) => {
 });
 document.getElementById("desde").value = isoDefault(24);
 document.getElementById("hasta").value = isoDefault(0);
+
+// ----- Vista Configuración: comisionamiento de nodos por USB -----
+// Habla con /api/config (configapi.py), que a su vez habla el protocolo
+// CFG.* con el Atom conectado por USB al Pi. Las operaciones tardan
+// segundos (abrir el puerto resetea el nodo y hay que esperar su boot):
+// los botones se bloquean durante cada una.
+
+let cfgPuerto = null;   // puerto serie del nodo detectado
+
+// Panel visible según la subruta: menú, "Configurar nodo", la página USB
+// o la radio LoRa (esta última carga su estado al entrar).
+function cfgRuta() {
+  const sub = location.hash.replace("#/", "").split("/").slice(1).join("/");
+  document.getElementById("cfg-menu").hidden     = sub !== "";
+  document.getElementById("cfg-sub-nodo").hidden = sub !== "nodo";
+  document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
+  document.getElementById("cfg-radio").hidden    = sub !== "radio";
+  if (sub === "radio") radioCargar();
+}
+
+function cfgBotones(bloquear) {
+  ["cfg-buscar", "cfg-leer", "cfg-archivo-btn", "cfg-enviar",
+   "cfg-borrar"].forEach((id) => {
+    document.getElementById(id).disabled = bloquear;
+  });
+}
+
+// ----- Diálogo de progreso y confirmación -----
+
+const SPIN = '<span class="spin"></span> ';
+let cfgConfirmarCb = null;   // acción del botón rojo del diálogo
+
+function cfgDialogo(titulo, texto, botones = {}) {
+  document.getElementById("cfg-dialogo-titulo").textContent = titulo;
+  document.getElementById("cfg-dialogo-texto").innerHTML = texto;
+  document.getElementById("cfg-dialogo-cancelar").hidden = !botones.cancelar;
+  document.getElementById("cfg-dialogo-confirmar").hidden = !botones.confirmar;
+  document.getElementById("cfg-dialogo-cerrar").hidden = !botones.cerrar;
+  document.getElementById("cfg-dialogo-fondo").hidden = false;
+  document.getElementById("cfg-dialogo").hidden = false;
+}
+
+function cfgDialogoCerrar() {
+  document.getElementById("cfg-dialogo-fondo").hidden = true;
+  document.getElementById("cfg-dialogo").hidden = true;
+  cfgConfirmarCb = null;
+}
+
+// Tras un CFG.PUT o CFG.DEL el nodo se reinicia (~2 s). Se re-detecta
+// para confirmar que volvió y con qué identidad; la detección ya sondea
+// con CFG.HELLO hasta que el arranque termina, así que basta un margen
+// corto para que el reinicio comience.
+async function cfgEsperarReinicio() {
+  await new Promise((res) => setTimeout(res, 1000));
+  try {
+    const r = await fetchApi("/api/config/detectar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: cfgPuerto }) });
+    if (r.ok) return (await r.json()).node;
+  } catch (e) { /* sin respuesta */ }
+  return null;
+}
+
+function cfgPintarNodo(port, n) {
+  cfgPuerto = port;
+  const chip = n.configured
+    ? '<span class="chip on">configurado</span>'
+    : '<span class="chip ambar">sin configurar</span>';
+  const titulo = n.configured
+    ? (n.name || "nodo " + n.node_id) : "nodo sin configurar";
+  const filas = [];
+  if (n.configured) {
+    filas.push(["nodo", `${n.node_id} · ${n.type === "super_node" ? "supernodo" : "nodo"}`]);
+  } else {
+    filas.push(["motivo", n.error ?? "sin config"]);
+  }
+  filas.push(["firmware", `${n.fw} v${n.version}`]);
+  filas.push(["puerto", port.split("/").pop()]);
+  const el = document.getElementById("cfg-nodo");
+  el.innerHTML = `
+    <div class="sensor fila-info">
+      ${svg(ICONO.chip)}
+      <span class="s-nombre">${titulo}</span>
+      <span class="s-valor">${chip}</span>
+    </div>` + filas.map(([k, v]) => `
+    <div class="sensor fila-info">
+      <span class="s-nombre">${k}</span>
+      <span class="s-valor">${v}</span>
+    </div>`).join("");
+  el.hidden = false;
+  document.getElementById("cfg-editor").hidden = false;
+}
+
+async function cfgDetectar() {
+  const aviso = document.getElementById("cfg-busqueda-aviso");
+  const sel = document.getElementById("cfg-puertos");
+  const body = {};
+  if (!sel.hidden && sel.value) body.port = sel.value;
+  cfgBotones(true);
+  aviso.textContent = "buscando nodo (se reinicia al abrir el puerto)...";
+  try {
+    const r = await fetchApi("/api/config/detectar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    const data = await r.json();
+    if (r.status === 300 && data.need_port) {
+      sel.innerHTML = data.ports.map((p) =>
+        `<option value="${p}">${p.split("/").pop()}</option>`).join("");
+      sel.hidden = false;
+      aviso.textContent = "varios puertos candidatos: elegir y volver a buscar";
+      return;
+    }
+    if (!r.ok) { aviso.textContent = data.error ?? "error"; return; }
+    aviso.textContent = "";
+    cfgPintarNodo(data.port, data.node);
+  } catch (e) {
+    aviso.textContent = "error: " + e.message;
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+async function cfgLeer() {
+  const res = document.getElementById("cfg-resultado");
+  if (!cfgPuerto) {
+    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    return;
+  }
+  cfgBotones(true);
+  res.className = "aviso"; res.textContent = "leyendo config del nodo...";
+  try {
+    const r = await fetchApi("/api/config/nodo?port=" +
+                             encodeURIComponent(cfgPuerto));
+    const data = await r.json();
+    if (!r.ok) {
+      res.className = "aviso mal"; res.textContent = data.error ?? "error";
+      return;
+    }
+    document.getElementById("cfg-texto").value = data.config;
+    res.textContent = "";
+  } catch (e) {
+    res.className = "aviso mal"; res.textContent = "error: " + e.message;
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+async function cfgEnviar() {
+  const res = document.getElementById("cfg-resultado");
+  const texto = document.getElementById("cfg-texto").value.trim();
+  if (!cfgPuerto) {
+    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    return;
+  }
+  if (!texto) {
+    res.className = "aviso mal"; res.textContent = "el editor está vacío";
+    return;
+  }
+  // Criba local: JSON parseable antes de molestar al Pi y al nodo. La
+  // validación de reglas la hace el firmware (única fuente de verdad).
+  try { JSON.parse(texto); } catch (e) {
+    res.className = "aviso mal";
+    res.textContent = "no es JSON válido: " + e.message;
+    return;
+  }
+  res.className = "aviso"; res.textContent = "";
+  cfgBotones(true);
+  const T = "Enviar config al nodo";
+  cfgDialogo(T, SPIN + "enviando y validando en el nodo...");
+  try {
+    const r = await fetchApi("/api/config/subir", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: cfgPuerto, config: texto }) });
+    const data = await r.json();
+    if (!r.ok) {
+      cfgDialogo(T, "El nodo rechazó el config: <b>" +
+                    (data.error ?? "error") + "</b>", { cerrar: true });
+      return;
+    }
+    cfgDialogo(T, SPIN + "config aceptado; el nodo se está reiniciando...");
+    const nodo = await cfgEsperarReinicio();
+    if (nodo) {
+      cfgPintarNodo(cfgPuerto, nodo);
+      cfgDialogo(T, "Reinicio completo: <b>" +
+                    (nodo.name ?? "nodo " + nodo.node_id) +
+                    "</b> operando con el config nuevo.", { cerrar: true });
+    } else {
+      cfgDialogo(T, "Config guardado, pero el nodo no respondió tras el " +
+                    "reinicio. Probar con Buscar nodo.", { cerrar: true });
+    }
+  } catch (e) {
+    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+async function cfgBorrar() {
+  const res = document.getElementById("cfg-resultado");
+  if (!cfgPuerto) {
+    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    return;
+  }
+  res.className = "aviso"; res.textContent = "";
+  const T = "Borrar config del nodo";
+  cfgConfirmarCb = async () => {
+    cfgBotones(true);
+    cfgDialogo(T, SPIN + "borrando el config...");
+    try {
+      const r = await fetchApi("/api/config/borrar", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port: cfgPuerto }) });
+      const data = await r.json();
+      if (!r.ok) {
+        cfgDialogo(T, "Error: <b>" + (data.error ?? "error") + "</b>",
+                   { cerrar: true });
+        return;
+      }
+      cfgDialogo(T, SPIN + "config borrado; el nodo se está reiniciando...");
+      const nodo = await cfgEsperarReinicio();
+      if (nodo) {
+        cfgPintarNodo(cfgPuerto, nodo);
+        cfgDialogo(T, "Reinicio completo: el nodo quedó <b>sin " +
+                      "configurar</b> (LED rojo), a la espera de un " +
+                      "config nuevo.", { cerrar: true });
+      } else {
+        cfgDialogo(T, "Config borrado, pero el nodo no respondió tras el " +
+                      "reinicio. Probar con Buscar nodo.", { cerrar: true });
+      }
+    } catch (e) {
+      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    } finally {
+      cfgBotones(false);
+    }
+  };
+  cfgDialogo(T, "¿Borrar el config.json del nodo? Quedará sin configurar " +
+                "(LED rojo parpadeando) hasta subirle uno nuevo.",
+             { cancelar: true, confirmar: true });
+}
+
+document.getElementById("cfg-buscar").addEventListener("click", cfgDetectar);
+document.getElementById("cfg-leer").addEventListener("click", cfgLeer);
+document.getElementById("cfg-enviar").addEventListener("click", cfgEnviar);
+document.getElementById("cfg-borrar").addEventListener("click", cfgBorrar);
+document.getElementById("cfg-dialogo-cerrar").addEventListener("click", cfgDialogoCerrar);
+document.getElementById("cfg-dialogo-cancelar").addEventListener("click", cfgDialogoCerrar);
+document.getElementById("cfg-dialogo-confirmar").addEventListener("click", () => {
+  if (cfgConfirmarCb) { const cb = cfgConfirmarCb; cfgConfirmarCb = null; cb(); }
+});
+
+// ----- Vista Configuración: radio LoRa del gateway -----
+// Estado de la radio y dos acciones privilegiadas (cambiar el puerto del
+// Heltec y flashear su firmware) que el Pi ejecuta bajo la regla sudo
+// acotada del instalador.
+
+function radioBotones(bloquear) {
+  ["radio-aplicar", "radio-flash"].forEach((id) => {
+    document.getElementById(id).disabled = bloquear;
+  });
+}
+
+async function radioCargar() {
+  const cont = document.getElementById("radio-estado");
+  try {
+    const r = await fetchApi("/api/radio/estado");
+    const d = await r.json();
+    if (!r.ok) { cont.innerHTML = `<p class="aviso">${d.error}</p>`; return; }
+
+    const svcChip = d.service_active
+      ? '<span class="chip on">activo</span>'
+      : '<span class="chip rojo">caído</span>';
+    const portChip = d.port
+      ? (d.port_present ? '<span class="chip on">presente</span>'
+                        : '<span class="chip rojo">no presente</span>')
+      : '<span class="chip off">sin fijar</span>';
+    cont.innerHTML = `
+      <div class="sensor fila-info">
+        <span class="s-nombre">servicio del gateway</span>
+        <span class="s-valor">${svcChip}</span>
+      </div>
+      <div class="sensor fila-info">
+        <span class="s-nombre">puerto configurado</span>
+        <span class="s-valor" title="${d.port ?? ""}">${d.port ? d.port.split("/").pop() : "(ninguno)"} ${portChip}</span>
+      </div>`;
+
+    const sel = document.getElementById("radio-puertos");
+    sel.innerHTML = d.ports.length
+      ? d.ports.map((p) =>
+          `<option value="${p.port}"${p.gateway ? " selected" : ""}>` +
+          `${p.port.split("/").pop()}${p.gateway ? " (actual)" : ""}</option>`).join("")
+      : '<option value="">(sin puertos detectados)</option>';
+
+    document.getElementById("radio-bin-info").textContent = d.bin
+      ? `Binario disponible: heltec-radio.bin, ${(d.bin.size / 1024).toFixed(0)} kB, del ${d.bin.mtime}.`
+      : "Sin heltec-radio.bin en el Pi: generarlo con make_dist.sh y copiarlo a pi-service.";
+    document.getElementById("radio-flash").disabled = !d.bin;
+  } catch (e) {
+    cont.innerHTML = `<p class="aviso">error: ${e.message}</p>`;
+  }
+}
+
+async function radioAplicarPuerto() {
+  const sel = document.getElementById("radio-puertos");
+  if (!sel.value) return;
+  const T = "Cambiar puerto de la radio";
+  radioBotones(true);
+  cfgDialogo(T, SPIN + "aplicando el puerto y reiniciando el gateway...");
+  try {
+    const r = await fetchApi("/api/radio/puerto", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: sel.value }) });
+    const d = await r.json();
+    if (!r.ok) { cfgDialogo(T, "Error: <b>" + (d.error ?? "error") + "</b>", { cerrar: true }); return; }
+    cfgDialogo(T, "Puerto aplicado y servicio del gateway reiniciado.<br>" +
+                  `<b>${d.port}</b>`, { cerrar: true });
+    radioCargar();
+  } catch (e) {
+    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+  } finally {
+    radioBotones(false);
+  }
+}
+
+async function radioFlash() {
+  const T = "Actualizar firmware de la radio";
+  cfgConfirmarCb = async () => {
+    radioBotones(true);
+    cfgDialogo(T, SPIN + "flasheando la radio (para el servicio, escribe " +
+                  "la imagen y lo rearranca; alrededor de un minuto)...");
+    try {
+      const r = await fetchApi("/api/radio/flash", { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) { cfgDialogo(T, "Error:<pre>" + (d.error ?? "error") + "</pre>", { cerrar: true }); return; }
+      cfgDialogo(T, "Flasheo completado, radio operando.<pre>" + d.output + "</pre>", { cerrar: true });
+      radioCargar();
+    } catch (e) {
+      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    } finally {
+      radioBotones(false);
+    }
+  };
+  cfgDialogo(T, "¿Flashear heltec-radio.bin en la radio? El servicio del " +
+                "gateway se detiene durante el flasheo y la red LoRa queda " +
+                "fuera ese tiempo.", { cancelar: true, confirmar: true });
+}
+
+document.getElementById("radio-aplicar").addEventListener("click", radioAplicarPuerto);
+document.getElementById("radio-flash").addEventListener("click", radioFlash);
+document.getElementById("cfg-archivo-btn").addEventListener("click", () =>
+  document.getElementById("cfg-archivo").click());
+document.getElementById("cfg-archivo").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  f.text().then((t) => { document.getElementById("cfg-texto").value = t; });
+  e.target.value = "";   // permitir recargar el mismo archivo
+});
 
 // ----- Arranque, refresco periódico y reloj -----
 

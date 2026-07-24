@@ -286,15 +286,102 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
 .rango button#btn-csv { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
 #grafico { height: 60vh; }
 
-/* ----- Configuración (en construcción) ----- */
+/* ----- Configuración: menú de ajustes (patrón de panel domótico) ----- */
 
-.construccion {
-  max-width: 480px; margin: 8vh auto 0; padding: 2.5rem 2rem;
-  text-align: center; color: var(--dim);
+.ajustes { max-width: 640px; margin: 0.5rem auto 0; }
+.ajustes-cabecera { display: flex; align-items: center; gap: 0.7rem; margin: 0.2rem 0 1rem; }
+.ajustes-cabecera h2 { margin: 0; font-size: 1.15rem; }
+.volver {
+  width: 34px; height: 34px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; color: var(--dim);
 }
-.construccion svg { width: 48px; height: 48px; color: var(--accent); margin-bottom: 0.8rem; }
-.construccion h2 { color: var(--text); margin: 0 0 0.4rem; }
-.construccion p { margin: 0; }
+.volver:hover { background: var(--border); color: var(--text); }
+.volver svg { width: 20px; height: 20px; }
+
+.lista-ajustes { padding: 0.35rem 0; }
+.ajuste-item {
+  display: flex; align-items: center; gap: 0.95rem;
+  padding: 0.8rem 1.15rem; color: var(--text); text-decoration: none;
+}
+a.ajuste-item { cursor: pointer; }
+a.ajuste-item:hover { background: var(--accent-suave); }
+.ajuste-item.desactivado .ai-titulo, .ajuste-item.desactivado .ai-sub { opacity: 0.6; }
+.ai-icono {
+  width: 40px; height: 40px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; color: #fff;
+}
+.ai-icono svg { width: 21px; height: 21px; }
+.ai-azul    { background: var(--accent); }
+.ai-verde   { background: var(--ok); }
+.ai-naranja { background: #e8930c; }
+.ai-texto { flex: 1; min-width: 0; }
+.ai-titulo { font-weight: 500; }
+.ai-sub { color: var(--dim); font-size: 0.82rem; line-height: 1.35; }
+.ai-chevron { width: 20px; height: 20px; color: var(--dim); flex: none; }
+
+/* ----- Configuración: carga del config.json por USB ----- */
+
+.cfg-card { margin: 0 0 1rem; padding: 1.1rem 1.3rem; }
+.cfg-card h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.cfg-fila { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin: 0.7rem 0 0; }
+.cfg-fila button {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0.4rem 1rem; font: inherit; cursor: pointer;
+}
+.cfg-fila button:hover { filter: brightness(0.96); }
+.cfg-fila button.btn-primario {
+  background: var(--accent); color: #fff; border: none; font-weight: 600;
+}
+.cfg-fila button:disabled { opacity: 0.55; cursor: default; }
+.cfg-fila select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0.35rem 0.7rem; font: inherit; max-width: 100%;
+}
+.cfg-nodo { margin-top: 0.9rem; border-top: 1px solid var(--border); }
+.cfg-nodo .sensor svg { width: 18px; height: 18px; }
+#cfg-texto {
+  width: 100%; min-height: 320px; margin-top: 0.8rem; resize: vertical;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0.7rem 0.9rem; box-sizing: border-box;
+  font: 0.82rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#cfg-resultado.ok  { color: var(--ok); }
+#cfg-resultado.mal { color: var(--bad); }
+.cfg-fila button.peligro {
+  background: var(--bad); color: #fff; border: none; font-weight: 600;
+}
+.cfg-fila button.peligro-borde {
+  background: transparent; border: 1px solid var(--bad); color: var(--bad);
+}
+
+/* Diálogo de progreso del comisionamiento */
+#cfg-dialogo-fondo {
+  position: fixed; inset: 0; background: rgba(15, 30, 45, 0.35); z-index: 60;
+}
+.dialogo {
+  position: fixed; z-index: 61; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(430px, calc(100vw - 2rem));
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: var(--sombra); padding: 1.2rem 1.4rem;
+}
+.dialogo h3 { margin: 0 0 0.6rem; font-size: 1.02rem; }
+.dialogo p { margin: 0; color: var(--dim); min-height: 2.4em; line-height: 1.5; }
+.dialogo p b { color: var(--text); }
+.dialogo pre {
+  margin: 0.6rem 0 0; padding: 0.6rem 0.8rem; max-height: 180px;
+  overflow: auto; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; white-space: pre-wrap; word-break: break-all;
+  font: 0.74rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.dialogo-botones { justify-content: flex-end; }
+.spin {
+  width: 15px; height: 15px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  display: inline-block; animation: girar 0.9s linear infinite;
+  vertical-align: -3px; margin-right: 0.45rem;
+}
+@keyframes girar { to { transform: rotate(360deg); } }
 
 /* ----- Toasts y esqueletos de carga ----- */
 

@@ -54,4 +54,9 @@ bool write(const char* text, size_t len) {
     return LittleFS.rename(kTmpPath, kPath);
 }
 
+bool remove() {
+    if (!LittleFS.exists(kPath)) return true;
+    return LittleFS.remove(kPath);
+}
+
 }  // namespace configstore

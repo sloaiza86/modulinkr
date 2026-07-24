@@ -12,6 +12,10 @@ Módulos locales (sin dependencia de Internet):
   /api/catalogos   reads/writes anunciados por nodo
 Módulo remoto (fase 3, degrada a 503 sin Internet):
   /api/datos       histórico desde el PostgreSQL de la VM (dataapi.py)
+Módulo de comisionamiento (fase 2 del plan, configapi.py):
+  /api/config      detección y carga del config.json de un nodo por USB
+Módulo de la radio LoRa (radioapi.py, acciones privilegiadas vía sudoers):
+  /api/radio       puerto del Heltec y actualización de su firmware
 Stub documentado:
   /api/comandos    escrituras a nodos (pospuesto, firmware pendiente)
 
@@ -212,6 +216,14 @@ def catalogos():
 
 import dataapi  # noqa: E402
 
+# ----- Módulo: comisionamiento de nodos por USB -----
+
+import configapi  # noqa: E402
+
+# ----- Módulo: radio LoRa del gateway -----
+
+import radioapi  # noqa: E402
+
 # ----- Stub de fase futura -----
 
 cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
@@ -226,9 +238,12 @@ def comandos_stub(_rest: str):
 
 for r in (red, topo, cats, cmds):
     app.include_router(r)
-# El router de datos vive en dataapi.py; la auth se aplica al incluirlo
-# (las dependencias de router se fijan en el include, no a posteriori).
+# Los routers de datos y comisionamiento viven en sus módulos; la auth se
+# aplica al incluirlos (las dependencias de router se fijan en el include,
+# no a posteriori).
 app.include_router(dataapi.router, dependencies=[Depends(require_auth)])
+app.include_router(configapi.router, dependencies=[Depends(require_auth)])
+app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
 
 
 # ----- Frontend estático -----

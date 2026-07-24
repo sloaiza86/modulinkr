@@ -24,6 +24,10 @@
 //     flash, responde CFG:OK y se reinicia. Cualquier fallo responde
 //     CFG:ERR <motivo> sin tocar la flash.
 //
+//   CFG.DEL
+//     Borra el config de la flash, responde CFG:OK y se reinicia: el nodo
+//     arranca sin configurar (LED rojo, a la espera de un CFG.PUT).
+//
 // Toda respuesta del protocolo empieza por "CFG:" y sale en una única
 // escritura a Serial (una línea contigua): el cliente filtra por ese
 // prefijo y los logs del firmware no la parten (la tarea NB-IoT del

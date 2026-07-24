@@ -31,4 +31,8 @@ char* read(size_t& len);
 // Escribe el texto como nuevo /config.json (vía /config.tmp + rename).
 bool write(const char* text, size_t len);
 
+// Borra /config.json (CFG.DEL del comisionamiento). true también si no
+// existía: el estado final es el mismo, sin config.
+bool remove();
+
 }  // namespace configstore
