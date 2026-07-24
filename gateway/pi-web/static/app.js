@@ -1001,8 +1001,12 @@ function cfgRuta() {
   document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
   document.getElementById("cfg-radio").hidden    = sub !== "radio";
   document.getElementById("cfg-zona").hidden     = sub !== "zona";
+  document.getElementById("cfg-bd").hidden       = sub !== "bd";
+  document.getElementById("cfg-mqtt").hidden     = sub !== "mqtt";
   if (sub === "radio") radioCargar();
   if (sub === "zona") tzCargar();
+  if (sub === "bd") bdCargar();
+  if (sub === "mqtt") mqttCargar();
 }
 
 function cfgBotones(bloquear) {
@@ -1413,10 +1417,154 @@ async function tzGuardar() {
   }
 }
 
+// ----- Configuración: base de datos (PostgreSQL de la VM) -----
+
+async function bdCargar() {
+  const res = document.getElementById("bd-resultado");
+  res.textContent = "";
+  try {
+    const r = await fetchApi("/api/db/estado");
+    const d = await r.json();
+    if (!r.ok) { res.textContent = d.error ?? "estado no disponible"; return; }
+    const c = d.config;
+    document.getElementById("bd-host").value = c.host ?? "";
+    document.getElementById("bd-port").value = c.port ?? 5432;
+    document.getElementById("bd-db").value   = c.db ?? "modulinkr";
+    document.getElementById("bd-user").value = c.user ?? "modulinkr_ro";
+    const pass = document.getElementById("bd-pass");
+    pass.value = "";
+    pass.placeholder = d.password_set
+      ? "dejar en blanco para no cambiar" : "sin contraseña configurada";
+  } catch (e) { res.textContent = "Error: " + e.message; }
+}
+
+function bdBody() {
+  return {
+    host: document.getElementById("bd-host").value.trim(),
+    port: Number(document.getElementById("bd-port").value) || 5432,
+    db:   document.getElementById("bd-db").value.trim(),
+    user: document.getElementById("bd-user").value.trim(),
+    password: document.getElementById("bd-pass").value,
+  };
+}
+
+async function bdProbar() {
+  const res = document.getElementById("bd-resultado");
+  res.textContent = "Probando conexión...";
+  try {
+    const r = await fetchApi("/api/db/probar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bdBody()) });
+    const d = await r.json();
+    res.textContent = r.ok ? ("Conexión correcta. " + (d.detail ?? ""))
+                           : ("Error: " + (d.error ?? "falló"));
+  } catch (e) { res.textContent = "Error: " + e.message; }
+}
+
+async function bdGuardar() {
+  const res = document.getElementById("bd-resultado");
+  res.textContent = "Guardando...";
+  try {
+    const r = await fetchApi("/api/db/guardar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bdBody()) });
+    const d = await r.json();
+    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    res.textContent = "Guardado y aplicado.";
+    bdCargar();
+  } catch (e) { res.textContent = "Error: " + e.message; }
+}
+
+// ----- Configuración: broker MQTT cloud -----
+
+function mqttEstadoHtml(d) {
+  if (d.enabled == null) {
+    return '<p class="aviso">Estado del servicio no disponible.</p>';
+  }
+  if (!d.enabled) {
+    return '<p class="aviso">MQTT sin configurar en el gateway (sin host). '
+         + 'La telemetría se acumula en el buffer local.</p>';
+  }
+  const chip = d.connected
+    ? '<span class="chip on">conectado</span>'
+    : '<span class="chip off">sin conexión</span>';
+  return `<div class="sensor fila-info">
+    <span class="s-nombre">Conexión al broker</span>${chip}</div>`;
+}
+
+async function mqttCargar() {
+  const res = document.getElementById("mqtt-resultado");
+  res.textContent = "";
+  const est = document.getElementById("mqtt-estado");
+  est.innerHTML = '<p class="aviso">Cargando estado...</p>';
+  try {
+    const r = await fetchApi("/api/mqtt/estado");
+    const d = await r.json();
+    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "estado no disponible"}</p>`; return; }
+    est.innerHTML = mqttEstadoHtml(d);
+    const c = d.config;
+    document.getElementById("mqtt-host").value = c.host ?? "";
+    document.getElementById("mqtt-port").value = c.port ?? 8883;
+    document.getElementById("mqtt-user").value = c.user ?? "";
+    document.getElementById("mqtt-cafile").value = c.cafile ?? "";
+    document.getElementById("mqtt-tls").checked = c.tls !== false;
+    document.getElementById("mqtt-insecure").checked = !!c.tls_insecure;
+    const pass = document.getElementById("mqtt-pass");
+    pass.value = "";
+    pass.placeholder = d.password_set
+      ? "dejar en blanco para no cambiar" : "contraseña del broker";
+  } catch (e) { est.innerHTML = `<p class="aviso">Error: ${e.message}</p>`; }
+}
+
+function mqttBody() {
+  return {
+    host: document.getElementById("mqtt-host").value.trim(),
+    port: Number(document.getElementById("mqtt-port").value) || 8883,
+    user: document.getElementById("mqtt-user").value.trim(),
+    password: document.getElementById("mqtt-pass").value,
+    cafile: document.getElementById("mqtt-cafile").value.trim(),
+    tls: document.getElementById("mqtt-tls").checked,
+    tls_insecure: document.getElementById("mqtt-insecure").checked,
+  };
+}
+
+async function mqttProbar() {
+  const res = document.getElementById("mqtt-resultado");
+  res.textContent = "Probando conexión (hasta unos segundos)...";
+  try {
+    const r = await fetchApi("/api/mqtt/probar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mqttBody()) });
+    const d = await r.json();
+    res.textContent = r.ok ? ("Conexión correcta: " + (d.detail ?? ""))
+                           : ("Error: " + (d.error ?? "falló"));
+  } catch (e) { res.textContent = "Error: " + e.message; }
+}
+
+async function mqttGuardar() {
+  const res = document.getElementById("mqtt-resultado");
+  res.textContent = "Guardando y reiniciando el servicio del gateway...";
+  try {
+    const r = await fetchApi("/api/mqtt/guardar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mqttBody()) });
+    const d = await r.json();
+    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    res.textContent = "Guardado. El gateway se está reiniciando; el estado se "
+                    + "actualiza en unos segundos.";
+    // Tras el reinicio del gateway, el latido tarda en reflejar la conexión.
+    setTimeout(mqttCargar, 5000);
+  } catch (e) { res.textContent = "Error: " + e.message; }
+}
+
 document.getElementById("radio-aplicar").addEventListener("click", radioAplicarPuerto);
 document.getElementById("radio-flash").addEventListener("click", radioFlash);
 document.getElementById("tz-detectar").addEventListener("click", tzDetectar);
 document.getElementById("tz-guardar").addEventListener("click", tzGuardar);
+document.getElementById("bd-probar").addEventListener("click", bdProbar);
+document.getElementById("bd-guardar").addEventListener("click", bdGuardar);
+document.getElementById("mqtt-probar").addEventListener("click", mqttProbar);
+document.getElementById("mqtt-guardar").addEventListener("click", mqttGuardar);
 document.getElementById("cfg-archivo-btn").addEventListener("click", () =>
   document.getElementById("cfg-archivo").click());
 document.getElementById("cfg-archivo").addEventListener("change", (e) => {

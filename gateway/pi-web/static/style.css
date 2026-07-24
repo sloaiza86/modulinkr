@@ -342,6 +342,19 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 10px; padding: 0.35rem 0.7rem; font: inherit; max-width: 100%;
 }
+/* Formulario de parámetros (MQTT, base de datos): label a la izquierda,
+   campo a la derecha, apilados. */
+.cfg-form { display: flex; flex-direction: column; gap: 0.7rem; margin: 0.9rem 0 0; max-width: 480px; }
+.cfg-campo { display: flex; align-items: center; gap: 0.8rem; }
+.cfg-campo > span { flex: none; width: 130px; color: var(--dim); font-size: 0.9rem; }
+.cfg-campo > input {
+  flex: 1; min-width: 0; padding: 0.4rem 0.6rem; font: inherit;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.cfg-check { display: flex; align-items: center; gap: 0.6rem; font-size: 0.9rem; color: var(--text); }
+.cfg-check > input { flex: none; width: 16px; height: 16px; }
+
 .cfg-nodo { margin-top: 0.9rem; border-top: 1px solid var(--border); }
 .cfg-nodo .sensor svg { width: 18px; height: 18px; }
 #cfg-texto {

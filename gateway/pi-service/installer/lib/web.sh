@@ -72,8 +72,8 @@ web_setup_venv() {
     fi
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install --upgrade pip
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install \
-        fastapi uvicorn psycopg2-binary pyserial
-    ok "fastapi, uvicorn, psycopg2 y pyserial en el venv del visor"
+        fastapi uvicorn psycopg2-binary pyserial paho-mqtt
+    ok "fastapi, uvicorn, psycopg2, pyserial y paho-mqtt en el venv del visor"
 }
 
 web_fetch_vendor() {
@@ -126,15 +126,19 @@ web_write_env() {
 
 web_write_sudoers() {
     step "Permisos sudo acotados del visor"
-    # La página "Configurar radio LoRa" ejecuta exactamente dos acciones
-    # privilegiadas. La regla protege frente a una sesión web comprometida
-    # (la API no puede ejecutar otra cosa); no pretende aislar al usuario
-    # del servicio, que es dueño de los scripts.
-    chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" 2>/dev/null || true
+    # Las páginas de configuración del visor ejecutan un puñado de acciones
+    # privilegiadas acotadas. La regla protege frente a una sesión web
+    # comprometida (la API no puede ejecutar otra cosa); no pretende aislar
+    # al usuario del servicio, que es dueño de los scripts. set_mqtt.sh y
+    # set_db.sh reciben los valores por stdin (sin argumentos), así que su
+    # entrada en la regla no lleva comodín.
+    chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" \
+             "$APP_DIR/set_mqtt.sh" "$APP_DIR/set_db.sh" 2>/dev/null || true
     cat > /etc/sudoers.d/modulinkr-web <<EOF
-# Generado por el instalador de ModuLinkr. Acciones privilegiadas de la
-# página "Configurar radio LoRa" del visor. No editar a mano.
-$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh
+# Generado por el instalador de ModuLinkr. Acciones privilegiadas de las
+# páginas de configuración del visor (radio LoRa, MQTT, base de datos). No
+# editar a mano.
+$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh
 EOF
     chmod 440 /etc/sudoers.d/modulinkr-web
     if visudo -cf /etc/sudoers.d/modulinkr-web >/dev/null 2>&1; then

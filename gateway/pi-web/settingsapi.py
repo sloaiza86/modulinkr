@@ -72,6 +72,38 @@ def load_settings() -> dict:
     return settings
 
 
+def load_raw() -> dict:
+    """Contenido completo del archivo de ajustes (todas las secciones), o
+    un dict vacío si no existe o es ilegible. Uso interno de los módulos
+    que guardan secciones propias (p. ej. la sombra no secreta de MQTT);
+    /api/ajustes solo expone las claves de DEFAULTS."""
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        LOG.warning("ajustes ilegibles en %s (%s)", SETTINGS_PATH, e)
+        return {}
+
+
+def get_section(name: str, default: dict | None = None) -> dict:
+    """Sección con nombre del archivo de ajustes (un sub-dict), o el
+    default. Para preferencias que no son del panel general sino de un
+    módulo concreto (MQTT, base de datos)."""
+    sec = load_raw().get(name)
+    return dict(sec) if isinstance(sec, dict) else dict(default or {})
+
+
+def set_section(name: str, values: dict) -> None:
+    """Guarda (reemplaza) una sección con nombre, conservando el resto del
+    archivo. Escritura atómica igual que el resto de ajustes."""
+    data = load_raw()
+    data[name] = values
+    _save_settings(data)
+
+
 def _save_settings(settings: dict) -> None:
     """Escritura atómica: archivo temporal en el mismo directorio y rename
     (atómico en el mismo sistema de archivos)."""

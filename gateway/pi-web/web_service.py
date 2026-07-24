@@ -233,6 +233,11 @@ import radioapi  # noqa: E402
 
 import settingsapi  # noqa: E402
 
+# ----- Módulos: configuración de MQTT y base de datos (acciones sudo) -----
+
+import mqttapi  # noqa: E402
+import dbapi    # noqa: E402
+
 # ----- Stub de fase futura -----
 
 cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
@@ -254,6 +259,8 @@ app.include_router(dataapi.router, dependencies=[Depends(require_auth)])
 app.include_router(configapi.router, dependencies=[Depends(require_auth)])
 app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
 app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
+app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
+app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
 
 
 # ----- Frontend estático -----

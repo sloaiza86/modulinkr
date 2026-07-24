@@ -124,6 +124,26 @@
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/bd">
+            <div class="ai-icono ai-naranja">
+              <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.6 3.1 3 7 3s7-1.4 7-3V6"/><path d="M5 12v6c0 1.6 3.1 3 7 3s7-1.4 7-3v-6"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar base de datos</div>
+              <div class="ai-sub">Conexión al PostgreSQL de la nube para el histórico</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
+          <a class="ajuste-item" href="#/configuracion/mqtt">
+            <div class="ai-icono ai-verde">
+              <svg viewBox="0 0 24 24"><path d="M18 18H7a4 4 0 0 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/><line x1="12" y1="13" x2="12" y2="17"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar MQTT</div>
+              <div class="ai-sub">Broker cloud al que el gateway publica la telemetría</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
         </div>
       </div>
 
@@ -252,6 +272,73 @@
           <div class="cfg-fila">
             <button id="tz-guardar" class="btn-primario">Guardar</button>
             <span id="tz-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: base de datos (PostgreSQL de la VM, histórico) -->
+      <div class="ajustes" id="cfg-bd" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar base de datos</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>PostgreSQL de la nube</h3>
+          <p class="aviso">Conexión de solo lectura que usa la vista de Datos para
+            el histórico. Los cambios se aplican al momento, sin reiniciar el
+            visor. Dejar la contraseña en blanco conserva la vigente.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Host</span><input id="bd-host" type="text" placeholder="modulinkr.ejemplo.com"></label>
+            <label class="cfg-campo"><span>Puerto</span><input id="bd-port" type="number" min="1" max="65535" value="5432"></label>
+            <label class="cfg-campo"><span>Base</span><input id="bd-db" type="text" value="modulinkr"></label>
+            <label class="cfg-campo"><span>Usuario</span><input id="bd-user" type="text" value="modulinkr_ro"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="bd-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
+          </div>
+          <div class="cfg-fila">
+            <button id="bd-probar">Probar conexión</button>
+            <button id="bd-guardar" class="btn-primario">Guardar</button>
+            <span id="bd-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: broker MQTT cloud (lo consume el servicio del gateway) -->
+      <div class="ajustes" id="cfg-mqtt" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar MQTT</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Broker cloud</h3>
+          <div id="mqtt-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Parámetros del broker</h3>
+          <p class="aviso">Al guardar se reescribe la configuración del gateway y
+            se reinicia su servicio (la telemetría cloud queda fuera unos
+            segundos). El certificado debe ser el de una CA RSA (el SIM7028 no
+            valida cadenas ECDSA). Dejar la contraseña en blanco conserva la
+            vigente.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Host</span><input id="mqtt-host" type="text" placeholder="broker.ejemplo.com"></label>
+            <label class="cfg-campo"><span>Puerto</span><input id="mqtt-port" type="number" min="1" max="65535" value="8883"></label>
+            <label class="cfg-campo"><span>Usuario</span><input id="mqtt-user" type="text"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="mqtt-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
+            <label class="cfg-campo"><span>Certificado CA</span><input id="mqtt-cafile" type="text" placeholder="/etc/modulinkr/ca.crt (opcional)"></label>
+            <label class="cfg-check"><input id="mqtt-tls" type="checkbox" checked><span>Usar TLS (cifrado)</span></label>
+            <label class="cfg-check"><input id="mqtt-insecure" type="checkbox"><span>No verificar el hostname del certificado (solo banco)</span></label>
+          </div>
+          <div class="cfg-fila">
+            <button id="mqtt-probar">Probar conexión</button>
+            <button id="mqtt-guardar" class="btn-primario">Guardar</button>
+            <span id="mqtt-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
