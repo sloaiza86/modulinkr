@@ -31,6 +31,14 @@ Custodia y entrega al menos una vez: published pasa a 1 SOLO tras el
 PUBACK. Un corte de Internet o un reinicio del servicio deja la muestra
 pendiente y se reintenta; el consumidor deduplica los reenvíos.
 
+Además de publicar, se SUSCRIBE a modulinkr/v1/+/telemetry para observar el
+camino NB-IoT (failover): un publisher distinto de 255 es un supernodo
+publicando por celular. Con eso el visor sabe qué supernodo tiene NB-IoT/MQTT
+activos y qué nodos entregan por failover, con sus datos frescos, aunque el
+LoRa esté caído. on_message solo encola (hilo de paho); el bucle del servicio
+escribe al buffer con drain_nbiot. Requiere que el usuario MQTT del gateway
+tenga permiso de suscripción en el broker.
+
 Config por variables de entorno (el instalador de fase 1 las rellena; la
 clave se pregunta al ejecutar, nunca se escribe en el código):
   MODULINKR_MQTT_HOST         host del broker cloud (vacío = MQTT off)
@@ -55,6 +63,7 @@ Requiere `pip install paho-mqtt` en el venv del servicio.
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -69,6 +78,10 @@ SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
 TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
 REGISTER_TOPIC   = "modulinkr/v1/{origin}/register"
+# El gateway se suscribe a la telemetría de TODOS los publishers para ver el
+# camino NB-IoT (failover): un publisher distinto de 255 es un supernodo
+# publicando por celular (db-schema §2, source por el publisher del topic).
+SUBSCRIBE_TOPIC  = "modulinkr/v1/+/telemetry"
 
 
 class MqttPublisher:
@@ -98,6 +111,11 @@ class MqttPublisher:
         self.n_pub_tel = 0   # muestras de telemetría publicadas (con PUBACK)
         self.n_pub_cat = 0   # catálogos republicados (con PUBACK)
         self.batch_id  = 0   # mensajes de telemetría enviados en esta sesión
+
+        # Cola del camino NB-IoT: on_message corre en el hilo de paho y no
+        # puede tocar el SQLite del buffer (un solo hilo). Encola y el bucle
+        # principal escribe con drain_nbiot. Acotada para no crecer sin fin.
+        self._nbiot_q: collections.deque = collections.deque(maxlen=2000)
 
     # ----- Conexión -----
 
@@ -137,6 +155,7 @@ class MqttPublisher:
 
         self.client.on_connect    = self._on_connect
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_message    = self._on_message
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
 
         try:
@@ -161,6 +180,12 @@ class MqttPublisher:
         if rc == 0:
             self.connected = True
             LOG.info("MQTT conectado al broker cloud")
+            # Suscripción a la telemetría de todos los publishers (camino
+            # NB-IoT/failover). Se resuscribe en cada reconexión.
+            try:
+                client.subscribe(SUBSCRIBE_TOPIC, qos=1)
+            except Exception as e:                    # noqa: BLE001
+                LOG.warning("MQTT subscribe falló: %s", e)
         else:
             self.connected = False
             LOG.error("MQTT rechazado por el broker (rc=%s)", rc)
@@ -169,6 +194,42 @@ class MqttPublisher:
         self.connected = False
         if rc != 0:
             LOG.warning("MQTT desconectado (rc=%s), reintentando", rc)
+
+    def _on_message(self, client, userdata, msg) -> None:
+        """Telemetría oída del broker. Un publisher distinto del gateway es un
+        supernodo publicando por NB-IoT (failover): se encola su actividad y
+        el último dato de cada origin, para que el bucle principal los guarde
+        (drain_nbiot). Corre en el hilo de paho: solo encola, no toca SQLite,
+        y nunca propaga (un fallo aquí no debe tumbar el bucle de red)."""
+        try:
+            publisher = int(msg.topic.split("/")[2])
+            if publisher == GATEWAY_ID:
+                return  # eco del propio gateway (camino LoRa), se ignora
+            payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
+            samples = []
+            for s in payload.get("samples") or []:
+                origin, ts, v = s.get("origin"), s.get("ts"), s.get("v")
+                if not isinstance(origin, int) or not isinstance(ts, int) or v is None:
+                    continue
+                st = s.get("st")
+                samples.append(
+                    (origin, ts, json.dumps({"v": v, "st": st} if st else v)))
+            self._nbiot_q.append((publisher, samples))
+        except Exception as e:                        # noqa: BLE001
+            LOG.warning("MQTT on_message descartado: %s", e)
+
+    def drain_nbiot(self) -> None:
+        """Vuelca la cola del camino NB-IoT al buffer (hilo principal). Marca
+        la actividad del supernodo (mqtt_seen) y el último dato de cada origin
+        (nbiot_last). Barato: se llama cada vuelta del bucle del servicio."""
+        while True:
+            try:
+                publisher, samples = self._nbiot_q.popleft()
+            except IndexError:
+                break
+            for origin, ts, reads_json in samples:
+                self.buf.nbiot_last_update(origin, ts, reads_json, publisher)
+            self.buf.mqtt_seen(publisher)
 
     # ----- Drenado -----
 

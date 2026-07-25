@@ -24,12 +24,14 @@
 // el Pi tras aceptar el dato en su buffer, así una caída del Pi corta ACK y
 // BEACON y los nodos escalan a NB-IoT.
 //
-// Configuración LoRa por build_flags en platformio.ini, debe coincidir con
-// la de los nodos.
+// Configuración LoRa inicial por build_flags en platformio.ini (defaults de
+// arranque); el Pi la ajusta en caliente con el comando RADIO. Debe coincidir
+// con la de los nodos.
 
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <SSD1306Wire.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "protocol.h"
@@ -51,17 +53,19 @@ constexpr int8_t  kPinOledSCL = 18;
 constexpr int8_t  kPinOledRST = 21;
 constexpr uint8_t kOledAddr   = 0x3C;
 
-// ----- Parámetros LoRa -----
-constexpr float    kFreqMHz       = LORA_FREQ_HZ / 1.0e6f;
-constexpr float    kBandwidthKHz  = static_cast<float>(LORA_BW_KHZ);
-constexpr uint8_t  kSpreadingFact = LORA_SF;
+// ----- Parámetros LoRa fijos (no varían por red) -----
 constexpr uint8_t  kCodingRate    = LORA_CR_DENOM;
 constexpr uint8_t  kSyncWord      = LORA_SYNC_WORD;
 constexpr uint8_t  kPreambleLen   = 8;
 constexpr uint8_t  kTxPowerDbm    = LORA_TX_DBM;
 
-// ----- Parámetros de red -----
-constexpr uint8_t  kNetworkId = NETWORK_ID;
+// ----- Parámetros de radio configurables en caliente por el Pi (comando
+// RADIO, frame-format.md §12.6). Arrancan con los build_flags como defaults
+// hasta el primer RADIO; la fuente de verdad es gateway.env del Pi. -----
+float   g_freq_mhz   = LORA_FREQ_HZ / 1.0e6f;
+float   g_bw_khz     = static_cast<float>(LORA_BW_KHZ);
+uint8_t g_sf         = LORA_SF;
+uint8_t g_network_id = NETWORK_ID;
 
 // SPI custom para Heltec v3 (no son los pines default del ESP32-S3).
 SPIClass loraSpi(HSPI);
@@ -74,7 +78,7 @@ SSD1306Wire display(kOledAddr, kPinOledSDA, kPinOledSCL);
 // Último estado recibido del Pi para la pantalla. Vacío hasta el primer
 // empuje: la pantalla muestra "esperando Pi" mientras tanto.
 char g_st_ssid[33] = "";     // SSID WiFi del gateway
-char g_st_net[33]  = "";     // nombre de la red ModuLinkr
+char g_st_net[64]  = "";     // etiqueta de red, ya compuesta por el Pi
 char g_st_ip[20]   = "";     // IP LAN del gateway
 char g_st_on[8]    = "";     // nodos en línea
 char g_st_off[8]   = "";     // nodos fuera de línea
@@ -104,11 +108,11 @@ void printBanner() {
     Serial.println(F("  ModuLinkr/gateway-radio  v0.3.0-radio-pura"));
     Serial.println(F("  Heltec WiFi LoRa 32 v3 + SX1262 (RadioLib)"));
     Serial.printf ("  freq=%.3f MHz  SF%u  BW%.0f kHz  CR4/%u  sync=0x%02X\n",
-                   kFreqMHz, kSpreadingFact, kBandwidthKHz,
+                   g_freq_mhz, g_sf, g_bw_khz,
                    kCodingRate, kSyncWord);
     Serial.printf ("  network_id=%u  rol=radio pura (ACK y BEACON en el Pi)\n",
-                   kNetworkId);
-    Serial.println(F("  Pi->Heltec: 'TX <hex>' / 'OLED ...'   Heltec->Pi: '[rx] ...'"));
+                   g_network_id);
+    Serial.println(F("  Pi->Heltec: 'TX <hex>' / 'OLED ...' / 'RADIO ...'   Heltec->Pi: '[rx] ...'"));
     Serial.println(F("=================================================="));
 }
 
@@ -196,7 +200,9 @@ void renderStatus() {
         return;
     }
     // Sin acentos: la fuente ASCII de la OLED no tiene la 'í' de "línea".
-    display.drawString(0, 0,  String("Red Modulinkr: ") + g_st_net);
+    // El primer campo llega ya compuesto por el Pi ("Red Modulinkr: <nombre>
+    // - ID: <id>", o "ID de Red Modulinkr: <id>" sin nombre): se dibuja tal cual.
+    display.drawString(0, 0,  g_st_net);
     display.drawString(0, 13, String("WiFi SSID: ") + g_st_ssid);
     display.drawString(0, 26, String("IP: ") + g_st_ip);
     display.drawString(0, 39, String("Nodos en linea: ") + g_st_on);
@@ -234,9 +240,50 @@ void handleOledLine(char* rest) {
     renderStatus();
 }
 
+// Interpreta "RADIO <netid> <freq_hz> <sf> <bw_khz>": reconfigura la radio
+// en caliente (frame-format.md §12.6). El Pi lo empuja cada ciclo; solo se
+// reconfigura si algún valor difiere, para no cortar la recepción en cada
+// empuje. El network_id es filtro software y se aplica siempre.
+void handleRadioLine(char* rest) {
+    unsigned netid = 0, sf = 0, bw = 0;
+    unsigned long freq_hz = 0;
+    if (sscanf(rest, "%u %lu %u %u", &netid, &freq_hz, &sf, &bw) != 4) {
+        Serial.println(F("[radio] err formato (RADIO <netid> <freq_hz> <sf> <bw_khz>)"));
+        return;
+    }
+    if (netid < 1 || netid > 254 || freq_hz < 100000000UL || freq_hz > 1000000000UL ||
+        sf < 7 || sf > 12 || (bw != 125 && bw != 250 && bw != 500)) {
+        Serial.println(F("[radio] err valores fuera de rango"));
+        return;
+    }
+    const float freq_mhz = freq_hz / 1.0e6f;
+    const float bw_khz   = static_cast<float>(bw);
+    if (netid == g_network_id && sf == g_sf &&
+        freq_mhz == g_freq_mhz && bw_khz == g_bw_khz) {
+        return;  // sin cambios: no se toca la radio
+    }
+
+    radio.standby();
+    bool ok = true;
+    int16_t s;
+    if ((s = radio.setFrequency(freq_mhz)) == RADIOLIB_ERR_NONE) g_freq_mhz = freq_mhz;
+    else { ok = false; Serial.printf("[radio] setFrequency err=%d\n", s); }
+    if ((s = radio.setSpreadingFactor(static_cast<uint8_t>(sf))) == RADIOLIB_ERR_NONE)
+        g_sf = static_cast<uint8_t>(sf);
+    else { ok = false; Serial.printf("[radio] setSpreadingFactor err=%d\n", s); }
+    if ((s = radio.setBandwidth(bw_khz)) == RADIOLIB_ERR_NONE) g_bw_khz = bw_khz;
+    else { ok = false; Serial.printf("[radio] setBandwidth err=%d\n", s); }
+    g_network_id = static_cast<uint8_t>(netid);
+
+    const int16_t rs = radio.startReceive();
+    if (rs != RADIOLIB_ERR_NONE) Serial.printf("[radio] startReceive err=%d\n", rs);
+    Serial.printf("[radio] aplicado netid=%u freq=%.3f MHz SF%u BW%.0f kHz%s\n",
+                  g_network_id, g_freq_mhz, g_sf, g_bw_khz, ok ? "" : " (con errores)");
+}
+
 // Procesa una línea completa recibida del Pi por USB. Entiende "TX <hex>"
-// (transmitir) y "OLED <campos>" (estado para la pantalla); cualquier otra
-// cosa se ignora (con aviso).
+// (transmitir), "OLED <campos>" (estado para la pantalla) y "RADIO <params>"
+// (reconfiguración de radio); cualquier otra cosa se ignora (con aviso).
 void handleInLine(char* line, size_t len) {
     // Trim de espacios/CR al final.
     while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' ')) {
@@ -256,8 +303,10 @@ void handleInLine(char* line, size_t len) {
         txRaw(frame, n);
     } else if (len >= 5 && strncmp(line, "OLED ", 5) == 0) {
         handleOledLine(line + 5);
+    } else if (len >= 6 && strncmp(line, "RADIO ", 6) == 0) {
+        handleRadioLine(line + 6);
     } else {
-        Serial.println(F("[in] comando desconocido (solo 'TX <hex>' u 'OLED ...')"));
+        Serial.println(F("[in] comando desconocido (solo 'TX', 'OLED' o 'RADIO')"));
     }
 }
 
@@ -289,7 +338,7 @@ void processFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
         // Demasiado corta para leer siquiera el network_id de forma segura.
         return;
     }
-    if (buf[kOffNetworkId] != kNetworkId) {
+    if (buf[kOffNetworkId] != g_network_id) {
         g_rx_alien++;
         return;  // tráfico de otra red: descartar en silencio
     }
@@ -332,9 +381,9 @@ void setup() {
 
     Serial.print(F("[init] SX1262.begin... "));
     int16_t state = radio.begin(
-        kFreqMHz,
-        kBandwidthKHz,
-        kSpreadingFact,
+        g_freq_mhz,
+        g_bw_khz,
+        g_sf,
         kCodingRate,
         kSyncWord,
         kTxPowerDbm,

@@ -77,7 +77,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.27-modbus-debug-modes";
+constexpr const char* kFirmwareVersion = "0.0.28-nbiot-status-hb";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -1068,7 +1068,14 @@ void heartbeatTick(uint32_t now) {
 
     nextSeq();
     const uint32_t tx_ms = lora.txAirtimeMs();
-    lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
+    // El supernodo adjunta su estado NB-IoT/MQTT (frame-format.md §6) para
+    // que el visor lo muestre; los nodos normales mandan solo el tx_ms.
+    if (g_cfg.super_node) {
+        lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId(),
+                           true, nbsvc.statusFlags(), nbsvc.csqRaw());
+    } else {
+        lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
+    }
     Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)\n",
                   g_lora_seq, static_cast<unsigned long>(tx_ms),
                   now > 0 ? (100.0 * tx_ms / now) : 0.0);

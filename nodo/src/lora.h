@@ -173,7 +173,11 @@ public:
     // HEARTBEAT v3.1 (frame-format.md §6): diagnóstico periódico sin ACK
     // con el contador de aire acumulado (duty cycle medido en el
     // transmisor, EN 300 220-1).
-    Status sendHeartbeat(uint16_t seq, uint32_t tx_ms, uint8_t hop_dst);
+    // El supernodo añade su estado NB-IoT/MQTT al heartbeat (frame-format.md
+    // §6): nb_present=true suma 2 bytes (nb_flags, csq) tras el tx_ms.
+    Status sendHeartbeat(uint16_t seq, uint32_t tx_ms, uint8_t hop_dst,
+                         bool nb_present = false, uint8_t nb_flags = 0,
+                         uint8_t csq = 0xFF);
 
     // Milisegundos de aire acumulados desde el boot (suma del ToA de cada
     // trama realmente transmitida, contada en el evento TXP2P DONE; los

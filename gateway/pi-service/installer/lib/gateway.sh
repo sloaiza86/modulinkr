@@ -249,6 +249,15 @@ gw_write_env() {
         echo "# Solo root. No versionar (está en .gitignore)."
         echo "MODULINKR_PORT=$MODULINKR_PORT"
         echo "MODULINKR_NETWORK_ID=$MODULINKR_NETWORK_ID"
+        # Parámetros de radio LoRa: fuente de verdad del camino B (el servicio
+        # los empuja al Heltec con RADIO y el visor los edita). Defaults EU868;
+        # se cambian luego desde "Parámetros de red LoRa" o por el conf.
+        echo "MODULINKR_LORA_REGION=${MODULINKR_LORA_REGION:-EU868}"
+        echo "MODULINKR_LORA_FREQ_HZ=${MODULINKR_LORA_FREQ_HZ:-869525000}"
+        echo "MODULINKR_SF=${MODULINKR_SF:-7}"
+        echo "MODULINKR_BW_KHZ=${MODULINKR_BW_KHZ:-125}"
+        echo "MODULINKR_MAX_TTL=${MODULINKR_MAX_TTL:-4}"
+        echo "MODULINKR_ONLINE_S=${MODULINKR_ONLINE_S:-30}"
         echo "MODULINKR_DB=$MODULINKR_DB"
         echo "MODULINKR_SEC_ENABLED=$MODULINKR_SEC_ENABLED"
         echo "MODULINKR_SEC_KEY=$MODULINKR_SEC_KEY"

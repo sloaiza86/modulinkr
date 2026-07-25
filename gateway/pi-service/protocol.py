@@ -350,12 +350,16 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
 
     elif frame_type == FRAME_HEARTBEAT:
         # v3.1: 4 B con tx_ms (aire acumulado del transmisor, duty cycle
-        # normativo). 0 B = legado v3.0, sin contador.
-        if payload_length not in (0, 4):
-            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0 o 4'
+        # normativo). 0 B = legado v3.0, sin contador. El supernodo añade
+        # 2 B con su estado NB-IoT/MQTT (frame-format.md §6): nb_flags y csq.
+        if payload_length not in (0, 4, 6):
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0, 4 o 6'
             return out
-        if payload_length == 4:
+        if payload_length >= 4:
             out['tx_ms'] = struct.unpack_from('<I', payload, 0)[0]
+        if payload_length == 6:
+            out['nb_flags'] = payload[4]
+            out['nb_csq'] = payload[5]
 
     elif frame_type == FRAME_BEACON:
         # v2.1: hop_count + parent + flags + epoch (uint32 LE).

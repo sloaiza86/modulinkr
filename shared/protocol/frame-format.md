@@ -395,6 +395,19 @@ Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay)
 
 Tamaño: **17 bytes** (25 con seguridad v2.2). Coste de aire del propio reporte: ~50 ms/min a SF7, ~0,08 % de duty, y queda contado en el contador que transporta.
 
+### 6.1 Estado NB-IoT/MQTT del supernodo (25-jul-2026)
+
+El supernodo añade 2 bytes al final del payload del HEARTBEAT con el estado de su enlace celular, para que el visor del gateway lo muestre por nodo sin depender del canal cloud. Payload del supernodo (6 bytes):
+
+```
+tx_ms          nb_flags   csq
+(4 B, uint32)  (1 B)      (1 B)
+```
+
+`nb_flags` es un mapa de bits: bit 0 (`0x01`) el módem está registrado en la red celular (pasó la fase de registro), bit 1 (`0x02`) la sesión MQTT con el broker cloud está operativa. Un backoff tras una caída deja ambos bits a 0. `csq` es la calidad de señal cruda 0 a 31 (`0xFF` si es desconocida), la misma escala del `SN_OFFER` (§8.2).
+
+El receptor distingue por longitud del payload: 4 bytes es un nodo normal (solo `tx_ms`), 6 un supernodo con su estado. Un nodo que jamás manda los 2 bytes no es supernodo, así que el visor solo pinta el chip NB-IoT a quien los reporta. La cadencia es la del propio heartbeat (cada 60 s), suficiente para un estado de conectividad de respaldo. El estado NB-IoT y MQTT del supernodo también viaja a la nube por su propia telemetría MQTT; estos 2 bytes son la vía LoRa, para que el gateway lo conozca aunque no observe el broker cloud.
+
 ## 7. Trama BEACON (downlink broadcast, `frame_type = 0x10`)
 
 Mantiene el árbol de rutas (§2.1). La origina el gateway; los nodos con padre la re-emiten una sola vez por `seq`.
@@ -634,9 +647,23 @@ El Heltec lleva una OLED (SSD1306 128x64) que hasta la v3.1 quedaba apagada. El 
 OLED <ssid>\t<red>\t<ip>\t<en_linea>\t<fuera_de_linea>
 ```
 
-Los cinco campos van separados por tabulador (`\t`), no por espacio, porque el SSID admite espacios. Significan, en orden: SSID del WiFi al que está asociado el gateway, nombre de la red ModuLinkr (`MODULINKR_NETWORK_NAME`, o `net <network_id>` si no se fija), IP LAN del gateway, número de nodos en línea y número de nodos fuera de línea. Un campo vacío se admite (por ejemplo, sin WiFi asociado el `ssid` va vacío). El conteo de nodos usa el umbral `MODULINKR_ONLINE_S` sobre la tabla `node_status` del buffer, el mismo criterio que el visor.
+Los cinco campos van separados por tabulador (`\t`), no por espacio, porque el SSID admite espacios. Significan, en orden: SSID del WiFi al que está asociado el gateway, etiqueta de red ya compuesta por el Pi que el Heltec dibuja tal cual (`Red Modulinkr: <nombre> - ID: <network_id>` con `MODULINKR_NETWORK_NAME` fijado, o `ID de Red Modulinkr: <network_id>` sin nombre), IP LAN del gateway, número de nodos en línea y número de nodos fuera de línea. Un campo vacío se admite (por ejemplo, sin WiFi asociado el `ssid` va vacío). El conteo de nodos usa el umbral `MODULINKR_ONLINE_S` sobre la tabla `node_status` del buffer, el mismo criterio que el visor.
+
+Desde el 25-jul-2026 el segundo campo lleva la etiqueta entera. Antes contenía solo el nombre de la red y el Heltec le anteponía el texto fijo `Red Modulinkr: `; ese prefijo se retiró del firmware para poder variar la etiqueta según haya nombre o no, sin recompilar el Heltec. El buffer del campo en el Heltec pasó a 64 bytes para admitir el texto compuesto.
 
 El Pi empuja esta línea al abrir el puerto del Heltec y luego cada `MODULINKR_OLED_S` (default 5 s). Antes del primer empuje, o si el Pi no está, el Heltec muestra `esperando Pi`. El redibujado por I2C es independiente del SPI de la radio y solo ocurre al llegar una línea nueva, así que no compite con la recepción LoRa.
+
+### 12.6 Configuración de radio en caliente (Pi a Heltec, 25-jul-2026)
+
+Hasta esta fecha los parámetros de radio (`network_id`, frecuencia, SF y ancho de banda) vivían solo en los `build_flags` del Heltec, fijados al compilar. Para poder editarlos desde el visor sin reflashear, el Pi los empuja por la misma línea serie y el Heltec reconfigura su radio en caliente. Una línea de texto por empuje, terminada en `\n`:
+
+```
+RADIO <network_id> <frequency_hz> <sf> <bw_khz>
+```
+
+Los cuatro campos van separados por espacio. `network_id` es 1 a 254; `frequency_hz` la frecuencia en Hz (100 MHz a 1 GHz); `sf` el spreading factor 7 a 12; `bw_khz` el ancho de banda 125, 250 o 500. La fuente de verdad es `gateway.env` del Pi (`MODULINKR_NETWORK_ID`, `MODULINKR_LORA_FREQ_HZ`, `MODULINKR_SF`, `MODULINKR_BW_KHZ`), editable desde la página "Parámetros de red LoRa" del visor, que reinicia el servicio para que relea los valores.
+
+El Pi empuja esta línea al abrir el puerto y luego con la cadencia de la OLED. El Heltec reconfigura la radio (`standby`, `setFrequency`, `setSpreadingFactor`, `setBandwidth`, `startReceive`) solo si algún valor difiere del que ya tiene, así que reenviarla cada ciclo no corta la recepción. El `network_id` es filtro software (`§2`) y se aplica siempre. Los `build_flags` quedan como valores de arranque hasta el primer `RADIO`; el sync word, el coding rate y la potencia de transmisión siguen fijos al compilar (no varían por red). Al cambiar cualquiera de estos parámetros, todos los nodos deben reconfigurarse a los mismos valores o dejan de comunicarse con el gateway.
 
 ## 13. Registro e incorporación a la red (NODE_REGISTER / WELCOME, v2.1)
 

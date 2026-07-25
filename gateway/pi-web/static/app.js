@@ -294,6 +294,64 @@ function chipEstado(n, ult, onlineS) {
   return { cls, txt };
 }
 
+// Estado por nodo en chips separados (pantalla inicial): enlace LoRa y estado
+// Modbus. El chip Modbus sale de los st_code de la última telemetría (v3.2):
+// sin fallos, "Modbus conectado"; con fallos, el motivo. Cuando el nodo está
+// sin señal no se muestra chip Modbus (no hay dato reciente). El chip
+// NB-IoT/MQTT del supernodo es fase 2 (requiere que el nodo lo reporte).
+function chipsNodo(n, ult, onlineS) {
+  const chips = [n.online ? { cls: "on", txt: "En línea LoRa" }
+                          : { cls: "off", txt: "LoRa sin señal" }];
+  const viaNb = !!(ult && ult.via_nbiot);
+  const mqttFresco = n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
+
+  // Modbus: con datos frescos, sea por LoRa (en línea) o por NB-IoT (failover).
+  if (n.online || viaNb) {
+    if (ult && ult.ago_s <= onlineS * 5) {
+      const canales = ult.channels ?? [];
+      const malos = canales.filter((c) => c.st_code);
+      if (!canales.length) {
+        chips.push({ cls: "neutro", txt: "Modbus sin datos" });
+      } else if (!malos.length) {
+        chips.push({ cls: "on", txt: "Modbus conectado" });
+      } else {
+        const todos = malos.length === canales.length;
+        const timeout = malos.every((c) => c.st_name === "timeout");
+        chips.push({ cls: "ambar", txt: "Modbus " + (todos
+          ? (timeout ? "sin respuesta" : "fallo")
+          : "fallo parcial") });
+      }
+    } else {
+      chips.push({ cls: "neutro", txt: "Modbus sin datos" });
+    }
+  }
+
+  // Failover: el dato del nodo llega por NB-IoT. En el propio supernodo esto
+  // ya lo dice el chip NB-IoT+MQTT, así que no se duplica.
+  if (viaNb && !mqttFresco) {
+    chips.push({ cls: "ambar", txt: "vía NB-IoT (failover)" });
+  }
+
+  // NB-IoT/MQTT del supernodo. Fuente primaria: el broker (mqtt_ago_s), que
+  // es el dato real y sobrevive a la caída del LoRa. Respaldo: el heartbeat
+  // por LoRa (nbiot_flags), que puede quedar viejo si el LoRa cae.
+  if (mqttFresco) {
+    chips.push({ cls: "on", txt: "NB-IoT + MQTT" });
+  } else if (n.nbiot_flags != null) {
+    const fresco = n.nbiot_ago_s != null && n.nbiot_ago_s <= 180;
+    if (!fresco) {
+      chips.push({ cls: "neutro", txt: "NB-IoT sin datos" });
+    } else {
+      const reg = (n.nbiot_flags & 0x01) !== 0;
+      const mqtt = (n.nbiot_flags & 0x02) !== 0;
+      chips.push(reg && mqtt ? { cls: "on", txt: "NB-IoT + MQTT" }
+               : reg ? { cls: "ambar", txt: "MQTT sin conexión" }
+               : { cls: "off", txt: "NB-IoT sin red" });
+    }
+  }
+  return chips;
+}
+
 function tarjetaNodo(n, ult, onlineS) {
   const canales = ult ? ult.channels : [];
   const filas = canales.map((c, i) => `
@@ -319,7 +377,8 @@ function tarjetaNodo(n, ult, onlineS) {
         <div class="tn-sub">${visto}</div>
         <div class="tn-sub">${medida}</div>
       </div>
-      <span class="tn-estado chip ${chipEstado(n, ult, onlineS).cls}">${chipEstado(n, ult, onlineS).txt}</span>
+      <div class="tn-estados">${chipsNodo(n, ult, onlineS)
+        .map((c) => `<span class="chip ${c.cls}">${c.txt}</span>`).join("")}</div>
     </div>
     <div class="tn-sensores">
       ${filas || '<div class="tn-vacio">Sin telemetría todavía.</div>'}
@@ -999,7 +1058,9 @@ function cfgRuta() {
   document.getElementById("cfg-menu").hidden     = sub !== "";
   document.getElementById("cfg-sub-nodo").hidden = sub !== "nodo";
   document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
+  if (sub !== "nodo/usb") cfgLocalCerrar();   // cierra el puerto Web Serial al salir
   document.getElementById("cfg-radio").hidden    = sub !== "radio";
+  document.getElementById("cfg-red-lora").hidden = sub !== "red-lora";
   document.getElementById("cfg-wifi").hidden     = sub !== "wifi";
   document.getElementById("cfg-debug").hidden    = sub !== "depuracion";
   document.getElementById("cfg-zona").hidden     = sub !== "zona";
@@ -1008,6 +1069,7 @@ function cfgRuta() {
   document.getElementById("cfg-fw").hidden       = sub !== "nodo/firmware";
   document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
+  if (sub === "red-lora") redloraCargar();
   if (sub === "wifi") wifiCargar();
   // Al salir de depuración se corta el stream SSE abierto.
   if (sub === "depuracion") debugInit(); else debugStop();
@@ -1028,14 +1090,25 @@ function cfgBotones(bloquear) {
 // ----- Diálogo de progreso y confirmación -----
 
 const SPIN = '<span class="spin"></span> ';
-let cfgConfirmarCb = null;   // acción del botón rojo del diálogo
+let cfgConfirmarCb = null;   // acción del botón de confirmar del diálogo
+let cfgCancelarCb = null;    // acción del botón de cancelar (opcional)
 
 function cfgDialogo(titulo, texto, botones = {}) {
   document.getElementById("cfg-dialogo-titulo").textContent = titulo;
   document.getElementById("cfg-dialogo-texto").innerHTML = texto;
-  document.getElementById("cfg-dialogo-cancelar").hidden = !botones.cancelar;
-  document.getElementById("cfg-dialogo-confirmar").hidden = !botones.confirmar;
-  document.getElementById("cfg-dialogo-cerrar").hidden = !botones.cerrar;
+  const bc = document.getElementById("cfg-dialogo-cancelar");
+  const bf = document.getElementById("cfg-dialogo-confirmar");
+  const bx = document.getElementById("cfg-dialogo-cerrar");
+  bc.hidden = !botones.cancelar;
+  bf.hidden = !botones.confirmar;
+  bx.hidden = !botones.cerrar;
+  // Etiquetas y estilo por llamada (defaults: borrado en rojo). Un popup no
+  // destructivo pide confirmarPeligro:false para el botón primario azul.
+  bc.textContent = botones.cancelarText || "Cancelar";
+  bf.textContent = botones.confirmarText || "Borrar";
+  bx.textContent = botones.cerrarText || "Cerrar";
+  bf.className = botones.confirmarPeligro === false ? "btn-primario" : "peligro";
+  cfgCancelarCb = botones.onCancelar || null;
   document.getElementById("cfg-dialogo-fondo").hidden = false;
   document.getElementById("cfg-dialogo").hidden = false;
 }
@@ -1044,6 +1117,7 @@ function cfgDialogoCerrar() {
   document.getElementById("cfg-dialogo-fondo").hidden = true;
   document.getElementById("cfg-dialogo").hidden = true;
   cfgConfirmarCb = null;
+  cfgCancelarCb = null;
 }
 
 // Tras un CFG.PUT o CFG.DEL el nodo se reinicia (~2 s). Se re-detecta
@@ -1091,7 +1165,219 @@ function cfgPintarNodo(port, n) {
   document.getElementById("cfg-editor").hidden = false;
 }
 
+// ----- Comisionamiento por Web Serial (nodo en el USB de este ordenador) -----
+// Replica el protocolo CFG.* de commission.h, el mismo que habla la Pi en
+// configapi: CFG.HELLO / CFG.GET / CFG.PUT / CFG.DEL, respuestas "CFG:...".
+// Un lector de fondo recoge líneas; waitLine espera la respuesta con timeout
+// y descarta los logs del nodo, igual que el _read_response del Pi.
+
+class LocalCfg {
+  constructor(port) {
+    this.port = port; this.reader = null; this.writer = null;
+    this.keep = false; this.lines = []; this.loop = null;
+  }
+  async open() {
+    await this.port.open({ baudRate: 115200 });
+    // Sin auto-reset por DTR/RTS (como el _open de la Pi); si igual resetea,
+    // el sondeo de hello cubre el arranque.
+    try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) { /* */ }
+    this.writer = this.port.writable.getWriter();
+    this.keep = true;
+    this.loop = this._read();
+  }
+  async _read() {
+    const dec = new TextDecoder(); let buf = "";
+    this.reader = this.port.readable.getReader();
+    try {
+      while (this.keep) {
+        const { value, done } = await this.reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          this.lines.push(buf.slice(0, idx).replace(/\r$/, ""));
+          buf = buf.slice(idx + 1);
+        }
+      }
+    } catch (e) { /* */ } finally {
+      try { this.reader.releaseLock(); } catch (e) { /* */ }
+    }
+  }
+  async close() {
+    this.keep = false;
+    try { if (this.reader) await this.reader.cancel(); } catch (e) { /* */ }
+    try { if (this.loop) await this.loop; } catch (e) { /* */ }
+    try { if (this.writer) this.writer.releaseLock(); } catch (e) { /* */ }
+    try { await this.port.close(); } catch (e) { /* */ }
+  }
+  async send(line) { await this.writer.write(new TextEncoder().encode(line + "\n")); }
+  async waitLine(pred, ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      while (this.lines.length) {
+        const l = this.lines.shift();
+        if (pred(l)) return l;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("el nodo no respondió a tiempo");
+  }
+  async hello() {
+    const deadline = Date.now() + 12000;   // cubre un boot completo
+    while (Date.now() < deadline) {
+      this.lines.length = 0;               // descarta HELLOs viejos
+      await this.send("CFG.HELLO");
+      try {
+        const l = await this.waitLine((x) => x.startsWith("CFG:HELLO "), 700);
+        return JSON.parse(l.slice("CFG:HELLO ".length));
+      } catch (e) { /* reintentar */ }
+    }
+    throw new Error("el nodo no respondió a CFG.HELLO");
+  }
+  async get() {
+    await this.send("CFG.GET");
+    const l = await this.waitLine((x) => x.startsWith("CFG:DATA ") || x.startsWith("CFG:ERR"), 10000);
+    if (l.startsWith("CFG:ERR")) throw new Error(l.replace(/^CFG:ERR\s*/, "") || "sin config");
+    const bin = atob(l.slice("CFG:DATA ".length));
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  }
+  async put(jsonText) {
+    const bytes = new TextEncoder().encode(jsonText);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await this.send(`CFG.PUT ${bytes.length} ${sha}`);
+    const ready = await this.waitLine((x) => x.startsWith("CFG:READY") || x.startsWith("CFG:ERR"), 5000);
+    if (!ready.startsWith("CFG:READY")) throw new Error(ready.replace(/^CFG:ERR\s*/, ""));
+    await this.writer.write(bytes);
+    const ok = await this.waitLine((x) => x.startsWith("CFG:OK") || x.startsWith("CFG:ERR"), 15000);
+    if (!ok.startsWith("CFG:OK")) throw new Error(ok.replace(/^CFG:ERR\s*/, ""));
+    return ok.replace(/^CFG:OK\s*/, "");
+  }
+  async del() {
+    await this.send("CFG.DEL");
+    const l = await this.waitLine((x) => x.startsWith("CFG:OK") || x.startsWith("CFG:ERR"), 10000);
+    if (!l.startsWith("CFG:OK")) throw new Error(l.replace(/^CFG:ERR\s*/, ""));
+    return l.replace(/^CFG:OK\s*/, "");
+  }
+}
+
+let cfgLocalSes = null;   // sesión Web Serial abierta (o null)
+
+function cfgFuenteLocal() {
+  const s = document.getElementById("cfg-fuente");
+  return !!(s && s.value === "local");
+}
+
+async function cfgLocalAsegurar() {
+  if (cfgLocalSes) return cfgLocalSes;
+  if (!("serial" in navigator)) {
+    throw new Error("Web Serial no disponible: usa Chrome o Edge de escritorio");
+  }
+  const port = await navigator.serial.requestPort();   // popup de elección
+  const ses = new LocalCfg(port);
+  await ses.open();
+  cfgLocalSes = ses;
+  return ses;
+}
+
+async function cfgLocalCerrar() {
+  if (cfgLocalSes) { const s = cfgLocalSes; cfgLocalSes = null; try { await s.close(); } catch (e) { /* */ } }
+}
+
+async function cfgLocalBuscar() {
+  const aviso = document.getElementById("cfg-busqueda-aviso");
+  cfgBotones(true);
+  aviso.textContent = "abriendo el puerto y detectando el nodo...";
+  try {
+    // Cada búsqueda parte de cero: cierra la sesión anterior y vuelve a pedir
+    // el puerto. Evita el reúso de un puerto que quedó en mal estado (el
+    // diálogo que solo salía la primera vez).
+    await cfgLocalCerrar();
+    const ses = await cfgLocalAsegurar();
+    const ident = await ses.hello();
+    aviso.textContent = "";
+    cfgPintarNodo("este equipo", ident);
+  } catch (e) {
+    aviso.textContent = "error: " + (e.message || e);
+    await cfgLocalCerrar();
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+async function cfgLocalLeer() {
+  const res = document.getElementById("cfg-resultado");
+  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
+  cfgBotones(true);
+  res.className = "aviso"; res.textContent = "leyendo config del nodo...";
+  try {
+    await cfgLocalSes.hello();
+    document.getElementById("cfg-texto").value = await cfgLocalSes.get();
+    res.textContent = "";
+  } catch (e) {
+    res.className = "aviso mal"; res.textContent = "error: " + (e.message || e);
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+async function cfgLocalEnviar() {
+  const res = document.getElementById("cfg-resultado");
+  const texto = document.getElementById("cfg-texto").value.trim();
+  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
+  if (!texto) { res.className = "aviso mal"; res.textContent = "el editor está vacío"; return; }
+  try { JSON.parse(texto); } catch (e) {
+    res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
+  }
+  res.className = "aviso"; res.textContent = "";
+  cfgBotones(true);
+  const T = "Enviar config al nodo";
+  cfgDialogo(T, SPIN + "enviando y validando en el nodo...");
+  try {
+    await cfgLocalSes.hello();
+    const detail = await cfgLocalSes.put(texto);
+    cfgDialogo(T, SPIN + "config aceptado; el nodo se está reiniciando...");
+    let ident = null;
+    try { ident = await cfgLocalSes.hello(); } catch (e) { /* */ }
+    if (ident) {
+      cfgPintarNodo("este equipo", ident);
+      cfgDialogo(T, "Reinicio completo, config aplicado.<pre>" + (detail || "") + "</pre>", { cerrar: true });
+    } else {
+      cfgDialogo(T, "Config aceptado, pero el nodo no respondió tras el reinicio.", { cerrar: true });
+    }
+  } catch (e) {
+    cfgDialogo(T, "El nodo rechazó el config: <b>" + (e.message || e) + "</b>", { cerrar: true });
+  } finally {
+    cfgBotones(false);
+  }
+}
+
+function cfgLocalBorrar() {
+  const T = "Borrar config del nodo";
+  cfgConfirmarCb = async () => {
+    if (!cfgLocalSes) { cfgDialogo(T, "buscar primero el nodo", { cerrar: true }); return; }
+    cfgBotones(true);
+    cfgDialogo(T, SPIN + "borrando el config...");
+    try {
+      await cfgLocalSes.hello();
+      await cfgLocalSes.del();
+      cfgDialogo(T, SPIN + "config borrado; el nodo se está reiniciando...");
+      let ident = null;
+      try { ident = await cfgLocalSes.hello(); } catch (e) { /* */ }
+      if (ident) cfgPintarNodo("este equipo", ident);
+      cfgDialogo(T, "El nodo quedó <b>sin configurar</b>.", { cerrar: true });
+    } catch (e) {
+      cfgDialogo(T, "Error: <b>" + (e.message || e) + "</b>", { cerrar: true });
+    } finally {
+      cfgBotones(false);
+    }
+  };
+  cfgDialogo(T, "¿Borrar el config.json del nodo? Quedará sin configurar hasta "
+    + "cargar uno nuevo.", { confirmar: true, cancelar: true });
+}
+
 async function cfgDetectar() {
+  if (cfgFuenteLocal()) { cfgLocalBuscar(); return; }
   const aviso = document.getElementById("cfg-busqueda-aviso");
   const sel = document.getElementById("cfg-puertos");
   const body = {};
@@ -1121,6 +1407,7 @@ async function cfgDetectar() {
 }
 
 async function cfgLeer() {
+  if (cfgFuenteLocal()) { cfgLocalLeer(); return; }
   const res = document.getElementById("cfg-resultado");
   if (!cfgPuerto) {
     res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
@@ -1146,6 +1433,7 @@ async function cfgLeer() {
 }
 
 async function cfgEnviar() {
+  if (cfgFuenteLocal()) { cfgLocalEnviar(); return; }
   const res = document.getElementById("cfg-resultado");
   const texto = document.getElementById("cfg-texto").value.trim();
   if (!cfgPuerto) {
@@ -1196,6 +1484,7 @@ async function cfgEnviar() {
 }
 
 async function cfgBorrar() {
+  if (cfgFuenteLocal()) { cfgLocalBorrar(); return; }
   const res = document.getElementById("cfg-resultado");
   if (!cfgPuerto) {
     res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
@@ -1239,11 +1528,24 @@ async function cfgBorrar() {
 }
 
 document.getElementById("cfg-buscar").addEventListener("click", cfgDetectar);
+// Cambiar de fuente cierra la sesión local y limpia la detección anterior.
+document.getElementById("cfg-fuente").addEventListener("change", () => {
+  cfgLocalCerrar();
+  cfgPuerto = null;
+  document.getElementById("cfg-nodo").hidden = true;
+  document.getElementById("cfg-editor").hidden = true;
+  document.getElementById("cfg-busqueda-aviso").textContent = "";
+  document.getElementById("cfg-puertos").hidden = true;
+});
 document.getElementById("cfg-leer").addEventListener("click", cfgLeer);
 document.getElementById("cfg-enviar").addEventListener("click", cfgEnviar);
 document.getElementById("cfg-borrar").addEventListener("click", cfgBorrar);
 document.getElementById("cfg-dialogo-cerrar").addEventListener("click", cfgDialogoCerrar);
-document.getElementById("cfg-dialogo-cancelar").addEventListener("click", cfgDialogoCerrar);
+document.getElementById("cfg-dialogo-cancelar").addEventListener("click", () => {
+  const cb = cfgCancelarCb;
+  cfgDialogoCerrar();
+  if (cb) cb();
+});
 document.getElementById("cfg-dialogo-confirmar").addEventListener("click", () => {
   if (cfgConfirmarCb) { const cb = cfgConfirmarCb; cfgConfirmarCb = null; cb(); }
 });
@@ -1566,6 +1868,100 @@ async function mqttGuardar() {
   } catch (e) { res.textContent = "Error: " + e.message; }
 }
 
+// ----- Página: parámetros de red LoRa (gateway.env, camino B) -----
+// Lee los valores actuales de /api/config/red (los mismos que bloquea el
+// asistente) y los guarda con /api/net/guardar (set_net.sh reinicia el
+// gateway, que reaplica la radio al Heltec en caliente).
+
+// Frecuencia por defecto de cada región: al cambiar de región se precarga,
+// pero la frecuencia queda editable por si se usa un canal concreto.
+const REGION_FREQ = { EU868: 869525000, US915: 903900000,
+                      CN470: 470300000, AS923: 923200000 };
+
+async function redloraCargar() {
+  const res = document.getElementById("r-resultado");
+  res.className = "aviso"; res.textContent = "";
+  try {
+    const r = await fetchApi("/api/config/red");
+    const d = await r.json();
+    if (!r.ok) { res.className = "aviso mal"; res.textContent = "Estado no disponible."; return; }
+    const sV = (id, v) => { if (v != null && v !== "") document.getElementById(id).value = v; };
+    sV("r-region", d.region); sV("r-freq", d.frequency_hz); sV("r-netid", d.network_id);
+    sV("r-sf", d.sf); sV("r-bw", d.bw_khz); sV("r-ttl", d.max_ttl);
+    const sec = d.security || {};
+    document.getElementById("r-sec").checked = !!sec.enabled;
+    document.getElementById("r-seckey").value = sec.key || "";
+    redloraLive();
+    if (d.source !== "gateway") {
+      res.className = "aviso ambar";
+      res.textContent = "No se pudo leer la config del gateway; se muestran valores por defecto.";
+    }
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+// Validación en vivo del formulario de red: marca los campos fuera de rango
+// y bloquea Guardar hasta que todo es válido (mismo criterio que netapi y
+// set_net.sh, para no depender del rechazo del servidor).
+function redloraLive() {
+  const num = (id) => Number(document.getElementById(id).value);
+  const secOn = document.getElementById("r-sec").checked;
+  const key = document.getElementById("r-seckey").value.trim();
+  const bad = [];
+  const mark = (id, ok, msg) => {
+    document.getElementById(id).classList.toggle("campo-mal", !ok);
+    if (!ok) bad.push(msg);
+  };
+  mark("r-netid", num("r-netid") >= 1 && num("r-netid") <= 254, "ID de red 1-254");
+  mark("r-freq", num("r-freq") >= 100000000 && num("r-freq") <= 1000000000,
+       "frecuencia 100-1000 MHz");
+  mark("r-sf", num("r-sf") >= 7 && num("r-sf") <= 12, "SF 7-12");
+  mark("r-ttl", num("r-ttl") >= 1 && num("r-ttl") <= 15, "Max TTL 1-15");
+  mark("r-seckey", !secOn || /^[0-9a-fA-F]{32}$/.test(key),
+       "clave de red de 32 hex con seguridad activa");
+  const res = document.getElementById("r-resultado");
+  document.getElementById("r-guardar").disabled = bad.length > 0;
+  if (bad.length) {
+    res.className = "aviso mal";
+    res.textContent = "Corrige: " + bad.join("; ");
+  } else if (res.textContent.startsWith("Corrige")) {
+    res.className = "aviso"; res.textContent = "";
+  }
+}
+
+async function redloraGuardar() {
+  const res = document.getElementById("r-resultado");
+  const body = {
+    region: document.getElementById("r-region").value,
+    frequency_hz: Number(document.getElementById("r-freq").value),
+    network_id: Number(document.getElementById("r-netid").value),
+    sf: Number(document.getElementById("r-sf").value),
+    bw_khz: Number(document.getElementById("r-bw").value),
+    max_ttl: Number(document.getElementById("r-ttl").value),
+    security_enabled: document.getElementById("r-sec").checked,
+    security_key: document.getElementById("r-seckey").value.trim(),
+  };
+  res.className = "aviso";
+  res.textContent = "Guardando y reiniciando el servicio del gateway...";
+  try {
+    const r = await fetchApi("/api/net/guardar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) { res.className = "aviso mal"; res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    res.className = "aviso";
+    res.textContent = "Guardado. El gateway se reinicia y reaplica la radio al "
+      + "Heltec. Recuerda reconfigurar los nodos con estos parámetros.";
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+document.getElementById("r-region").addEventListener("change", (e) => {
+  const f = REGION_FREQ[e.target.value];
+  if (f) document.getElementById("r-freq").value = f;
+});
+document.getElementById("r-guardar").addEventListener("click", redloraGuardar);
+document.getElementById("cfg-red-lora").addEventListener("input", redloraLive);
+document.getElementById("cfg-red-lora").addEventListener("change", redloraLive);
+
 document.getElementById("radio-aplicar").addEventListener("click", radioAplicarPuerto);
 document.getElementById("radio-flash").addEventListener("click", radioFlash);
 document.getElementById("tz-detectar").addEventListener("click", tzDetectar);
@@ -1672,12 +2068,18 @@ document.getElementById("wifi-conectar").addEventListener("click", wifiConectar)
 
 let dbgEs = null;      // EventSource abierto, o null
 let dbgTab = "gateway";
+// Monitor serie por Web Serial (nodo conectado a ESTE ordenador, no a la Pi).
+let dbgPort = null;    // SerialPort local abierto, o null
+let dbgReader = null;  // reader del stream de lectura
+let dbgKeep = false;   // bandera del bucle de lectura
+let dbgLoopDone = null;// promesa del bucle de lectura, para cerrar sin carrera
 
 const DBG_AYUDA = {
   gateway: "Salida del servicio del gateway en vivo (journalctl).",
-  serial:  "Salida serie de un nodo conectado por USB. El puerto del Heltec "
-         + "queda excluido. Mientras el monitor está abierto no se puede "
-         + "comisionar un nodo (comparten el bus).",
+  serial:  "Salida serie de un nodo por USB. Elige la fuente: conectado al "
+         + "gateway (lo lee la Pi) o a este equipo (lo lee el navegador por "
+         + "Web Serial, solo Chrome o Edge de escritorio). En el gateway, el "
+         + "puerto del Heltec queda excluido y no se puede comisionar a la vez.",
   modbus:  "Aparecen las tramas que el nodo emite según su modo modbus.debug "
          + "(off / errors_* solo fallidas / all_* también correctas; _last una "
          + "por ciclo, _each cada transacción). Con off no hay ninguna. Sin "
@@ -1729,14 +2131,31 @@ function debugSetTab(tab) {
   document.querySelectorAll(".dbg-tab").forEach((b) => {
     b.classList.toggle("activa", b.dataset.tab === tab);
   });
-  document.getElementById("dbg-puerto").hidden = tab !== "serial";
+  dbgSerialCtrls();
   document.getElementById("dbg-nodo").hidden = tab !== "modbus";
   document.getElementById("dbg-ayuda").textContent = DBG_AYUDA[tab];
   document.getElementById("dbg-consola").textContent = "";
 }
 
+// Visibilidad de los controles de la pestaña serie: el selector de fuente
+// solo en serie; el selector de puertos de la Pi solo con fuente "gateway"
+// (con "este equipo", el puerto lo elige el popup de Web Serial).
+function dbgSerialCtrls() {
+  const serie = dbgTab === "serial";
+  const local = serie && document.getElementById("dbg-fuente").value === "local";
+  document.getElementById("dbg-fuente").hidden = !serie;
+  document.getElementById("dbg-puerto").hidden = !serie || local;
+}
+
 function debugToggle() {
-  if (dbgEs) { debugStop(); return; }
+  if (dbgEs || dbgPort) { debugStop(); return; }
+  // Fuente "este equipo": el navegador lee el puerto USB local (Web Serial),
+  // no la Pi. El resto de pestañas y la fuente "gateway" van por SSE.
+  if (dbgTab === "serial" &&
+      document.getElementById("dbg-fuente").value === "local") {
+    debugLocalStart();
+    return;
+  }
   let url;
   if (dbgTab === "gateway") {
     url = "/api/debug/gateway";
@@ -1759,10 +2178,69 @@ function debugToggle() {
 
 function debugStop() {
   if (dbgEs) { dbgEs.close(); dbgEs = null; }
+  if (dbgPort || dbgReader) { debugLocalStop(); }   // async, sin await
   const t = document.getElementById("dbg-toggle");
   if (t) t.textContent = "Iniciar";
   const i = document.getElementById("dbg-info");
-  if (i && i.textContent === "en vivo") i.textContent = "";
+  if (i && (i.textContent === "en vivo" ||
+            i.textContent === "en vivo (este equipo)")) i.textContent = "";
+}
+
+// ----- Monitor serie por Web Serial (nodo en el USB de este ordenador) -----
+
+async function debugLocalStart() {
+  const info = document.getElementById("dbg-info");
+  if (!("serial" in navigator)) {
+    info.textContent = "Web Serial no disponible: usa Chrome o Edge de escritorio.";
+    return;
+  }
+  let port;
+  try {
+    port = await navigator.serial.requestPort();   // popup de elección de puerto
+    await port.open({ baudRate: 115200 });
+  } catch (e) {
+    info.textContent = "No se abrió el puerto: " + (e.message || e);
+    return;
+  }
+  dbgPort = port;
+  dbgKeep = true;
+  info.textContent = "en vivo (este equipo)";
+  document.getElementById("dbg-toggle").textContent = "Detener";
+  dbgLoopDone = debugLocalLoop();   // se guarda para cerrar sin carrera
+}
+
+async function debugLocalLoop() {
+  const dec = new TextDecoder();
+  let buf = "";
+  const reader = dbgPort.readable.getReader();
+  dbgReader = reader;
+  try {
+    while (dbgKeep) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        debugAppend(buf.slice(0, idx).replace(/\r$/, ""));
+        buf = buf.slice(idx + 1);
+      }
+    }
+  } catch (e) {
+    /* lectura cancelada al detener: se ignora */
+  } finally {
+    try { reader.releaseLock(); } catch (e) { /* ya suelto */ }
+    dbgReader = null;
+  }
+}
+
+async function debugLocalStop() {
+  dbgKeep = false;
+  // cancel() desbloquea read(); el bucle termina y suelta el lock en su
+  // finally. Se espera al bucle antes de cerrar el puerto para no chocar con
+  // el readable aún bloqueado.
+  if (dbgReader) { try { await dbgReader.cancel(); } catch (e) { /* */ } }
+  if (dbgLoopDone) { try { await dbgLoopDone; } catch (e) { /* */ } dbgLoopDone = null; }
+  if (dbgPort) { try { await dbgPort.close(); } catch (e) { /* */ } dbgPort = null; }
 }
 
 function debugAppend(line) {
@@ -1777,6 +2255,11 @@ function debugAppend(line) {
 
 document.querySelectorAll(".dbg-tab").forEach((b) => {
   b.addEventListener("click", () => debugSetTab(b.dataset.tab));
+});
+// Cambiar la fuente detiene un monitor en curso y ajusta los controles.
+document.getElementById("dbg-fuente").addEventListener("change", () => {
+  debugStop();
+  dbgSerialCtrls();
 });
 document.getElementById("dbg-toggle").addEventListener("click", debugToggle);
 document.getElementById("dbg-limpiar").addEventListener("click", () => {
@@ -1804,6 +2287,48 @@ async function fwCargar() {
         + "nodo/make_dist.sh en el Mac y copiarlo con el resto del pi-service.";
     }
   } catch (e) { info.textContent = "Error consultando el binario: " + e.message; }
+  fwFuenteCtrls();
+}
+
+// Flasheo por navegador (esp-web-tools): la librería se carga de internet una
+// vez, bajo demanda, y el botón <esp-web-install-button> hace todo (elegir
+// puerto, resetear, escribir la flash, progreso y reinicio) con el manifiesto
+// que sirve el visor (/api/config/nodo-manifest, apunta a nodo.bin en 0x0).
+let fwEspToolsCargado = false;
+let fwBotonPuesto = false;
+
+function fwEnsureEspTools() {
+  if (fwEspToolsCargado) return;
+  fwEspToolsCargado = true;
+  const s = document.createElement("script");
+  s.type = "module";
+  s.src = "https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module";
+  s.onerror = () => {
+    fwEspToolsCargado = false;   // permitir reintento al volver a entrar
+    document.getElementById("fw-local-boton").innerHTML =
+      '<span class="aviso mal">No se pudo cargar el flasheador. '
+      + '¿El portátil tiene internet?</span>';
+  };
+  document.head.appendChild(s);
+}
+
+function fwLocalRender() {
+  if (fwBotonPuesto) return;
+  fwBotonPuesto = true;
+  document.getElementById("fw-local-boton").innerHTML =
+    '<esp-web-install-button manifest="/api/config/nodo-manifest">'
+    + '<button slot="activate" class="btn-primario">Flashear por este equipo</button>'
+    + '<span slot="unsupported" class="aviso mal">Tu navegador no soporta Web '
+    + 'Serial: usa Chrome o Edge de escritorio.</span>'
+    + '<span slot="not-allowed" class="aviso mal">El flasheo requiere HTTPS.</span>'
+    + '</esp-web-install-button>';
+}
+
+function fwFuenteCtrls() {
+  const local = document.getElementById("fw-fuente").value === "local";
+  document.getElementById("fw-gateway").hidden = local;
+  document.getElementById("fw-local").hidden = !local;
+  if (local) { fwEnsureEspTools(); fwLocalRender(); }
 }
 
 // El flasheo no usa CFG (un Atom sin firmware no responde): solo elige el
@@ -1869,12 +2394,15 @@ function fwFlash() {
 
 document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
+document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
 document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
 
 // ----- Configurar nodo: formulario que arma el config.json -----
 
 let formPuerto = null;
 let formInited = false;
+let nodosConocidos = new Map();  // origin -> nombre, para avisar de ID ya en uso
+let idLeido = null;              // ID leído de un nodo (reconfiguración legítima)
 
 // Clases de lectura Modbus (orden del array reads[] = orden de telemetría).
 const MB_READS = [
@@ -1899,8 +2427,8 @@ function readRowHtml(bits) {
     <input data-f="scale" class="fin-n" type="number" step="any" placeholder="escala">
     <input data-f="offset" class="fin-n" type="number" step="any" placeholder="offset">`;
   return `<div class="frow">
-    <input data-f="id" class="fin-id" placeholder="id" maxlength="8">
-    <input data-f="name" class="fin" placeholder="nombre">
+    <input data-f="id" class="fin-id" placeholder="id *" maxlength="8">
+    <input data-f="name" class="fin" placeholder="nombre *">
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
     <input data-f="count" class="fin-n" type="number" min="1" max="125" value="1" title="cantidad">
     ${reg}
@@ -1917,8 +2445,8 @@ function writeRowHtml() {
       <option value="write_multiple_coils">bobinas múlt.</option>
       <option value="write_multiple_registers">registros múlt.</option>
     </select>
-    <input data-f="id" class="fin-id" placeholder="id" maxlength="8">
-    <input data-f="name" class="fin" placeholder="nombre">
+    <input data-f="id" class="fin-id" placeholder="id *" maxlength="8">
+    <input data-f="name" class="fin" placeholder="nombre *">
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
     <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1">
     <select data-f="type" class="fin-s freg">
@@ -1951,7 +2479,7 @@ function deviceHtml(idx) {
       <button type="button" class="fdev-del" title="Quitar dispositivo">Quitar</button>
     </div>
     <div class="cfg-form">
-      <label class="cfg-campo"><span>Nombre</span><input data-fd="name" placeholder="amb"></label>
+      <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input data-fd="name" placeholder="amb"></label>
       <label class="cfg-campo"><span>Descripción</span><input data-fd="description" placeholder="opcional"></label>
       <label class="cfg-campo"><span>Slave ID (fábrica)</span><input data-fd="default_slave_id" type="number" min="1" max="247" value="1"></label>
       <label class="cfg-campo"><span>Slave ID (deseado)</span><input data-fd="desired_slave_id" type="number" min="1" max="247" value="1"></label>
@@ -1995,10 +2523,119 @@ function formNbiotVis() {
 function formInit() {
   if (!formInited) {
     document.getElementById("f-add-device").click();
-    formLockRed();
     formInited = true;
   }
+  // formLockRed refresca los campos de red del gateway y redActual en CADA
+  // entrada al asistente: si se cambiaron los parámetros de red entremedias,
+  // el popup de incongruencia y los campos bloqueados usan los valores
+  // nuevos, no los de la primera apertura.
+  formLockRed();
   formNbiotVis();
+  formCargarNodos();
+}
+
+// ----- Validación en vivo del asistente (a medida que se escribe) -----
+
+// Nodos ya dados de alta, para avisar si el ID del formulario choca con otro.
+// Se refresca al entrar al asistente. Un fallo de red omite el aviso sin más.
+async function formCargarNodos() {
+  try {
+    const r = await fetchApi("/api/red/estado");
+    if (r.ok) {
+      const d = await r.json();
+      nodosConocidos = new Map(
+        (d.nodes || []).map((n) => [Number(n.origin), n.name || ("nodo " + n.origin)]));
+    }
+  } catch (e) { /* sin lista: se omite el aviso de ID en uso */ }
+  formLive();
+}
+
+function marcarCampo(id, malo) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle("campo-mal", !!malo);
+}
+
+// Marca en rojo los campos con problema de cada fila de lectura/escritura
+// Modbus, con las mismas reglas que fValidate. fnBloque llega para las
+// lecturas (la función la fija el bloque); en escrituras va en la fila.
+function marcarFila(row, fnBloque) {
+  const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
+  const set = (f, malo) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.classList.toggle("campo-mal", malo); };
+  const fn = fnBloque || g("function");
+  const id = g("id");
+  set("id", !(id.length >= 2 && id.length <= 8));
+  set("name", !g("name"));
+  const a = Number(g("address")); set("address", !(a >= 0 && a <= 65535));
+  const bits = ["read_coils", "read_discrete_inputs",
+                "write_single_coil", "write_multiple_coils"].includes(fn);
+  set("type", !bits && !g("type"));
+}
+
+// Recorre el DOM de los dispositivos y marca nombre, slave ids y cada fila.
+function formMarcarDevices() {
+  document.querySelectorAll("#f-devices > .fdev").forEach((dev) => {
+    const nombre = dev.querySelector('[data-fd="name"]');
+    if (nombre) nombre.classList.toggle("campo-mal", !nombre.value.trim());
+    ["default_slave_id", "desired_slave_id"].forEach((f) => {
+      const el = dev.querySelector(`[data-fd="${f}"]`);
+      if (el) { const v = Number(el.value); el.classList.toggle("campo-mal", !(v >= 1 && v <= 247)); }
+    });
+    dev.querySelectorAll(".fread").forEach((blk) => {
+      blk.querySelectorAll(".frows > .frow").forEach((row) => marcarFila(row, blk.dataset.fn));
+    });
+    const fw = dev.querySelector(".fwrites");
+    if (fw) fw.querySelectorAll(":scope > .frow").forEach((row) => marcarFila(row, null));
+  });
+}
+
+// Corre en cada input/change del formulario: marca los campos con problema,
+// avisa (sin bloquear) si el ID ya está en uso por otro nodo, y lista lo
+// pendiente. Toda edición invalida una validación previa: hay que revalidar.
+function formLive() {
+  const form = collectForm();
+  const errs = fValidate(form);
+
+  const id = Number(form.node.id);
+  const idAviso = document.getElementById("f-id-aviso");
+  let idEnUso = false;
+  if (id >= 1 && id <= 254 && nodosConocidos.has(id) && id !== idLeido) {
+    idEnUso = true;
+    idAviso.className = "aviso ambar";
+    idAviso.textContent = `ID ${id} ya en uso por «${nodosConocidos.get(id)}». `
+      + "Si reconfiguras ese nodo usa «Leer del nodo» primero; si no, elige otro ID.";
+  } else {
+    idAviso.className = "aviso";
+    idAviso.textContent = "";
+  }
+
+  marcarCampo("f-id", !(id >= 1 && id <= 254) || idEnUso);
+  marcarCampo("f-name", !form.node.name);
+  const sf = Number(form.lora.sf); marcarCampo("f-sf", !(sf >= 7 && sf <= 12));
+  const tx = Number(form.lora.tx_power_dbm); marcarCampo("f-txpow", !(tx >= 2 && tx <= 22));
+  marcarCampo("f-interval", !(Number(form.lora.send_interval_ms) >= 100));
+  const sn = form.node.type === "super_node";
+  marcarCampo("f-apn", sn && !form.nbiot.apn);
+  marcarCampo("f-mbroker", sn && !form.nbiot.mqtt_broker);
+  formMarcarDevices();
+
+  const pend = document.getElementById("f-pendientes");
+  if (errs.length) {
+    pend.className = "aviso mal";
+    pend.textContent = `Pendiente (${errs.length}): ` + errs.join("; ");
+  } else {
+    pend.className = "aviso";
+    pend.textContent = idEnUso
+      ? "Sin errores de formato; revisa el aviso del ID antes de validar."
+      : "Sin errores. Pulsa «Validar configuración».";
+  }
+
+  // Editar tras validar obliga a revalidar: se apaga buscar/enviar y se
+  // descarta el preview anterior para no enviar una config desincronizada.
+  document.getElementById("f-buscar").disabled = true;
+  document.getElementById("f-enviar").disabled = true;
+  document.getElementById("f-preview").value = "";
+  const res = document.getElementById("f-resultado");
+  res.className = "aviso"; res.textContent = "";
 }
 
 // Campos fijados por la red del gateway: se muestran (referencia) pero no
@@ -2012,9 +2649,15 @@ function formInit() {
 const FLOCK = ["f-region", "f-freq", "f-sf", "f-bw", "f-netid", "f-ttl",
                "f-sec", "f-seckey", "f-mbroker", "f-mport", "f-mtls",
                "f-muser", "f-mpass"];
+// Subconjunto LoRa de los campos bloqueados: los que el popup de
+// incongruencia desbloquea si el usuario elige conservar los del nodo.
+const FLOCK_LORA = ["f-region", "f-freq", "f-sf", "f-bw", "f-netid", "f-ttl",
+                    "f-sec", "f-seckey"];
+let redActual = null;   // parámetros de red del gateway (/api/config/red)
 function formLockRed() {
   FLOCK.forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = true; });
   fetchApi("/api/config/red").then((r) => r.json()).then((d) => {
+    redActual = d;
     const sV = (id, v) => { if (v != null && v !== "") document.getElementById(id).value = v; };
     sV("f-region", d.region); sV("f-freq", d.frequency_hz); sV("f-sf", d.sf);
     sV("f-bw", d.bw_khz); sV("f-netid", d.network_id); sV("f-ttl", d.max_ttl);
@@ -2031,6 +2674,51 @@ function formLockRed() {
         + "muestran valores por defecto.)";
     }
   }).catch(() => {});
+}
+
+// Popup de incongruencia (camino B): al leer un nodo, compara sus parámetros
+// de red LoRa con los de la red actual del gateway. Si difieren, pregunta si
+// actualizarlos. "Sí" deja los de la red actual (los campos siguen
+// bloqueados, ya los tienen). "No" conserva los del nodo y desbloquea esos
+// campos para editarlos.
+function formNetCheck(cfg) {
+  if (!redActual) return;
+  const tr = cfg.transport || {}, lora = tr.lora || {}, mesh = tr.mesh || {};
+  const sec = lora.security || {}, R = redActual, Rsec = R.security || {};
+  const cmp = (a, b) => String(a ?? "") !== String(b ?? "");
+  const dif = [];
+  if (cmp(lora.region, R.region)) dif.push("región");
+  if (cmp(lora.frequency_hz, R.frequency_hz)) dif.push("frecuencia");
+  if (cmp(lora.sf, R.sf)) dif.push("SF");
+  if (cmp(lora.bw_khz, R.bw_khz)) dif.push("BW");
+  if (cmp(lora.network_id, R.network_id)) dif.push("ID de red");
+  if (cmp(mesh.max_ttl, R.max_ttl)) dif.push("Max TTL");
+  if (cmp(!!sec.enabled, !!Rsec.enabled)) dif.push("seguridad");
+  else if ((sec.enabled || Rsec.enabled) && cmp(sec.key, Rsec.key)) dif.push("clave de red");
+  if (!dif.length) return;
+  cfgDialogo("Parámetros de red distintos",
+    "Los parámetros de red leídos del nodo no coinciden con los de la red "
+    + "actual (" + dif.join(", ") + "). ¿Actualizarlos a la red actual? "
+    + "Con «Sí» se enviarán los de la red actual (recomendado). Con «No» se "
+    + "conservan los del nodo y quedan editables.",
+    { confirmar: true, confirmarText: "Sí, actualizar", confirmarPeligro: false,
+      cancelar: true, cancelarText: "No, editar",
+      onCancelar: () => formNetUnlock(cfg) });
+  cfgConfirmarCb = () => cfgDialogoCerrar();
+}
+
+// "No, editar": desbloquea los campos LoRa de red y los rellena con los
+// valores leídos del nodo, para que el usuario los ajuste a mano.
+function formNetUnlock(cfg) {
+  const tr = cfg.transport || {}, lora = tr.lora || {}, mesh = tr.mesh || {};
+  const sec = lora.security || {};
+  FLOCK_LORA.forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = false; });
+  const sV = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+  sV("f-region", lora.region); sV("f-freq", lora.frequency_hz); sV("f-sf", lora.sf);
+  sV("f-bw", lora.bw_khz); sV("f-netid", lora.network_id); sV("f-ttl", mesh.max_ttl);
+  document.getElementById("f-sec").checked = !!sec.enabled;
+  document.getElementById("f-seckey").value = sec.key || "";
+  formLive();
 }
 
 // Principio general: un campo que no aplica se oculta. En una fila de
@@ -2343,6 +3031,9 @@ async function fLeer() {
     try { cfg = JSON.parse(data.config); } catch (e) { aviso.textContent = "config del nodo no es JSON válido"; return; }
     fillForm(cfg);
     formPuerto = dd.port;
+    idLeido = Number(document.getElementById("f-id").value);
+    formLive();
+    formNetCheck(cfg);
     aviso.textContent = "formulario rellenado desde el nodo en " + dd.port.split("/").pop();
   } catch (e) {
     aviso.textContent = "error: " + e.message;
@@ -2545,6 +3236,14 @@ document.getElementById("f-devices").addEventListener("input", (e) => {
   if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
 });
 document.getElementById("f-type").addEventListener("change", formNbiotVis);
+// Validación en vivo: cualquier input/change del asistente la dispara. Se
+// excluye el textarea del preview para no borrarlo mientras se revisa.
+document.getElementById("cfg-form").addEventListener("input", (e) => {
+  if (e.target.id !== "f-preview") formLive();
+});
+document.getElementById("cfg-form").addEventListener("change", (e) => {
+  if (e.target.id !== "f-preview") formLive();
+});
 document.getElementById("f-leer").addEventListener("click", fLeer);
 document.getElementById("f-buscar").addEventListener("click", formBuscar);
 document.getElementById("f-generar").addEventListener("click", formGenerar);

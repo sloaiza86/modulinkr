@@ -148,7 +148,7 @@ web_write_env() {
         # pregunta; se conserva del env existente en reinstalaciones para
         # no invalidar las sesiones abiertas.
         echo "MODULINKR_WEB_SECRET=${MODULINKR_WEB_SECRET:-$(openssl rand -hex 32)}"
-        echo "MODULINKR_WEB_ONLINE_S=${MODULINKR_WEB_ONLINE_S:-60}"
+        echo "MODULINKR_WEB_ONLINE_S=${MODULINKR_WEB_ONLINE_S:-30}"
         # Certificado TLS: uvicorn los recibe por --ssl-*; el visor los usa
         # para la cookie segura y para servir el cert en /cert.
         echo "MODULINKR_WEB_CERT=$WEB_CERT"
@@ -181,12 +181,12 @@ web_write_sudoers() {
     chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" \
              "$APP_DIR/set_mqtt.sh" "$APP_DIR/set_db.sh" \
              "$APP_DIR/flash_nodo.sh" "$APP_DIR/get_net.sh" \
-             "$APP_DIR/set_wifi.sh" 2>/dev/null || true
+             "$APP_DIR/set_net.sh" "$APP_DIR/set_wifi.sh" 2>/dev/null || true
     cat > /etc/sudoers.d/modulinkr-web <<EOF
 # Generado por el instalador de ModuLinkr. Acciones privilegiadas de las
 # páginas de configuración del visor (radio LoRa, MQTT, base de datos,
 # firmware del nodo, parámetros de red, red WiFi). No editar a mano.
-$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh, $APP_DIR/flash_nodo.sh *, $APP_DIR/get_net.sh, $APP_DIR/set_wifi.sh scan, $APP_DIR/set_wifi.sh connect
+$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh, $APP_DIR/flash_nodo.sh *, $APP_DIR/get_net.sh, $APP_DIR/set_net.sh, $APP_DIR/set_wifi.sh scan, $APP_DIR/set_wifi.sh connect
 EOF
     chmod 440 /etc/sudoers.d/modulinkr-web
     if visudo -cf /etc/sudoers.d/modulinkr-web >/dev/null 2>&1; then

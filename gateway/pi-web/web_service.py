@@ -40,7 +40,7 @@ Config por variables de entorno (/etc/modulinkr/web.env en el Pi):
                           lo sirve también en /cert para instalarlo como de
                           confianza. Lo genera el instalador (autofirmado)
   MODULINKR_WEB_KEY       clave privada del cert (--ssl-keyfile de uvicorn)
-  MODULINKR_WEB_ONLINE_S  (default 60) umbral de "conectado", segundos
+  MODULINKR_WEB_ONLINE_S  (default 30) umbral de "conectado", segundos
   MODULINKR_WEB_HEARTBEAT_S (default 15) frescura del latido del servicio
                           (gateway_status); pasado este plazo sin refresco,
                           el servicio se da por caído (ver netstatus.py)
@@ -261,6 +261,10 @@ import settingsapi  # noqa: E402
 import mqttapi  # noqa: E402
 import dbapi    # noqa: E402
 
+# ----- Módulo: parámetros de red LoRa del gateway (acción sudo) -----
+
+import netapi  # noqa: E402
+
 # ----- Módulo: red WiFi del gateway (acción sudo) -----
 
 import wifiapi  # noqa: E402
@@ -291,6 +295,7 @@ app.include_router(configapi.router, dependencies=[Depends(require_auth)])
 app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
 app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
 app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
+app.include_router(netapi.router, dependencies=[Depends(require_auth)])
 app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
 app.include_router(wifiapi.router, dependencies=[Depends(require_auth)])
 app.include_router(debugapi.router, dependencies=[Depends(require_auth)])

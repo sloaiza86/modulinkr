@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# set_net.sh
+# Reescribe las claves LoRa de red de gateway.env con los pares KEY=VALUE
+# que llegan por stdin (una por linea; solo se aceptan claves de la lista
+# blanca) y reinicia el servicio del gateway. Lo invoca la pagina "Configurar
+# red LoRa" del visor via la regla sudo acotada del instalador, o el operador
+# por SSH. Al reiniciar, el servicio reempuja los parametros de radio al
+# Heltec (comando serie RADIO), asi que un cambio de network_id, frecuencia,
+# SF o BW se aplica en caliente sin reflashear.
+#
+# Solo se tocan las claves recibidas: las ausentes quedan como estaban (una
+# clave omitida conserva su valor, util para cambiar el SF sin reescribir la
+# clave de red).
+set -euo pipefail
+
+GW_ENV=/etc/modulinkr/gateway.env
+
+ALLOWED=" MODULINKR_LORA_REGION MODULINKR_LORA_FREQ_HZ MODULINKR_NETWORK_ID \
+MODULINKR_SF MODULINKR_BW_KHZ MODULINKR_MAX_TTL \
+MODULINKR_SEC_ENABLED MODULINKR_SEC_KEY "
+
+[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
+[ -f "$GW_ENV" ] || { echo "No existe $GW_ENV (¿instalador ejecutado?)." >&2; exit 1; }
+
+declare -A NEW
+cnt=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%=*}
+    val=${line#*=}
+    case "$ALLOWED" in
+        *" $key "*) NEW["$key"]="$val"; cnt=$((cnt + 1)) ;;
+        *) echo "Clave no admitida: $key" >&2; exit 1 ;;
+    esac
+done
+
+[ "$cnt" -gt 0 ] || { echo "Sin claves que actualizar." >&2; exit 1; }
+
+tmp=$(mktemp)
+# Conserva las lineas cuyas claves NO se estan actualizando.
+while IFS= read -r line || [ -n "$line" ]; do
+    k=${line%%=*}
+    [ -n "${NEW[$k]+x}" ] && continue
+    printf '%s\n' "$line"
+done < "$GW_ENV" > "$tmp"
+# Anade las claves nuevas al final.
+for k in "${!NEW[@]}"; do
+    printf '%s=%s\n' "$k" "${NEW[$k]}"
+done >> "$tmp"
+
+chmod 600 "$tmp"
+chown root:root "$tmp" 2>/dev/null || true
+mv "$tmp" "$GW_ENV"
+
+systemctl restart modulinkr-gateway 2>/dev/null || true
+
+echo "gateway.env: ${#NEW[@]} clave(s) de red actualizada(s)"
+echo "servicio: modulinkr-gateway reiniciado"

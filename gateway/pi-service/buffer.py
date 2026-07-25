@@ -106,7 +106,25 @@ class GatewayBuffer:
                 rssi            REAL,
                 snr             REAL,
                 parent_id       INTEGER,
-                hop_count       INTEGER
+                hop_count       INTEGER,
+                nbiot_flags     INTEGER,
+                nbiot_csq       INTEGER,
+                nbiot_updated   REAL,
+                mqtt_seen       REAL
+            )
+        """)
+        # Último dato de cada nodo recibido del broker cloud por NB-IoT (el
+        # gateway se suscribe: db-schema §2, source por publisher del topic).
+        # No entra en 'buffer' para no republicarse; el visor lo usa cuando
+        # el LoRa del nodo se queda viejo (failover). captured_ts es el ts de
+        # captura de la muestra; recv_ts, cuándo el gateway la oyó del broker.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS nbiot_last (
+                origin          INTEGER PRIMARY KEY,
+                captured_ts     INTEGER,
+                recv_ts         REAL    NOT NULL,
+                reads_json      TEXT,
+                via_publisher   INTEGER
             )
         """)
         # Latido de estado del servicio para el visor (fila única id=1). El
@@ -124,6 +142,7 @@ class GatewayBuffer:
                 mqtt_connected INTEGER NOT NULL
             )
         """)
+        self._migrate_node_status_nbiot()
         self.conn.commit()
 
     def _migrate_v20_if_needed(self) -> None:
@@ -135,6 +154,59 @@ class GatewayBuffer:
             self.conn.execute(
                 "ALTER TABLE buffer RENAME TO buffer_v20_legacy")
             self.conn.commit()
+
+    def _migrate_node_status_nbiot(self) -> None:
+        """Añade las columnas de estado NB-IoT/MQTT a node_status si faltan
+        (DB anterior a la fase 2 del estado por nodo). No borra nada."""
+        cur = self.conn.execute("PRAGMA table_info(node_status)")
+        cols = [row[1] for row in cur.fetchall()]
+        for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen"):
+            if col not in cols:
+                col_type = "INTEGER" if col in ("nbiot_flags", "nbiot_csq") else "REAL"
+                self.conn.execute(
+                    f"ALTER TABLE node_status ADD COLUMN {col} {col_type}")
+
+    def nbiot_update(self, origin: int, flags: int, csq: int) -> None:
+        """Guarda el estado NB-IoT/MQTT que un supernodo reporta en su
+        heartbeat (frame-format.md §6). La fila del nodo ya existe: la crea
+        status_update al oír esta misma trama, antes de este update."""
+        self.conn.execute(
+            """UPDATE node_status
+                   SET nbiot_flags = ?, nbiot_csq = ?, nbiot_updated = ?
+                 WHERE origin = ?""",
+            (flags, csq, time.time(), origin))
+        self.conn.commit()
+
+    def mqtt_seen(self, publisher: int) -> None:
+        """Marca que un supernodo publicó en el broker cloud (lo oyó la
+        suscripción del gateway): su NB-IoT y MQTT están operativos ahora.
+        Upsert por si el nodo aún no tiene fila. En una fila nueva last_seen
+        va a 0 (epoch): oírlo por MQTT no lo pone en línea por LoRa; solo una
+        trama LoRa real (status_update) mueve last_seen."""
+        self.conn.execute(
+            """INSERT INTO node_status (origin, last_seen, mqtt_seen)
+               VALUES (?, 0, ?)
+               ON CONFLICT(origin) DO UPDATE SET mqtt_seen = excluded.mqtt_seen""",
+            (publisher, time.time()))
+        self.conn.commit()
+
+    def nbiot_last_update(self, origin: int, captured_ts: int,
+                          reads_json: str, via_publisher: int) -> None:
+        """Guarda el último dato de un nodo recibido por NB-IoT (batch del
+        supernodo en el broker). Solo si es más reciente que lo guardado, por
+        si un batch reordenado trae una muestra vieja."""
+        self.conn.execute(
+            """INSERT INTO nbiot_last
+                   (origin, captured_ts, recv_ts, reads_json, via_publisher)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(origin) DO UPDATE SET
+                   captured_ts   = excluded.captured_ts,
+                   recv_ts       = excluded.recv_ts,
+                   reads_json    = excluded.reads_json,
+                   via_publisher = excluded.via_publisher
+               WHERE excluded.captured_ts >= nbiot_last.captured_ts""",
+            (origin, captured_ts, time.time(), reads_json, via_publisher))
+        self.conn.commit()
 
     def accept(self, parsed: dict, rssi: float, snr: float) -> bool:
         """Inserta una trama en el buffer. Devuelve True si es nueva, False

@@ -15,6 +15,14 @@ MODULINKR_MQTT_USER=modulinkr
 
 # --- Red LoRa ---
 MODULINKR_NETWORK_ID=1
+# Parámetros de radio (por defecto EU868). Se cambian luego desde el visor
+# (Configuración -> Parámetros de red LoRa); fijarlos aquí solo para desplegar
+# en otra banda o con otros valores desde el inicio.
+# MODULINKR_LORA_REGION=EU868
+# MODULINKR_LORA_FREQ_HZ=869525000
+# MODULINKR_SF=7
+# MODULINKR_BW_KHZ=125
+# MODULINKR_MAX_TTL=4
 # MODULINKR_PORT=/dev/ttyUSB0     # normalmente se autodetecta; fijar solo si hay varios
 
 # --- Avanzado (rara vez se toca) ---

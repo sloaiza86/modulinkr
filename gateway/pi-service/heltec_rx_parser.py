@@ -168,8 +168,15 @@ def parse_frame(frame: bytes) -> dict:
         out['ack_status_name'] = ACK_STATUS_NAMES.get(status, f'UNKNOWN(0x{status:02X})')
 
     elif frame_type == FRAME_HEARTBEAT:
-        if payload_length != 0:
-            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0'
+        # v3.1: 4 B con tx_ms; el supernodo añade 2 B (nb_flags, csq), §6.
+        if payload_length not in (0, 4, 6):
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0, 4 o 6'
+        else:
+            if payload_length >= 4:
+                out['tx_ms'] = struct.unpack_from('<I', payload, 0)[0]
+            if payload_length == 6:
+                out['nb_flags'] = payload[4]
+                out['nb_csq'] = payload[5]
 
     elif frame_type == FRAME_BEACON:
         if payload_length != 3:

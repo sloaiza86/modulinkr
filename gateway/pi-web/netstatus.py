@@ -24,7 +24,7 @@ DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
 
 # Umbral de "conectado": sin trama en este tiempo, el nodo se considera
 # offline. Debe cubrir varios intervalos de muestreo (banco: 5 s).
-ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "60"))
+ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "30"))
 
 # Frescura del latido de estado del servicio (gateway_status). Más corto
 # que ONLINE_S: gobierna el veredicto de "servicio caído". Debe cubrir
@@ -112,7 +112,8 @@ def network_state() -> dict:
         rows = c.execute(
             """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
                       s.snr, s.parent_id, s.hop_count,
-                      k.node_name, k.fw_version
+                      k.node_name, k.fw_version,
+                      s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen
                FROM node_status s
                LEFT JOIN node_catalog k ON k.origin_id = s.origin
                ORDER BY s.origin""").fetchall()
@@ -130,6 +131,16 @@ def network_state() -> dict:
             "parent_id":  r[5],
             "hop_count":  r[6],
             "duty_1h":    duty.get(r[0]),
+            # Estado NB-IoT/MQTT del supernodo (frame-format.md §6): None si
+            # el nodo nunca lo reportó (no es supernodo o aún no se oyó su
+            # heartbeat con estado). nbiot_ago_s da la frescura del dato.
+            "nbiot_flags": r[9],
+            "nbiot_csq":   r[10],
+            "nbiot_ago_s": None if r[11] is None else round(now - r[11], 1),
+            # Actividad del supernodo en el broker cloud (visto por la
+            # suscripción del gateway): fuente primaria del chip NB-IoT/MQTT,
+            # más veraz que el heartbeat y sobrevive a la caída del LoRa.
+            "mqtt_ago_s":  None if r[12] is None else round(now - r[12], 1),
         }
         for r in rows
     ]
@@ -208,6 +219,24 @@ def _catalog_reads() -> dict:
         rows = c.execute(
             "SELECT origin_id, catalog_json FROM node_catalog").fetchall()
     return {r[0]: json.loads(r[1]).get("reads", []) for r in rows}
+
+
+def _channels_simple(vals: list, sts: list, defs: list) -> list:
+    """Canales etiquetados a partir de valores y estados, sin rescate del
+    último valor bueno (para el dato NB-IoT, que ya es el más fresco que hay).
+    Mismo formato que produce last_values para las tarjetas."""
+    channels = []
+    for i, v in enumerate(vals):
+        d = defs[i] if i < len(defs) else {}
+        ch = {"read_id": d.get("id") or f"canal {i}",
+              "unit": d.get("unit"), "value": v, "serie": []}
+        b = sts[i] if i < len(sts) else 0
+        if b:
+            ch["st_code"] = b & 0x0F
+            ch["st_name"] = MODBUS_STATUS.get(b & 0x0F, "error")
+            ch["st_exc"]  = (b >> 4) & 0x0F
+        channels.append(ch)
+    return channels
 
 
 def last_values(window_s: float = 3600.0) -> dict:
@@ -306,6 +335,25 @@ def last_values(window_s: float = 3600.0) -> dict:
         for i, v in enumerate(_reads_row(rj)[0]):
             if i < len(node["channels"]):
                 node["channels"][i]["serie"].append([round(t, 1), v])
+
+    # Camino NB-IoT (failover, db-schema §2): si el LoRa de un nodo se quedó
+    # viejo pero su dato sigue entrando por NB-IoT, se muestran esos valores
+    # frescos y se marca via_nbiot. LoRa es primario: solo se cambia con el
+    # LoRa vencido (umbral ONLINE_S), nunca cuando el LoRa está fresco.
+    with _conn() as c:
+        nb_rows = c.execute(
+            "SELECT origin, captured_ts, recv_ts, reads_json FROM nbiot_last"
+        ).fetchall()
+    for origin, cap_ts, recv_ts, rj in nb_rows:
+        if rj is None or (now - recv_ts) > ONLINE_S:
+            continue  # sin dato NB-IoT, o también vencido
+        lora = nodes.get(origin)
+        if lora is not None and lora["ago_s"] <= ONLINE_S:
+            continue  # LoRa fresco: es primario, no se cambia
+        vals, sts = _reads_row(rj)
+        nodes[origin] = {"origin": origin, "t_last": recv_ts,
+                         "ago_s": round(now - recv_ts, 1), "via_nbiot": True,
+                         "channels": _channels_simple(vals, sts, reads_def.get(origin, []))}
 
     return {"window_s": window_s, "nodes": list(nodes.values())}
 

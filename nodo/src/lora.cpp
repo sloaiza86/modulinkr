@@ -301,13 +301,22 @@ LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
 }
 
 LoraP2P::Status LoraP2P::sendHeartbeat(uint16_t seq, uint32_t tx_ms,
-                                       uint8_t hop_dst) {
+                                       uint8_t hop_dst, bool nb_present,
+                                       uint8_t nb_flags, uint8_t csq) {
     if (!initialized_) return Status::NOT_INITIALIZED;
     // Payload v3.1 (spec §6): tx_ms, aire acumulado desde el boot, uint32
     // LE. El contador incluye este mismo heartbeat en cuanto se transmita
-    // (la medida se cuenta a sí misma, como exige la norma).
-    uint8_t payload[4];
+    // (la medida se cuenta a sí misma, como exige la norma). El supernodo
+    // añade 2 bytes con su estado NB-IoT/MQTT (nb_flags, csq); los nodos
+    // normales mandan solo los 4 de tx_ms.
+    uint8_t payload[6];
     std::memcpy(payload, &tx_ms, sizeof(tx_ms));
+    size_t len = sizeof(tx_ms);
+    if (nb_present) {
+        payload[4] = nb_flags;
+        payload[5] = csq;
+        len = 6;
+    }
     return buildAndSend(hop_dst,
                         node_id_,
                         protocol::kAddrGateway,
@@ -315,7 +324,7 @@ LoraP2P::Status LoraP2P::sendHeartbeat(uint16_t seq, uint32_t tx_ms,
                         protocol::kFrameHeartbeat,
                         ttl_,
                         payload,
-                        sizeof(payload));
+                        len);
 }
 
 // Time-on-Air según la fórmula de Semtech (SX1276 datasheet §4.1.1.6):

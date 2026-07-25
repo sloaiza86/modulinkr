@@ -42,7 +42,7 @@ código:
   MODULINKR_HEARTBEAT_S (default 3)       periodo del latido de estado (visor)
   MODULINKR_OLED_S      (default 5)       periodo del empuje de estado a la
                                           pantalla OLED del Heltec
-  MODULINKR_ONLINE_S    (default 60)      umbral "en línea" del conteo de
+  MODULINKR_ONLINE_S    (default 30)      umbral "en línea" del conteo de
                                           nodos de la pantalla (igual que el
                                           MODULINKR_WEB_ONLINE_S del visor)
   MODULINKR_NETWORK_NAME (sin default)    nombre de la red ModuLinkr que
@@ -114,6 +114,9 @@ class GatewayService:
         # despliegue usa en los nodos (node-config transport.lora).
         self.sf       = int(os.environ.get("MODULINKR_SF", "7"))
         self.bw_khz   = int(os.environ.get("MODULINKR_BW_KHZ", "125"))
+        # Frecuencia que el Pi empuja al Heltec (comando RADIO, camino B).
+        # Fuente de verdad en gateway.env, editable desde el visor.
+        self.freq_hz  = int(os.environ.get("MODULINKR_LORA_FREQ_HZ", "869525000"))
 
         self.gw_seq   = 0               # contador downlink (ACK + BEACON)
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
@@ -157,9 +160,14 @@ class GatewayService:
         # red y conteo de nodos). Periodo del empuje y umbral de "en línea"
         # (el mismo default que el visor, MODULINKR_WEB_ONLINE_S).
         self.oled_s   = float(os.environ.get("MODULINKR_OLED_S", "5"))
-        self.online_s = float(os.environ.get("MODULINKR_ONLINE_S", "60"))
-        self.net_name = (os.environ.get("MODULINKR_NETWORK_NAME", "").strip()
-                         or f"net {self.net_id}")
+        self.online_s = float(os.environ.get("MODULINKR_ONLINE_S", "30"))
+        # Etiqueta de red ya compuesta que el Heltec dibuja tal cual en la
+        # OLED (el Heltec ya no antepone texto). Con nombre fijado:
+        # "Red Modulinkr: <nombre> - ID: <id>"; sin nombre: "ID de Red
+        # Modulinkr: <id>".
+        _net_name = os.environ.get("MODULINKR_NETWORK_NAME", "").strip()
+        self.net_label = (f"Red Modulinkr: {_net_name} - ID: {self.net_id}"
+                          if _net_name else f"ID de Red Modulinkr: {self.net_id}")
 
         # Ventana de supresión de ACK duplicado (mac.md §4.2). Si la misma
         # (origin, seq) llega dos veces dentro de esta ventana, es multi-
@@ -394,9 +402,18 @@ class GatewayService:
             tx_ms = parsed.get("tx_ms")
             if tx_ms is not None:
                 self.buf.airtime_report(parsed["origin_id"], tx_ms)
-            LOG.info("heartbeat origin=%s seq=%d tx_ms=%s rssi=%.1f snr=%.1f",
+            # Estado NB-IoT/MQTT del supernodo (frame-format.md §6): solo el
+            # supernodo lo adjunta. La fila del nodo ya existe (status_update
+            # arriba), así que basta actualizar sus columnas nbiot.
+            nb_flags = parsed.get("nb_flags")
+            if nb_flags is not None:
+                self.buf.nbiot_update(parsed["origin_id"], nb_flags,
+                                      parsed.get("nb_csq", 0xFF))
+            LOG.info("heartbeat origin=%s seq=%d tx_ms=%s nb=%s rssi=%.1f snr=%.1f",
                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
-                     tx_ms if tx_ms is not None else "-", rssi, snr)
+                     tx_ms if tx_ms is not None else "-",
+                     f"0x{nb_flags:02X}" if nb_flags is not None else "-",
+                     rssi, snr)
             return
 
         # Supresión de ACK duplicado por ventana (mac.md §4.2). El dato ya
@@ -608,13 +625,26 @@ class GatewayService:
         # Ni tabuladores ni saltos: partirían los campos o la línea.
         def clean(v: str) -> str:
             return v.replace("\t", " ").replace("\n", " ").replace("\r", " ")
-        line = (f"OLED {clean(ssid)}\t{clean(self.net_name)}\t{clean(ip)}\t"
+        line = (f"OLED {clean(ssid)}\t{clean(self.net_label)}\t{clean(ip)}\t"
                 f"{online}\t{offline}\n")
         try:
             self.ser.write(line.encode("utf-8", errors="ignore"))
         except (serial.SerialException, OSError):
             # El bucle principal detecta la desconexión en su lectura y
             # vuelve a la fase de reapertura; aquí no se propaga.
+            pass
+
+    def push_radio(self) -> None:
+        """Empuja al Heltec sus parámetros de radio (comando RADIO,
+        frame-format.md §12.6). El Heltec reconfigura la radio en caliente
+        solo si difieren de los que ya tiene, así que reenviarlo cada ciclo
+        es barato. Fuente de verdad: gateway.env, editable desde el visor."""
+        if self.ser is None:
+            return
+        line = f"RADIO {self.net_id} {self.freq_hz} {self.sf} {self.bw_khz}\n"
+        try:
+            self.ser.write(line.encode("ascii", errors="ignore"))
+        except (serial.SerialException, OSError):
             pass
 
     # ----- Bucle principal -----
@@ -650,6 +680,9 @@ class GatewayService:
                     if not self._open_serial():
                         self._heartbeat(lora_link=False)
                         now = time.monotonic()
+                        # El camino NB-IoT importa sobre todo aquí (sin radio):
+                        # es cuando los nodos entregan por failover.
+                        self.mqtt.drain_nbiot()
                         if now - last_drain >= self.drain_s:
                             last_drain = now
                             self.mqtt.drain()
@@ -662,6 +695,7 @@ class GatewayService:
 
                 try:
                     now = time.monotonic()
+                    self.mqtt.drain_nbiot()
                     if now - last_beacon >= self.beacon_s:
                         last_beacon = now
                         self.send_beacon()
@@ -680,6 +714,7 @@ class GatewayService:
                         self._heartbeat(lora_link=True)
                     if now - last_oled >= self.oled_s:
                         last_oled = now
+                        self.push_radio()
                         self.push_oled()
 
                     chunk = self.ser.read(self.ser.in_waiting or 1)

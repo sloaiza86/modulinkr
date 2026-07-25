@@ -390,6 +390,10 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 .frow-del { flex: none; width: 1.7rem; height: 1.7rem; border: 1px solid var(--border); background: var(--card); color: var(--bad); border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1; }
 #f-preview { width: 100%; box-sizing: border-box; min-height: 220px; margin-top: 0.7rem; padding: 0.6rem 0.7rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.82rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; resize: vertical; }
 .aviso.mal { color: var(--bad); }
+.aviso.ambar { color: var(--warn); }
+.cfg-campo > input.campo-mal, .cfg-campo > select.campo-mal,
+.frow input.campo-mal, .frow select.campo-mal { border-color: var(--bad); }
+.req { color: var(--bad); margin-left: 2px; }
 
 .cfg-nodo { margin-top: 0.9rem; border-top: 1px solid var(--border); }
 .cfg-nodo .sensor svg { width: 18px; height: 18px; }

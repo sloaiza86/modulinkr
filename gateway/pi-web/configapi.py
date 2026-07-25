@@ -36,7 +36,7 @@ from pathlib import Path
 
 import serial
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 LOG = logging.getLogger("modulinkr.web.config")
 
@@ -402,6 +402,14 @@ def red_params():
             return int(env.get(key, "") or 0) or None
         except ValueError:
             return None
+    # Región y frecuencia: fuente de verdad en gateway.env desde el camino
+    # B (editables por la página de red). Si no están (Pi anterior a la
+    # migración), se conservan los valores de despliegue de web.env.
+    if env.get("MODULINKR_LORA_REGION"):
+        out["region"] = env["MODULINKR_LORA_REGION"]
+    _freq = _int("MODULINKR_LORA_FREQ_HZ")
+    if _freq:
+        out["frequency_hz"] = _freq
     out["network_id"] = _int("MODULINKR_NETWORK_ID")
     out["max_ttl"] = _int("MODULINKR_MAX_TTL")
     out["sf"] = _int("MODULINKR_SF")
@@ -422,6 +430,40 @@ def red_params():
     }
     out["source"] = "gateway"
     return out
+
+
+@router.get("/nodo-bin")
+def nodo_bin():
+    """Binario nodo.bin para el flasheo por navegador (Web Serial, esp-web-
+    tools). Lo referencia el manifiesto de /nodo-manifest."""
+    if not NODO_BIN.is_file():
+        return _err(404, "no hay nodo.bin en el gateway")
+    return FileResponse(str(NODO_BIN), media_type="application/octet-stream",
+                        filename="nodo.bin")
+
+
+@router.get("/nodo-manifest")
+def nodo_manifest():
+    """Manifiesto de esp-web-tools para flashear el nodo desde el navegador.
+    Apunta al binario merge (offset 0, ESP32) y lleva la versión de
+    nodo.bin.version. La ruta 'nodo-bin' se resuelve relativa a esta URL."""
+    if not NODO_BIN.is_file():
+        return _err(404, "no hay nodo.bin en el gateway")
+    version = ""
+    if NODO_VER.is_file():
+        try:
+            version = NODO_VER.read_text().strip()
+        except OSError:
+            version = ""
+    return {
+        "name": "ModuLinkr nodo",
+        "version": version or "desconocida",
+        "new_install_prompt_erase": False,
+        "builds": [
+            {"chipFamily": "ESP32",
+             "parts": [{"path": "nodo-bin", "offset": 0}]},
+        ],
+    }
 
 
 @router.post("/flash")

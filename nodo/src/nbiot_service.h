@@ -74,6 +74,17 @@ public:
     State state() const { return state_; }
     static const char* stateName(State s);
 
+    // Estado compacto para el heartbeat del supernodo (frame-format.md §6):
+    // bit 0 = registrado en la red celular (pasó REGISTERING), bit 1 =
+    // conectado al broker MQTT cloud. BACKOFF cuenta como no operativo.
+    uint8_t statusFlags() const {
+        uint8_t f = 0;
+        if (state_ == State::MQTT_START || state_ == State::MQTT_CONNECT ||
+            state_ == State::READY) f |= 0x01;
+        if (state_ == State::READY) f |= 0x02;
+        return f;
+    }
+
     // Calidad de señal en dBm (INT8_MIN si desconocida). Cacheada por la
     // tarea; asoma al SN_OFFER como byte CSQ crudo vía csqRaw().
     int8_t  csqDbm() const { return csq_dbm_; }

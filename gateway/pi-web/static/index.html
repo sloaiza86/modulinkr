@@ -114,6 +114,16 @@
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/red-lora">
+            <div class="ai-icono ai-verde">
+              <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Parámetros de red LoRa</div>
+              <div class="ai-sub">ID de red, frecuencia, SF, BW, seguridad y TTL, compartidos por todos los nodos</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
           <a class="ajuste-item" href="#/configuracion/wifi">
             <div class="ai-icono ai-azul">
               <svg viewBox="0 0 24 24"><path d="M4.5 9.5a12 12 0 0 1 15 0"/><path d="M7.5 12.5a8 8 0 0 1 9 0"/><path d="M10 15.5a4 4 0 0 1 4 0"/><circle cx="12" cy="18.5" r="0.6"/></svg>
@@ -221,17 +231,35 @@
         <div class="card cfg-card">
           <h3>Firmware del nodo</h3>
           <p class="aviso" id="fw-bin-info">Comprobando el binario...</p>
-          <p class="aviso">Conectar el Atom a un puerto USB del Pi y buscarlo. El
-            puerto de la radio del gateway queda excluido. El flasheo borra el
-            firmware anterior del Atom (su config.json en flash se conserva).</p>
           <div class="cfg-fila">
-            <button id="fw-buscar" class="btn-primario">Buscar nodo</button>
-            <select id="fw-puertos" hidden></select>
-            <span id="fw-busqueda-aviso" class="aviso"></span>
+            <label class="cfg-campo"><span>Nodo conectado a</span>
+              <select id="fw-fuente">
+                <option value="gateway">el gateway (Pi)</option>
+                <option value="local">este equipo</option>
+              </select>
+            </label>
           </div>
-          <div class="cfg-fila">
-            <button id="fw-flash" class="btn-primario" disabled>Flashear firmware</button>
-            <span id="fw-resultado" class="aviso"></span>
+          <div id="fw-gateway">
+            <p class="aviso">Conectar el Atom a un puerto USB del Pi y buscarlo. El
+              puerto de la radio del gateway queda excluido. El flasheo borra el
+              firmware anterior del Atom (su config.json en flash se conserva).</p>
+            <div class="cfg-fila">
+              <button id="fw-buscar" class="btn-primario">Buscar nodo</button>
+              <select id="fw-puertos" hidden></select>
+              <span id="fw-busqueda-aviso" class="aviso"></span>
+            </div>
+            <div class="cfg-fila">
+              <button id="fw-flash" class="btn-primario" disabled>Flashear firmware</button>
+              <span id="fw-resultado" class="aviso"></span>
+            </div>
+          </div>
+          <div id="fw-local" hidden>
+            <p class="aviso">Flashea el nodo conectado al USB de este ordenador
+              (Chrome o Edge de escritorio, con internet para cargar el
+              flasheador). El asistente pide elegir el puerto y muestra el
+              progreso. Borra el firmware anterior; el config.json en flash se
+              conserva.</p>
+            <div class="cfg-fila" id="fw-local-boton"></div>
           </div>
         </div>
       </div>
@@ -247,8 +275,18 @@
 
         <div class="card cfg-card">
           <h3>Nodo por USB</h3>
-          <p class="aviso">Conectar un nodo Atom a un puerto USB del Pi y buscarlo.
-            El puerto de la radio del gateway queda excluido de la búsqueda.</p>
+          <p class="aviso">Elige dónde está enchufado el nodo Atom: al gateway
+            (lo maneja la Pi; el puerto del Heltec queda excluido) o a este
+            equipo (lo maneja el navegador por Web Serial, solo Chrome o Edge
+            de escritorio).</p>
+          <div class="cfg-fila">
+            <label class="cfg-campo"><span>Nodo conectado a</span>
+              <select id="cfg-fuente">
+                <option value="gateway">el gateway (Pi)</option>
+                <option value="local">este equipo</option>
+              </select>
+            </label>
+          </div>
           <div class="cfg-fila">
             <button id="cfg-buscar" class="btn-primario">Buscar nodo</button>
             <select id="cfg-puertos" hidden></select>
@@ -303,6 +341,45 @@
           <p class="aviso" id="radio-bin-info"></p>
           <div class="cfg-fila">
             <button id="radio-flash" class="btn-primario">Actualizar firmware de la radio</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: parámetros de red LoRa (gateway.env, compartidos por todos los nodos) -->
+      <div class="ajustes" id="cfg-red-lora" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Parámetros de red LoRa</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Identidad y radio de la red</h3>
+          <p class="aviso">Estos parámetros los comparte todo el despliegue. Al
+            guardar se reescribe la configuración del gateway y se reinicia su
+            servicio. Todos los nodos deben usar los mismos valores: tras
+            cambiarlos hay que reconfigurar los nodos con el asistente, o
+            dejarán de comunicarse con el gateway. El ID de red, la frecuencia,
+            el SF y el BW se aplican al Heltec en caliente, sin reflashear. La
+            clave de red en blanco conserva la vigente.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Región</span>
+              <select id="r-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
+            </label>
+            <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="r-freq" type="number" min="100000000" max="1000000000" value="869525000"></label>
+            <label class="cfg-campo"><span>ID de red</span><input id="r-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>SF</span><input id="r-sf" type="number" min="7" max="12" value="7"></label>
+            <label class="cfg-campo"><span>Ancho de banda (kHz)</span>
+              <select id="r-bw"><option>125</option><option>250</option><option>500</option></select>
+            </label>
+            <label class="cfg-campo"><span>Max TTL</span><input id="r-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-check"><input id="r-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
+            <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="r-seckey" type="text" maxlength="32" placeholder="dejar en blanco para no cambiar"></label>
+          </div>
+          <div class="cfg-fila">
+            <button id="r-guardar" class="btn-primario">Guardar</button>
+            <span id="r-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
@@ -452,6 +529,10 @@
           </div>
 
           <div class="cfg-fila dbg-controles">
+            <select id="dbg-fuente" hidden>
+              <option value="gateway">Conectado al gateway</option>
+              <option value="local">Conectado a este equipo</option>
+            </select>
             <select id="dbg-puerto" hidden></select>
             <select id="dbg-nodo" hidden></select>
             <button id="dbg-toggle" class="btn-primario">Iniciar</button>
@@ -487,13 +568,14 @@
         <div class="card cfg-card">
           <h3>Identidad</h3>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>ID del nodo</span><input id="f-id" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>ID del nodo <span class="req">*</span></span><input id="f-id" type="number" min="1" max="254" value="1"></label>
             <label class="cfg-campo"><span>Tipo</span>
               <select id="f-type"><option value="node">Nodo</option><option value="super_node">Supernodo (con NB-IoT)</option></select>
             </label>
-            <label class="cfg-campo"><span>Nombre</span><input id="f-name" type="text" maxlength="64" placeholder="Nodo banco TFM"></label>
+            <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input id="f-name" type="text" maxlength="64" placeholder="Nodo banco TFM"></label>
             <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="opcional"></label>
           </div>
+          <p class="aviso" id="f-id-aviso"></p>
         </div>
 
         <div class="card cfg-card">
@@ -544,7 +626,7 @@
         <div class="card cfg-card" id="f-nbiot-card" hidden>
           <h3>NB-IoT (supernodo)</h3>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>APN</span><input id="f-apn" type="text" placeholder="nb.wlapn.com"></label>
+            <label class="cfg-campo"><span>APN <span class="req">*</span></span><input id="f-apn" type="text" placeholder="nb.wlapn.com"></label>
             <label class="cfg-campo"><span>Broker MQTT</span><input id="f-mbroker" type="text" placeholder="modulinkr.ejemplo.com"></label>
             <label class="cfg-campo"><span>Puerto MQTT</span><input id="f-mport" type="number" min="1" max="65535" value="8883"></label>
             <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>TLS (cert RSA en el broker)</span></label>
@@ -598,6 +680,7 @@
           <p class="aviso">Primero validar el formulario. Con la configuración
             válida se habilita buscar el nodo (conectado por USB); el nodo lo
             valida de nuevo y solo graba si pasa sus reglas.</p>
+          <p class="aviso" id="f-pendientes"></p>
           <div class="cfg-fila">
             <button id="f-generar" class="btn-primario">Validar configuración</button>
             <span id="f-resultado" class="aviso"></span>
