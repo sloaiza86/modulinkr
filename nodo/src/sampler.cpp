@@ -8,6 +8,12 @@ void Sampler::begin(ModbusRTU* bus, const cfg::Config* config) {
     bus_ = bus;
     cfg_ = config;
 
+    // Debug Modbus (v3.3): la captura de evidencia en el camino feliz solo
+    // se enciende en los modos "all"; en "errors" basta la del camino de
+    // error, que el driver registra siempre.
+    dbg_mode_ = cfg_->modbus_debug;
+    if (bus_ != nullptr) bus_->enableCapture(cfg::mbDebugAll(dbg_mode_));
+
     // Precalcula los grupos: reads contiguos (misma función, dirección
     // consecutiva contando el ancho en registros del anterior) colapsan
     // en una sola transacción.
@@ -141,6 +147,7 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
                       g.address, g.n_regs, g.function,
                       static_cast<unsigned long>(ok_count_),
                       static_cast<unsigned long>(err_count_));
+        captureDebug(g.dev, status_byte, true);
         return false;
     }
 
@@ -163,11 +170,40 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
         off = static_cast<uint8_t>(off + cfg::typeRegisters(rd.type));
     }
     ok_count_++;
+    captureDebug(g.dev, 0x00, false);   // status ok
     return true;
+}
+
+void Sampler::captureDebug(uint8_t dev, uint8_t status_byte, bool failed) {
+    if (!cfg::mbDebugEnabled(dbg_mode_)) return;
+    // En modos "errors" solo interesan los fallos; en "all", todas. La
+    // evidencia del grupo la dejó el driver: siempre ante fallo, y en éxito
+    // solo con la captura activa (que begin encendió en los modos "all").
+    if (!failed && !cfg::mbDebugAll(dbg_mode_)) return;
+
+    const ModbusRTU::FailEvidence& ev = bus_->lastTxn();
+    uint8_t idx;
+    if (cfg::mbDebugEach(dbg_mode_)) {
+        if (dbg_n_ >= cfg::kMaxReadsTotal) return;   // buffer del ciclo lleno
+        idx = dbg_n_++;
+    } else {
+        idx = 0;            // "last": la última candidata pisa a la anterior
+        dbg_n_ = 1;
+    }
+    DebugTxn& d = dbg_[idx];
+    d.dev         = dev;
+    d.status_byte = status_byte;
+    d.req_len  = ev.req_len;
+    memcpy(d.req, ev.req, ev.req_len);
+    d.resp_len = ev.resp_len;
+    memcpy(d.resp, ev.resp, ev.resp_len);
 }
 
 void Sampler::pollDue() {
     if (bus_ == nullptr || cfg_ == nullptr || n_groups_ == 0) return;
+
+    // El buffer de evidencia del debug se vacía al principio de cada ciclo.
+    dbg_n_ = 0;
 
     // v2.3: un solo timer. Se leen TODOS los dispositivos en cada llamada
     // (una vez por ciclo de send_interval_ms, ya que fireLora invoca esto

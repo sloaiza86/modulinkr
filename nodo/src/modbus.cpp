@@ -64,16 +64,17 @@ ModbusRTU::Status ModbusRTU::readDiscreteInputs(uint8_t slave_id, uint16_t addre
     return readBits(kFuncReadDiscreteInputs, slave_id, address, count, out);
 }
 
-void ModbusRTU::recordFail(Status st, const uint8_t* req, size_t req_len,
-                           const uint8_t* rx, size_t rx_len) {
-    fail_.status    = st;
-    fail_.exception = (st == Status::EXCEPTION) ? last_exception_ : 0;
-    if (req_len > sizeof(fail_.req)) req_len = sizeof(fail_.req);
-    std::memcpy(fail_.req, req, req_len);
-    fail_.req_len = static_cast<uint8_t>(req_len);
-    if (rx_len > sizeof(fail_.resp)) rx_len = sizeof(fail_.resp);
-    std::memcpy(fail_.resp, rx, rx_len);
-    fail_.resp_len = static_cast<uint8_t>(rx_len);
+void ModbusRTU::record(Status st, const uint8_t* req, size_t req_len,
+                       const uint8_t* rx, size_t rx_len) {
+    txn_.status    = st;
+    txn_.exception = (st == Status::EXCEPTION) ? last_exception_ : 0;
+    if (req_len > sizeof(txn_.req)) req_len = sizeof(txn_.req);
+    std::memcpy(txn_.req, req, req_len);
+    txn_.req_len = static_cast<uint8_t>(req_len);
+    if (rx_len > sizeof(txn_.resp)) rx_len = sizeof(txn_.resp);
+    std::memcpy(txn_.resp, rx, rx_len);
+    txn_.resp_len = static_cast<uint8_t>(rx_len);
+    txn_valid_ = true;
 }
 
 const char* ModbusRTU::statusToString(Status s) {
@@ -142,7 +143,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     // camino feliz.
     uint8_t resp[kMaxResponseSize];
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
-        recordFail(st, req, sizeof(req), resp, rx_len);
+        record(st, req, sizeof(req), resp, rx_len);
         if (!kDiag) return st;
         Serial.printf("[mb-dbg] fallo '%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
@@ -218,7 +219,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         last_exception_ = resp[2];
         // Respuesta bien formada pero de fallo: evidencia sin traza serie
         // (el log de sampler ya reporta la excepción).
-        recordFail(Status::EXCEPTION, req, sizeof(req), resp, 5);
+        record(Status::EXCEPTION, req, sizeof(req), resp, 5);
         return Status::EXCEPTION;
     }
 
@@ -237,7 +238,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     const size_t remaining = static_cast<size_t>(byte_count) + 2;
     if (3 + remaining > kMaxResponseSize) {
         // Sanidad: nunca debería pasar dado el límite kMaxRegistersPerRequest.
-        recordFail(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
+        record(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
         return Status::INVALID_RESPONSE;
     }
     const size_t got_body = readWithTimeout(resp + 3, remaining);
@@ -259,6 +260,8 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         out[i] = (static_cast<uint16_t>(resp[off]) << 8) |
                  static_cast<uint16_t>(resp[off + 1]);
     }
+    // Evidencia de la transacción exitosa (modos "all" del debug, v3.3).
+    if (capture_) record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2);
     return Status::OK;
 }
 
@@ -305,7 +308,7 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
 
     uint8_t resp[kMaxResponseSize];
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
-        recordFail(st, req, sizeof(req), resp, rx_len);
+        record(st, req, sizeof(req), resp, rx_len);
         if (!kDiag) return st;
         Serial.printf("[mb-dbg] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
@@ -346,7 +349,7 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
             return failRet(Status::CRC_ERROR, "crc excepcion", 5);
         }
         last_exception_ = resp[2];
-        recordFail(Status::EXCEPTION, req, sizeof(req), resp, 5);
+        record(Status::EXCEPTION, req, sizeof(req), resp, 5);
         return Status::EXCEPTION;
     }
 
@@ -363,7 +366,7 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
 
     const size_t remaining = static_cast<size_t>(byte_count) + 2;  // datos + CRC
     if (3 + remaining > kMaxResponseSize) {
-        recordFail(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
+        record(Status::INVALID_RESPONSE, req, sizeof(req), resp, 3);
         return Status::INVALID_RESPONSE;
     }
     const size_t got_body = readWithTimeout(resp + 3, remaining);
@@ -383,6 +386,8 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
         const uint8_t byte = resp[3 + (i / 8)];
         out[i] = (byte >> (i % 8)) & 0x01;
     }
+    // Evidencia de la transacción exitosa (modos "all" del debug, v3.3).
+    if (capture_) record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2);
     return Status::OK;
 }
 

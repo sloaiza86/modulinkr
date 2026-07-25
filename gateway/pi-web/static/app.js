@@ -1001,6 +1001,7 @@ function cfgRuta() {
   document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
   document.getElementById("cfg-radio").hidden    = sub !== "radio";
   document.getElementById("cfg-wifi").hidden     = sub !== "wifi";
+  document.getElementById("cfg-debug").hidden    = sub !== "depuracion";
   document.getElementById("cfg-zona").hidden     = sub !== "zona";
   document.getElementById("cfg-bd").hidden       = sub !== "bd";
   document.getElementById("cfg-mqtt").hidden     = sub !== "mqtt";
@@ -1008,6 +1009,8 @@ function cfgRuta() {
   document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
   if (sub === "wifi") wifiCargar();
+  // Al salir de depuración se corta el stream SSE abierto.
+  if (sub === "depuracion") debugInit(); else debugStop();
   if (sub === "zona") tzCargar();
   if (sub === "bd") bdCargar();
   if (sub === "mqtt") mqttCargar();
@@ -1665,6 +1668,121 @@ async function wifiConectar() {
 document.getElementById("wifi-buscar").addEventListener("click", wifiBuscar);
 document.getElementById("wifi-conectar").addEventListener("click", wifiConectar);
 
+// ----- Herramientas de depuración (logs en vivo por SSE) -----
+
+let dbgEs = null;      // EventSource abierto, o null
+let dbgTab = "gateway";
+
+const DBG_AYUDA = {
+  gateway: "Salida del servicio del gateway en vivo (journalctl).",
+  serial:  "Salida serie de un nodo conectado por USB. El puerto del Heltec "
+         + "queda excluido. Mientras el monitor está abierto no se puede "
+         + "comisionar un nodo (comparten el bus).",
+  modbus:  "Aparecen las tramas que el nodo emite según su modo modbus.debug "
+         + "(off / errors_* solo fallidas / all_* también correctas; _last una "
+         + "por ciclo, _each cada transacción). Con off no hay ninguna. Sin "
+         + "nodo, muestra las de todos.",
+};
+
+async function debugInit() {
+  debugStop();
+  document.getElementById("dbg-consola").textContent = "";
+  document.getElementById("dbg-info").textContent = "";
+  try {
+    const r = await fetchApi("/api/debug/puertos");
+    const d = await r.json();
+    const sel = document.getElementById("dbg-puerto");
+    sel.innerHTML = "";
+    (d.ports || []).forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p.port;
+      o.textContent = p.port.replace("/dev/serial/by-id/", "");
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = "sin puertos USB";
+      sel.appendChild(o);
+    }
+  } catch (e) { /* la lista queda vacía */ }
+  try {
+    const r = await fetchApi("/api/debug/nodos");
+    const d = await r.json();
+    const sel = document.getElementById("dbg-nodo");
+    sel.innerHTML = "";
+    const todos = document.createElement("option");
+    todos.value = ""; todos.textContent = "Todos los nodos";
+    sel.appendChild(todos);
+    (d.nodos || []).forEach((n) => {
+      const o = document.createElement("option");
+      o.value = n.origin;
+      o.textContent = (n.name ? n.name + " " : "") + "(" + n.origin + ")";
+      sel.appendChild(o);
+    });
+  } catch (e) { /* la lista queda con "Todos" */ }
+  debugSetTab("gateway");
+}
+
+function debugSetTab(tab) {
+  debugStop();
+  dbgTab = tab;
+  document.querySelectorAll(".dbg-tab").forEach((b) => {
+    b.classList.toggle("activa", b.dataset.tab === tab);
+  });
+  document.getElementById("dbg-puerto").hidden = tab !== "serial";
+  document.getElementById("dbg-nodo").hidden = tab !== "modbus";
+  document.getElementById("dbg-ayuda").textContent = DBG_AYUDA[tab];
+  document.getElementById("dbg-consola").textContent = "";
+}
+
+function debugToggle() {
+  if (dbgEs) { debugStop(); return; }
+  let url;
+  if (dbgTab === "gateway") {
+    url = "/api/debug/gateway";
+  } else if (dbgTab === "serial") {
+    const port = document.getElementById("dbg-puerto").value;
+    if (!port) { document.getElementById("dbg-info").textContent = "No hay puerto USB."; return; }
+    url = "/api/debug/serial?port=" + encodeURIComponent(port);
+  } else {
+    const origin = document.getElementById("dbg-nodo").value;
+    url = "/api/debug/modbus" + (origin ? "?origin=" + encodeURIComponent(origin) : "");
+  }
+  dbgEs = new EventSource(url);
+  dbgEs.onmessage = (ev) => debugAppend(ev.data);
+  dbgEs.onerror = () => {
+    document.getElementById("dbg-info").textContent = "conexión interrumpida";
+  };
+  document.getElementById("dbg-info").textContent = "en vivo";
+  document.getElementById("dbg-toggle").textContent = "Detener";
+}
+
+function debugStop() {
+  if (dbgEs) { dbgEs.close(); dbgEs = null; }
+  const t = document.getElementById("dbg-toggle");
+  if (t) t.textContent = "Iniciar";
+  const i = document.getElementById("dbg-info");
+  if (i && i.textContent === "en vivo") i.textContent = "";
+}
+
+function debugAppend(line) {
+  const con = document.getElementById("dbg-consola");
+  const abajo = con.scrollTop + con.clientHeight >= con.scrollHeight - 4;
+  con.textContent += line + "\n";
+  const MAX = 800;   // cota de líneas para no crecer sin límite
+  const lineas = con.textContent.split("\n");
+  if (lineas.length > MAX) con.textContent = lineas.slice(-MAX).join("\n");
+  if (abajo) con.scrollTop = con.scrollHeight;
+}
+
+document.querySelectorAll(".dbg-tab").forEach((b) => {
+  b.addEventListener("click", () => debugSetTab(b.dataset.tab));
+});
+document.getElementById("dbg-toggle").addEventListener("click", debugToggle);
+document.getElementById("dbg-limpiar").addEventListener("click", () => {
+  document.getElementById("dbg-consola").textContent = "";
+});
+
 // ----- Configurar nodo: cargar firmware del Atom por USB -----
 
 let fwPuerto = null;
@@ -1999,7 +2117,7 @@ function collectForm() {
              topic_telemetry: gv("f-ttel"), topic_commands: gv("f-tcmd"),
              debug: gc("f-mdebug"), relay_enabled: gc("f-nbrelay"), relay_queue_max: gv("f-relayqueue") },
     modbus: { baudrate: gv("f-baud"), parity: gv("f-parity"), stopbits: gv("f-stopbits"),
-              debug: gc("f-mbdebug"), devices },
+              debug: gv("f-mbdebug"), devices },
   };
 }
 
@@ -2045,8 +2163,16 @@ function buildDevice(d) {
   return dev;
 }
 
+// Normaliza modbus.debug (string v3.3, booleano v3.2 o ausente) a uno de
+// los cinco valores del selector del asistente.
+function mbDebugValor(d) {
+  if (d === true) return "errors_last";
+  if (d === false || d == null) return "off";
+  return ["off", "errors_last", "errors_each", "all_last", "all_each"].includes(d) ? d : "off";
+}
+
 function buildConfig(f) {
-  const cfg = { schema_version: "3.2", node: {}, transport: {}, modbus: {} };
+  const cfg = { schema_version: "3.3", node: {}, transport: {}, modbus: {} };
   cfg.node.id = fNum(f.node.id, 1);
   cfg.node.type = f.node.type;
   cfg.node.name = f.node.name || "";
@@ -2089,7 +2215,8 @@ function buildConfig(f) {
 
   const mb = { baudrate: fNum(f.modbus.baudrate, 9600), parity: f.modbus.parity,
                stopbits: fNum(f.modbus.stopbits, 1) };
-  if (f.modbus.debug) mb.debug = true;
+  // v3.3: modo del debug Modbus. Se omite si es "off" (el default).
+  if (f.modbus.debug && f.modbus.debug !== "off") mb.debug = f.modbus.debug;
   mb.devices = f.modbus.devices.map(buildDevice);
   cfg.modbus = mb;
   return cfg;
@@ -2163,7 +2290,7 @@ function fillForm(cfg) {
     sC("f-mdebug", nb.debug !== false); sC("f-nbrelay", nb.relay_enabled !== false); sV("f-relayqueue", nb.relay_queue_max);
   }
   formNbiotVis();
-  sV("f-baud", mb.baudrate); sV("f-parity", mb.parity); sV("f-stopbits", mb.stopbits); sC("f-mbdebug", mb.debug);
+  sV("f-baud", mb.baudrate); sV("f-parity", mb.parity); sV("f-stopbits", mb.stopbits); sV("f-mbdebug", mbDebugValor(mb.debug));
   const cont = document.getElementById("f-devices");
   cont.innerHTML = "";
   (mb.devices || []).forEach((dev, i) => {

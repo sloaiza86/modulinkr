@@ -77,7 +77,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.26-usb-config";
+constexpr const char* kFirmwareVersion = "0.0.27-modbus-debug-modes";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -495,26 +495,21 @@ void fireLora() {
                       static_cast<unsigned long>(g_lora_err));
     }
 
-    // MODBUS_DEBUG (v3.2, spec §15): la última transacción Modbus fallida
-    // del ciclo, solo con modbus.debug activo en el config. Best-effort
-    // como el HEARTBEAT: sin ACK, sin reintentos, sin cola. Se emite tras
-    // la TELEMETRY, con ruta ya garantizada (los caminos sin padre o sin
-    // registro salieron antes de este punto). La evidencia se limpia tras
-    // reportarla: cada trama corresponde a un fallo del ciclo en curso.
-    if (g_cfg.modbus_debug && modbus.lastFailValid()) {
-        const ModbusRTU::FailEvidence& fe = modbus.lastFail();
-        const uint8_t status_byte = static_cast<uint8_t>(
-            (static_cast<uint8_t>(fe.status) & 0x0F) |
-            ((fe.exception & 0x0F) << 4));
+    // MODBUS_DEBUG (v3.3, spec §15): el sampler dejó en su buffer las
+    // transacciones del ciclo que el modo modbus.debug pide reportar
+    // (node-config.md §5: off / errors_last / errors_each / all_last /
+    // all_each). Se emite una trama por entrada, best-effort como el
+    // HEARTBEAT (sin ACK, sin reintentos, sin cola), tras la TELEMETRY y
+    // con ruta ya garantizada (los caminos sin padre o sin registro
+    // salieron antes de este punto).
+    for (uint8_t i = 0; i < sampler.debugCount(); ++i) {
+        const Sampler::DebugTxn& d = sampler.debugAt(i);
         nextSeq();
-        lora.sendModbusDebug(g_lora_seq, sampler.lastFailDev(), status_byte,
-                             fe.req, fe.req_len, fe.resp, fe.resp_len,
+        lora.sendModbusDebug(g_lora_seq, d.dev, d.status_byte,
+                             d.req, d.req_len, d.resp, d.resp_len,
                              mesh.parentId());
-        Serial.printf("[mb-dbg] trama debug dev=%u status=%s exc=%u req=%uB resp=%uB\n",
-                      sampler.lastFailDev(),
-                      ModbusRTU::statusToString(fe.status), fe.exception,
-                      fe.req_len, fe.resp_len);
-        modbus.clearLastFail();
+        Serial.printf("[mb-dbg] trama debug dev=%u status=0x%02X req=%uB resp=%uB\n",
+                      d.dev, d.status_byte, d.req_len, d.resp_len);
     }
 }
 

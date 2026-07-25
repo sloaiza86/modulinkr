@@ -483,3 +483,20 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 .wifi-red.activa { border-color: var(--accent); background: rgba(7, 86, 235, 0.06); }
 .wr-ssid { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wr-meta { color: var(--dim); font-size: 0.82rem; white-space: nowrap; }
+
+/* Herramientas de depuración: pestañas y consola de log en vivo. */
+.dbg-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.8rem; flex-wrap: wrap; }
+.dbg-tab {
+  padding: 0.4rem 0.8rem; font: inherit; color: var(--dim);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer;
+}
+.dbg-tab.activa { color: #fff; background: var(--accent); border-color: var(--accent); }
+.dbg-controles { align-items: center; flex-wrap: wrap; }
+.dbg-consola {
+  margin-top: 0.8rem; height: 340px; overflow: auto;
+  background: #0e1526; color: #d6e2ff; border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap; word-break: break-all;
+}

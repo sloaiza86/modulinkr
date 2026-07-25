@@ -180,12 +180,13 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     }
 
     // ----- schema_version (regla 1) -----
-    // 3.2 es la actual; 3.0 y 3.1 se aceptan porque los cambios de
+    // 3.3 es la actual; 3.0 a 3.2 se aceptan porque los cambios de
     // estructura del JSON son opcionales hacia atrás (node-config.md §1:
-    // 3.1 no cambió estructura, 3.2 añade el campo opcional modbus.debug).
+    // 3.1 no cambió estructura, 3.2 añadió modbus.debug booleano, 3.3 lo
+    // amplía a un enum aceptando también el booleano).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "3.2") != 0 && strcmp(schema, "3.1") != 0 &&
-        strcmp(schema, "3.0") != 0) {
+    if (strcmp(schema, "3.3") != 0 && strcmp(schema, "3.2") != 0 &&
+        strcmp(schema, "3.1") != 0 && strcmp(schema, "3.0") != 0) {
         return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.x)", schema);
     }
 
@@ -366,7 +367,25 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     c.parity = par[0];
     c.stopbits = mb["stopbits"] | 0;
     if (c.stopbits != 1 && c.stopbits != 2) return fail(err, err_len, "modbus.stopbits invalido");
-    c.modbus_debug = mb["debug"] | false;  // v3.2, opcional
+    // modbus.debug (v3.3): enum de 5 valores, con compatibilidad del
+    // booleano v3.2 (true=errors_last, false=off). Ausente = off.
+    JsonVariantConst dbg = mb["debug"];
+    if (dbg.isNull()) {
+        c.modbus_debug = cfg::ModbusDebug::OFF;
+    } else if (dbg.is<bool>()) {
+        c.modbus_debug = dbg.as<bool>() ? cfg::ModbusDebug::ERRORS_LAST
+                                        : cfg::ModbusDebug::OFF;
+    } else if (dbg.is<const char*>()) {
+        const char* s = dbg.as<const char*>();
+        if      (strcmp(s, "off")         == 0) c.modbus_debug = cfg::ModbusDebug::OFF;
+        else if (strcmp(s, "errors_last") == 0) c.modbus_debug = cfg::ModbusDebug::ERRORS_LAST;
+        else if (strcmp(s, "errors_each") == 0) c.modbus_debug = cfg::ModbusDebug::ERRORS_EACH;
+        else if (strcmp(s, "all_last")    == 0) c.modbus_debug = cfg::ModbusDebug::ALL_LAST;
+        else if (strcmp(s, "all_each")    == 0) c.modbus_debug = cfg::ModbusDebug::ALL_EACH;
+        else return fail(err, err_len, "modbus.debug invalido (off/errors_last/errors_each/all_last/all_each)");
+    } else {
+        return fail(err, err_len, "modbus.debug invalido (booleano o cadena)");
+    }
 
     JsonArrayConst devices = mb["devices"];
     if (devices.isNull() || devices.size() == 0) {

@@ -13,8 +13,10 @@ El mismo archivo se utiliza en tres puntos del sistema:
 Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con el formato `"MAJOR.MINOR"`. La versión actual de este documento es:
 
 ```json
-"schema_version": "3.2"
+"schema_version": "3.3"
 ```
+
+> **Nota v3.3 (25-jul-2026)**: `modbus.debug` (§5) pasa de booleano a un modo de cinco valores (`off`, `errors_last`, `errors_each`, `all_last`, `all_each`): dos ejes, qué transacciones se reportan (solo fallidas o también correctas) y cuántas por ciclo (la última candidata o cada candidata). El booleano sigue aceptándose (`true`=`errors_last`, `false`=`off`), así que los configs 3.2 no se rompen. No cambia la estructura de la trama MODBUS_DEBUG (`frame-format.md` §15); su `status` ahora puede valer `ok` en los modos `all_*`. El firmware acepta configs 3.0 a 3.3.
 
 > **Nota v3.2 (20-jul-2026)**: acompaña al bump de la trama (`frame-format.md` §1.2, byte `0x32`: estado Modbus por read en TELEMETRY y trama MODBUS_DEBUG). En el JSON aparece `modbus.debug` (opcional, default `false`, §5): con `true`, el dispositivo transmite por LoRa la última transacción Modbus fallida de cada ciclo (petición y respuesta en crudo, trama MODBUS_DEBUG), observable en el log del Pi del gateway. Al ser opcional, un config 3.0 o 3.1 sigue validando; el firmware acepta las tres versiones.
 
@@ -236,7 +238,7 @@ Describe el bus RS-485 y los dispositivos industriales conectados a él.
   "baudrate": 9600,
   "parity":   "N",
   "stopbits": 1,
-  "debug":    false,
+  "debug":    "off",
   "devices":  [ ... ]
 }
 ```
@@ -246,7 +248,7 @@ Describe el bus RS-485 y los dispositivos industriales conectados a él.
 | `baudrate` | integer | sí | `2400`, `4800`, `9600`, `19200`, `38400`, `57600`, `115200` | Velocidad del bus. Todos los dispositivos del bus deben hablar a la misma velocidad. |
 | `parity` | string | sí | `"N"`, `"E"`, `"O"` | None / Even / Odd. |
 | `stopbits` | integer | sí | `1`, `2` | Stop bits. |
-| `debug` | boolean | no (v3.2, default `false`) | `true`, `false` | Con `true`, el dispositivo transmite por LoRa la última transacción Modbus fallida de cada ciclo (trama MODBUS_DEBUG, `frame-format.md` §15), que el Pi del gateway vuelca a su log. Pensado para comisionamiento y diagnóstico; en operación normal se deja en `false`. Independiente de `nbiot.debug` (§4.3), que gobierna el sobre del mensaje de telemetría. |
+| `debug` | string o boolean | no (v3.3, default `"off"`) | `"off"`, `"errors_last"`, `"errors_each"`, `"all_last"`, `"all_each"` (y booleano por compatibilidad) | Modo del debug Modbus, que gobierna la trama MODBUS_DEBUG (`frame-format.md` §15) que el Pi del gateway vuelca a su log. Dos ejes: qué transacciones (`errors` solo las fallidas, `all` también las correctas) y cuántas por ciclo (`_last` la última candidata, `_each` cada candidata). `"off"` no emite nada. Los modos `_each` suben el aire (una trama por transacción). Compatibilidad v3.2: `true` equivale a `"errors_last"` y `false` a `"off"`. Pensado para comisionamiento y diagnóstico; en operación normal se deja en `"off"`. Independiente de `nbiot.debug` (§4.3), que gobierna el sobre del mensaje de telemetría. |
 | `devices` | array | sí | mínimo 1 entrada | Lista de dispositivos en el bus. |
 
 ### 5.1 Bloque `devices[i]`

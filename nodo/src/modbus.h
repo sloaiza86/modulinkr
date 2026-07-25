@@ -67,23 +67,27 @@ public:
     // fue Status::EXCEPTION. 0 si no aplica.
     uint8_t lastException() const { return last_exception_; }
 
-    // Evidencia de la última transacción fallida (v3.2): la petición tal
-    // cual salió al bus y los bytes recibidos hasta el fallo. Alimenta la
-    // trama MODBUS_DEBUG (frame-format.md §15) y el JSON de batch-format.md
-    // §11. Se sobreescribe en cada fallo; una transacción exitosa no la
-    // borra (la semántica es "última fallida"). El consumidor la limpia
-    // con clearLastFail() tras reportarla.
+    // Evidencia de la última transacción (v3.2, ampliada en v3.3): la
+    // petición tal cual salió al bus, los bytes recibidos y el estado.
+    // Alimenta la trama MODBUS_DEBUG (frame-format.md §15). Los fallos se
+    // registran siempre (camino de error, coste solo ante fallo). Los
+    // aciertos solo se registran con la captura activa (enableCapture), que
+    // el sampler enciende en los modos "all" del debug; así el camino feliz
+    // no paga el volcado cuando no hace falta.
     struct FailEvidence {
-        Status  status    = Status::OK;   // OK = sin evidencia
+        Status  status    = Status::OK;   // estado de la transacción
         uint8_t exception = 0;            // código Modbus, solo con EXCEPTION
         uint8_t req[8];
         uint8_t req_len   = 0;
         uint8_t resp[32];                 // tope de volcado, spec §15.1
         uint8_t resp_len  = 0;
     };
-    const FailEvidence& lastFail() const { return fail_; }
-    bool lastFailValid() const { return fail_.status != Status::OK; }
-    void clearLastFail() { fail_.status = Status::OK; }
+    const FailEvidence& lastTxn() const { return txn_; }
+    bool lastTxnValid() const { return txn_valid_; }
+    void clearTxn() { txn_valid_ = false; }
+    // Con captura activa, las transacciones exitosas también dejan evidencia
+    // (modos "all"). Sin ella, solo la dejan los fallos.
+    void enableCapture(bool on) { capture_ = on; }
 
     // Devuelve un literal estático con el nombre del estado, útil para logs.
     static const char* statusToString(Status s);
@@ -92,7 +96,9 @@ private:
     Stream*  uart_ = nullptr;
     uint32_t response_timeout_ms_ = 1000;
     uint8_t  last_exception_ = 0;
-    FailEvidence fail_;
+    FailEvidence txn_;
+    bool         txn_valid_ = false;
+    bool         capture_   = false;
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);
@@ -102,11 +108,11 @@ private:
     Status readBits(uint8_t function_code, uint8_t slave_id,
                     uint16_t address, uint8_t count, uint8_t* out);
 
-    // Guarda la evidencia del fallo (v3.2): copia petición y bytes
-    // recibidos en fail_. Con st == EXCEPTION toma el código de
-    // last_exception_, que el caller ya fijó.
-    void recordFail(Status st, const uint8_t* req, size_t req_len,
-                    const uint8_t* rx, size_t rx_len);
+    // Guarda la evidencia de una transacción (v3.3): copia petición y bytes
+    // recibidos en txn_ y la marca válida. Con st == EXCEPTION toma el
+    // código de last_exception_, que el caller ya fijó; con OK, exception 0.
+    void record(Status st, const uint8_t* req, size_t req_len,
+                const uint8_t* rx, size_t rx_len);
 
     // Lee exactamente `len` bytes en `buf` con timeout total de
     // `response_timeout_ms_`. Devuelve número de bytes leídos.

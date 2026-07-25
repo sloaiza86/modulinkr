@@ -265,6 +265,10 @@ import dbapi    # noqa: E402
 
 import wifiapi  # noqa: E402
 
+# ----- Módulo: herramientas de depuración (logs en vivo por SSE) -----
+
+import debugapi  # noqa: E402
+
 # ----- Stub de fase futura -----
 
 cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
@@ -289,6 +293,7 @@ app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
 app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
 app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
 app.include_router(wifiapi.router, dependencies=[Depends(require_auth)])
+app.include_router(debugapi.router, dependencies=[Depends(require_auth)])
 
 
 # ----- Frontend estático -----

@@ -78,8 +78,21 @@ public:
     uint32_t errCount() const { return err_count_; }
 
     // Índice en devices[] del último grupo fallido del ciclo (v3.2).
-    // Válido solo si el driver tiene evidencia (bus->lastFailValid()).
     uint8_t lastFailDev() const { return last_fail_dev_; }
+
+    // Evidencia de las transacciones del ciclo para MODBUS_DEBUG (v3.3),
+    // seleccionada según el modo modbus.debug. Se llena en pollDue y la lee
+    // main tras la TELEMETRY, emitiendo una trama por entrada.
+    struct DebugTxn {
+        uint8_t dev         = 0;
+        uint8_t status_byte = 0;   // nibble bajo estado, alto excepción
+        uint8_t req[8];
+        uint8_t req_len     = 0;
+        uint8_t resp[32];
+        uint8_t resp_len    = 0;
+    };
+    uint8_t debugCount() const { return dbg_n_; }
+    const DebugTxn& debugAt(uint8_t i) const { return dbg_[i]; }
 
     // Cuántas transacciones por ciclo de poll quedaron tras agrupar
     // (diagnóstico para el banner).
@@ -124,6 +137,16 @@ private:
     uint32_t ok_count_  = 0;
     uint32_t err_count_ = 0;
     uint8_t  last_fail_dev_ = 0;   // v3.2: device del último grupo fallido
+
+    // Debug Modbus (v3.3): modo y buffer de evidencia del ciclo.
+    cfg::ModbusDebug dbg_mode_ = cfg::ModbusDebug::OFF;
+    DebugTxn dbg_[cfg::kMaxReadsTotal];
+    uint8_t  dbg_n_ = 0;
+
+    // Registra la evidencia de un grupo en el buffer del ciclo según el
+    // modo (última vs cada, solo fallidas vs todas). `failed` indica si la
+    // transacción falló; toma los bytes de bus_->lastTxn().
+    void captureDebug(uint8_t dev, uint8_t status_byte, bool failed);
 
     // Índice global del read `r` del device `d` en el snapshot.
     uint8_t globalIndex(uint8_t d, uint8_t r) const;

@@ -43,6 +43,27 @@ constexpr size_t kMaxReadsTotal  = 8;   // = PendingQueue/Outbox kMaxValues
 // Tipos de dato de un registro (node-config.md §5.6).
 enum class ValType : uint8_t { U16, I16, U32, I32, F32 };
 
+// Modo del debug Modbus (node-config.md §5, v3.3). Dos ejes en un valor:
+// qué transacciones son candidatas (ninguna / solo fallidas / todas) y
+// cuántas se emiten por ciclo (la última candidata / cada candidata). El
+// booleano v3.2 se mapea en el parseo: true=ERRORS_LAST, false=OFF.
+enum class ModbusDebug : uint8_t {
+    OFF = 0,       // no se emite MODBUS_DEBUG (coste cero)
+    ERRORS_LAST,   // la última transacción fallida del ciclo (v3.2 clásico)
+    ERRORS_EACH,   // cada transacción fallida del ciclo
+    ALL_LAST,      // la última transacción del ciclo, ok o fallida
+    ALL_EACH,      // cada transacción del ciclo, ok o fallida
+};
+
+// Predicados de política derivados del modo.
+inline bool mbDebugEnabled(ModbusDebug m) { return m != ModbusDebug::OFF; }
+inline bool mbDebugAll(ModbusDebug m) {
+    return m == ModbusDebug::ALL_LAST || m == ModbusDebug::ALL_EACH;
+}
+inline bool mbDebugEach(ModbusDebug m) {
+    return m == ModbusDebug::ERRORS_EACH || m == ModbusDebug::ALL_EACH;
+}
+
 // Orden de bytes para tipos multi-registro (§5.6.1).
 enum class ByteOrder : uint8_t { NONE, ABCD, BADC, CDAB, DCBA };
 
@@ -152,8 +173,8 @@ struct Config {
     uint32_t baudrate = 9600;
     char     parity   = 'N';
     uint8_t  stopbits = 1;
-    bool     modbus_debug = false;  // v3.2: transmitir la última transacción
-                                    // fallida (MODBUS_DEBUG / batch §11)
+    ModbusDebug modbus_debug = ModbusDebug::OFF;  // v3.3: modo del debug
+                                    // Modbus (MODBUS_DEBUG, frame-format §15)
 
     DeviceDef devices[kMaxDevices];
     uint8_t   n_devices   = 0;

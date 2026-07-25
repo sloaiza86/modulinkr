@@ -818,9 +818,9 @@ La clave viaja en `transport.lora.security.key` (`node-config.md` §4.5): 32 car
 
 ## 15. Trama MODBUS_DEBUG (uplink, `frame_type = 0x06`, v3.2)
 
-Transporta en crudo la evidencia de una transacción Modbus fallida: la petición tal cual salió al bus y los bytes recibidos hasta el fallo. Es la versión por aire de la traza `[mb-dbg]` que el driver vuelca al log serie, pensada para diagnosticar un sensor remoto sin conectarle un portátil.
+Transporta en crudo la evidencia de una transacción Modbus: la petición tal cual salió al bus y los bytes recibidos. Según el modo, reporta solo transacciones fallidas o también las correctas. Es la versión por aire de la traza `[mb-dbg]` que el driver vuelca al log serie, pensada para diagnosticar un sensor remoto sin conectarle un portátil.
 
-La emisión la gobierna `modbus.debug` del config ([`node-config.md`](node-config.md) §5, default `false`). Con el flag desactivado la trama no existe y el coste es cero.
+La emisión la gobierna `modbus.debug` del config ([`node-config.md`](node-config.md) §5), que en v3.3 pasa de booleano a un modo de cinco valores (`off`, `errors_last`, `errors_each`, `all_last`, `all_each`). Con `off` la trama no existe y el coste es cero.
 
 ### 15.1 Estructura del payload
 
@@ -832,7 +832,7 @@ dev_index   status   req_len   resp_len   req           resp
 | Campo | Contenido |
 | --- | --- |
 | `dev_index` | Índice del dispositivo en `modbus.devices[]` del config del origen. |
-| `status` | Mismo formato que `st[]` de §3.1: nibble bajo estado, nibble alto código de excepción. Nunca vale `ok`: la trama solo existe ante fallo. |
+| `status` | Mismo formato que `st[]` de §3.1: nibble bajo estado, nibble alto código de excepción. Con los modos `errors_*` nunca vale `ok` (solo transacciones fallidas); con `all_*` puede valer `ok` (una transacción correcta reportada). |
 | `req_len` | Longitud de la petición volcada. Con las funciones de lectura actuales, siempre 8. |
 | `resp_len` | Bytes recibidos hasta el fallo, tope 32. Puede ser 0 (timeout sin respuesta alguna). |
 | `req` | La petición Modbus RTU tal cual se escribió al bus, CRC incluido. |
@@ -842,8 +842,8 @@ dev_index   status   req_len   resp_len   req           resp
 
 ### 15.2 Reglas de emisión
 
-1. Solo con `modbus.debug == true` en el config del origen.
-2. Máximo **una por ciclo de envío**: la última transacción fallida del ciclo. Un ciclo con varios fallos reporta solo el último; los contadores agregados viajan igualmente en los `st[]` de TELEMETRY.
+1. Solo si `modbus.debug` no es `off` en el config del origen.
+2. El modo gobierna qué transacciones y cuántas por ciclo de envío se reportan: `errors_last`, la última fallida del ciclo (comportamiento v3.2); `errors_each`, cada transacción fallida; `all_last`, la última transacción del ciclo, correcta o fallida; `all_each`, cada transacción del ciclo, correcta o fallida. Los modos `_each` pueden emitir varias tramas por ciclo, así que su coste de aire crece con el número de transacciones y la cadencia (duty cycle, §9). Los contadores agregados por lectura viajan igualmente en los `st[]` de TELEMETRY, en todos los modos.
 3. Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay), emitida inmediatamente después de la TELEMETRY del ciclo.
 4. **Sin ACK, sin reintentos, sin cola de pendientes y sin custodia NB-IoT**: es diagnóstico best-effort, como el HEARTBEAT (§6). Perder una no compromete nada: mientras el fallo persista, el ciclo siguiente emite otra.
 5. La trama solo viaja por LoRa. Un supernodo sin ruta LoRa no la saca por NB-IoT: el punto de observación del debug es el Pi del gateway (decisión del 20-jul-2026; el estado agregado sigue llegando por los `st[]` de la telemetría, que sí viaja por todos los caminos).

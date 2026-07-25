@@ -154,6 +154,16 @@
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/depuracion">
+            <div class="ai-icono ai-naranja">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="7 9 10 12 7 15"/><line x1="13" y1="15" x2="16.5" y2="15"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Herramientas de depuración</div>
+              <div class="ai-sub">Journal del gateway, serie de un nodo y tramas Modbus de debug</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
         </div>
       </div>
 
@@ -425,6 +435,35 @@
         </div>
       </div>
 
+      <!-- Nivel 2: herramientas de depuración (logs en vivo por SSE) -->
+      <div class="ajustes" id="cfg-debug" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Herramientas de depuración</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <div class="dbg-tabs">
+            <button class="dbg-tab activa" data-tab="gateway">Journal del gateway</button>
+            <button class="dbg-tab" data-tab="serial">Serie de un nodo</button>
+            <button class="dbg-tab" data-tab="modbus">Tramas Modbus</button>
+          </div>
+
+          <div class="cfg-fila dbg-controles">
+            <select id="dbg-puerto" hidden></select>
+            <select id="dbg-nodo" hidden></select>
+            <button id="dbg-toggle" class="btn-primario">Iniciar</button>
+            <button id="dbg-limpiar">Limpiar</button>
+            <span id="dbg-info" class="aviso"></span>
+          </div>
+          <p class="aviso" id="dbg-ayuda"></p>
+
+          <pre id="dbg-consola" class="dbg-consola"></pre>
+        </div>
+      </div>
+
       <!-- Nivel 3: asistente de configuración de nodo -->
       <div class="ajustes" id="cfg-form" hidden>
         <div class="ajustes-cabecera">
@@ -538,7 +577,15 @@
             <label class="cfg-campo"><span>Stop bits</span>
               <select id="f-stopbits"><option>1</option><option>2</option></select>
             </label>
-            <label class="cfg-check"><input id="f-mbdebug" type="checkbox"><span>Debug Modbus (trama de la última transacción fallida)</span></label>
+            <label class="cfg-campo"><span>Debug Modbus</span>
+              <select id="f-mbdebug">
+                <option value="off" selected>Desactivado</option>
+                <option value="errors_last">Fallidas, la última por ciclo</option>
+                <option value="errors_each">Fallidas, cada una</option>
+                <option value="all_last">Todas, la última por ciclo</option>
+                <option value="all_each">Todas, cada una</option>
+              </select>
+            </label>
           </div>
           <div id="f-devices"></div>
           <div class="cfg-fila">

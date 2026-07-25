@@ -197,6 +197,21 @@ EOF
     fi
 }
 
+web_grant_journal() {
+    step "Lectura del journal para el visor"
+    # La página "Herramientas de depuración" lee el journal del servicio del
+    # gateway (journalctl) para el visor de journaling y el de tramas
+    # modbus-debug. Leer el journal de un servicio del sistema exige el grupo
+    # systemd-journal; se añade al usuario del servicio. El servicio recoge
+    # el grupo nuevo al reiniciarse (web_enable). Idempotente.
+    if usermod -aG systemd-journal "$GW_USER" 2>/dev/null; then
+        ok "Usuario $GW_USER en el grupo systemd-journal"
+    else
+        warn "No se pudo añadir $GW_USER a systemd-journal; el visor de "
+        warn "journaling quedará vacío hasta concederlo."
+    fi
+}
+
 web_write_unit() {
     step "Servicio systemd del visor"
     cat > "$WEB_UNIT" <<EOF
@@ -246,6 +261,7 @@ install_web() {
     web_make_cert
     web_write_env
     web_write_sudoers
+    web_grant_journal
     web_write_unit
     web_enable
 }
