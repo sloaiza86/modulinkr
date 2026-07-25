@@ -29,7 +29,7 @@ Interfaz web servida desde el Raspberry Pi del gateway con cuatro funciones en f
 - **Stack**: FastAPI + uvicorn (Python, coherente con el resto del proyecto), frontend estático servido por el propio backend, sin build ni Node: ECharts para gráficos, vis-network para el mapa. Presupuesto de memoria ~40-60 MB (los gráficos los renderiza el navegador del cliente; el Pi solo sirve JSON y estáticos).
 - **Modularidad**: un router de API por función (`/api/datos`, `/api/red`, `/api/topologia`; futuro `/api/comandos`), cada uno con su vista. Añadir una función es añadir un módulo, sin tocar los demás.
 - **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol **solo lectura** dedicado (`modulinkr_ro`, únicamente `SELECT` sobre la base de telemetría; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
-- **Autenticación**: página de login propia con cookie de sesión firmada (HMAC SHA-256 con `MODULINKR_WEB_SECRET`; usuario y contraseña preguntados en la instalación, la clave de firma autogenerada). Sustituye al basic auth de la primera iteración: misma protección, sin el diálogo del navegador y con logout. Sobre HTTP en la LAN (`http://gateway.local:8080`); sin TLS local en fase 1, se revisita si la web se expone fuera de la LAN.
+- **Autenticación**: página de login propia con cookie de sesión firmada (HMAC SHA-256 con `MODULINKR_WEB_SECRET`; usuario y contraseña preguntados en la instalación, la clave de firma autogenerada). Sustituye al basic auth de la primera iteración: misma protección, sin el diálogo del navegador y con logout. Desde el 25-jul-2026 el visor sirve HTTPS con certificado autofirmado (§8); la cookie se marca `Secure` cuando hay TLS.
 
 ## 3. Fuentes de datos
 
@@ -84,3 +84,11 @@ La tarjeta del gateway en la vista Red muestra dos enlaces independientes desde 
 - **Grafana**: cubre solo la función 1, pesa 150-300 MB (inviable en el Zero 2W) y obligaría a construir igualmente el resto. Queda como opción futura en la VM apuntando al mismo Postgres si algún día hace falta análisis avanzado.
 - **Home Assistant**: el patrón modular se copia; la plataforma no (dimensionada para cientos de integraciones domóticas, ajena a este dominio).
 - **Web en la VM**: era la opción recomendada por cercanía al dato histórico, descartada en favor del Pi para tener el estado vivo de la red en campo sin depender de Internet.
+
+## 8. Cifrado TLS (25-jul-2026)
+
+El visor sirve HTTPS. `uvicorn` termina el TLS con un certificado autofirmado que genera el instalador (`web.sh`, `web_make_cert`) la primera vez y conserva en reinstalaciones (regenerarlo invalidaría el que el operador ya haya marcado como de confianza). El par vive bajo el árbol del visor (`pi-web/.tls/`, gitignored), propiedad del usuario del servicio para que `uvicorn` lo lea sin permisos de root; las rutas van a `web.env` (`MODULINKR_WEB_CERT`, `MODULINKR_WEB_KEY`) y la unidad las pasa con `--ssl-certfile`/`--ssl-keyfile`. El puerto por defecto pasa a 8443.
+
+El certificado incluye SAN por nombre mDNS (`<host>.local`, la vía de acceso normal) y por la IP del momento; el acceso por `<host>.local` no depende de la IP, que puede cambiar por DHCP. Al ser autofirmado, el navegador avisa la primera vez; el visor sirve la parte pública en `GET /cert` (público, es la parte pública del par) con un enlace en la página de login, para instalarlo como de confianza en el dispositivo y quitar el aviso. La cookie de sesión se marca `Secure` cuando hay TLS configurado; el arranque manual de banco sin certificado la deja sin el flag para no romper el login sobre HTTP.
+
+Descarte: no se monta una CA propia ni `mkcert`. Para un gateway de LAN al que se accede desde pocos dispositivos, el certificado autofirmado descargable da el mismo canal cifrado con menos partes móviles; una CA solo compensaría con muchos dispositivos o muchos gateways.

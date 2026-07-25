@@ -34,7 +34,12 @@ Config por variables de entorno (/etc/modulinkr/web.env en el Pi):
   MODULINKR_WEB_SECRET    clave de firma de sesiones; vacía = clave
                           efímera generada al arrancar (las sesiones
                           caducan al reiniciar el servicio)
-  MODULINKR_WEB_PORT      (default 8080; lo usa el arranque uvicorn)
+  MODULINKR_WEB_PORT      (default 8443; lo usa el arranque uvicorn)
+  MODULINKR_WEB_CERT      cert TLS (PEM) que sirve uvicorn con --ssl-certfile;
+                          vacío = banco sin TLS (cookie sin Secure). El visor
+                          lo sirve también en /cert para instalarlo como de
+                          confianza. Lo genera el instalador (autofirmado)
+  MODULINKR_WEB_KEY       clave privada del cert (--ssl-keyfile de uvicorn)
   MODULINKR_WEB_ONLINE_S  (default 60) umbral de "conectado", segundos
   MODULINKR_WEB_HEARTBEAT_S (default 15) frescura del latido del servicio
                           (gateway_status); pasado este plazo sin refresco,
@@ -70,7 +75,13 @@ logging.basicConfig(level=os.environ.get("MODULINKR_LOG_LEVEL", "INFO"),
 WEB_USER   = os.environ.get("MODULINKR_WEB_USER", "")
 WEB_PASS   = os.environ.get("MODULINKR_WEB_PASS", "")
 WEB_SECRET = os.environ.get("MODULINKR_WEB_SECRET", "")
+WEB_CERT   = os.environ.get("MODULINKR_WEB_CERT", "")
 STATIC     = Path(__file__).parent / "static"
+
+# La cookie de sesión se marca Secure (solo viaja por HTTPS) cuando hay
+# certificado configurado. En el arranque manual de banco sin TLS queda sin
+# el flag para que el login funcione sobre HTTP.
+COOKIE_SECURE = bool(WEB_CERT)
 
 SESSION_S = 30 * 24 * 3600   # caducidad de la sesión: 30 días
 COOKIE    = "modulinkr_s"
@@ -146,7 +157,7 @@ async def login(request: Request):
             and secrets.compare_digest(pwd, WEB_PASS)):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(COOKIE, _session_new(), max_age=SESSION_S,
-                        httponly=True, samesite="lax")
+                        httponly=True, samesite="lax", secure=COOKIE_SECURE)
         LOG.info("login correcto de %r", user)
         return resp
     LOG.warning("login fallido de %r", user)
@@ -158,6 +169,18 @@ def logout():
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(COOKIE)
     return resp
+
+
+@app.get("/cert")
+def descargar_cert():
+    """Parte pública del certificado del visor, para instalarla como de
+    confianza en el dispositivo del operador y quitar el aviso del navegador
+    del certificado autofirmado. Público sin sesión: es la parte pública del
+    par, no la clave privada."""
+    if not WEB_CERT or not Path(WEB_CERT).is_file():
+        raise HTTPException(status_code=404, detail="certificado no disponible")
+    return FileResponse(WEB_CERT, media_type="application/x-pem-file",
+                        filename="modulinkr-gateway.pem")
 
 
 # ----- Módulo: estado de la red -----

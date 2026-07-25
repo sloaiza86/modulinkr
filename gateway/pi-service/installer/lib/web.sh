@@ -18,6 +18,13 @@ WEB_UNIT="/etc/systemd/system/modulinkr-web.service"
 WEB_DIR="$(cd "$APP_DIR/.." && pwd)/pi-web"
 WEB_VENV="$WEB_DIR/.venv"
 
+# Certificado TLS del visor (autofirmado, generado en la primera instalación
+# y conservado después). Bajo el árbol del visor, propiedad del usuario del
+# servicio, para que uvicorn pueda leerlo sin permisos de root.
+WEB_TLS_DIR="$WEB_DIR/.tls"
+WEB_CERT="$WEB_TLS_DIR/web-cert.pem"
+WEB_KEY="$WEB_TLS_DIR/web-key.pem"
+
 WEB_WANTED=0
 
 web_load_env() {
@@ -41,7 +48,7 @@ gather_web() {
     WEB_WANTED=1
     web_load_env
 
-    ask MODULINKR_WEB_PORT "Puerto del visor" "${MODULINKR_WEB_PORT:-8080}"
+    ask MODULINKR_WEB_PORT "Puerto del visor (HTTPS)" "${MODULINKR_WEB_PORT:-8443}"
     ask MODULINKR_WEB_USER "Usuario del visor" "${MODULINKR_WEB_USER:-admin}"
     if [ -z "${MODULINKR_WEB_PASS:-}" ]; then
         ask_secret MODULINKR_WEB_PASS "Contraseña del visor"
@@ -91,6 +98,41 @@ web_fetch_vendor() {
     fi
 }
 
+web_make_cert() {
+    step "Certificado TLS del visor"
+    # El visor sirve HTTPS con un certificado autofirmado. Se genera la
+    # primera vez y se conserva en reinstalaciones: regenerarlo invalidaría
+    # el que el operador ya haya marcado como de confianza en sus
+    # dispositivos. Propiedad del usuario del servicio (lo lee uvicorn al
+    # arrancar), no de root, así que no vive en /etc/modulinkr.
+    if [ -f "$WEB_CERT" ] && [ -f "$WEB_KEY" ]; then
+        ok "Certificado ya presente en $WEB_CERT (se conserva)"
+        return 0
+    fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        warn "openssl no está: el visor no arrancará con TLS. Instalar openssl y reejecutar."
+        return 0
+    fi
+    run sudo -u "$GW_USER" -H mkdir -p "$WEB_TLS_DIR"
+    local host ip san
+    host="$(hostname)"
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    # SAN por nombre mDNS (la vía de acceso normal) más la IP actual. La IP
+    # puede cambiar por DHCP; el acceso por <host>.local no depende de ella.
+    san="DNS:${host}.local,DNS:${host},DNS:localhost,IP:127.0.0.1"
+    [ -n "$ip" ] && san="${san},IP:${ip}"
+    if sudo -u "$GW_USER" -H openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$WEB_KEY" -out "$WEB_CERT" -days 3650 \
+            -subj "/O=ModuLinkr/CN=${host}.local" \
+            -addext "subjectAltName=${san}" >/dev/null 2>&1; then
+        chmod 600 "$WEB_KEY"  2>/dev/null || true
+        chmod 644 "$WEB_CERT" 2>/dev/null || true
+        ok "Certificado autofirmado en $WEB_CERT (SAN: ${san}, 3650 días)"
+    else
+        warn "openssl falló al generar el certificado; el visor no arrancará con TLS"
+    fi
+}
+
 web_write_env() {
     step "Configuración y secretos del visor"
     install -d -m 700 "$MODULINKR_ETC"
@@ -107,6 +149,10 @@ web_write_env() {
         # no invalidar las sesiones abiertas.
         echo "MODULINKR_WEB_SECRET=${MODULINKR_WEB_SECRET:-$(openssl rand -hex 32)}"
         echo "MODULINKR_WEB_ONLINE_S=${MODULINKR_WEB_ONLINE_S:-60}"
+        # Certificado TLS: uvicorn los recibe por --ssl-*; el visor los usa
+        # para la cookie segura y para servir el cert en /cert.
+        echo "MODULINKR_WEB_CERT=$WEB_CERT"
+        echo "MODULINKR_WEB_KEY=$WEB_KEY"
         # Puerto serie del Heltec: el comisionamiento por USB lo excluye
         # de la detección (abrirlo resetearía la radio del gateway).
         if [ -n "${MODULINKR_PORT:-}" ]; then
@@ -166,7 +212,7 @@ Type=simple
 User=$GW_USER
 WorkingDirectory=$WEB_DIR
 EnvironmentFile=$WEB_ENV_FILE
-ExecStart=$WEB_VENV/bin/uvicorn web_service:app --host 0.0.0.0 --port \${MODULINKR_WEB_PORT}
+ExecStart=$WEB_VENV/bin/uvicorn web_service:app --host 0.0.0.0 --port \${MODULINKR_WEB_PORT} --ssl-certfile \${MODULINKR_WEB_CERT} --ssl-keyfile \${MODULINKR_WEB_KEY}
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -186,7 +232,7 @@ web_enable() {
     sleep 1
     if systemctl is-active --quiet modulinkr-web; then
         ok "modulinkr-web activo en el puerto $MODULINKR_WEB_PORT"
-        log "Visor: http://$(hostname).local:$MODULINKR_WEB_PORT"
+        log "Visor: https://$(hostname).local:$MODULINKR_WEB_PORT"
     else
         warn "El visor no quedó activo; revisar: journalctl -u modulinkr-web -n 40"
     fi
@@ -196,6 +242,7 @@ install_web() {
     [ "$WEB_WANTED" = "1" ] || return 0
     web_setup_venv
     web_fetch_vendor
+    web_make_cert
     web_write_env
     web_write_sudoers
     web_write_unit

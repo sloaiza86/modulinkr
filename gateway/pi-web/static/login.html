@@ -45,6 +45,9 @@ button:hover { filter: brightness(0.94); }
   background: rgba(214, 69, 69, 0.10); color: var(--error);
 }
 body.con-error .error { display: block; }
+.pie { text-align: center; margin: 1.2rem 0 0; font-size: 0.82rem; }
+.pie a { color: var(--dim); text-decoration: none; }
+.pie a:hover { color: var(--accent); text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -57,6 +60,7 @@ body.con-error .error { display: block; }
   <input id="pass" name="pass" type="password" autocomplete="current-password" required>
   <p class="error">Usuario o contraseña incorrectos.</p>
   <button type="submit">Entrar</button>
+  <p class="pie"><a href="/cert" download>Descargar certificado</a></p>
 </form>
 <script>
 if (new URLSearchParams(location.search).has("e")) {

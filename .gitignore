@@ -42,6 +42,8 @@ server/modulinkr-server.conf
 server/config/modulinkr-server.conf
 # Config MQTT del gateway con la clave del broker (se crea en el Pi, 600)
 gateway/pi-service/mqtt.env
+# Certificado y clave TLS del visor (autofirmados, se generan en el Pi)
+gateway/pi-web/.tls/
 # Config del instalador del gateway con valores rellenados (puede tener ajustes propios)
 gateway/pi-service/installer/modulinkr-gateway.conf
 gateway/pi-service/installer/config/modulinkr-gateway.conf
