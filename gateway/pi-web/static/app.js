@@ -1000,12 +1000,14 @@ function cfgRuta() {
   document.getElementById("cfg-sub-nodo").hidden = sub !== "nodo";
   document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
   document.getElementById("cfg-radio").hidden    = sub !== "radio";
+  document.getElementById("cfg-wifi").hidden     = sub !== "wifi";
   document.getElementById("cfg-zona").hidden     = sub !== "zona";
   document.getElementById("cfg-bd").hidden       = sub !== "bd";
   document.getElementById("cfg-mqtt").hidden     = sub !== "mqtt";
   document.getElementById("cfg-fw").hidden       = sub !== "nodo/firmware";
   document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
+  if (sub === "wifi") wifiCargar();
   if (sub === "zona") tzCargar();
   if (sub === "bd") bdCargar();
   if (sub === "mqtt") mqttCargar();
@@ -1569,6 +1571,99 @@ document.getElementById("bd-probar").addEventListener("click", bdProbar);
 document.getElementById("bd-guardar").addEventListener("click", bdGuardar);
 document.getElementById("mqtt-probar").addEventListener("click", mqttProbar);
 document.getElementById("mqtt-guardar").addEventListener("click", mqttGuardar);
+
+// ----- Configurar red WiFi (NetworkManager en el Pi) -----
+
+async function wifiCargar() {
+  document.getElementById("wifi-resultado").textContent = "";
+  const est = document.getElementById("wifi-estado");
+  est.innerHTML = '<p class="aviso">Cargando estado...</p>';
+  try {
+    const r = await fetchApi("/api/wifi/estado");
+    const d = await r.json();
+    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "estado no disponible"}</p>`; return; }
+    // SSID e IP por textContent: el SSID viene del entorno, no se interpola.
+    est.innerHTML = "";
+    const fila = document.createElement("div");
+    fila.className = "sensor fila-info";
+    const nombre = document.createElement("span");
+    nombre.className = "s-nombre";
+    nombre.textContent = d.ssid || "No conectado";
+    const chip = document.createElement("span");
+    chip.className = "chip " + (d.ssid ? "on" : "off");
+    chip.textContent = d.ssid ? "conectado" : "sin WiFi";
+    fila.append(nombre, chip);
+    const filaIp = document.createElement("div");
+    filaIp.className = "sensor fila-info";
+    const etq = document.createElement("span");
+    etq.className = "s-nombre";
+    etq.textContent = "IP";
+    const val = document.createElement("span");
+    val.textContent = d.ip || "0.0.0.0";
+    filaIp.append(etq, val);
+    est.append(fila, filaIp);
+  } catch (e) { est.innerHTML = `<p class="aviso">Error: ${e.message}</p>`; }
+}
+
+async function wifiBuscar() {
+  const info = document.getElementById("wifi-buscar-info");
+  const lista = document.getElementById("wifi-lista");
+  info.textContent = "Buscando redes (unos segundos)...";
+  lista.innerHTML = "";
+  try {
+    const r = await fetchApi("/api/wifi/escanear");
+    const d = await r.json();
+    if (!r.ok) { info.textContent = "Error: " + (d.error ?? "falló el escaneo"); return; }
+    if (!d.redes.length) { info.textContent = "No se encontraron redes."; return; }
+    info.textContent = "";
+    d.redes.forEach((red) => {
+      const abierta = !red.security || red.security === "abierta";
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "wifi-red" + (red.in_use ? " activa" : "");
+      const ssid = document.createElement("span");
+      ssid.className = "wr-ssid";
+      ssid.textContent = red.ssid;
+      const meta = document.createElement("span");
+      meta.className = "wr-meta";
+      meta.textContent = red.signal + "%"
+        + (abierta ? " · abierta" : " · " + red.security)
+        + (red.in_use ? " · actual" : "");
+      row.append(ssid, meta);
+      row.addEventListener("click", () => {
+        document.getElementById("wifi-ssid").value = red.ssid;
+        document.getElementById("wifi-pass").value = "";
+        document.getElementById(abierta ? "wifi-conectar" : "wifi-pass").focus();
+      });
+      lista.appendChild(row);
+    });
+  } catch (e) { info.textContent = "Error: " + e.message; }
+}
+
+async function wifiConectar() {
+  const res = document.getElementById("wifi-resultado");
+  const ssid = document.getElementById("wifi-ssid").value.trim();
+  if (!ssid) { res.textContent = "Elige una red de la lista o escribe el SSID."; return; }
+  res.textContent = "Conectando (hasta unos segundos)...";
+  try {
+    const r = await fetchApi("/api/wifi/conectar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ssid, password: document.getElementById("wifi-pass").value }) });
+    const d = await r.json();
+    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no conectó"); return; }
+    res.textContent = "Conectado a " + ssid + (d.ip ? " (IP " + d.ip + ")" : "") + ".";
+    document.getElementById("wifi-pass").value = "";
+    setTimeout(wifiCargar, 1500);
+  } catch (e) {
+    // Al cambiar de red la respuesta puede no llegar: la IP del gateway
+    // cambia y la sesión por el WiFi anterior cae.
+    res.textContent = "Sin respuesta. Si cambiaste de red, la IP del gateway "
+                    + "cambió; vuelve a entrar por gateway.local.";
+  }
+}
+
+document.getElementById("wifi-buscar").addEventListener("click", wifiBuscar);
+document.getElementById("wifi-conectar").addEventListener("click", wifiConectar);
 
 // ----- Configurar nodo: cargar firmware del Atom por USB -----
 

@@ -114,6 +114,16 @@
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
+          <a class="ajuste-item" href="#/configuracion/wifi">
+            <div class="ai-icono ai-azul">
+              <svg viewBox="0 0 24 24"><path d="M4.5 9.5a12 12 0 0 1 15 0"/><path d="M7.5 12.5a8 8 0 0 1 9 0"/><path d="M10 15.5a4 4 0 0 1 4 0"/><circle cx="12" cy="18.5" r="0.6"/></svg>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Configurar red WiFi</div>
+              <div class="ai-sub">Red WiFi a la que se conecta el gateway</div>
+            </div>
+            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+          </a>
           <a class="ajuste-item" href="#/configuracion/zona">
             <div class="ai-icono ai-azul">
               <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="13.5"/></svg>
@@ -376,6 +386,41 @@
             <button id="mqtt-probar">Probar conexión</button>
             <button id="mqtt-guardar" class="btn-primario">Guardar</button>
             <span id="mqtt-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: red WiFi del gateway (NetworkManager) -->
+      <div class="ajustes" id="cfg-wifi" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          </a>
+          <h2>Configurar red WiFi</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Red actual</h3>
+          <div id="wifi-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
+        </div>
+
+        <div class="card cfg-card">
+          <h3>Redes disponibles</h3>
+          <p class="aviso">Conectar a una red distinta cambia la IP del gateway y
+            puede cortar esta sesión si entras por ese mismo WiFi. El acceso por
+            <code>gateway.local</code> se mantiene.</p>
+          <div class="cfg-fila">
+            <button id="wifi-buscar" class="btn-primario">Buscar redes</button>
+            <span id="wifi-buscar-info" class="aviso"></span>
+          </div>
+          <div id="wifi-lista" class="wifi-lista"></div>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Red</span><input id="wifi-ssid" type="text" placeholder="elige de la lista o escribe el SSID"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="wifi-pass" type="password" placeholder="vacía si la red es abierta"></label>
+          </div>
+          <div class="cfg-fila">
+            <button id="wifi-conectar" class="btn-primario">Conectar</button>
+            <span id="wifi-resultado" class="aviso"></span>
           </div>
         </div>
       </div>

@@ -261,6 +261,10 @@ import settingsapi  # noqa: E402
 import mqttapi  # noqa: E402
 import dbapi    # noqa: E402
 
+# ----- Módulo: red WiFi del gateway (acción sudo) -----
+
+import wifiapi  # noqa: E402
+
 # ----- Stub de fase futura -----
 
 cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
@@ -284,6 +288,7 @@ app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
 app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
 app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
 app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
+app.include_router(wifiapi.router, dependencies=[Depends(require_auth)])
 
 
 # ----- Frontend estático -----

@@ -470,3 +470,16 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   header { padding: 0 0.9rem; }
   .vistas, .rango { margin-left: 0; }
 }
+
+/* Configurar red WiFi: lista de redes del escaneo (botones seleccionables). */
+.wifi-lista { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.6rem 0; }
+.wifi-red {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.8rem;
+  width: 100%; padding: 0.55rem 0.8rem; font: inherit; text-align: left;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 10px; cursor: pointer;
+}
+.wifi-red:hover { border-color: var(--accent); }
+.wifi-red.activa { border-color: var(--accent); background: rgba(7, 86, 235, 0.06); }
+.wr-ssid { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wr-meta { color: var(--dim); font-size: 0.82rem; white-space: nowrap; }
