@@ -590,6 +590,8 @@ Sección añadida el 6-jul-2026. Describe el protocolo entre las dos piezas inte
 | Contador de `seq` descendente del gateway | No | Sí |
 | Transmisión LoRa al aire | Sí (a orden del Pi) | No |
 | Claves y cifrado (futuro) | No | Sí |
+| Cómputo del estado de la pantalla (SSID, IP, conteo de nodos) | No | Sí |
+| Dibujo del estado en la OLED (§12.5) | Sí (a orden del Pi) | No |
 
 El Heltec ya no genera ACK ni BEACON por su cuenta. Toda trama descendente (ACK, BEACON, y en el futuro comandos) la construye el Pi y la entrega al Heltec para transmitir.
 
@@ -623,6 +625,18 @@ Donde `<hexstring>` es la trama LoRa completa **ya construida por el Pi** (cabec
 - El Heltec comparte el mismo puerto USB CDC para ambos sentidos. Lee líneas de entrada en su bucle además de volcar las de salida.
 - Half-duplex: al recibir un `TX`, el Heltec sale del modo recepción, transmite y vuelve a recepción, con el mismo cuidado del disparo fantasma de DIO1 que ya se aplicaba a los ACK/BEACON autónomos previos.
 - El servicio del Pi debe correr bajo systemd con reinicio automático: como el Pi genera ahora el BEACON, un proceso caído derriba el árbol de rutas hasta que se reinicie.
+
+### 12.5 Estado para la pantalla OLED (Pi a Heltec, 25-jul-2026)
+
+El Heltec lleva una OLED (SSD1306 128x64) que hasta la v3.1 quedaba apagada. El Pi es el dueño del estado de la red, así que compone lo que se muestra y lo empuja por la misma línea serie; el Heltec solo dibuja. Una línea de texto por refresco, terminada en `\n`:
+
+```
+OLED <ssid>\t<red>\t<ip>\t<en_linea>\t<fuera_de_linea>
+```
+
+Los cinco campos van separados por tabulador (`\t`), no por espacio, porque el SSID admite espacios. Significan, en orden: SSID del WiFi al que está asociado el gateway, nombre de la red ModuLinkr (`MODULINKR_NETWORK_NAME`, o `net <network_id>` si no se fija), IP LAN del gateway, número de nodos en línea y número de nodos fuera de línea. Un campo vacío se admite (por ejemplo, sin WiFi asociado el `ssid` va vacío). El conteo de nodos usa el umbral `MODULINKR_ONLINE_S` sobre la tabla `node_status` del buffer, el mismo criterio que el visor.
+
+El Pi empuja esta línea al abrir el puerto del Heltec y luego cada `MODULINKR_OLED_S` (default 5 s). Antes del primer empuje, o si el Pi no está, el Heltec muestra `esperando Pi`. El redibujado por I2C es independiente del SPI de la radio y solo ocurre al llegar una línea nueva, así que no compite con la recepción LoRa.
 
 ## 13. Registro e incorporación a la red (NODE_REGISTER / WELCOME, v2.1)
 

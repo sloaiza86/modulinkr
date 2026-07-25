@@ -33,6 +33,7 @@ eso el servicio corre bajo systemd con `Restart=always`.
 
 - Heltec a Pi: `[rx] #N len=L rssi=X snr=Y hex=...` por cada trama del aire.
 - Pi a Heltec: `TX <hex>` por cada trama a transmitir (ACK, BEACON).
+- Pi a Heltec: `OLED <ssid>\t<red>\t<ip>\t<en_linea>\t<fuera_de_linea>` con el estado para la pantalla del Heltec, cada `MODULINKR_OLED_S` (`frame-format.md` §12.5).
 
 ## Configuración (variables de entorno, con defaults)
 
@@ -48,6 +49,9 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_SF` | `7` | SF del despliegue, para el ToA del aire propio (v3.1) |
 | `MODULINKR_BW_KHZ` | `125` | BW del despliegue, ídem |
 | `MODULINKR_HEARTBEAT_S` | `3` | Periodo del latido de estado hacia el visor, en segundos |
+| `MODULINKR_OLED_S` | `5` | Periodo del empuje de estado a la pantalla OLED del Heltec, en segundos |
+| `MODULINKR_ONLINE_S` | `60` | Umbral "en línea" del conteo de nodos de la pantalla (igual que el `MODULINKR_WEB_ONLINE_S` del visor) |
+| `MODULINKR_NETWORK_NAME` | (sin default) | Nombre de la red ModuLinkr que muestra la pantalla. Vacío usa `net <network_id>` |
 | `MODULINKR_SEC_ENABLED` | `0` | Seguridad v2.2 de la interfaz aire (`frame-format.md` §14) |
 | `MODULINKR_SEC_KEY` | (sin default) | Clave de red, 32 caracteres hex. Obligatoria con `SEC_ENABLED=1`. **Debe coincidir** con `security.key` del config de todos los nodos |
 | `MODULINKR_MQTT_HOST` | (vacío) | Host del broker cloud. Vacío deja el MQTT desactivado y la telemetría se acumula en el buffer local |

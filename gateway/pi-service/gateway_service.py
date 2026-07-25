@@ -40,6 +40,14 @@ código:
   MODULINKR_BUFFER_MAX  (default 1000)
   MODULINKR_STATS_S     (default 60)      periodo del reporte STATS
   MODULINKR_HEARTBEAT_S (default 3)       periodo del latido de estado (visor)
+  MODULINKR_OLED_S      (default 5)       periodo del empuje de estado a la
+                                          pantalla OLED del Heltec
+  MODULINKR_ONLINE_S    (default 60)      umbral "en línea" del conteo de
+                                          nodos de la pantalla (igual que el
+                                          MODULINKR_WEB_ONLINE_S del visor)
+  MODULINKR_NETWORK_NAME (sin default)    nombre de la red ModuLinkr que
+                                          muestra la pantalla; vacío usa
+                                          "net <network_id>"
   MODULINKR_ACK_WINDOW_S (default 1.0)    ventana de supresión de ACK dup
   MODULINKR_SEC_ENABLED (default 0)       seguridad v2.2 (frame-format §14)
   MODULINKR_SEC_KEY     (sin default)     clave de red, 32 caracteres hex;
@@ -60,6 +68,8 @@ import logging
 import os
 import random
 import re
+import socket
+import subprocess
 import sys
 import time
 
@@ -142,6 +152,14 @@ class GatewayService:
         # "servicio caído". La caída del enlace LoRa no espera a este
         # periodo, se escribe en el acto al fallar el puerto.
         self.hb_s = float(os.environ.get("MODULINKR_HEARTBEAT_S", "3"))
+
+        # Estado empujado a la pantalla OLED del Heltec (SSID, IP, nombre de
+        # red y conteo de nodos). Periodo del empuje y umbral de "en línea"
+        # (el mismo default que el visor, MODULINKR_WEB_ONLINE_S).
+        self.oled_s   = float(os.environ.get("MODULINKR_OLED_S", "5"))
+        self.online_s = float(os.environ.get("MODULINKR_ONLINE_S", "60"))
+        self.net_name = (os.environ.get("MODULINKR_NETWORK_NAME", "").strip()
+                         or f"net {self.net_id}")
 
         # Ventana de supresión de ACK duplicado (mac.md §4.2). Si la misma
         # (origin, seq) llega dos veces dentro de esta ventana, es multi-
@@ -525,6 +543,80 @@ class GatewayService:
         mqtt_up = bool(self.mqtt and self.mqtt.connected)
         self.buf.status_heartbeat(lora_link, mqtt_en, mqtt_up)
 
+    # ----- Estado hacia la pantalla OLED del Heltec -----
+
+    @staticmethod
+    def _wifi_ssid() -> str:
+        """SSID del WiFi al que está asociado el gateway, o "" si no hay
+        (cableado, sin asociar o herramienta ausente). No requiere root."""
+        try:
+            r = subprocess.run(["iwgetid", "-r"], capture_output=True,
+                               text=True, timeout=2)
+            ssid = r.stdout.strip()
+            if r.returncode == 0 and ssid:
+                return ssid
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # Respaldo con NetworkManager: la línea activa da el SSID.
+        try:
+            r = subprocess.run(["nmcli", "-t", "-f", "ACTIVE,SSID",
+                                "dev", "wifi"], capture_output=True,
+                               text=True, timeout=2)
+            for line in r.stdout.splitlines():
+                if line.startswith("yes:"):
+                    return line.split(":", 1)[1]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ""
+
+    @staticmethod
+    def _lan_ip() -> str:
+        """IP LAN del gateway (la de la interfaz de salida). No envía nada:
+        connect en UDP solo fija la ruta, así que funciona sin Internet."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return ""
+        finally:
+            s.close()
+
+    def _node_counts(self) -> tuple[int, int]:
+        """(en línea, fuera de línea) según el umbral online_s, sobre la
+        tabla node_status del buffer (un nodo por cada origin oído)."""
+        try:
+            rows = self.buf.status_all()
+        except Exception:                            # noqa: BLE001
+            return (0, 0)
+        now = time.time()
+        online = sum(1 for r in rows
+                     if (now - r["last_seen"]) <= self.online_s)
+        return online, len(rows) - online
+
+    def push_oled(self) -> None:
+        """Empuja al Heltec la línea de estado para su pantalla. Los campos
+        van separados por tabulador (el SSID admite espacios); el Heltec la
+        interpreta en handleOledLine (frame-format.md §12)."""
+        if self.ser is None:
+            return
+        # Sin WiFi asociado: "No conectado". Sin IP: 0.0.0.0, la dirección
+        # no especificada (INADDR_ANY), convención estándar para "sin IP".
+        ssid = self._wifi_ssid() or "No conectado"
+        ip = self._lan_ip() or "0.0.0.0"
+        online, offline = self._node_counts()
+        # Ni tabuladores ni saltos: partirían los campos o la línea.
+        def clean(v: str) -> str:
+            return v.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+        line = (f"OLED {clean(ssid)}\t{clean(self.net_name)}\t{clean(ip)}\t"
+                f"{online}\t{offline}\n")
+        try:
+            self.ser.write(line.encode("utf-8", errors="ignore"))
+        except (serial.SerialException, OSError):
+            # El bucle principal detecta la desconexión en su lectura y
+            # vuelve a la fase de reapertura; aquí no se propaga.
+            pass
+
     # ----- Bucle principal -----
 
     def run(self) -> int:
@@ -545,6 +637,7 @@ class GatewayService:
         last_stats  = time.monotonic()
         last_drain  = 0.0
         last_hb     = 0.0
+        last_oled   = 0.0
         rx_buf = b""
 
         try:
@@ -565,6 +658,7 @@ class GatewayService:
                     LOG.info("radio abierta en %s @ %d baud", self.port, self.baud)
                     rx_buf = b""
                     last_beacon = 0.0   # beacon inmediato al recuperar la radio
+                    last_oled   = 0.0   # y estado inmediato a la pantalla
 
                 try:
                     now = time.monotonic()
@@ -584,6 +678,9 @@ class GatewayService:
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)
+                    if now - last_oled >= self.oled_s:
+                        last_oled = now
+                        self.push_oled()
 
                     chunk = self.ser.read(self.ser.in_waiting or 1)
                     if chunk:

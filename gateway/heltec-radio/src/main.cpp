@@ -29,6 +29,8 @@
 
 #include <Arduino.h>
 #include <RadioLib.h>
+#include <SSD1306Wire.h>
+#include <string.h>
 
 #include "protocol.h"
 
@@ -41,6 +43,13 @@ constexpr int8_t kPinSpiSCK  = 9;
 constexpr int8_t kPinSpiMISO = 11;
 constexpr int8_t kPinSpiMOSI = 10;
 constexpr int8_t kPinVEXT    = 36;  // controla alimentación SX1262 + OLED, active LOW
+
+// ----- Pines de la OLED SSD1306 del Heltec v3 (I2C dedicado, ajenos al SPI
+// de la radio). RST se pulsa en el arranque; la alimenta VEXT. -----
+constexpr int8_t  kPinOledSDA = 17;
+constexpr int8_t  kPinOledSCL = 18;
+constexpr int8_t  kPinOledRST = 21;
+constexpr uint8_t kOledAddr   = 0x3C;
 
 // ----- Parámetros LoRa -----
 constexpr float    kFreqMHz       = LORA_FREQ_HZ / 1.0e6f;
@@ -57,6 +66,19 @@ constexpr uint8_t  kNetworkId = NETWORK_ID;
 // SPI custom para Heltec v3 (no son los pines default del ESP32-S3).
 SPIClass loraSpi(HSPI);
 SX1262   radio = new Module(kPinNSS, kPinDIO1, kPinRESET, kPinBUSY, loraSpi);
+
+// OLED del panel: 128x64 por I2C. El Pi le empuja el estado por serie
+// (línea "OLED ...", ver frame-format.md §12) y el Heltec solo lo dibuja.
+SSD1306Wire display(kOledAddr, kPinOledSDA, kPinOledSCL);
+
+// Último estado recibido del Pi para la pantalla. Vacío hasta el primer
+// empuje: la pantalla muestra "esperando Pi" mientras tanto.
+char g_st_ssid[33] = "";     // SSID WiFi del gateway
+char g_st_net[33]  = "";     // nombre de la red ModuLinkr
+char g_st_ip[20]   = "";     // IP LAN del gateway
+char g_st_on[8]    = "";     // nodos en línea
+char g_st_off[8]   = "";     // nodos fuera de línea
+bool g_st_have     = false;  // ya llegó al menos un estado del Pi
 
 volatile bool g_rx_flag = false;
 uint32_t      g_rx_count = 0;   // tramas volcadas al Pi
@@ -86,7 +108,7 @@ void printBanner() {
                    kCodingRate, kSyncWord);
     Serial.printf ("  network_id=%u  rol=radio pura (ACK y BEACON en el Pi)\n",
                    kNetworkId);
-    Serial.println(F("  Pi->Heltec: 'TX <hex>'   Heltec->Pi: '[rx] ...'"));
+    Serial.println(F("  Pi->Heltec: 'TX <hex>' / 'OLED ...'   Heltec->Pi: '[rx] ...'"));
     Serial.println(F("=================================================="));
 }
 
@@ -148,8 +170,73 @@ size_t hexToBytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_max)
     return n;
 }
 
-// Procesa una línea completa recibida del Pi por USB. Solo entiende el
-// comando "TX <hex>"; cualquier otra cosa se ignora (con aviso).
+// Arranca la OLED: pulso de RST (la alimenta VEXT, ya activo) e init del
+// controlador. Orientación volteada, la del montaje del Heltec v3.
+void initDisplay() {
+    pinMode(kPinOledRST, OUTPUT);
+    digitalWrite(kPinOledRST, LOW);
+    delay(20);
+    digitalWrite(kPinOledRST, HIGH);
+    delay(20);
+    display.init();
+    display.flipScreenVertically();
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.setFont(ArialMT_Plain_10);
+}
+
+// Redibuja la pantalla con el último estado recibido del Pi.
+void renderStatus() {
+    display.clear();
+    display.setFont(ArialMT_Plain_10);
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    if (!g_st_have) {
+        display.drawString(0, 0,  "ModuLinkr");
+        display.drawString(0, 26, "esperando Pi...");
+        display.display();
+        return;
+    }
+    // Sin acentos: la fuente ASCII de la OLED no tiene la 'í' de "línea".
+    display.drawString(0, 0,  String("Red Modulinkr: ") + g_st_net);
+    display.drawString(0, 13, String("WiFi SSID: ") + g_st_ssid);
+    display.drawString(0, 26, String("IP: ") + g_st_ip);
+    display.drawString(0, 39, String("Nodos en linea: ") + g_st_on);
+    display.drawString(0, 52, String("Nodos fuera de linea: ") + g_st_off);
+    display.display();
+}
+
+// Copia acotada a un buffer fijo (deja el NUL final). Vacío si src es NULL.
+static void copyField(char* dst, size_t cap, const char* src) {
+    if (src == nullptr) src = "";
+    size_t i = 0;
+    for (; src[i] != '\0' && i < cap - 1; ++i) dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+// Interpreta el resto de una línea "OLED ..." del Pi: cinco campos
+// separados por tabulador (ssid, red, ip, en_linea, fuera_de_linea). Un
+// campo ausente queda vacío. Tras parsear, redibuja.
+void handleOledLine(char* rest) {
+    const char* fields[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    int n = 0;
+    fields[n++] = rest;
+    for (char* p = rest; *p != '\0' && n < 5; ++p) {
+        if (*p == '\t') {
+            *p = '\0';
+            fields[n++] = p + 1;
+        }
+    }
+    copyField(g_st_ssid, sizeof(g_st_ssid), fields[0]);
+    copyField(g_st_net,  sizeof(g_st_net),  fields[1]);
+    copyField(g_st_ip,   sizeof(g_st_ip),   fields[2]);
+    copyField(g_st_on,   sizeof(g_st_on),   fields[3]);
+    copyField(g_st_off,  sizeof(g_st_off),  fields[4]);
+    g_st_have = true;
+    renderStatus();
+}
+
+// Procesa una línea completa recibida del Pi por USB. Entiende "TX <hex>"
+// (transmitir) y "OLED <campos>" (estado para la pantalla); cualquier otra
+// cosa se ignora (con aviso).
 void handleInLine(char* line, size_t len) {
     // Trim de espacios/CR al final.
     while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == ' ')) {
@@ -167,8 +254,10 @@ void handleInLine(char* line, size_t len) {
             return;
         }
         txRaw(frame, n);
+    } else if (len >= 5 && strncmp(line, "OLED ", 5) == 0) {
+        handleOledLine(line + 5);
     } else {
-        Serial.println(F("[in] comando desconocido (solo 'TX <hex>')"));
+        Serial.println(F("[in] comando desconocido (solo 'TX <hex>' u 'OLED ...')"));
     }
 }
 
@@ -223,6 +312,11 @@ void setup() {
     pinMode(kPinVEXT, OUTPUT);
     digitalWrite(kPinVEXT, LOW);
     delay(100);  // espera estabilización del rail antes de tocar el SX1262
+
+    // OLED antes que la radio: si el SX1262 no arranca, la pantalla ya
+    // muestra "esperando Pi" en vez de quedar negra.
+    initDisplay();
+    renderStatus();
 
     // Reset manual del SX1262 antes de SPI.begin (algunos chips quedan en
     // estado indefinido tras un boot caliente y RadioLib no siempre lo cura
