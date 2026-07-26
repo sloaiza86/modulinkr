@@ -434,36 +434,13 @@ def red_params():
 
 @router.get("/nodo-bin")
 def nodo_bin():
-    """Binario nodo.bin para el flasheo por navegador (Web Serial, esp-web-
-    tools). Lo referencia el manifiesto de /nodo-manifest."""
+    """Binario nodo.bin para el flasheo por navegador (Web Serial, esptool-js,
+    camino A). El navegador lo descarga y lo escribe en 0x0 con eraseAll:false,
+    conservando el config.json del nodo."""
     if not NODO_BIN.is_file():
         return _err(404, "no hay nodo.bin en el gateway")
     return FileResponse(str(NODO_BIN), media_type="application/octet-stream",
                         filename="nodo.bin")
-
-
-@router.get("/nodo-manifest")
-def nodo_manifest():
-    """Manifiesto de esp-web-tools para flashear el nodo desde el navegador.
-    Apunta al binario merge (offset 0, ESP32) y lleva la versión de
-    nodo.bin.version. La ruta 'nodo-bin' se resuelve relativa a esta URL."""
-    if not NODO_BIN.is_file():
-        return _err(404, "no hay nodo.bin en el gateway")
-    version = ""
-    if NODO_VER.is_file():
-        try:
-            version = NODO_VER.read_text().strip()
-        except OSError:
-            version = ""
-    return {
-        "name": "ModuLinkr nodo",
-        "version": version or "desconocida",
-        "new_install_prompt_erase": False,
-        "builds": [
-            {"chipFamily": "ESP32",
-             "parts": [{"path": "nodo-bin", "offset": 0}]},
-        ],
-    }
 
 
 @router.post("/flash")

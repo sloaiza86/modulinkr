@@ -18,5 +18,13 @@ ECHARTS_VERSION="5.5.1"
 curl -fsSL -o "$DIR/echarts.min.js" \
     "https://unpkg.com/echarts@$ECHARTS_VERSION/dist/echarts.min.js"
 
+# esptool-js (flasheo del nodo por Web Serial desde el navegador, camino A).
+# Bundle ESM autocontenido en un solo archivo: se sirve local y funciona sin
+# Internet. Versión fijada. Escribe solo el firmware (eraseAll:false), así
+# conserva el config.json del nodo.
+ESPTOOL_VERSION="0.4.5"
+curl -fsSL -o "$DIR/esptool-bundle.js" \
+    "https://unpkg.com/esptool-js@$ESPTOOL_VERSION/bundle.js"
+
 echo "assets en $DIR:"
 ls -lh "$DIR"

@@ -30,6 +30,10 @@ __pycache__/
 .venv/
 venv/
 
+# Assets JS de terceros que baja get_vendor.sh (vis-network, ECharts,
+# esptool-js). No se versionan: se descargan en la instalación con Internet.
+gateway/pi-web/static/vendor/
+
 # Secretos y credenciales (nunca commitear)
 secrets.h
 secrets.ini

@@ -255,11 +255,15 @@
           </div>
           <div id="fw-local" hidden>
             <p class="aviso">Flashea el nodo conectado al USB de este ordenador
-              (Chrome o Edge de escritorio, con internet para cargar el
-              flasheador). El asistente pide elegir el puerto y muestra el
-              progreso. Borra el firmware anterior; el config.json en flash se
-              conserva.</p>
-            <div class="cfg-fila" id="fw-local-boton"></div>
+              (Chrome o Edge de escritorio). Reescribe solo el firmware y
+              <b>conserva el config.json</b> del nodo. Al terminar se resetea
+              solo; si no arranca, desenchufa y vuelve a enchufar el nodo una
+              vez.</p>
+            <div class="cfg-fila">
+              <button id="fw-local-flash" class="btn-primario">Flashear por este equipo</button>
+              <span id="fw-local-aviso" class="aviso"></span>
+            </div>
+            <pre id="fw-local-log" class="dbg-consola" hidden></pre>
           </div>
         </div>
       </div>
@@ -746,6 +750,14 @@
 
 <script src="/static/vendor/vis-network.min.js"></script>
 <script src="/static/vendor/echarts.min.js"></script>
+<!-- esptool-js (ESM) para el flasheo del nodo por Web Serial. Se expone en
+     window para que app.js (script clásico) lo use. Si el vendor no está, el
+     import falla en silencio y el botón de flasheo local lo avisa. -->
+<script type="module">
+  import { ESPLoader, Transport } from "/static/vendor/esptool-bundle.js";
+  window.ESPLoader = ESPLoader;
+  window.Transport = Transport;
+</script>
 <script src="/static/app.js"></script>
 </body>
 </html>

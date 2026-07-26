@@ -2290,45 +2290,94 @@ async function fwCargar() {
   fwFuenteCtrls();
 }
 
-// Flasheo por navegador (esp-web-tools): la librería se carga de internet una
-// vez, bajo demanda, y el botón <esp-web-install-button> hace todo (elegir
-// puerto, resetear, escribir la flash, progreso y reinicio) con el manifiesto
-// que sirve el visor (/api/config/nodo-manifest, apunta a nodo.bin en 0x0).
-let fwEspToolsCargado = false;
-let fwBotonPuesto = false;
-
-function fwEnsureEspTools() {
-  if (fwEspToolsCargado) return;
-  fwEspToolsCargado = true;
-  const s = document.createElement("script");
-  s.type = "module";
-  s.src = "https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module";
-  s.onerror = () => {
-    fwEspToolsCargado = false;   // permitir reintento al volver a entrar
-    document.getElementById("fw-local-boton").innerHTML =
-      '<span class="aviso mal">No se pudo cargar el flasheador. '
-      + '¿El portátil tiene internet?</span>';
-  };
-  document.head.appendChild(s);
-}
-
-function fwLocalRender() {
-  if (fwBotonPuesto) return;
-  fwBotonPuesto = true;
-  document.getElementById("fw-local-boton").innerHTML =
-    '<esp-web-install-button manifest="/api/config/nodo-manifest">'
-    + '<button slot="activate" class="btn-primario">Flashear por este equipo</button>'
-    + '<span slot="unsupported" class="aviso mal">Tu navegador no soporta Web '
-    + 'Serial: usa Chrome o Edge de escritorio.</span>'
-    + '<span slot="not-allowed" class="aviso mal">El flasheo requiere HTTPS.</span>'
-    + '</esp-web-install-button>';
-}
+// Flasheo por navegador (camino A, esptool-js): reescribe solo el firmware en
+// 0x0 con eraseAll:false, así CONSERVA el config.json del nodo (a diferencia
+// de esp-web-tools, que borra la flash entera). esptool-js se sirve del vendor
+// y se expone en window (ver el shim de index.html), así que funciona offline.
 
 function fwFuenteCtrls() {
   const local = document.getElementById("fw-fuente").value === "local";
   document.getElementById("fw-gateway").hidden = local;
   document.getElementById("fw-local").hidden = !local;
-  if (local) { fwEnsureEspTools(); fwLocalRender(); }
+}
+
+async function fwLocalFlash() {
+  const aviso = document.getElementById("fw-local-aviso");
+  const log = document.getElementById("fw-local-log");
+  const btn = document.getElementById("fw-local-flash");
+  if (!("serial" in navigator)) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "Web Serial no disponible: usa Chrome o Edge de escritorio.";
+    return;
+  }
+  if (!window.ESPLoader || !window.Transport) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "El flasheador no cargó (falta el vendor esptool-js; correr get_vendor.sh).";
+    return;
+  }
+  btn.disabled = true;
+  log.hidden = false; log.textContent = "";
+  aviso.className = "aviso";
+  const term = {
+    clean: () => { log.textContent = ""; },
+    writeLine: (d) => { log.textContent += d + "\n"; log.scrollTop = log.scrollHeight; },
+    write: (d) => { log.textContent += d; log.scrollTop = log.scrollHeight; },
+  };
+  let transport = null;
+  try {
+    aviso.textContent = "elige el puerto del nodo...";
+    const port = await navigator.serial.requestPort();
+    transport = new window.Transport(port, false);
+    // 115200 fijo (sin subir a 460800): el puente USB del Atom no sostiene la
+    // escritura sostenida a mayor velocidad y da timeout, igual que en la Pi.
+    const loader = new window.ESPLoader({ transport, baudrate: 115200,
+                                          romBaudrate: 115200, terminal: term });
+    aviso.textContent = "conectando con el nodo...";
+    await loader.main();
+    aviso.textContent = "descargando el firmware...";
+    const r = await fetchApi("/api/config/nodo-bin");
+    if (!r.ok) {
+      aviso.className = "aviso mal";
+      aviso.textContent = "no hay nodo.bin en el gateway.";
+      return;
+    }
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    // esptool-js espera los datos como binary string (un carácter por byte).
+    let data = "";
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) {
+      data += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    }
+    aviso.textContent = "flasheando (conserva el config)...";
+    await loader.writeFlash({
+      fileArray: [{ data, address: 0 }],
+      flashSize: "keep", flashMode: "keep", flashFreq: "keep",
+      eraseAll: false, compress: true,
+      reportProgress: (idx, written, total) => {
+        aviso.textContent = "flasheando " + Math.round(100 * written / total) + "%";
+      },
+    });
+    aviso.textContent = "reiniciando el nodo...";
+    try {
+      if (typeof loader.hardReset === "function") {
+        await loader.hardReset();
+      } else {
+        // Reset manual: pulso de EN por RTS, GPIO0 alto (modo run).
+        await transport.setDTR(false);
+        await transport.setRTS(true);
+        await new Promise((res) => setTimeout(res, 120));
+        await transport.setRTS(false);
+      }
+    } catch (e) { /* si falla, un power-cycle arranca el firmware nuevo */ }
+    aviso.textContent = "Firmware escrito. El nodo arranca con el binario nuevo; "
+      + "el config.json se conservó.";
+  } catch (e) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "error: " + (e.message || e);
+  } finally {
+    try { if (transport) await transport.disconnect(); } catch (e) { /* */ }
+    btn.disabled = false;
+  }
 }
 
 // El flasheo no usa CFG (un Atom sin firmware no responde): solo elige el
@@ -2395,6 +2444,7 @@ function fwFlash() {
 document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
 document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
+document.getElementById("fw-local-flash").addEventListener("click", fwLocalFlash);
 document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
 
 // ----- Configurar nodo: formulario que arma el config.json -----
