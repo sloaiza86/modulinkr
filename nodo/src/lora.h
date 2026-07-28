@@ -135,6 +135,15 @@ public:
     // Veces que la detección ha entrado en sospecha desde el boot.
     uint32_t muteEvents() const { return mute_events_; }
 
+    // Escrituras descartadas por cola de transmisión llena.
+    uint32_t txDropped() const { return tx_dropped_; }
+
+    // Escrituras en vuelo que agotaron su margen sin TXP2P DONE.
+    uint32_t txTimeouts() const { return tx_timeouts_; }
+
+    // Tramas esperando turno en la cola de transmisión.
+    uint8_t txQueued() const { return static_cast<uint8_t>(txq_count_); }
+
     // Construye una trama TELEMETRY v3.2 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
@@ -290,6 +299,38 @@ private:
 
     // Reevalúa la sospecha de radio muda. La llama poll() en cada vuelta.
     void checkMute();
+
+    // ----- Serialización de las escrituras al módulo -----
+    //
+    // El RAK3172 se traga en silencio un AT+PSEND emitido mientras está
+    // transmitiendo: no responde ni DONE, ni ERROR, ni BUSY. Con la
+    // TELEMETRY y la MODBUS_DEBUG saliendo del mismo ciclo con 12 ms de
+    // separación y entre 60 y 100 ms de aire por delante, se perdía una
+    // trama por ciclo sin rastro en los contadores (28-jul-2026, con
+    // modbus.debug en modo all_*). Solo puede haber una escritura en vuelo;
+    // las demás esperan en cola hasta su DONE.
+    static constexpr size_t kTxQueue = 4;
+    struct TxSlot {
+        uint8_t buf[protocol::kOverhead + protocol::kMaxPayload];
+        size_t  len = 0;
+    };
+    TxSlot   txq_[kTxQueue];
+    size_t   txq_head_           = 0;
+    size_t   txq_count_          = 0;
+    bool     tx_in_flight_       = false;
+    uint32_t in_flight_at_ms_    = 0;  // millis() de la escritura en vuelo
+    uint32_t in_flight_guard_ms_ = 0;  // margen antes de darla por perdida
+    uint32_t tx_dropped_         = 0;  // encoladas descartadas (cola llena)
+    uint32_t tx_timeouts_        = 0;  // en vuelo sin DONE dentro del margen
+
+    // Emite la trama ya, marcándola en vuelo y fijando su margen.
+    void startTx(const uint8_t* frame, size_t len);
+
+    // Encola la trama. false si la cola está llena o la trama no cabe.
+    bool enqueueTx(const uint8_t* frame, size_t len);
+
+    // Da por resuelta la escritura en vuelo y arranca la siguiente.
+    void clearInFlight();
 
     // Parámetros de radio para el cálculo de ToA (fijados en begin()).
     uint8_t  sf_       = 7;

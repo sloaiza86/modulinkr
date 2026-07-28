@@ -77,7 +77,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.29-radio-health";
+constexpr const char* kFirmwareVersion = "0.0.30-tx-queue";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -483,7 +483,7 @@ void fireLora() {
         // psend y done delatan el estado real del transmisor: tx_ok solo
         // cuenta comandos escritos en la UART, done cuenta tramas que
         // salieron al aire (salud del TX, ver lora.h).
-        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu  psend=%lu done=%lu\n",
+        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu  psend=%lu done=%lu txq=%u\n",
                       g_lora_seq,
                       mesh.parentId(), mesh.ownHop(),
                       static_cast<unsigned>(pending.count()),
@@ -491,7 +491,8 @@ void fireLora() {
                       static_cast<unsigned long>(g_lora_err),
                       static_cast<unsigned long>(lora.busyEvents()),
                       static_cast<unsigned long>(lora.txPsend()),
-                      static_cast<unsigned long>(lora.txDone()));
+                      static_cast<unsigned long>(lora.txDone()),
+                      static_cast<unsigned>(lora.txQueued()));
     } else {
         g_lora_err++;
         Serial.printf("[lora]   tx err %s seq=%u  tx_ok=%lu tx_err=%lu\n",
@@ -1081,13 +1082,15 @@ void heartbeatTick(uint32_t now) {
     } else {
         lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
     }
-    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)  psend=%lu done=%lu busy=%lu err=%lu\n",
+    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)  psend=%lu done=%lu busy=%lu err=%lu timeout=%lu drop=%lu\n",
                   g_lora_seq, static_cast<unsigned long>(tx_ms),
                   now > 0 ? (100.0 * tx_ms / now) : 0.0,
                   static_cast<unsigned long>(lora.txPsend()),
                   static_cast<unsigned long>(lora.txDone()),
                   static_cast<unsigned long>(lora.busyEvents()),
-                  static_cast<unsigned long>(lora.txErrors()));
+                  static_cast<unsigned long>(lora.txErrors()),
+                  static_cast<unsigned long>(lora.txTimeouts()),
+                  static_cast<unsigned long>(lora.txDropped()));
 }
 
 // Salud del camino de transmisión (fase 1 del watchdog de radio). Informa

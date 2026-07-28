@@ -87,6 +87,13 @@ bool LoraP2P::begin(HardwareSerial& uart,
     psend_no_done_ = 0;
     mute_flagged_  = false;
 
+    // Un begin() sobre una cola con tramas (reinicialización de la radio) las
+    // pierde: se contabilizan en vez de desaparecer sin rastro.
+    tx_dropped_  += txq_count_;
+    txq_head_     = 0;
+    txq_count_    = 0;
+    tx_in_flight_ = false;
+
     initialized_ = true;
     return true;
 }
@@ -594,10 +601,25 @@ void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
 }
 
 LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
+    // Con una escritura en vuelo, la trama espera turno: emitirla ahora la
+    // perdería en silencio (ver la cola de transmisión en lora.h).
+    if (tx_in_flight_) {
+        if (!enqueueTx(frame, len)) {
+            tx_dropped_++;
+            return Status::TX_FAILED;
+        }
+        return Status::OK;
+    }
+
+    startTx(frame, len);
+    return Status::OK;
+}
+
+void LoraP2P::startTx(const uint8_t* frame, size_t len) {
     // Guarda la última trama por si el CAD reporta el canal ocupado
-    // (AT_BUSY_ERROR) y hay que reenviarla rápido (LBT, mac.md §4.3). Cada
-    // envío nuevo cancela un reintento rápido pendiente de una trama anterior:
-    // si esa trama vieja no salió, la recupera el backoff de ACK de main.cpp.
+    // (AT_BUSY_ERROR) y hay que reenviarla rápido (LBT, mac.md §4.3). Solo se
+    // llega aquí sin nada en vuelo, así que ningún reintento rápido de una
+    // trama anterior queda a medias: mientras lo hay, los envíos se encolan.
     if (len <= sizeof(last_tx_)) {
         std::memcpy(last_tx_, frame, len);
         last_tx_len_ = len;
@@ -607,8 +629,35 @@ LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
     busy_at_ms_ = 0;
     busy_tries_ = 0;
 
+    // Margen antes de dar la escritura por perdida: dos veces el aire de la
+    // trama más medio segundo, para cubrir los SF altos sin fijar un número
+    // que habría que revisar con cada cambio de radio.
+    tx_in_flight_       = true;
+    in_flight_at_ms_    = millis();
+    in_flight_guard_ms_ = airtimeMs(len) * 2 + 500;
+
     writePsend(frame, len);
-    return Status::OK;
+}
+
+bool LoraP2P::enqueueTx(const uint8_t* frame, size_t len) {
+    if (txq_count_ >= kTxQueue || len > sizeof(txq_[0].buf)) return false;
+    const size_t tail = (txq_head_ + txq_count_) % kTxQueue;
+    std::memcpy(txq_[tail].buf, frame, len);
+    txq_[tail].len = len;
+    txq_count_++;
+    return true;
+}
+
+void LoraP2P::clearInFlight() {
+    tx_in_flight_ = false;
+    if (txq_count_ == 0) return;
+
+    // Saca la siguiente de la cola. La copia a last_tx_ ocurre dentro de
+    // startTx antes de que la ranura pueda reutilizarse.
+    const size_t idx = txq_head_;
+    txq_head_ = (txq_head_ + 1) % kTxQueue;
+    txq_count_--;
+    startTx(txq_[idx].buf, txq_[idx].len);
 }
 
 void LoraP2P::poll() {
@@ -621,6 +670,9 @@ void LoraP2P::poll() {
         static_cast<int32_t>(millis() - busy_at_ms_) >= 0) {
         busy_at_ms_ = 0;
         busy_tries_++;
+        // Sigue siendo la misma trama en vuelo: el margen se reinicia porque
+        // el intento anterior no llegó a ocupar el aire.
+        in_flight_at_ms_ = millis();
         writePsend(last_tx_, last_tx_len_);
     }
 
@@ -641,6 +693,18 @@ void LoraP2P::poll() {
             // Línea imposiblemente larga: descartar y resincronizar.
             line_len_ = 0;
         }
+    }
+
+    // Escritura en vuelo que agotó su margen sin TXP2P DONE. Va después de
+    // vaciar la UART para no contar como perdida una confirmación que ya
+    // estaba en el buffer. Libera la cola, de modo que el silencio del módulo
+    // no bloquee todos los envíos siguientes; psend_no_done_ queda alto a
+    // propósito, que es la señal de radio muda.
+    if (tx_in_flight_ && busy_at_ms_ == 0 &&
+        static_cast<int32_t>(millis() - in_flight_at_ms_) >=
+            static_cast<int32_t>(in_flight_guard_ms_)) {
+        tx_timeouts_++;
+        clearInFlight();
     }
 
     checkMute();
@@ -685,12 +749,15 @@ void LoraP2P::handleLine(const char* line) {
         // abajo vuelve a escribir y a contabilizarse.
         if (psend_no_done_ > 0) psend_no_done_--;
         if (last_tx_len_ > 0 && busy_tries_ < kBusyMaxTries) {
+            // La trama sigue en vuelo: el reintento rápido de poll() la
+            // reescribe, así que la cola no avanza todavía.
             busy_at_ms_ = millis() + kBusyBackoffMs +
                           (esp_random() % (kBusyJitterMs + 1));
         } else {
             // Agotados los reintentos rápidos: que lo recupere el backoff
             // de ACK cuando venza el timeout de la trama.
             tx_errors_++;
+            clearInFlight();
         }
         return;
     }
@@ -707,6 +774,7 @@ void LoraP2P::handleLine(const char* line) {
         last_done_ms_  = millis();
         psend_no_done_ = 0;
         mute_flagged_  = false;
+        clearInFlight();
         return;
     }
 
@@ -716,6 +784,7 @@ void LoraP2P::handleLine(const char* line) {
         // El módulo respondió: la escritura queda resuelta, aunque sea con
         // error, y deja de contar como pendiente de confirmación.
         if (psend_no_done_ > 0) psend_no_done_--;
+        clearInFlight();
         return;
     }
 
