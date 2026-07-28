@@ -108,6 +108,33 @@ public:
     // de contención del medio para el análisis MAC.
     uint32_t busyEvents() const { return busy_events_; }
 
+    // ----- Salud del camino de transmisión (fase 1 del watchdog) -----
+    //
+    // Toda escritura de AT+PSEND acaba en una de tres respuestas del módulo:
+    // TXP2P DONE, AT_BUSY_ERROR o ERROR. El invariante de salud es que
+    // txDone() + busyEvents() + txErrors() sigue de cerca a txPsend(), con un
+    // desfase acotado por las transmisiones en curso. Una divergencia
+    // creciente y sostenida es la firma de la radio muda: el módulo acepta
+    // los comandos por la UART y sigue recibiendo (los +EVT:RXP2P llegan),
+    // pero su camino de transmisión no emite. Es lo ocurrido el 27-jul-2026,
+    // donde el nodo reportó 15 000 envíos correctos con el aire acumulado
+    // congelado y el gateway sin recibir una sola trama.
+
+    // Escrituras de AT+PSEND emitidas por la UART desde el boot.
+    uint32_t txPsend() const { return tx_psend_; }
+
+    // Eventos TXP2P DONE recibidos: tramas que salieron al aire de verdad.
+    uint32_t txDone() const { return tx_done_; }
+
+    // true mientras la detección considera la radio muda: kMuteThreshold
+    // escrituras pendientes de confirmación, o kMuteTimeoutMs desde el
+    // último DONE con escrituras esperándolo. Se limpia con el primer DONE
+    // real. Fase 1: solo informa, no actúa.
+    bool muteSuspected() const { return mute_flagged_; }
+
+    // Veces que la detección ha entrado en sospecha desde el boot.
+    uint32_t muteEvents() const { return mute_events_; }
+
     // Construye una trama TELEMETRY v3.2 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
@@ -245,6 +272,24 @@ private:
     uint32_t busy_at_ms_  = 0;   // millis() del próximo reintento; 0 = ninguno
     uint8_t  busy_tries_  = 0;   // reintentos rápidos consumidos para last_tx_
     uint32_t busy_events_ = 0;   // total de AT_BUSY_ERROR observados
+
+    // ----- Detección de radio muda (fase 1 del watchdog) -----
+    // psend_no_done_ cuenta las escrituras que siguen esperando su TXP2P
+    // DONE: sube en writePsend y baja con el DONE, con el BUSY (la trama no
+    // llegó a salir) y con el ERROR (el módulo ya respondió). Cero significa
+    // que no hay nada pendiente de confirmar.
+    static constexpr uint8_t  kMuteThreshold = 5;      // escrituras sin confirmar
+    static constexpr uint32_t kMuteTimeoutMs = 30000;  // silencio con envíos en espera
+    uint32_t tx_psend_      = 0;
+    uint32_t tx_done_       = 0;
+    uint8_t  psend_no_done_ = 0;   // satura en 255
+    uint32_t last_done_ms_  = 0;   // millis() del último TXP2P DONE
+    uint32_t last_psend_ms_ = 0;   // millis() de la última escritura
+    bool     mute_flagged_  = false;
+    uint32_t mute_events_   = 0;
+
+    // Reevalúa la sospecha de radio muda. La llama poll() en cada vuelta.
+    void checkMute();
 
     // Parámetros de radio para el cálculo de ToA (fijados en begin()).
     uint8_t  sf_       = 7;

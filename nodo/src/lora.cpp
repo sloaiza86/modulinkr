@@ -79,6 +79,14 @@ bool LoraP2P::begin(HardwareSerial& uart,
         return false;
     }
 
+    // Base temporal de la detección de radio muda: sin fijarla, el criterio
+    // de silencio compararía contra un último DONE en el instante 0 y
+    // dispararía en falso durante el primer ciclo de envío.
+    last_done_ms_  = millis();
+    last_psend_ms_ = last_done_ms_;
+    psend_no_done_ = 0;
+    mute_flagged_  = false;
+
     initialized_ = true;
     return true;
 }
@@ -570,6 +578,13 @@ void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
     // (ver comentario de cabecera en lora.h). El OK y los errores llegan
     // como líneas asíncronas que poll() procesa.
     static const char hexmap[] = "0123456789ABCDEF";
+
+    // Contabilidad de la escritura antes de emitirla: queda pendiente de su
+    // TXP2P DONE hasta que el módulo responda (salud del TX, ver lora.h).
+    tx_psend_++;
+    last_psend_ms_ = millis();
+    if (psend_no_done_ < 255) psend_no_done_++;
+
     uart_->print("AT+PSEND=");
     for (size_t i = 0; i < len; ++i) {
         uart_->write(hexmap[(frame[i] >> 4) & 0x0F]);
@@ -627,6 +642,34 @@ void LoraP2P::poll() {
             line_len_ = 0;
         }
     }
+
+    checkMute();
+}
+
+void LoraP2P::checkMute() {
+    // Ya señalada: solo la limpia un TXP2P DONE real (handleLine).
+    if (mute_flagged_) return;
+
+    // Sin escrituras esperando confirmación no hay nada que juzgar: la cola
+    // parada no es un fallo del transmisor.
+    if (psend_no_done_ == 0) return;
+
+    // Criterio por acumulación: varias escrituras seguidas sin que ninguna
+    // se confirme.
+    if (psend_no_done_ >= kMuteThreshold) {
+        mute_flagged_ = true;
+        mute_events_++;
+        return;
+    }
+
+    // Criterio por silencio: cadencias bajas no llegan a acumular
+    // escrituras, y aun así el transmisor puede llevar mudo mucho rato. La
+    // resta con cast a int32_t es segura ante el desbordamiento de millis().
+    if (static_cast<int32_t>(millis() - last_done_ms_) >=
+        static_cast<int32_t>(kMuteTimeoutMs)) {
+        mute_flagged_ = true;
+        mute_events_++;
+    }
 }
 
 void LoraP2P::handleLine(const char* line) {
@@ -637,6 +680,10 @@ void LoraP2P::handleLine(const char* line) {
     // DESPUÉS de transmitir); aquí la trama nunca salió al aire.
     if (strstr(line, "BUSY") != nullptr) {
         busy_events_++;
+        // La trama no llegó a salir: esa escritura ya no espera un DONE y no
+        // debe contar como silencio del transmisor. El reintento rápido de
+        // abajo vuelve a escribir y a contabilizarse.
+        if (psend_no_done_ > 0) psend_no_done_--;
         if (last_tx_len_ > 0 && busy_tries_ < kBusyMaxTries) {
             busy_at_ms_ = millis() + kBusyBackoffMs +
                           (esp_random() % (kBusyJitterMs + 1));
@@ -654,12 +701,21 @@ void LoraP2P::handleLine(const char* line) {
     // intentos abortados por CAD (BUSY, arriba) no ocuparon aire.
     if (strstr(line, "TXP2P DONE") != nullptr) {
         if (last_tx_len_ > 0) tx_air_ms_ += airtimeMs(last_tx_len_);
+        // Única prueba de que el transmisor está vivo: limpia la sospecha
+        // de radio muda y la cuenta de escrituras sin confirmar.
+        tx_done_++;
+        last_done_ms_  = millis();
+        psend_no_done_ = 0;
+        mute_flagged_  = false;
         return;
     }
 
     // Otros errores asíncronos del módulo (AT_PARAM_ERROR, ...).
     if (strstr(line, "ERROR") != nullptr) {
         tx_errors_++;
+        // El módulo respondió: la escritura queda resuelta, aunque sea con
+        // error, y deja de contar como pendiente de confirmación.
+        if (psend_no_done_ > 0) psend_no_done_--;
         return;
     }
 

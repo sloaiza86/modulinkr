@@ -77,7 +77,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.28-nbiot-status-hb";
+constexpr const char* kFirmwareVersion = "0.0.29-radio-health";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -480,13 +480,18 @@ void fireLora() {
                           protocol::kAddrGateway, capture_ms, ts)) {
             Serial.println(F("[lora]   AVISO: cola de pendientes llena, entrada antigua pisada"));
         }
-        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu\n",
+        // psend y done delatan el estado real del transmisor: tx_ok solo
+        // cuenta comandos escritos en la UART, done cuenta tramas que
+        // salieron al aire (salud del TX, ver lora.h).
+        Serial.printf("[lora]   tx ok seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu  psend=%lu done=%lu\n",
                       g_lora_seq,
                       mesh.parentId(), mesh.ownHop(),
                       static_cast<unsigned>(pending.count()),
                       static_cast<unsigned long>(g_lora_ok),
                       static_cast<unsigned long>(g_lora_err),
-                      static_cast<unsigned long>(lora.busyEvents()));
+                      static_cast<unsigned long>(lora.busyEvents()),
+                      static_cast<unsigned long>(lora.txPsend()),
+                      static_cast<unsigned long>(lora.txDone()));
     } else {
         g_lora_err++;
         Serial.printf("[lora]   tx err %s seq=%u  tx_ok=%lu tx_err=%lu\n",
@@ -1076,9 +1081,40 @@ void heartbeatTick(uint32_t now) {
     } else {
         lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
     }
-    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)\n",
+    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)  psend=%lu done=%lu busy=%lu err=%lu\n",
                   g_lora_seq, static_cast<unsigned long>(tx_ms),
-                  now > 0 ? (100.0 * tx_ms / now) : 0.0);
+                  now > 0 ? (100.0 * tx_ms / now) : 0.0,
+                  static_cast<unsigned long>(lora.txPsend()),
+                  static_cast<unsigned long>(lora.txDone()),
+                  static_cast<unsigned long>(lora.busyEvents()),
+                  static_cast<unsigned long>(lora.txErrors()));
+}
+
+// Salud del camino de transmisión (fase 1 del watchdog de radio). Informa
+// del cruce del umbral de sospecha y de la vuelta a la normalidad, sin
+// actuar: la escalera de recuperación llega en la fase 2. Un aviso aquí con
+// el nodo aparentemente sano significa que las tramas no salen al aire,
+// aunque tx_ok siga subiendo.
+void radioHealthTick() {
+    static bool warned = false;
+    const bool mute = lora.muteSuspected();
+
+    if (mute && !warned) {
+        warned = true;
+        Serial.printf("[radio]  AVISO: sin TXP2P DONE, radio muda sospechada  "
+                      "psend=%lu done=%lu busy=%lu err=%lu tx_ms=%lu  eventos=%lu\n",
+                      static_cast<unsigned long>(lora.txPsend()),
+                      static_cast<unsigned long>(lora.txDone()),
+                      static_cast<unsigned long>(lora.busyEvents()),
+                      static_cast<unsigned long>(lora.txErrors()),
+                      static_cast<unsigned long>(lora.txAirtimeMs()),
+                      static_cast<unsigned long>(lora.muteEvents()));
+    } else if (!mute && warned) {
+        warned = false;
+        Serial.printf("[radio]  transmisor recuperado, TXP2P DONE de nuevo  psend=%lu done=%lu\n",
+                      static_cast<unsigned long>(lora.txPsend()),
+                      static_cast<unsigned long>(lora.txDone()));
+    }
 }
 
 // Construcción y publicación del mensaje de telemetría MQTT
@@ -1431,6 +1467,7 @@ void loop() {
             outboxDrainTick(tnow);
             ntpTick();
             heartbeatTick(tnow);
+            radioHealthTick();
             batchTick(tnow);
         }
 
