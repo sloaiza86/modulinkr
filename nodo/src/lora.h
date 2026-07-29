@@ -144,6 +144,23 @@ public:
     // Tramas esperando turno en la cola de transmisión.
     uint8_t txQueued() const { return static_cast<uint8_t>(txq_count_); }
 
+    // Retiene la cola durante `ms` a partir de ahora: nada sale al aire en
+    // esa ventana, ni siquiera con el módulo libre.
+    //
+    // Se usa tras emitir una trama que espera ACK. Una radio que transmite
+    // no puede recibir, así que cualquier envío pegado a la telemetría se
+    // lleva por delante su confirmación y obliga a retransmitir. Medido en
+    // banco el 29-jul-2026: con modbus.debug en modo all_* se perdía el ACK
+    // de TODAS las muestras, y al apagarlo el fallo persistía en los ciclos
+    // en los que la trama NODE_HEALTH coincidía con el envío. El ACK del
+    // gateway tarda unos 220 ms, así que una ventana de guarda del orden de
+    // medio segundo lo cubre con holgura.
+    //
+    // La retención vive aquí y no en los llamantes a propósito: así cubre
+    // cualquier trama, incluidas las que se añadan más adelante, en vez de
+    // depender de acordarse de gatear cada emisión nueva.
+    void holdQueue(uint32_t ms);
+
     // ----- Salud de la recepción (fase 2) -----
     //
     // El receptor puede quedarse mudo con el transmisor vivo: el 28-jul-2026
@@ -412,6 +429,15 @@ private:
 
     // Da por resuelta la escritura en vuelo y arranca la siguiente.
     void clearInFlight();
+
+    // Saca de la cola la siguiente trama, si no hay nada en vuelo ni
+    // retención activa.
+    void startNextQueued();
+
+    // true mientras la ventana de guarda del ACK sigue abierta.
+    bool queueHeld() const;
+
+    uint32_t hold_until_ms_ = 0;   // 0 = sin retención
 
     // Parámetros de radio para el cálculo de ToA (fijados en begin()).
     uint8_t  sf_       = 7;

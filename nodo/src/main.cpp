@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.33-mb-purge";
+constexpr const char* kFirmwareVersion = "0.0.34-ack-guard";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -116,6 +116,12 @@ constexpr uint32_t kBatchAckTimeoutMs = 30000;
 // de aire tx_ms para el duty cycle medido en el transmisor. Sin ACK; la
 // pérdida de un reporte la absorbe el esquema de deltas del receptor.
 constexpr uint32_t kHeartbeatPeriodMs = 60000;
+
+// Ventana de guarda tras enviar telemetría (razonamiento en lora.h,
+// holdQueue). El ACK del gateway tarda unos 220 ms medidos en banco; medio
+// segundo lo cubre con holgura y no retrasa de forma apreciable las tramas
+// best-effort, que esperan al siguiente tick de 1 Hz.
+constexpr uint32_t kAckGuardMs = 500;
 
 #if defined(MODEM_SIM7028)
 constexpr const char* kModemLabel = "SIM7028";
@@ -498,6 +504,12 @@ void fireLora() {
     const auto st = lora.sendTelemetry(g_lora_seq, ts, values, sts, n_values,
                                        mesh.parentId());
     if (st == LoraP2P::Status::OK) {
+        // Ventana de guarda del ACK: nada más sale al aire hasta que llegue
+        // la confirmación de esta muestra. Sin esto, cualquier trama emitida
+        // a continuación (MODBUS_DEBUG, NODE_HEALTH, HEARTBEAT) deja al nodo
+        // sordo justo cuando vuelve su ACK, y la muestra se retransmite
+        // entera. Solo aplica con ACK activo: sin él no hay nada que esperar.
+        if (g_cfg.ack_enabled) lora.holdQueue(kAckGuardMs);
         g_lora_ok++;
         if (!pending.push(g_lora_seq, values, sts, n_values, millis(),
                           protocol::kAddrGateway, capture_ms, ts)) {

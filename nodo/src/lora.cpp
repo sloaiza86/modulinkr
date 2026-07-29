@@ -117,11 +117,12 @@ void LoraP2P::clearFaults() {
 void LoraP2P::discardTxQueue() {
     // Las tramas encoladas no sobreviven a una reinicialización de la radio:
     // se contabilizan en vez de desaparecer sin rastro.
-    tx_dropped_  += txq_count_;
-    txq_head_     = 0;
-    txq_count_    = 0;
-    tx_in_flight_ = false;
-    line_len_     = 0;
+    tx_dropped_   += txq_count_;
+    txq_head_      = 0;
+    txq_count_     = 0;
+    tx_in_flight_  = false;
+    hold_until_ms_ = 0;
+    line_len_      = 0;
 }
 
 bool LoraP2P::probeModule() {
@@ -711,9 +712,11 @@ void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
 }
 
 LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
-    // Con una escritura en vuelo, la trama espera turno: emitirla ahora la
-    // perdería en silencio (ver la cola de transmisión en lora.h).
-    if (tx_in_flight_) {
+    // Con una escritura en vuelo la trama se perdería en silencio, y durante
+    // la ventana de guarda del ACK se llevaría por delante la confirmación de
+    // la telemetría recién enviada. En los dos casos espera turno (ver la
+    // cola de transmisión y holdQueue en lora.h).
+    if (tx_in_flight_ || queueHeld()) {
         if (!enqueueTx(frame, len)) {
             tx_dropped_++;
             return Status::TX_FAILED;
@@ -760,14 +763,29 @@ bool LoraP2P::enqueueTx(const uint8_t* frame, size_t len) {
 
 void LoraP2P::clearInFlight() {
     tx_in_flight_ = false;
-    if (txq_count_ == 0) return;
+    startNextQueued();
+}
 
-    // Saca la siguiente de la cola. La copia a last_tx_ ocurre dentro de
-    // startTx antes de que la ranura pueda reutilizarse.
+void LoraP2P::startNextQueued() {
+    if (tx_in_flight_ || txq_count_ == 0 || queueHeld()) return;
+
+    // La copia a last_tx_ ocurre dentro de startTx antes de que la ranura
+    // pueda reutilizarse.
     const size_t idx = txq_head_;
     txq_head_ = (txq_head_ + 1) % kTxQueue;
     txq_count_--;
     startTx(txq_[idx].buf, txq_[idx].len);
+}
+
+void LoraP2P::holdQueue(uint32_t ms) {
+    hold_until_ms_ = millis() + ms;
+    if (hold_until_ms_ == 0) hold_until_ms_ = 1;  // 0 significa sin retención
+}
+
+bool LoraP2P::queueHeld() const {
+    if (hold_until_ms_ == 0) return false;
+    // Resta con cast a int32_t, segura ante el desbordamiento de millis().
+    return static_cast<int32_t>(millis() - hold_until_ms_) < 0;
 }
 
 void LoraP2P::poll() {
@@ -816,6 +834,9 @@ void LoraP2P::poll() {
         tx_timeouts_++;
         clearInFlight();
     }
+
+    // Vencida la ventana de guarda del ACK, sale lo que quedó esperando.
+    startNextQueued();
 
     checkMute();
     checkRxSilence();
