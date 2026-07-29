@@ -34,6 +34,15 @@ HEARTBEAT_S = float(os.environ.get("MODULINKR_WEB_HEARTBEAT_S", "15"))
 GATEWAY_ID = 255
 
 
+MB_DEBUG_NAMES = {
+    0: "off",
+    1: "errors_last",
+    2: "errors_each",
+    3: "all_last",
+    4: "all_each",
+}
+
+
 def _conn() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
 
@@ -113,7 +122,8 @@ def network_state() -> dict:
             """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
                       s.snr, s.parent_id, s.hop_count,
                       k.node_name, k.fw_version,
-                      s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen
+                      s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen,
+                      s.mb_debug, s.mb_debug_updated
                FROM node_status s
                LEFT JOIN node_catalog k ON k.origin_id = s.origin
                ORDER BY s.origin""").fetchall()
@@ -141,6 +151,12 @@ def network_state() -> dict:
             # suscripción del gateway): fuente primaria del chip NB-IoT/MQTT,
             # más veraz que el heartbeat y sobrevive a la caída del LoRa.
             "mqtt_ago_s":  None if r[12] is None else round(now - r[12], 1),
+            # Modo de depuración Modbus vigente en el nodo (NODE_HEALTH, v3.4).
+            # None si el nodo aún no ha reportado ninguna. Lo usa la pestaña de
+            # tramas Modbus para decir qué modo está activo, incluido `off`.
+            "mb_debug":       r[13],
+            "mb_debug_name":  MB_DEBUG_NAMES.get(r[13]),
+            "mb_debug_ago_s": None if r[14] is None else round(now - r[14], 1),
         }
         for r in rows
     ]

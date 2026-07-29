@@ -20,19 +20,20 @@ constexpr uint8_t kFuncReadInputRegisters   = 0x04;
 // Modbus RTU permite hasta 2000 bits por petición de read de coils.
 constexpr uint16_t kMaxBitsPerRequest = 2000;
 
-// ----- Traza de diagnóstico de fallos (10-jul-2026) -----
-// Cuando una transacción falla, se vuelca en hexadecimal la evidencia
-// completa: buffer previo a la petición, petición enviada, bytes
-// recibidos hasta el fallo y cola tardía (lo que aparece en los 120 ms
-// siguientes). Objetivo: distinguir entre respuesta rezagada de una
-// consulta anterior, eco de la propia petición (transceptor
-// auto-dirección) y corrupción por interrupciones. Retirar (kDiag=false)
-// cuando el invalid_response ocasional quede explicado (bitácora,
-// pendientes del 10-jul-2026).
-constexpr bool kDiag = true;
+// ----- Traza de diagnóstico (10-jul-2026, reorganizada el 29-jul-2026) -----
+// Cuando una transacción falla se vuelca en hexadecimal la evidencia
+// completa: buffer previo a la petición, petición enviada, bytes recibidos
+// hasta el fallo y cola tardía (lo que aparece en los 120 ms siguientes).
+// Sirve para distinguir entre respuesta rezagada de una consulta anterior,
+// eco de la propia petición y corrupción por interrupciones.
+//
+// Hasta el 29-jul-2026 esto lo gobernaba una constante de compilación
+// (kDiag, siempre a true) al margen del `modbus.debug` del config, con lo
+// que la consola se llenaba de trazas incluso con la depuración apagada.
+// Ahora lo gobierna el modo del config, a través de setTrace.
 
 void diagHex(const char* label, const uint8_t* d, size_t n) {
-    Serial.printf("[mb-dbg]   %s (%u B):", label, static_cast<unsigned>(n));
+    Serial.printf("[mb]   %s (%u B):", label, static_cast<unsigned>(n));
     for (size_t i = 0; i < n; ++i) Serial.printf(" %02X", d[i]);
     Serial.println();
 }
@@ -80,7 +81,8 @@ ModbusRTU::Status ModbusRTU::readDiscreteInputs(uint8_t slave_id, uint16_t addre
 }
 
 void ModbusRTU::record(Status st, const uint8_t* req, size_t req_len,
-                       const uint8_t* rx, size_t rx_len) {
+                       const uint8_t* rx, size_t rx_len,
+                       const uint8_t* purged, size_t purged_n) {
     txn_.status    = st;
     txn_.exception = (st == Status::EXCEPTION) ? last_exception_ : 0;
     if (req_len > sizeof(txn_.req)) req_len = sizeof(txn_.req);
@@ -89,7 +91,28 @@ void ModbusRTU::record(Status st, const uint8_t* req, size_t req_len,
     if (rx_len > sizeof(txn_.resp)) rx_len = sizeof(txn_.resp);
     std::memcpy(txn_.resp, rx, rx_len);
     txn_.resp_len = static_cast<uint8_t>(rx_len);
+    if (purged_n > sizeof(txn_.purged)) purged_n = sizeof(txn_.purged);
+    if (purged != nullptr && purged_n > 0) std::memcpy(txn_.purged, purged, purged_n);
+    txn_.purged_len   = static_cast<uint8_t>(purged != nullptr ? purged_n : 0);
+    txn_.purged_total = purged_total_;
+    txn_.resync_total = resync_total_;
     txn_valid_ = true;
+}
+
+void ModbusRTU::purgeTurnaround(uint8_t* out, size_t cap, size_t& out_n) {
+    out_n = 0;
+    if (purge_us_ == 0 || uart_ == nullptr) return;
+    uint32_t total = 0;
+    const uint32_t t0 = micros();
+    while (micros() - t0 < purge_us_) {
+        while (uart_->available()) {
+            const int b = uart_->read();
+            if (b < 0) break;
+            if (out_n < cap) out[out_n++] = static_cast<uint8_t>(b);
+            total++;
+        }
+    }
+    purged_total_ += total;
 }
 
 const char* ModbusRTU::statusToString(Status s) {
@@ -128,10 +151,11 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
             pre_total++;
         }
     }
-    if (kDiag && pre_total > 0) {
+    if (trace_ == Trace::ALL && pre_total > 0) {
         // Se reporta aunque la lectura posterior salga bien: es la pista
-        // de una respuesta rezagada de la transacción anterior.
-        Serial.printf("[mb-dbg] buffer previo con %u bytes antes de la peticion\n",
+        // de una respuesta rezagada de la transacción anterior. Con traza
+        // de solo errores, sale dentro del volcado de fallo si lo hay.
+        Serial.printf("[mb]   buffer previo con %u bytes antes de la peticion\n",
                       static_cast<unsigned>(pre_total));
         diagHex("previos", pre, pre_len);
     }
@@ -158,47 +182,29 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     // norma impone al esclavo antes de responder, y con una ventana de solo
     // 1.5 tiempos de carácter para dejar margen a los esclavos que no
     // cumplen ese silencio.
-    if (purge_us_ > 0) {
-        uint8_t  purged[8];
-        size_t   pn    = 0;
-        uint32_t total = 0;
-        const uint32_t t0 = micros();
-        while (micros() - t0 < purge_us_) {
-            while (uart_->available()) {
-                const int b = uart_->read();
-                if (b < 0) break;
-                if (pn < sizeof(purged)) purged[pn++] = static_cast<uint8_t>(b);
-                total++;
-            }
-        }
-        if (total > 0) {
-            purged_total_ += total;
-            if (kDiag) {
-                Serial.printf("[mb-dbg] purga: %lu byte(s) del cambio de sentido "
-                              "en %lu us (acumulado %lu)\n",
-                              static_cast<unsigned long>(total),
-                              static_cast<unsigned long>(purge_us_),
-                              static_cast<unsigned long>(purged_total_));
-                diagHex("purgados", purged, pn);
-            }
-        }
-    }
+    // Los bytes purgados de ESTA transacción se retienen para la evidencia
+    // (viajan en la trama MODBUS_DEBUG, spec §15.1) y ya no se imprimen por
+    // su cuenta: forman parte de la traza de su transacción.
+    uint8_t purged[4];
+    size_t  purged_n = 0;
+    purgeTurnaround(purged, sizeof(purged), purged_n);
 
-    // Ante cualquier fallo: guarda la evidencia para MODBUS_DEBUG (v3.2)
-    // y, con kDiag, imprime las cuatro piezas y escucha la cola tardía.
-    // Solo corre en el camino de error, así que no toca el timing del
-    // camino feliz.
+    // Ante cualquier fallo: guarda la evidencia para MODBUS_DEBUG (§15) y,
+    // con traza activa en cualquiera de sus dos niveles, imprime las piezas
+    // y escucha la cola tardía. Solo corre en el camino de error, así que no
+    // toca el timing del camino feliz.
     uint8_t resp[kMaxResponseSize];
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
-        record(st, req, sizeof(req), resp, rx_len);
-        if (!kDiag) return st;
-        Serial.printf("[mb-dbg] fallo '%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
+        record(st, req, sizeof(req), resp, rx_len, purged, purged_n);
+        if (trace_ == Trace::NONE) return st;
+        Serial.printf("[mb] fallo '%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
         if (pre_total > 0) {
-            Serial.printf("[mb-dbg]   buffer previo NO vacio: %u bytes descartados\n",
+            Serial.printf("[mb]   buffer previo NO vacio: %u bytes descartados\n",
                           static_cast<unsigned>(pre_total));
             diagHex("previos", pre, pre_len);
         }
+        if (purged_n > 0) diagHex("purgados", purged, purged_n);
         diagHex("peticion", req, sizeof(req));
         diagHex("recibido", resp, rx_len);
         uint8_t tail[32];
@@ -214,7 +220,7 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         if (tn > 0) {
             diagHex("cola tardia", tail, tn);
         } else {
-            Serial.println(F("[mb-dbg]   cola tardia: nada en 120 ms"));
+            Serial.println(F("[mb]   cola tardia: nada en 120 ms"));
         }
         return st;
     };
@@ -244,27 +250,26 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         }
         skipped++;
     }
-    if (kDiag && skipped > 0) {
-        // Qué se descartó decide entre las dos causas posibles, que hasta
-        // ahora no se distinguían porque los bytes se tiraban sin mirarlos:
-        // si coinciden con la cola de la propia petición son eco del
-        // transceptor auto-dirección (el UART software pierde el principio
-        // del eco mientras bit-banguea la transmisión y solo captura el
-        // final); si no coinciden, es ruido de la línea en el cambio de
-        // sentido, que se corrige con polarización y no con software.
-        //
-        // Importa más de lo que parece: esta resincronización para en el
-        // primer byte que valga slave_id, así que un byte espurio con ese
-        // valor la corta antes de tiempo y la trama se malinterpreta. Es la
-        // explicación candidata del invalid_response ocasional que quedó
-        // pendiente el 10-jul-2026.
-        const bool eco = std::memcmp(skipped_bytes,
-                                     req + sizeof(req) - skipped,
-                                     skipped) == 0;
-        Serial.printf("[mb-dbg] resync: %u byte(s) espurio(s) descartado(s) antes de la trama (%s)\n",
-                      skipped, eco ? "ECO de la peticion" : "NO coincide con la peticion");
-        diagHex("espurios", skipped_bytes, skipped);
-        diagHex("peticion", req, sizeof(req));
+    if (skipped > 0) {
+        resync_total_++;
+        if (trace_ == Trace::ALL) {
+            // Qué se descartó decide entre las dos causas posibles: si
+            // coincide con la cola de la propia petición es eco del
+            // transceptor auto-dirección; si no, es ruido de la línea en el
+            // cambio de sentido, que se corrige polarizando el bus.
+            //
+            // Importa más de lo que parece: esta resincronización para en el
+            // primer byte que valga slave_id, así que un byte espurio con ese
+            // valor la corta antes de tiempo y la trama se malinterpreta. Es
+            // la explicación candidata del invalid_response ocasional que
+            // quedó pendiente el 10-jul-2026.
+            const bool eco = std::memcmp(skipped_bytes,
+                                         req + sizeof(req) - skipped,
+                                         skipped) == 0;
+            Serial.printf("[mb] resync: %u byte(s) espurio(s) tras la purga (%s)\n",
+                          skipped, eco ? "ECO de la peticion" : "NO coincide con la peticion");
+            diagHex("espurios", skipped_bytes, skipped);
+        }
     }
 
     if (resp[0] != slave_id) {
@@ -328,7 +333,19 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
                  static_cast<uint16_t>(resp[off + 1]);
     }
     // Evidencia de la transacción exitosa (modos "all" del debug, v3.3).
-    if (capture_) record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2);
+    if (capture_) {
+        record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2,
+               purged, purged_n);
+    }
+    if (trace_ == Trace::ALL) {
+        Serial.printf("[mb] ok slave=0x%02X fn=0x%02X addr=%u count=%u  "
+                      "purgados=%u (total %lu)  resyncs=%lu\n",
+                      slave_id, function_code, address, count,
+                      static_cast<unsigned>(purged_n),
+                      static_cast<unsigned long>(purged_total_),
+                      static_cast<unsigned long>(resync_total_));
+        if (purged_n > 0) diagHex("purgados", purged, purged_n);
+    }
     return Status::OK;
 }
 
@@ -352,8 +369,8 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
             pre_total++;
         }
     }
-    if (kDiag && pre_total > 0) {
-        Serial.printf("[mb-dbg] buffer previo con %u bytes antes de la peticion (bits)\n",
+    if (trace_ == Trace::ALL && pre_total > 0) {
+        Serial.printf("[mb]   buffer previo con %u bytes antes de la peticion (bits)\n",
                       static_cast<unsigned>(pre_total));
         diagHex("previos", pre, pre_len);
     }
@@ -373,11 +390,17 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
     uart_->write(req, sizeof(req));
     uart_->flush();
 
+    // Misma purga del cambio de sentido que en readRegisters: es el mismo
+    // bus y el mismo transceptor (razonamiento en modbus.h).
+    uint8_t purged[4];
+    size_t  purged_n = 0;
+    purgeTurnaround(purged, sizeof(purged), purged_n);
+
     uint8_t resp[kMaxResponseSize];
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
-        record(st, req, sizeof(req), resp, rx_len);
-        if (!kDiag) return st;
-        Serial.printf("[mb-dbg] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
+        record(st, req, sizeof(req), resp, rx_len, purged, purged_n);
+        if (trace_ == Trace::NONE) return st;
+        Serial.printf("[mb] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
         diagHex("peticion", req, sizeof(req));
         diagHex("recibido", resp, rx_len);
@@ -454,7 +477,19 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
         out[i] = (byte >> (i % 8)) & 0x01;
     }
     // Evidencia de la transacción exitosa (modos "all" del debug, v3.3).
-    if (capture_) record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2);
+    if (capture_) {
+        record(Status::OK, req, sizeof(req), resp, crc_payload_len + 2,
+               purged, purged_n);
+    }
+    if (trace_ == Trace::ALL) {
+        Serial.printf("[mb] ok slave=0x%02X fn=0x%02X addr=%u count=%u  "
+                      "purgados=%u (total %lu)  resyncs=%lu\n",
+                      slave_id, function_code, address, count,
+                      static_cast<unsigned>(purged_n),
+                      static_cast<unsigned long>(purged_total_),
+                      static_cast<unsigned long>(resync_total_));
+        if (purged_n > 0) diagHex("purgados", purged, purged_n);
+    }
     return Status::OK;
 }
 

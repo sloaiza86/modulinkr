@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x33          # v3.3 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x34          # v3.4 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -167,6 +167,17 @@ HEALTH_FAULT_NAMES = {
     HEALTH_FAULT_NONE:      'ninguno',
     HEALTH_FAULT_TX_MUTE:   'transmisor mudo',
     HEALTH_FAULT_RX_SILENT: 'receptor mudo',
+}
+
+# Modo de depuración Modbus vigente en el nodo (node-config.md §5). Viaja en
+# NODE_HEALTH desde v3.4 para que el visor pueda decir cuál está activo, y en
+# particular distinguir un bus limpio de una traza apagada.
+MB_DEBUG_NAMES = {
+    0: 'off',
+    1: 'errors_last',
+    2: 'errors_each',
+    3: 'all_last',
+    4: 'all_each',
 }
 
 ACK_SCHEMA_MISMATCH = 0x02
@@ -416,26 +427,33 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         status_b  = payload[1]
         req_len   = payload[2]
         resp_len  = payload[3]
-        if payload_length != 4 + req_len + resp_len:
+        purge_len = payload[4]
+        # v3.4: tras req y resp van los bytes purgados del cambio de sentido
+        # y los dos acumulados del bus (4 B cada uno).
+        if payload_length != 5 + req_len + resp_len + purge_len + 8:
             out['error'] = (f'MODBUS_DEBUG tamaños incoherentes '
                             f'(payload={payload_length}, req={req_len}, '
-                            f'resp={resp_len})')
+                            f'resp={resp_len}, purge={purge_len})')
             return out
         out['mb_dev']         = dev_index
         out['mb_status']      = status_b & 0x0F
         out['mb_status_name'] = MODBUS_STATUS_NAMES.get(
             status_b & 0x0F, f'unknown(0x{status_b & 0x0F:X})')
         out['mb_exception']   = (status_b >> 4) & 0x0F
-        out['mb_req']         = payload[4:4 + req_len]
-        out['mb_resp']        = payload[4 + req_len:4 + req_len + resp_len]
+        off = 5
+        out['mb_req']  = payload[off:off + req_len];  off += req_len
+        out['mb_resp'] = payload[off:off + resp_len]; off += resp_len
+        out['mb_purged'] = payload[off:off + purge_len]; off += purge_len
+        out['mb_purged_total'] = struct.unpack_from('<I', payload, off)[0]
+        out['mb_resync_total'] = struct.unpack_from('<I', payload, off + 4)[0]
 
     elif frame_type == FRAME_NODE_HEALTH:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
         # recuperaciones por nivel y los contadores de radio.
-        if payload_length != 24:
+        if payload_length != 25:
             out['error'] = (f'NODE_HEALTH payload_length={payload_length}, '
-                            f'esperado 24')
+                            f'esperado 25')
             return out
         out['hl_fault']        = payload[0]
         out['hl_fault_name']   = HEALTH_FAULT_NAMES.get(
@@ -449,6 +467,9 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['hl_tx_psend']     = struct.unpack_from('<I', payload, 12)[0]
         out['hl_tx_done']      = struct.unpack_from('<I', payload, 16)[0]
         out['hl_rx_valid']     = struct.unpack_from('<I', payload, 20)[0]
+        out['hl_mb_debug']      = payload[24]
+        out['hl_mb_debug_name'] = MB_DEBUG_NAMES.get(
+            payload[24], f'unknown(0x{payload[24]:02X})')
 
     return out
 

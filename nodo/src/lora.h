@@ -253,12 +253,19 @@ public:
                                 const float* values, const uint8_t* st,
                                 uint8_t n_values, uint8_t sn_id);
 
-    // MODBUS_DEBUG v3.2 (frame-format.md §15): la última transacción
-    // Modbus fallida en crudo, hacia el gateway vía el padre. Best-effort
-    // como el HEARTBEAT: sin ACK, sin reintentos, sin cola de pendientes.
+    // MODBUS_DEBUG v3.4 (frame-format.md §15): una transacción Modbus en
+    // crudo, hacia el gateway vía el padre. Best-effort como el HEARTBEAT:
+    // sin ACK, sin reintentos, sin cola de pendientes.
+    //   purged        Bytes fantasma descartados antes de esa transacción.
+    //   purged_total  Acumulado de bytes purgados desde el arranque.
+    //   resync_total  Acumulado de resincronizaciones desde el arranque.
+    // Los tres se añaden en v3.4 para que el visor enseñe lo mismo que la
+    // consola del nodo, que era información que solo existía por USB.
     Status sendModbusDebug(uint16_t seq, uint8_t dev_index, uint8_t status,
                            const uint8_t* req, uint8_t req_len,
                            const uint8_t* resp, uint8_t resp_len,
+                           const uint8_t* purged, uint8_t purged_len,
+                           uint32_t purged_total, uint32_t resync_total,
                            uint8_t hop_dst);
 
     // Búsqueda de supernodo: broadcast a vecinos directos (ttl=1).
@@ -283,10 +290,16 @@ public:
     //   reset_reason  Causa del último arranque (esp_reset_reason).
     //   boots         Arranques acumulados.
     //   l1..l4        Recuperaciones ejecutadas por nivel.
+    //   mb_debug_mode Modo de depuración Modbus vigente (cfg::ModbusDebug),
+    //                 añadido en v3.4. Viaja aquí porque un cambio de config
+    //                 reinicia el nodo, así que esta trama siempre lleva el
+    //                 modo actual, incluido `off`, que es lo que permite al
+    //                 visor distinguir un bus limpio de una traza apagada.
     Status sendNodeHealth(uint16_t seq, uint8_t hop_dst,
                           uint8_t fault, uint8_t reset_reason,
                           uint16_t boots,
-                          uint16_t l1, uint16_t l2, uint16_t l3, uint16_t l4);
+                          uint16_t l1, uint16_t l2, uint16_t l3, uint16_t l4,
+                          uint8_t mb_debug_mode);
 
     // Milisegundos de aire acumulados desde el boot (suma del ToA de cada
     // trama realmente transmitida, contada en el evento TXP2P DONE; los

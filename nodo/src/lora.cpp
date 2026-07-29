@@ -362,23 +362,33 @@ LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
                                          uint8_t status,
                                          const uint8_t* req, uint8_t req_len,
                                          const uint8_t* resp, uint8_t resp_len,
+                                         const uint8_t* purged, uint8_t purged_len,
+                                         uint32_t purged_total, uint32_t resync_total,
                                          uint8_t hop_dst) {
     if (!initialized_) return Status::NOT_INITIALIZED;
+    const size_t total = 5u + req_len + resp_len + purged_len + 8u;
     if (req == nullptr || req_len == 0 ||
         (resp == nullptr && resp_len > 0) ||
-        static_cast<size_t>(4u + req_len + resp_len) > protocol::kMaxPayload) {
+        (purged == nullptr && purged_len > 0) ||
+        total > protocol::kMaxPayload) {
         return Status::INVALID_ARGS;
     }
 
-    // Payload MODBUS_DEBUG v3.2 (spec §15.1):
-    //   dev_index + status + req_len + resp_len + req + resp
+    // Payload MODBUS_DEBUG v3.4 (spec §15.1):
+    //   dev_index + status + req_len + resp_len + purge_len
+    //   + req + resp + purged + purged_total + resync_total
     uint8_t payload[protocol::kMaxPayload];
     payload[0] = dev_index;
     payload[1] = status;
     payload[2] = req_len;
     payload[3] = resp_len;
-    std::memcpy(&payload[4], req, req_len);
-    if (resp_len > 0) std::memcpy(&payload[4u + req_len], resp, resp_len);
+    payload[4] = purged_len;
+    size_t off = 5;
+    std::memcpy(&payload[off], req, req_len);          off += req_len;
+    if (resp_len > 0)   { std::memcpy(&payload[off], resp, resp_len);     off += resp_len; }
+    if (purged_len > 0) { std::memcpy(&payload[off], purged, purged_len); off += purged_len; }
+    std::memcpy(&payload[off], &purged_total, sizeof(purged_total)); off += sizeof(purged_total);
+    std::memcpy(&payload[off], &resync_total, sizeof(resync_total)); off += sizeof(resync_total);
 
     return buildAndSend(hop_dst,
                         node_id_,
@@ -387,20 +397,23 @@ LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
                         protocol::kFrameModbusDebug,
                         ttl_,
                         payload,
-                        static_cast<uint8_t>(4u + req_len + resp_len));
+                        static_cast<uint8_t>(off));
 }
 
 LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
                                         uint8_t fault, uint8_t reset_reason,
                                         uint16_t boots,
                                         uint16_t l1, uint16_t l2,
-                                        uint16_t l3, uint16_t l4) {
+                                        uint16_t l3, uint16_t l4,
+                                        uint8_t mb_debug_mode) {
     if (!initialized_) return Status::NOT_INITIALIZED;
 
-    // Payload v3.3 (spec §16), 24 bytes. Los contadores de recuperación van
+    // Payload v3.4 (spec §16), 25 bytes. Los contadores de recuperación van
     // en uint16: un nodo que supere las 65535 recuperaciones tiene un
-    // problema que ningún contador va a resolver.
-    uint8_t payload[24];
+    // problema que ningún contador va a resolver. El último byte es el modo
+    // de depuración Modbus vigente, que el visor necesita para distinguir
+    // "el bus va limpio" de "la depuración está apagada".
+    uint8_t payload[25];
     payload[0] = fault;
     payload[1] = reset_reason;
     std::memcpy(&payload[2],  &boots, sizeof(boots));
@@ -415,6 +428,7 @@ LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
     std::memcpy(&payload[12], &psend, sizeof(psend));
     std::memcpy(&payload[16], &done,  sizeof(done));
     std::memcpy(&payload[20], &rxv,   sizeof(rxv));
+    payload[24] = mb_debug_mode;
 
     return buildAndSend(hop_dst,
                         node_id_,

@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.34-ack-guard";
+constexpr const char* kFirmwareVersion = "0.0.35-mb-debug-unificado";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -348,8 +348,9 @@ void printBanner() {
                    static_cast<unsigned long>(g_cfg.gateway_wait_ms));
 
     // Catálogo Modbus del config: dispositivos y lecturas.
-    Serial.printf ("  Modbus: %u dispositivo(s), %u lectura(s) total\n",
-                   g_cfg.n_devices, g_cfg.total_reads);
+    Serial.printf ("  Modbus: %u dispositivo(s), %u lectura(s) total  debug=%s\n",
+                   g_cfg.n_devices, g_cfg.total_reads,
+                   cfg::mbDebugName(g_cfg.modbus_debug));
     for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
         const cfg::DeviceDef& dev = g_cfg.devices[d];
         Serial.printf("    [%s] slave=0x%02X reads=%u writes=%u mode=%s gap=%lu ms\n",
@@ -548,9 +549,11 @@ void fireLora() {
         nextSeq();
         lora.sendModbusDebug(g_lora_seq, d.dev, d.status_byte,
                              d.req, d.req_len, d.resp, d.resp_len,
+                             d.purged, d.purged_len,
+                             d.purged_total, d.resync_total,
                              mesh.parentId());
-        Serial.printf("[mb-dbg] trama debug dev=%u status=0x%02X req=%uB resp=%uB\n",
-                      d.dev, d.status_byte, d.req_len, d.resp_len);
+        Serial.printf("[mb] trama debug dev=%u status=0x%02X req=%uB resp=%uB purgados=%uB\n",
+                      d.dev, d.status_byte, d.req_len, d.resp_len, d.purged_len);
     }
 }
 
@@ -1269,7 +1272,8 @@ void nodeHealthTick(uint32_t now) {
                             static_cast<uint16_t>(g_health.probes),
                             static_cast<uint16_t>(g_health.reinits),
                             static_cast<uint16_t>(g_health.resets),
-                            static_cast<uint16_t>(g_health.reboots))
+                            static_cast<uint16_t>(g_health.reboots),
+                            static_cast<uint8_t>(g_cfg.modbus_debug))
         != LoraP2P::Status::OK) {
         return;   // cola llena o radio no lista: se reintenta en el próximo tick
     }

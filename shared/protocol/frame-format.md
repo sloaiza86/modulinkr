@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x33` (= `v3.3`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x34` (= `v3.4`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.4 (29-jul-2026)**: reorganización del diagnóstico Modbus. MODBUS_DEBUG (§15.1) gana el campo `purge_len` y, tras la petición y la respuesta, los bytes purgados del cambio de sentido de esa transacción y los dos acumulados del bus, `purged_total` y `resync_total`. NODE_HEALTH (§16.1) gana un byte final con el modo de depuración Modbus vigente. Motiva el cambio que esa información solo existía en la consola del nodo, accesible por USB, y que una pestaña de tramas vacía en el visor no distinguía un bus limpio de una depuración apagada. En el firmware desaparece además la constante de compilación que gobernaba la traza por consola al margen del config: `modbus.debug` pasa a gobernar las dos salidas, consola y aire.
 
 **v3.3 (28-jul-2026)**: aparece la trama NODE_HEALTH (`frame_type = 0x07`, §16), con el estado de la radio del nodo: motivo del último fallo, causa del arranque, arranques acumulados, recuperaciones ejecutadas por nivel y contadores de transmisión y recepción. El bump es aditivo y no cambia ninguna trama existente: un receptor v3.2 la descarta como tipo desconocido. Motiva el cambio el incidente del 27 y 28 de julio de 2026, en el que un módulo colgado dejó al nodo un día entero transmitiendo al vacío sin que ningún contador lo delatara.
 
@@ -80,7 +82,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x33` para v3.3. |
+| `schema_version` | `0x34` para v3.4. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -855,8 +857,11 @@ La emisión la gobierna `modbus.debug` del config ([`node-config.md`](node-confi
 ### 15.1 Estructura del payload
 
 ```
-dev_index   status   req_len   resp_len   req           resp
-(1 B)       (1 B)    (1 B)     (1 B)      (req_len B)   (resp_len B)
+dev_index  status  req_len  resp_len  purge_len  req          resp
+(1 B)      (1 B)   (1 B)    (1 B)     (1 B)      (req_len B)  (resp_len B)
+
+purged           purged_total   resync_total
+(purge_len B)    (4 B LE)       (4 B LE)
 ```
 
 | Campo | Contenido |
@@ -867,8 +872,14 @@ dev_index   status   req_len   resp_len   req           resp
 | `resp_len` | Bytes recibidos hasta el fallo, tope 32. Puede ser 0 (timeout sin respuesta alguna). |
 | `req` | La petición Modbus RTU tal cual se escribió al bus, CRC incluido. |
 | `resp` | Los bytes crudos recibidos, truncados a 32. |
+| `purge_len` | Bytes fantasma descartados antes de esta transacción, tope 4 (v3.4). |
+| `purged` | Esos bytes en crudo. Delatan el estado físico del bus: valores del tipo `0xFE`, `0xFC` o `0xC0` son un flanco lento de una línea sin polarizar, no datos. |
+| `purged_total` | Bytes purgados acumulados desde el arranque del nodo. |
+| `resync_total` | Resincronizaciones de trama acumuladas: bytes fantasma que se colaron fuera de la ventana de purga. |
 
-`payload_length = 4 + req_len + resp_len` (validación en regla 8 de §10). Tamaño típico: 12 a 44 bytes de payload.
+`payload_length = 5 + req_len + resp_len + purge_len + 8` (validación en regla 8 de §10). Tamaño típico: 25 a 57 bytes de payload.
+
+Los tres últimos campos existen para que el visor enseñe lo mismo que la consola del nodo. Antes de v3.4 la purga y la resincronización solo se veían con un cable USB conectado, de modo que el diagnóstico del bus dependía de estar físicamente delante del nodo.
 
 ### 15.2 Reglas de emisión
 
@@ -901,6 +912,7 @@ bytes 10-11  reboots           (2 B)   recuperaciones de nivel 4
 bytes 12-15  tx_psend          (4 B)   escrituras AT+PSEND, uint32 LE
 bytes 16-19  tx_done           (4 B)   eventos TXP2P DONE, uint32 LE
 bytes 20-23  rx_valid          (4 B)   tramas válidas recibidas, uint32 LE
+byte  24     mb_debug          (1 B)   modo de depuración Modbus vigente (v3.4)
 ```
 
 Valores de `fault`:
@@ -910,6 +922,8 @@ Valores de `fault`:
 | `0x00` | NONE | Sin fallos desde el arranque |
 | `0x01` | TX_MUTE | Escrituras al módulo sin su confirmación `TXP2P DONE` |
 | `0x02` | RX_SILENT | Sin recepciones válidas mientras el nodo transmitía |
+
+`mb_debug` (v3.4) es el modo de `modbus.debug` con el que corre el nodo, con la codificación de `node-config.md` §5: `0` off, `1` errors_last, `2` errors_each, `3` all_last, `4` all_each. Viaja aquí porque un cambio de configuración reinicia el nodo, así que esta trama lleva siempre el modo actual. Sin él, el visor no puede distinguir "el bus va limpio" de "la depuración está apagada", porque en los dos casos no llega ninguna MODBUS_DEBUG.
 
 `reset_reason` es el valor crudo de `esp_reset_reason()`, que distingue el encendido normal del reinicio por software (nivel 4 de la escalera), del pánico y del brownout.
 

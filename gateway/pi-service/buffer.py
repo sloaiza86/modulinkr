@@ -160,9 +160,12 @@ class GatewayBuffer:
         (DB anterior a la fase 2 del estado por nodo). No borra nada."""
         cur = self.conn.execute("PRAGMA table_info(node_status)")
         cols = [row[1] for row in cur.fetchall()]
-        for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen"):
+        for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen",
+                    "mb_debug", "mb_debug_updated"):
             if col not in cols:
-                col_type = "INTEGER" if col in ("nbiot_flags", "nbiot_csq") else "REAL"
+                col_type = ("INTEGER"
+                            if col in ("nbiot_flags", "nbiot_csq", "mb_debug")
+                            else "REAL")
                 self.conn.execute(
                     f"ALTER TABLE node_status ADD COLUMN {col} {col_type}")
 
@@ -176,6 +179,32 @@ class GatewayBuffer:
                  WHERE origin = ?""",
             (flags, csq, time.time(), origin))
         self.conn.commit()
+
+    def set_mb_debug(self, origin: int, mode: int) -> None:
+        """Guarda el modo de depuración Modbus que el nodo reporta en su
+        NODE_HEALTH (frame-format.md §16.1, v3.4). Lo consume el visor para
+        decir cuál está activo: con el modo en `off` no llega ninguna trama
+        MODBUS_DEBUG, y sin este dato una pestaña vacía era indistinguible
+        de un bus limpio. Upsert por si el nodo aún no tiene fila, con
+        last_seen a 0 por la misma razón que en mqtt_seen."""
+        self.conn.execute(
+            """INSERT INTO node_status (origin, last_seen, mb_debug, mb_debug_updated)
+               VALUES (?, 0, ?, ?)
+               ON CONFLICT(origin) DO UPDATE SET
+                   mb_debug = excluded.mb_debug,
+                   mb_debug_updated = excluded.mb_debug_updated""",
+            (origin, mode, time.time()))
+        self.conn.commit()
+
+    def mb_debug_all(self) -> dict:
+        """Modo de depuración Modbus conocido de cada nodo, {origin: modo}.
+        Lo lee el servicio al arrancar para no quedarse ciego hasta que
+        llegue el primer NODE_HEALTH de cada nodo (que solo se emite al
+        arrancar el nodo, no periódicamente)."""
+        cur = self.conn.execute(
+            """SELECT origin, mb_debug FROM node_status
+                WHERE mb_debug IS NOT NULL""")
+        return {row[0]: row[1] for row in cur.fetchall()}
 
     def mqtt_seen(self, publisher: int) -> None:
         """Marca que un supernodo publicó en el broker cloud (lo oyó la

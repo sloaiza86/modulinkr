@@ -2080,10 +2080,10 @@ const DBG_AYUDA = {
          + "gateway (lo lee la Pi) o a este equipo (lo lee el navegador por "
          + "Web Serial, solo Chrome o Edge de escritorio). En el gateway, el "
          + "puerto del Heltec queda excluido y no se puede comisionar a la vez.",
-  modbus:  "Aparecen las tramas que el nodo emite según su modo modbus.debug "
-         + "(off / errors_* solo fallidas / all_* también correctas; _last una "
-         + "por ciclo, _each cada transacción). Con off no hay ninguna. Sin "
-         + "nodo, muestra las de todos.",
+  modbus:  "Cada línea lleva el modo de depuración del nodo que la emitió "
+         + "(modo=off / errors_* solo fallidas / all_* también correctas; "
+         + "_last una por ciclo, _each cada transacción). Un nodo en off no "
+         + "emite ninguna. Sin nodo seleccionado, muestra las de todos.",
 };
 
 async function debugInit() {
@@ -2121,6 +2121,8 @@ async function debugInit() {
       o.textContent = (n.name ? n.name + " " : "") + "(" + n.origin + ")";
       sel.appendChild(o);
     });
+    // Cambiar de nodo refresca el modo de depuración mostrado.
+    sel.onchange = dbgModoModbus;
   } catch (e) { /* la lista queda con "Todos" */ }
   debugSetTab("gateway");
 }
@@ -2135,6 +2137,49 @@ function debugSetTab(tab) {
   document.getElementById("dbg-nodo").hidden = tab !== "modbus";
   document.getElementById("dbg-ayuda").textContent = DBG_AYUDA[tab];
   document.getElementById("dbg-consola").textContent = "";
+  dbgModoModbus();
+}
+
+// Aviso del nodo en `off`, único caso que necesita cabecera.
+//
+// El modo de cada nodo viaja YA en su propia línea de log (`modo=all_each`),
+// que el gateway compone con lo que el nodo reporta en su NODE_HEALTH. Por
+// eso aquí no se lista nada: una cabecera con el modo de cada nodo no escala,
+// con cien nodos sería un muro de texto, y además duplicaría un dato que la
+// línea ya lleva.
+//
+// Queda una sola situación sin cubrir: un nodo concreto en `off` no emite
+// ninguna línea, así que sin este aviso la consola vacía sería indistinguible
+// de un bus limpio. Se muestra solo con ese nodo seleccionado, así que es una
+// línea como mucho, nunca una lista.
+async function dbgModoModbus() {
+  const el = document.getElementById("dbg-modo");
+  if (!el) return;
+  el.hidden = true;
+  if (dbgTab !== "modbus") return;
+
+  const origin = document.getElementById("dbg-nodo").value;
+  if (!origin) return;              // "Todos": cada línea lleva su modo
+
+  try {
+    const r = await fetchApi("/api/red/estado");
+    const n = ((await r.json()).nodes || [])
+                .find((x) => String(x.origin) === String(origin));
+    if (!n) return;
+    const nombre = n.name ? `${n.name} (${n.origin})` : `Nodo ${n.origin}`;
+
+    if (n.mb_debug_name === "off") {
+      el.hidden = false;
+      el.className = "aviso";
+      el.textContent = `${nombre}: depuración Modbus en OFF, por eso no `
+        + "aparece ninguna trama. Se cambia en la configuración del nodo.";
+    } else if (n.mb_debug_name == null) {
+      el.hidden = false;
+      el.className = "aviso";
+      el.textContent = `${nombre}: modo de depuración aún desconocido. El nodo `
+        + "lo reporta al arrancar, así que aparecerá tras su próximo arranque.";
+    }
+  } catch (e) { /* sin aviso: las líneas siguen llevando su modo */ }
 }
 
 // Visibilidad de los controles de la pestaña serie: el selector de fuente
@@ -3058,9 +3103,68 @@ function fillForm(cfg) {
   });
 }
 
+// ----- Asistente con el nodo en este equipo (Web Serial) -----
+//
+// El asistente era la única de las tres páginas del visor que solo hablaba con
+// nodos enchufados al gateway; la de JSON en crudo y la de firmware ya dejaban
+// elegir la fuente. Aquí se reutiliza tal cual el cliente LocalCfg que ya
+// implementa el protocolo CFG.* del comisionamiento en el navegador, así que
+// esto es encaminamiento, no protocolo nuevo.
+
+function formFuenteLocal() {
+  const s = document.getElementById("f-fuente");
+  return !!(s && s.value === "local");
+}
+
+// Abre (o reabre) la sesión Web Serial y devuelve la identidad del nodo.
+// Cada llamada parte de cero, cerrando la anterior y volviendo a pedir el
+// puerto: es la misma cautela que la página de JSON, para no reutilizar un
+// puerto que quedó en mal estado tras un reinicio del nodo.
+async function formLocalSesion() {
+  await cfgLocalCerrar();
+  const ses = await cfgLocalAsegurar();
+  return { ses, ident: await ses.hello() };
+}
+
+// Oculta los controles de puerto de la Pi con la fuente local: ahí el puerto
+// lo elige el popup del navegador, no un desplegable nuestro.
+function formFuenteCtrls() {
+  const local = formFuenteLocal();
+  ["f-leer-puertos", "f-puertos"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el && local) { el.hidden = true; el.value = ""; }
+  });
+}
+
 async function fLeer() {
   const aviso = document.getElementById("f-leer-aviso");
   const sel = document.getElementById("f-leer-puertos");
+
+  if (formFuenteLocal()) {
+    document.getElementById("f-leer").disabled = true;
+    aviso.textContent = "abriendo el puerto y leyendo el nodo...";
+    try {
+      const { ses, ident } = await formLocalSesion();
+      const texto = await ses.get();
+      let cfg;
+      try { cfg = JSON.parse(texto); } catch (e) {
+        aviso.textContent = "config del nodo no es JSON válido"; return;
+      }
+      fillForm(cfg);
+      formPuerto = "local";
+      idLeido = Number(document.getElementById("f-id").value);
+      formLive();
+      formNetCheck(cfg);
+      aviso.textContent = "formulario rellenado desde el nodo en este equipo"
+        + (ident && ident.version ? ` (firmware ${ident.version})` : "");
+    } catch (e) {
+      aviso.textContent = "error: " + e.message;
+    } finally {
+      document.getElementById("f-leer").disabled = false;
+    }
+    return;
+  }
+
   const body = {};
   if (!sel.hidden && sel.value) body.port = sel.value;
   document.getElementById("f-leer").disabled = true;
@@ -3116,6 +3220,29 @@ function formGenerar() {
 // firmware y luego la configuración).
 let formMode = "config";
 
+// Compara dos versiones de firmware del nodo ("0.0.33-mb-purge"). Devuelve
+// -1 si a es anterior a b, 0 si son la misma serie numérica, 1 si a es
+// posterior, y null si alguna no se puede interpretar.
+//
+// Existe porque comparar por igualdad de cadena trataba como "desactualizado"
+// a cualquier nodo cuya versión no coincidiera con la del binario del
+// gateway, incluidos los MÁS NUEVOS: el asistente ofrecía entonces cargar un
+// firmware anterior y el nodo se quedaba con una versión vieja sin que nadie
+// lo hubiera pedido (29-jul-2026, nodo en 0.0.33 con el binario del gateway
+// en 0.0.31).
+function cmpVersionFw(a, b) {
+  const num = (s) => {
+    const m = String(s || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const va = num(a), vb = num(b);
+  if (!va || !vb) return null;
+  for (let i = 0; i < 3; i++) {
+    if (va[i] !== vb[i]) return va[i] < vb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
 async function formCheckFw(node) {
   const est = document.getElementById("f-fw-estado");
   const enviar = document.getElementById("f-enviar");
@@ -3124,17 +3251,64 @@ async function formCheckFw(node) {
   let latest = null;
   try { const fr = await fetchApi("/api/config/firmware"); latest = (await fr.json()).version; } catch (e) { /* sin versión */ }
 
-  if (fw.startsWith("ModuLinkr") && (!latest || !ver || ver === latest)) {
+  if (fw.startsWith("ModuLinkr")) {
+    const cmp = cmpVersionFw(ver, latest);
+
+    // Misma versión, o falta alguna de las dos: solo configuración.
+    if (!latest || !ver || ver === latest || cmp === 0) {
+      formMode = "config";
+      est.className = "aviso";
+      est.textContent = (latest && ver ? `Firmware ModuLinkr ${ver} (última versión). `
+                                       : `Firmware ModuLinkr ${ver || "detectado"}. `)
+        + "Al enviar se cargará solo la configuración.";
+      enviar.disabled = false;
+      return;
+    }
+
+    // El nodo va por delante del binario del gateway: cargarlo sería una
+    // vuelta atrás. No se ofrece; se avisa y se envía solo la configuración.
+    // Lo que hay que actualizar es el gateway, no el nodo.
+    if (cmp === 1) {
+      formMode = "config";
+      est.className = "aviso";
+      est.textContent = `El nodo lleva ModuLinkr ${ver}, MÁS NUEVO que el binario `
+        + `del gateway (${latest}). Cargar el firmware lo haría retroceder, así que `
+        + "al enviar se cargará solo la configuración. Para poder actualizar nodos "
+        + "hay que regenerar nodo.bin con nodo/make_dist.sh y copiarlo al gateway.";
+      enviar.disabled = false;
+      return;
+    }
+
+    // Versión no interpretable: por prudencia tampoco se toca el firmware.
+    if (cmp === null) {
+      formMode = "config";
+      est.className = "aviso";
+      est.textContent = `Firmware ModuLinkr ${ver} y binario del gateway ${latest}: `
+        + "no se pueden comparar. Al enviar se cargará solo la configuración.";
+      enviar.disabled = false;
+      return;
+    }
+  }
+
+  // Con la fuente local el flasheo no se ofrece desde aquí: vive en la página
+  // de firmware, que ya tiene su propio camino con esptool-js. Se avisa y se
+  // deja enviar solo la configuración, que sí sabemos hacer.
+  if (formFuenteLocal()) {
     formMode = "config";
     est.className = "aviso";
-    est.textContent = (latest && ver ? `Firmware ModuLinkr ${ver} (última versión). `
-                                     : `Firmware ModuLinkr ${ver || "detectado"}. `)
-      + "Al enviar se cargará solo la configuración.";
-    enviar.disabled = false;
+    est.textContent = fw.startsWith("ModuLinkr")
+      ? `Firmware ModuLinkr ${ver}, desactualizado (última: ${latest}). `
+        + "Al enviar se cargará solo la configuración. Para actualizar el "
+        + "firmware, usa la página de firmware con la fuente 'este equipo'."
+      : "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
+        + "Cárgale el firmware desde la página de firmware con la fuente "
+        + "'este equipo' y vuelve aquí.";
+    enviar.disabled = !fw.startsWith("ModuLinkr");
     return;
   }
-  // Desactualizado, o no responde como ModuLinkr: Enviar carga el firmware y
-  // después la configuración.
+
+  // Nodo anterior al binario del gateway, o firmware ajeno: Enviar carga el
+  // firmware y después la configuración.
   formMode = "flash";
   est.className = "aviso";
   if (fw.startsWith("ModuLinkr")) {
@@ -3150,6 +3324,30 @@ async function formCheckFw(node) {
 async function formBuscar() {
   const aviso = document.getElementById("f-busqueda-aviso");
   const sel = document.getElementById("f-puertos");
+
+  if (formFuenteLocal()) {
+    document.getElementById("f-buscar").disabled = true;
+    aviso.textContent = "abriendo el puerto y detectando el nodo...";
+    try {
+      const { ident } = await formLocalSesion();
+      formPuerto = "local";
+      aviso.textContent = "nodo detectado en este equipo";
+      // La identidad de CFG.HELLO trae los mismos campos que la detección de
+      // la Pi (fw y version), así que la comprobación de firmware vale igual.
+      await formCheckFw(ident || {});
+    } catch (e) {
+      // Sin respuesta al protocolo: por el gateway aquí se ofrecería flashear,
+      // pero el flasheo local vive en la página de firmware. Se dice qué hacer
+      // en vez de dejar al usuario con un error a secas.
+      aviso.textContent = "el nodo no respondió al protocolo de comisionamiento ("
+        + e.message + "). Si está virgen, cárgale antes el firmware desde la "
+        + "página de firmware con la fuente 'este equipo'.";
+    } finally {
+      document.getElementById("f-buscar").disabled = false;
+    }
+    return;
+  }
+
   const body = {};
   if (!sel.hidden && sel.value) body.port = sel.value;
   document.getElementById("f-buscar").disabled = true;
@@ -3221,6 +3419,28 @@ async function formEnviar() {
     res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
   }
   const T = "Enviar al nodo";
+
+  // Fuente local: el navegador escribe el config por Web Serial con el mismo
+  // CFG.PUT que habla la Pi. El flasheo no se ofrece por aquí (vive en la
+  // página de firmware), así que formCheckFw ya dejó formMode en "config".
+  if (formFuenteLocal()) {
+    try {
+      cfgDialogo(T, SPIN + "enviando y validando la configuración en el nodo...");
+      const ses = await cfgLocalAsegurar();
+      const detalle = await ses.put(texto);
+      // El nodo se reinicia tras aceptar el config, así que la sesión abierta
+      // deja de servir: se cierra para que la próxima búsqueda parta limpia.
+      await cfgLocalCerrar();
+      cfgDialogo(T, "Configuración aceptada. El nodo arranca con la "
+                  + "configuración nueva.<pre>" + (detalle || "") + "</pre>",
+                 { cerrar: true });
+    } catch (e) {
+      cfgDialogo(T, "El nodo rechazó el config o se perdió el puerto:<pre>"
+                  + e.message + "</pre>", { cerrar: true });
+    }
+    return;
+  }
+
   try {
     if (formMode === "flash") {
       cfgDialogo(T, SPIN + "cargando el firmware del nodo por USB (cerca de un minuto)...");
@@ -3296,6 +3516,20 @@ document.getElementById("cfg-form").addEventListener("change", (e) => {
 });
 document.getElementById("f-leer").addEventListener("click", fLeer);
 document.getElementById("f-buscar").addEventListener("click", formBuscar);
+// Cambiar de fuente invalida el nodo detectado: obliga a volver a buscarlo
+// donde toca, en vez de enviar al que quedó de la fuente anterior.
+document.getElementById("f-fuente").addEventListener("change", async () => {
+  formPuerto = null;
+  formMode = "config";
+  document.getElementById("f-envio-aviso").textContent = "";
+  document.getElementById("f-busqueda-aviso").textContent = "";
+  document.getElementById("f-leer-aviso").textContent = "";
+  const est = document.getElementById("f-fw-estado");
+  if (est) est.hidden = true;
+  document.getElementById("f-enviar").disabled = true;
+  formFuenteCtrls();
+  await cfgLocalCerrar();
+});
 document.getElementById("f-generar").addEventListener("click", formGenerar);
 document.getElementById("f-enviar").addEventListener("click", formEnviar);
 document.getElementById("cfg-archivo-btn").addEventListener("click", () =>

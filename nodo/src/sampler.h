@@ -90,6 +90,13 @@ public:
         uint8_t req_len     = 0;
         uint8_t resp[32];
         uint8_t resp_len    = 0;
+        // Purga del cambio de sentido de esa transacción y acumulados del
+        // bus desde el arranque (v3.4, frame-format.md §15.1). Viajan en la
+        // trama para que el visor enseñe lo mismo que la consola del nodo.
+        uint8_t  purged[4];
+        uint8_t  purged_len   = 0;
+        uint32_t purged_total = 0;
+        uint32_t resync_total = 0;
     };
     uint8_t debugCount() const { return dbg_n_; }
     const DebugTxn& debugAt(uint8_t i) const { return dbg_[i]; }

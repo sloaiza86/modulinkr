@@ -544,6 +544,7 @@
             <span id="dbg-info" class="aviso"></span>
           </div>
           <p class="aviso" id="dbg-ayuda"></p>
+          <p class="aviso" id="dbg-modo" hidden></p>
 
           <pre id="dbg-consola" class="dbg-consola"></pre>
         </div>
@@ -561,8 +562,15 @@
         <div class="card cfg-card">
           <h3>Leer configuración de nodo</h3>
           <p class="aviso">Opcional: leer el config.json de un Atom ya configurado
-            (conectado por USB) para rellenar el formulario y editarlo desde ahí.</p>
+            (conectado por USB) para rellenar el formulario y editarlo desde ahí.
+            La fuente elegida aquí vale para todo el asistente, también para el
+            envío del final: el gateway lo lee la Pi, este equipo lo lee el
+            navegador por Web Serial (solo Chrome o Edge de escritorio).</p>
           <div class="cfg-fila">
+            <select id="f-fuente">
+              <option value="gateway">Conectado al gateway</option>
+              <option value="local">Conectado a este equipo</option>
+            </select>
             <button id="f-leer" class="btn-primario">Leer del nodo</button>
             <select id="f-leer-puertos" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>

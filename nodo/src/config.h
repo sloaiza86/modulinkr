@@ -60,6 +60,19 @@ inline bool mbDebugEnabled(ModbusDebug m) { return m != ModbusDebug::OFF; }
 inline bool mbDebugAll(ModbusDebug m) {
     return m == ModbusDebug::ALL_LAST || m == ModbusDebug::ALL_EACH;
 }
+// Nombre del modo tal como aparece en el config.json, para el banner y para
+// el byte que viaja en NODE_HEALTH (v3.4).
+inline const char* mbDebugName(ModbusDebug m) {
+    switch (m) {
+        case ModbusDebug::OFF:         return "off";
+        case ModbusDebug::ERRORS_LAST: return "errors_last";
+        case ModbusDebug::ERRORS_EACH: return "errors_each";
+        case ModbusDebug::ALL_LAST:    return "all_last";
+        case ModbusDebug::ALL_EACH:    return "all_each";
+    }
+    return "desconocido";
+}
+
 inline bool mbDebugEach(ModbusDebug m) {
     return m == ModbusDebug::ERRORS_EACH || m == ModbusDebug::ALL_EACH;
 }

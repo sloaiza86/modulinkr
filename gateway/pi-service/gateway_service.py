@@ -122,6 +122,7 @@ class GatewayService:
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
+        self.mb_debug: dict = {}      # origin -> modo de depuración Modbus
         self.mqtt: MqttPublisher | None = None
 
         # Periodo del drenado del buffer hacia el broker cloud (segundos).
@@ -332,13 +333,17 @@ class GatewayService:
         # del 20-jul-2026: sin publicación MQTT; el Pi es el punto de debug).
         if ft == protocol.FRAME_MODBUS_DEBUG:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                LOG.info("modbus-debug origin=%s dev=%d status=%s exc=%d "
-                         "req=%s resp=%s",
-                         protocol.addr_name(parsed["origin_id"]),
+                modo = protocol.MB_DEBUG_NAMES.get(
+                    self.mb_debug.get(parsed["origin_id"]), "?")
+                LOG.info("modbus-debug origin=%s modo=%s dev=%d status=%s exc=%d "
+                         "req=%s resp=%s purgados=%s total=%d resyncs=%d",
+                         protocol.addr_name(parsed["origin_id"]), modo,
                          parsed["mb_dev"], parsed["mb_status_name"],
                          parsed["mb_exception"],
                          bytes(parsed["mb_req"]).hex().upper(),
-                         bytes(parsed["mb_resp"]).hex().upper() or "-")
+                         bytes(parsed["mb_resp"]).hex().upper() or "-",
+                         bytes(parsed["mb_purged"]).hex().upper() or "-",
+                         parsed["mb_purged_total"], parsed["mb_resync_total"])
             else:
                 self.n_notconf += 1
             return
@@ -353,14 +358,23 @@ class GatewayService:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 LOG.info("node-health origin=%s fallo=%s arranques=%d "
                          "reset=%d L1=%d L2=%d L3=%d L4=%d "
-                         "psend=%d done=%d rx=%d",
+                         "psend=%d done=%d rx=%d mb_debug=%s",
                          protocol.addr_name(parsed["origin_id"]),
                          parsed["hl_fault_name"], parsed["hl_boots"],
                          parsed["hl_reset_reason"],
                          parsed["hl_probes"], parsed["hl_reinits"],
                          parsed["hl_resets"], parsed["hl_reboots"],
                          parsed["hl_tx_psend"], parsed["hl_tx_done"],
-                         parsed["hl_rx_valid"])
+                         parsed["hl_rx_valid"], parsed["hl_mb_debug_name"])
+                # El modo de depuración Modbus del nodo (v3.4) se guarda en
+                # node_status para que el visor pueda decir cuál está activo
+                # sin depender de que lleguen tramas MODBUS_DEBUG: con el
+                # modo en `off` no llega ninguna, y una pestaña vacía sin
+                # más era indistinguible de un bus limpio.
+                self.mb_debug[parsed["origin_id"]] = parsed["hl_mb_debug"]
+                if self.buf is not None:
+                    self.buf.set_mb_debug(parsed["origin_id"],
+                                          parsed["hl_mb_debug"])
                 self._publish_node_health(parsed)
             else:
                 self.n_notconf += 1
@@ -684,6 +698,16 @@ class GatewayService:
 
     def run(self) -> int:
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
+
+        # Modo de depuración Modbus por nodo, para etiquetar cada línea de
+        # modbus-debug sin consultar la base de datos por trama. Se siembra
+        # con lo último guardado: el NODE_HEALTH que lo trae solo se emite al
+        # arrancar el nodo, así que sin esta siembra el servicio quedaría
+        # ciego hasta el siguiente arranque de cada nodo.
+        self.mb_debug = self.buf.mb_debug_all()
+        if self.mb_debug:
+            LOG.info("modo de depuracion Modbus conocido de %d nodo(s)",
+                     len(self.mb_debug))
         LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
                  self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
         LOG.info("seguridad interfaz aire (v2.2): %s",

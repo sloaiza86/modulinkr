@@ -12,7 +12,17 @@ void Sampler::begin(ModbusRTU* bus, const cfg::Config* config) {
     // se enciende en los modos "all"; en "errors" basta la del camino de
     // error, que el driver registra siempre.
     dbg_mode_ = cfg_->modbus_debug;
-    if (bus_ != nullptr) bus_->enableCapture(cfg::mbDebugAll(dbg_mode_));
+    if (bus_ != nullptr) {
+        bus_->enableCapture(cfg::mbDebugAll(dbg_mode_));
+
+        // El mismo modo gobierna la traza por consola del driver (v3.4).
+        // Antes la gobernaba una constante de compilación, así que la
+        // consola escupía diagnóstico aunque el config dijera `off`.
+        ModbusRTU::Trace t = ModbusRTU::Trace::NONE;
+        if (cfg::mbDebugAll(dbg_mode_))          t = ModbusRTU::Trace::ALL;
+        else if (cfg::mbDebugEnabled(dbg_mode_)) t = ModbusRTU::Trace::ERRORS;
+        bus_->setTrace(t);
+    }
 
     // Precalcula los grupos: reads contiguos (misma función, dirección
     // consecutiva contando el ancho en registros del anterior) colapsan
@@ -197,6 +207,10 @@ void Sampler::captureDebug(uint8_t dev, uint8_t status_byte, bool failed) {
     memcpy(d.req, ev.req, ev.req_len);
     d.resp_len = ev.resp_len;
     memcpy(d.resp, ev.resp, ev.resp_len);
+    d.purged_len = ev.purged_len;
+    memcpy(d.purged, ev.purged, ev.purged_len);
+    d.purged_total = ev.purged_total;
+    d.resync_total = ev.resync_total;
 }
 
 void Sampler::pollDue() {

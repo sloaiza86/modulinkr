@@ -93,6 +93,10 @@ public:
     // sin polarizar que la purga está compensando.
     uint32_t purgedBytes() const { return purged_total_; }
 
+    // Resincronizaciones de trama desde el arranque: bytes fantasma que se
+    // colaron fuera de la ventana de purga y hubo que saltar.
+    uint32_t resyncs() const { return resync_total_; }
+
     // Duración de la ventana de purga en microsegundos, para el banner.
     uint32_t purgeWindowUs() const { return purge_us_; }
 
@@ -135,6 +139,13 @@ public:
         uint8_t req_len   = 0;
         uint8_t resp[32];                 // tope de volcado, spec §15.1
         uint8_t resp_len  = 0;
+        // Bytes fantasma descartados justo antes de esta transacción y
+        // acumulados desde el arranque (v3.4, spec §15.1). Viajan con la
+        // trama para que el visor enseñe lo mismo que la consola.
+        uint8_t  purged[4];
+        uint8_t  purged_len   = 0;
+        uint32_t purged_total = 0;
+        uint32_t resync_total = 0;
     };
     const FailEvidence& lastTxn() const { return txn_; }
     bool lastTxnValid() const { return txn_valid_; }
@@ -142,6 +153,18 @@ public:
     // Con captura activa, las transacciones exitosas también dejan evidencia
     // (modos "all"). Sin ella, solo la dejan los fallos.
     void enableCapture(bool on) { capture_ = on; }
+
+    // Nivel de traza por consola. Sustituye a la antigua constante de
+    // compilación kDiag, que imprimía siempre y al margen del config: la
+    // consola se llenaba de líneas de depuración con `modbus.debug` en
+    // `off`, porque eran dos sistemas distintos con el mismo prefijo.
+    //   NONE    silencio, sea cual sea el resultado de la transacción.
+    //   ERRORS  volcado completo solo cuando la transacción falla.
+    //   ALL     además, una línea por transacción correcta con su purga.
+    // La purga y la resincronización no se imprimen por su cuenta: forman
+    // parte de la traza de la transacción a la que pertenecen.
+    enum class Trace : uint8_t { NONE = 0, ERRORS, ALL };
+    void setTrace(Trace t) { trace_ = t; }
 
     // Devuelve un literal estático con el nombre del estado, útil para logs.
     static const char* statusToString(Status s);
@@ -151,10 +174,12 @@ private:
     uint32_t response_timeout_ms_ = 1000;
     uint32_t purge_us_     = 0;   // ventana del cambio de sentido
     uint32_t purged_total_ = 0;   // bytes fantasma descartados desde el boot
+    uint32_t resync_total_ = 0;   // resincronizaciones de trama desde el boot
     uint8_t  last_exception_ = 0;
     FailEvidence txn_;
     bool         txn_valid_ = false;
     bool         capture_   = false;
+    Trace        trace_     = Trace::NONE;
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);
@@ -167,8 +192,15 @@ private:
     // Guarda la evidencia de una transacción (v3.3): copia petición y bytes
     // recibidos en txn_ y la marca válida. Con st == EXCEPTION toma el
     // código de last_exception_, que el caller ya fijó; con OK, exception 0.
+    // purged/purged_n: bytes fantasma descartados antes de esa transacción
+    // (v3.4). Opcionales: los caminos que no los tienen a mano pasan nada.
     void record(Status st, const uint8_t* req, size_t req_len,
-                const uint8_t* rx, size_t rx_len);
+                const uint8_t* rx, size_t rx_len,
+                const uint8_t* purged = nullptr, size_t purged_n = 0);
+
+    // Purga del cambio de sentido tras escribir una petición. Devuelve en
+    // `out` hasta `cap` de los bytes descartados y su número real.
+    void purgeTurnaround(uint8_t* out, size_t cap, size_t& out_n);
 
     // Lee exactamente `len` bytes en `buf` con timeout total de
     // `response_timeout_ms_`. Devuelve número de bytes leídos.
