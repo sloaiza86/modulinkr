@@ -49,14 +49,20 @@ import paho.mqtt.client as mqtt
 from db import Db
 from ingest import ingest_message
 from catalog import process_register
+from health import process_health
 
 LOG = logging.getLogger("modulinkr.consumer")
 
-TOPIC_RE = re.compile(r"^modulinkr/v1/(\d+)/(telemetry|register)$")
+TOPIC_RE = re.compile(r"^modulinkr/v1/(\d+)/(telemetry|register|health)$")
+
+# Contador de descarte por tipo de topic, para que un payload ilegible no se
+# contabilice siempre como register.
+_BAD_KEY = {"telemetry": "msg_bad", "register": "reg_bad", "health": "hlt_bad"}
 
 STATS_KEYS = ("msg_tel", "msg_bad", "msg_test", "inserted", "dup",
               "quarantined", "sample_bad", "reg_ok", "reg_synced",
-              "reg_bad", "materialized", "infra_err")
+              "reg_bad", "materialized", "hlt_ok", "hlt_dup", "hlt_bad",
+              "infra_err")
 
 
 class Consumer:
@@ -112,7 +118,8 @@ class Consumer:
         # persistente es redundante pero inocua, y cubre el primer
         # arranque y los brokers reiniciados sin estado.
         client.subscribe([("modulinkr/v1/+/telemetry", 1),
-                          ("modulinkr/v1/+/register", 1)])
+                          ("modulinkr/v1/+/register", 1),
+                          ("modulinkr/v1/+/health", 1)])
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         if rc != 0:
@@ -130,7 +137,7 @@ class Consumer:
             if not isinstance(payload, dict):
                 raise ValueError("el payload no es un objeto JSON")
         except (ValueError, UnicodeDecodeError) as e:
-            self.stats["msg_bad" if kind == "telemetry" else "reg_bad"] += 1
+            self.stats[_BAD_KEY[kind]] += 1
             LOG.warning("payload no parseable en %s: %s", msg.topic, e)
             return
 
@@ -138,6 +145,8 @@ class Consumer:
             if kind == "telemetry":
                 self.stats["msg_tel"] += 1
                 ingest_message(self.db, publisher, payload, self.stats)
+            elif kind == "health":
+                process_health(self.db, publisher, payload, self.stats)
             else:
                 process_register(self.db, publisher, payload, self.stats)
         except Exception:                            # noqa: BLE001
@@ -186,10 +195,12 @@ class Consumer:
     def report_stats(self) -> None:
         s = self.stats
         LOG.info("STATS msgs=%d bad=%d test=%d | ins=%d dup=%d quar=%d "
-                 "sbad=%d | reg ok=%d sync=%d bad=%d mat=%d | infra=%d",
+                 "sbad=%d | reg ok=%d sync=%d bad=%d mat=%d | "
+                 "health ok=%d dup=%d bad=%d | infra=%d",
                  s["msg_tel"], s["msg_bad"], s["msg_test"], s["inserted"],
                  s["dup"], s["quarantined"], s["sample_bad"], s["reg_ok"],
                  s["reg_synced"], s["reg_bad"], s["materialized"],
+                 s["hlt_ok"], s["hlt_dup"], s["hlt_bad"],
                  s["infra_err"])
 
 

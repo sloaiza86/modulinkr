@@ -181,7 +181,48 @@ GROUP BY 1
 ORDER BY 1;
 ```
 
-## 6. Escalado futuro (no requerido hoy)
+## 6. Histórico de salud de radio (`node_health`, 29-jul-2026)
+
+Persiste la trama NODE_HEALTH (`frame-format.md` §16) que el gateway publica en `modulinkr/v1/{node_id}/health`. Motiva la tabla el incidente del 27 y 28 de julio de 2026: un nodo que se recupera solo borra la prueba de que algo iba mal, y sin histórico no hay forma de saber si un despliegue se degrada con el tiempo.
+
+```sql
+CREATE TABLE node_health (
+    health_id    bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    node_id      smallint    NOT NULL REFERENCES nodes(node_id),
+    received_at  timestamptz NOT NULL DEFAULT now(),
+    fault        text        NOT NULL,   -- ninguno / transmisor mudo / receptor mudo
+    reset_reason smallint    NOT NULL,   -- esp_reset_reason crudo
+    boots        integer     NOT NULL,
+    probes       integer     NOT NULL,   -- recuperaciones de nivel 1
+    reinits      integer     NOT NULL,   -- nivel 2
+    resets       integer     NOT NULL,   -- nivel 3
+    reboots      integer     NOT NULL,   -- nivel 4
+    tx_psend     bigint      NOT NULL,
+    tx_done      bigint      NOT NULL,
+    rx_valid     bigint      NOT NULL
+);
+
+CREATE UNIQUE INDEX node_health_event
+    ON node_health (node_id, boots, probes, reinits, resets, reboots);
+CREATE INDEX node_health_recent ON node_health (node_id, received_at DESC);
+```
+
+El nodo emite la misma trama tres veces espaciadas un minuto para sobrevivir a un enlace degradado (`frame-format.md` §16.2), así que el consumidor deduplica con el índice único y `ON CONFLICT DO NOTHING`. La tupla identifica el evento sin mirar el instante de llegada, porque cualquier evento nuevo mueve al menos un contador: un arranque sube `boots` y una recuperación sube el contador de su nivel.
+
+Un mensaje de salud de un nodo todavía sin `register` da de alta el nodo con un nombre provisional, que el register posterior corrige. La clave foránea lo exige, y perder el evento sería peor que guardarlo con un nombre incompleto.
+
+La relación entre `tx_psend` y `tx_done` es el indicador de salud del transmisor. Consulta de referencia, últimos eventos de cada nodo con su tasa de confirmación:
+
+```sql
+SELECT node_id, received_at, fault, boots,
+       probes, reinits, resets, reboots,
+       round(100.0 * tx_done / NULLIF(tx_psend, 0), 1) AS pct_confirmadas
+FROM   node_health
+ORDER  BY received_at DESC
+LIMIT  50;
+```
+
+## 7. Escalado futuro (no requerido hoy)
 
 El volumen del TFM (pocos nodos, 1 muestra/s en banco, menos en despliegue) lo maneja PostgreSQL sin ayuda. Si el despliegue creciera:
 
@@ -190,8 +231,8 @@ El volumen del TFM (pocos nodos, 1 muestra/s en banco, menos en despliegue) lo m
 
 Ambas son migraciones aditivas; no condicionan el diseño actual.
 
-## 7. Documentos relacionados
+## 8. Documentos relacionados
 
 - [`batch-format.md`](batch-format.md): identidad y deduplicación (§8.1) que implementan los índices únicos de §2.
 - [`node-config.md`](node-config.md): `reads[]` y su anuncio, origen del catálogo de canales.
-- [`frame-format.md`](frame-format.md): NODE_REGISTER (§13) y el `ts` de captura de TELEMETRY (§3.1).
+- [`frame-format.md`](frame-format.md): NODE_REGISTER (§13), el `ts` de captura de TELEMETRY (§3.1) y NODE_HEALTH (§16).
