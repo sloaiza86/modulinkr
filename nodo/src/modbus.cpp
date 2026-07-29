@@ -39,9 +39,24 @@ void diagHex(const char* label, const uint8_t* d, size_t n) {
 
 }  // namespace
 
-void ModbusRTU::begin(Stream& uart, uint32_t response_timeout_ms) {
+void ModbusRTU::begin(Stream& uart, uint32_t baudrate,
+                      uint32_t response_timeout_ms) {
     uart_ = &uart;
     response_timeout_ms_ = response_timeout_ms;
+
+    // Ventana de purga del cambio de sentido (razonamiento completo en
+    // modbus.h): 1.5 tiempos de carácter, con el carácter contado a 11 bits
+    // como hace la norma. 1.5 * 11 * 1e6 / baudrate microsegundos, o sea
+    // 16500000 / baudrate. Por encima de 19200 el silencio normativo deja
+    // de escalar y queda fijo en 1750 us, así que la ventana topa en su
+    // mitad en lugar de encogerse indefinidamente.
+    if (baudrate == 0) {
+        purge_us_ = 0;
+    } else if (baudrate > 19200) {
+        purge_us_ = 875;
+    } else {
+        purge_us_ = 16500000UL / baudrate;
+    }
 }
 
 ModbusRTU::Status ModbusRTU::readInputRegisters(uint8_t slave_id, uint16_t address,
@@ -137,6 +152,38 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     uart_->write(req, sizeof(req));
     uart_->flush();  // espera a que se vacíe el shift register
 
+    // Purga del cambio de sentido (razonamiento completo en modbus.h). Al
+    // soltar el bus, una línea sin polarizar flota y el receptor entrega
+    // bytes que nadie envió. Se descartan aquí, dentro del silencio que la
+    // norma impone al esclavo antes de responder, y con una ventana de solo
+    // 1.5 tiempos de carácter para dejar margen a los esclavos que no
+    // cumplen ese silencio.
+    if (purge_us_ > 0) {
+        uint8_t  purged[8];
+        size_t   pn    = 0;
+        uint32_t total = 0;
+        const uint32_t t0 = micros();
+        while (micros() - t0 < purge_us_) {
+            while (uart_->available()) {
+                const int b = uart_->read();
+                if (b < 0) break;
+                if (pn < sizeof(purged)) purged[pn++] = static_cast<uint8_t>(b);
+                total++;
+            }
+        }
+        if (total > 0) {
+            purged_total_ += total;
+            if (kDiag) {
+                Serial.printf("[mb-dbg] purga: %lu byte(s) del cambio de sentido "
+                              "en %lu us (acumulado %lu)\n",
+                              static_cast<unsigned long>(total),
+                              static_cast<unsigned long>(purge_us_),
+                              static_cast<unsigned long>(purged_total_));
+                diagHex("purgados", purged, pn);
+            }
+        }
+    }
+
     // Ante cualquier fallo: guarda la evidencia para MODBUS_DEBUG (v3.2)
     // y, con kDiag, imprime las cuatro piezas y escucha la cola tardía.
     // Solo corre en el camino de error, así que no toca el timing del
@@ -187,7 +234,9 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     // se corre la ventana hasta dar con el inicio real de la trama.
     constexpr uint8_t kMaxSyncSkip = 4;
     uint8_t skipped = 0;
+    uint8_t skipped_bytes[kMaxSyncSkip] = {0};
     while (resp[0] != slave_id && skipped < kMaxSyncSkip) {
+        skipped_bytes[skipped] = resp[0];
         resp[0] = resp[1];
         resp[1] = resp[2];
         if (readWithTimeout(resp + 2, 1) < 1) {
@@ -196,8 +245,26 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         skipped++;
     }
     if (kDiag && skipped > 0) {
-        Serial.printf("[mb-dbg] resync: %u byte(s) espurio(s) descartado(s) antes de la trama\n",
-                      skipped);
+        // Qué se descartó decide entre las dos causas posibles, que hasta
+        // ahora no se distinguían porque los bytes se tiraban sin mirarlos:
+        // si coinciden con la cola de la propia petición son eco del
+        // transceptor auto-dirección (el UART software pierde el principio
+        // del eco mientras bit-banguea la transmisión y solo captura el
+        // final); si no coinciden, es ruido de la línea en el cambio de
+        // sentido, que se corrige con polarización y no con software.
+        //
+        // Importa más de lo que parece: esta resincronización para en el
+        // primer byte que valga slave_id, así que un byte espurio con ese
+        // valor la corta antes de tiempo y la trama se malinterpreta. Es la
+        // explicación candidata del invalid_response ocasional que quedó
+        // pendiente el 10-jul-2026.
+        const bool eco = std::memcmp(skipped_bytes,
+                                     req + sizeof(req) - skipped,
+                                     skipped) == 0;
+        Serial.printf("[mb-dbg] resync: %u byte(s) espurio(s) descartado(s) antes de la trama (%s)\n",
+                      skipped, eco ? "ECO de la peticion" : "NO coincide con la peticion");
+        diagHex("espurios", skipped_bytes, skipped);
+        diagHex("peticion", req, sizeof(req));
     }
 
     if (resp[0] != slave_id) {

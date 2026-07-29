@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.31-radio-recovery";
+constexpr const char* kFirmwareVersion = "0.0.33-mb-purge";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -313,11 +313,12 @@ void printBanner() {
                    g_cfg.region, kModemLabel, g_cfg.node_id, g_cfg.node_name);
     Serial.println(F("  H6 fase 3: mesh + respaldo NB-IoT distribuido"));
     Serial.println(F("  UART map:"));
-    Serial.printf ("    Modbus  SoftwareSerial rx=GPIO%d tx=GPIO%d @ %lu %c%u\n",
+    Serial.printf ("    Modbus  SoftwareSerial rx=GPIO%d tx=GPIO%d @ %lu %c%u  purga=%lu us\n",
                    static_cast<int>(kRs485RxPin),
                    static_cast<int>(kRs485TxPin),
                    static_cast<unsigned long>(g_cfg.baudrate),
-                   g_cfg.parity, g_cfg.stopbits);
+                   g_cfg.parity, g_cfg.stopbits,
+                   static_cast<unsigned long>(modbus.purgeWindowUs()));
     Serial.printf ("    LoRa    Serial1        rx=GPIO%d tx=GPIO%d @ 115200\n",
                    static_cast<int>(kLoraRxPin),
                    static_cast<int>(kLoraTxPin));
@@ -1494,6 +1495,11 @@ void setup() {
         Serial.println(F("[reg]    ERROR: catalogo no construible, nodo sin registro"));
     }
 
+    // El driver Modbus se configura antes del banner: solo guarda la
+    // referencia al puerto y calcula la ventana de purga a partir del
+    // baudio, y el banner la reporta.
+    modbus.begin(modbus_uart, g_cfg.baudrate);
+
     printBanner();
     Serial.printf("  Reg   : catalogo=%u B en %u fragmento(s)\n",
                   static_cast<unsigned>(g_reg_catalog_len), g_reg_frag_total);
@@ -1503,7 +1509,6 @@ void setup() {
     modbus_uart.begin(g_cfg.baudrate,
                       swserialConfig(g_cfg.parity, g_cfg.stopbits),
                       kRs485RxPin, kRs485TxPin);
-    modbus.begin(modbus_uart);
     delay(400);  // margen para que el ISR de SoftwareSerial se estabilice
 
     // ----- Sampler dirigido por el config -----

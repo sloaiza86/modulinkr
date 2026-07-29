@@ -19,6 +19,49 @@
 //     los parámetros adecuados antes de pasarlo a este driver.
 //   - El tiempo entre tramas (3.5 caracteres a 9600 baudios ≈ 3.65 ms)
 //     se cumple sobradamente con el espaciado natural del loop a 1 Hz.
+//
+// Purga del cambio de sentido (29-jul-2026)
+// -----------------------------------------
+// El RS-485 lleva el dato en la DIFERENCIA de tensión entre sus dos hilos,
+// A y B, y el estado de reposo exige que A esté por encima de B. Quién
+// sostiene esa diferencia cuando nadie transmite es responsabilidad del
+// bus, no del transceptor: con solo dos bocas y sin resistencias de
+// polarización, en cuanto el emisor suelta la línea A y B quedan al mismo
+// potencial y el receptor no puede decidir si eso es un 1 o un 0. Flapea
+// con cualquier interferencia y entrega bytes que nadie envió.
+//
+// En banco se capturaron siempre los mismos: 0xFE, 0xFC y 0xC0, es decir
+// 11111110, 11111100 y 11000000. No son datos de nadie, son un flanco
+// lento troceado en bits por el muestreo del UART. Se confirmó que no es
+// eco de la propia petición porque no coinciden con ella, y porque
+// alejar el nodo del resto del equipamiento reduce su aparición, cosa que
+// un eco no haría. Con el acelerómetro del supernodo no ocurre, muy
+// probablemente porque ese módulo trae su propia polarización en placa.
+//
+// La purga los descarta en un instante en el que la norma GARANTIZA que
+// no puede haber datos buenos. Modbus RTU obliga al esclavo a respetar un
+// silencio de 3.5 tiempos de carácter antes de responder (unos 4 ms a
+// 9600 baudios, contando el carácter a 11 bits como hace la norma), y los
+// bytes fantasma nacen en las primeras decenas de microsegundos tras
+// soltar el bus, no repartidos por todo ese hueco.
+//
+// La ventana es de 1.5 tiempos de carácter, no de los 3.5 completos, y esa
+// diferencia es deliberada: existen esclavos baratos que incumplen el
+// silencio y responden antes. Con 1.5 quedan más del doble de margen, así
+// que un dispositivo tendría que contestar en menos de 1.7 ms (a 9600)
+// para verse afectado. Se calcula a partir del baudio en vez de fijarla,
+// porque a 19200 el silencio obligatorio es la mitad; y por encima de
+// 19200 la norma deja de escalar y fija el silencio en 1750 us, así que
+// la ventana topa en 875 us en lugar de seguir encogiendo.
+//
+// La resincronización de trama de la implementación se conserva como red
+// de seguridad. Con la purga funcionando no debería llegar a saltar.
+//
+// Esto es un paliativo, no la cura. La solución física es polarizar el
+// bus (resistencia de A a la alimentación y de B a masa), que es lo que
+// recomienda la propia especificación de Modbus sobre línea serie. La
+// purga existe porque el firmware acabará en buses ajenos que no se
+// controlan.
 
 #pragma once
 
@@ -39,8 +82,19 @@ public:
     // Inicializa el driver con un Stream ya configurado (HardwareSerial o
     // SoftwareSerial). El caller debe haber llamado .begin() del UART con
     // los parámetros adecuados (típicamente 9600 8N1, GPIO 33 RX / 23 TX).
+    // baudrate es el mismo con el que se abrió ese UART: de él sale la
+    // ventana de purga del cambio de sentido (ver §"Purga" arriba).
     // response_timeout_ms aplica al tiempo total de espera de respuesta.
-    void begin(Stream& uart, uint32_t response_timeout_ms = 1000);
+    void begin(Stream& uart, uint32_t baudrate,
+               uint32_t response_timeout_ms = 1000);
+
+    // Bytes fantasma descartados por la purga desde el arranque. Un valor
+    // que crece sin que aparezcan errores de lectura es la señal de un bus
+    // sin polarizar que la purga está compensando.
+    uint32_t purgedBytes() const { return purged_total_; }
+
+    // Duración de la ventana de purga en microsegundos, para el banner.
+    uint32_t purgeWindowUs() const { return purge_us_; }
 
     // Lee `count` registros de entrada (función 0x04) desde el esclavo
     // `slave_id`, empezando en `address`. Devuelve los valores en `out`
@@ -95,6 +149,8 @@ public:
 private:
     Stream*  uart_ = nullptr;
     uint32_t response_timeout_ms_ = 1000;
+    uint32_t purge_us_     = 0;   // ventana del cambio de sentido
+    uint32_t purged_total_ = 0;   // bytes fantasma descartados desde el boot
     uint8_t  last_exception_ = 0;
     FailEvidence txn_;
     bool         txn_valid_ = false;
