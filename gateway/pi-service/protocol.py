@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x32          # v3.2 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x33          # v3.3 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -125,6 +125,7 @@ FRAME_ALARM         = 0x03
 FRAME_NODE_REGISTER = 0x04
 FRAME_WELCOME       = 0x05
 FRAME_MODBUS_DEBUG  = 0x06
+FRAME_NODE_HEALTH   = 0x07
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -137,6 +138,7 @@ FRAME_TYPE_NAMES = {
     FRAME_NODE_REGISTER: 'NODE_REGISTER',
     FRAME_WELCOME:       'WELCOME',
     FRAME_MODBUS_DEBUG:  'MODBUS_DEBUG',
+    FRAME_NODE_HEALTH:   'NODE_HEALTH',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
@@ -156,6 +158,17 @@ MODBUS_STATUS_NAMES = {
 # Status de ACK (§4.2).
 ACK_OK              = 0x00
 ACK_CRC_ERROR       = 0x01
+# Motivo del fallo de radio reportado en NODE_HEALTH (spec §16.1).
+HEALTH_FAULT_NONE      = 0x00
+HEALTH_FAULT_TX_MUTE   = 0x01
+HEALTH_FAULT_RX_SILENT = 0x02
+
+HEALTH_FAULT_NAMES = {
+    HEALTH_FAULT_NONE:      'ninguno',
+    HEALTH_FAULT_TX_MUTE:   'transmisor mudo',
+    HEALTH_FAULT_RX_SILENT: 'receptor mudo',
+}
+
 ACK_SCHEMA_MISMATCH = 0x02
 ACK_UNKNOWN_NODE    = 0x03
 ACK_DECODE_ERROR    = 0x04
@@ -415,6 +428,27 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['mb_exception']   = (status_b >> 4) & 0x0F
         out['mb_req']         = payload[4:4 + req_len]
         out['mb_resp']        = payload[4 + req_len:4 + req_len + resp_len]
+
+    elif frame_type == FRAME_NODE_HEALTH:
+        # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
+        # radio, la causa del arranque, los arranques acumulados, las
+        # recuperaciones por nivel y los contadores de radio.
+        if payload_length != 24:
+            out['error'] = (f'NODE_HEALTH payload_length={payload_length}, '
+                            f'esperado 24')
+            return out
+        out['hl_fault']        = payload[0]
+        out['hl_fault_name']   = HEALTH_FAULT_NAMES.get(
+            payload[0], f'unknown(0x{payload[0]:02X})')
+        out['hl_reset_reason'] = payload[1]
+        out['hl_boots']        = struct.unpack_from('<H', payload, 2)[0]
+        out['hl_probes']       = struct.unpack_from('<H', payload, 4)[0]
+        out['hl_reinits']      = struct.unpack_from('<H', payload, 6)[0]
+        out['hl_resets']       = struct.unpack_from('<H', payload, 8)[0]
+        out['hl_reboots']      = struct.unpack_from('<H', payload, 10)[0]
+        out['hl_tx_psend']     = struct.unpack_from('<I', payload, 12)[0]
+        out['hl_tx_done']      = struct.unpack_from('<I', payload, 16)[0]
+        out['hl_rx_valid']     = struct.unpack_from('<I', payload, 20)[0]
 
     return out
 

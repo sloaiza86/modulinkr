@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x32` (= `v3.2`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x33` (= `v3.3`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.3 (28-jul-2026)**: aparece la trama NODE_HEALTH (`frame_type = 0x07`, §16), con el estado de la radio del nodo: motivo del último fallo, causa del arranque, arranques acumulados, recuperaciones ejecutadas por nivel y contadores de transmisión y recepción. El bump es aditivo y no cambia ninguna trama existente: un receptor v3.2 la descarta como tipo desconocido. Motiva el cambio el incidente del 27 y 28 de julio de 2026, en el que un módulo colgado dejó al nodo un día entero transmitiendo al vacío sin que ningún contador lo delatara.
 
 **v3.2 (20-jul-2026)**: visibilidad del estado Modbus desde el gateway. TELEMETRY gana un byte de estado por read (§3.1) y **se emite en cada ciclo con reloj sincronizado, incluso con todas las lecturas fallidas**: una lectura fallida viaja como NaN con su estado, en lugar del silencio de v3.1 (que hacía indistinguible "sensor desconectado" de "nodo muerto"). Aparece la trama MODBUS_DEBUG (`frame_type = 0x06`, §15): la transacción Modbus fallida en crudo, activable con `modbus.debug` del config (`node-config.md` §5). Misma nota de honestidad que en v2.1: el cambio de layout de TELEMETRY se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
@@ -78,7 +80,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x32` para v3.2. |
+| `schema_version` | `0x33` para v3.3. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -122,6 +124,7 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x04` | NODE_REGISTER | uplink | Registro del nodo al arrancar: fw, catálogo de reads y writes. Ver §13. |
 | `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
 | `0x06` | MODBUS_DEBUG | uplink | Transacción Modbus fallida en crudo (v3.2). Ver §15. |
+| `0x07` | NODE_HEALTH | uplink | Estado de la radio del nodo y recuperaciones (v3.3). Ver §16. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
@@ -879,7 +882,50 @@ dev_index   status   req_len   resp_len   req           resp
 
 El gateway decodifica la trama y la escribe en su log (journal del servicio), y ahí termina: sin ACK, sin buffer de telemetría y sin publicación MQTT (decisión del 20-jul-2026: el debug se observa en el Pi, no en el broker).
 
-## 16. Cambios respecto a v1.0
+## 16. Trama NODE_HEALTH (uplink, `frame_type = 0x07`, v3.3)
+
+Estado de la radio del nodo y de las recuperaciones que ha necesitado. Nace del incidente del 27 y 28 de julio de 2026: el módulo RAK3172 se colgó dos veces, una por el lado del transmisor y otra por el del receptor, y el nodo siguió reportando envíos correctos mientras el gateway no recibía nada. Un nodo que se recupera solo borra la prueba de que algo iba mal, así que el estado tiene que viajar y quedar guardado.
+
+### 16.1 Estructura del payload
+
+24 bytes fijos:
+
+```
+byte  0      fault             (1 B)   motivo del último fallo
+byte  1      reset_reason      (1 B)   causa del último arranque
+bytes 2-3    boots             (2 B)   arranques acumulados, uint16 LE
+bytes 4-5    probes            (2 B)   recuperaciones de nivel 1
+bytes 6-7    reinits           (2 B)   recuperaciones de nivel 2
+bytes 8-9    resets            (2 B)   recuperaciones de nivel 3
+bytes 10-11  reboots           (2 B)   recuperaciones de nivel 4
+bytes 12-15  tx_psend          (4 B)   escrituras AT+PSEND, uint32 LE
+bytes 16-19  tx_done           (4 B)   eventos TXP2P DONE, uint32 LE
+bytes 20-23  rx_valid          (4 B)   tramas válidas recibidas, uint32 LE
+```
+
+Valores de `fault`:
+
+| Valor | Nombre | Significado |
+| --- | --- | --- |
+| `0x00` | NONE | Sin fallos desde el arranque |
+| `0x01` | TX_MUTE | Escrituras al módulo sin su confirmación `TXP2P DONE` |
+| `0x02` | RX_SILENT | Sin recepciones válidas mientras el nodo transmitía |
+
+`reset_reason` es el valor crudo de `esp_reset_reason()`, que distingue el encendido normal del reinicio por software (nivel 4 de la escalera), del pánico y del brownout.
+
+La relación entre `tx_psend` y `tx_done` es el indicador de salud del transmisor: toda escritura acaba en `TXP2P DONE`, `AT_BUSY_ERROR` o `ERROR`, así que una divergencia sostenida entre ambos significa que el módulo acepta comandos y no transmite. Los contadores de recuperación van en uint16 porque un nodo que supere las 65535 recuperaciones tiene un problema que ningún contador resuelve.
+
+### 16.2 Reglas de emisión
+
+Se emite al completar el registro en la red (primer WELCOME de la sesión) y tras cada recuperación que se confirme estable. Es best-effort, como el HEARTBEAT: sin ACK, sin reintentos y sin cola de pendientes, porque la cola de reconciliación solo sabe reconstruir tramas TELEMETRY. Se compensa repitiendo la emisión tres veces espaciadas un minuto, ya que el dato interesa precisamente cuando el enlace está degradado.
+
+Los mismos contadores viven en `/health.json` en la flash del nodo, que es lo que les permite sobrevivir a un reinicio.
+
+### 16.3 En el gateway
+
+El gateway no la confirma ni la mete en su buffer de telemetría: la registra en su log y la publica al topic `modulinkr/v1/{node_id}/health`, sin retain, porque es un evento con su instante y no un estado actual. La repetición del nodo cubre la pérdida de una copia suelta.
+
+## 17. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -928,7 +974,7 @@ Resumen para trazabilidad del TFM:
 3. Trama nueva MODBUS_DEBUG (`0x06`, §15): transacción fallida en crudo, activable con `modbus.debug` del config, best-effort sin ACK.
 4. Nota de honestidad habitual: el layout de TELEMETRY no es parseable por un receptor v3.1, pero todo el despliegue se flashea a la vez; se acepta como minor.
 
-## 17. Documentos relacionados
+## 18. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.

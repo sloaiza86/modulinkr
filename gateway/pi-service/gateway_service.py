@@ -343,6 +343,29 @@ class GatewayService:
                 self.n_notconf += 1
             return
 
+        # NODE_HEALTH (v3.3, spec §16.3): estado de la radio del nodo. Sin ACK
+        # y sin buffer, como el MODBUS_DEBUG: el nodo lo repite varias veces
+        # espaciadas, así que una pérdida no deja al gateway sin el dato. Se
+        # registra en el log y se publica a MQTT, porque a diferencia del
+        # debug Modbus interesa fuera del banco: es el histórico de fallos y
+        # recuperaciones de radio de cada nodo.
+        if ft == protocol.FRAME_NODE_HEALTH:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                LOG.info("node-health origin=%s fallo=%s arranques=%d "
+                         "reset=%d L1=%d L2=%d L3=%d L4=%d "
+                         "psend=%d done=%d rx=%d",
+                         protocol.addr_name(parsed["origin_id"]),
+                         parsed["hl_fault_name"], parsed["hl_boots"],
+                         parsed["hl_reset_reason"],
+                         parsed["hl_probes"], parsed["hl_reinits"],
+                         parsed["hl_resets"], parsed["hl_reboots"],
+                         parsed["hl_tx_psend"], parsed["hl_tx_done"],
+                         parsed["hl_rx_valid"])
+                self._publish_node_health(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
         # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
@@ -462,6 +485,15 @@ class GatewayService:
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
+    def _publish_node_health(self, parsed: dict) -> None:
+        """Publica la trama de salud al broker. Sin buffer local: el nodo la
+        repite varias veces espaciadas, así que una pérdida puntual no deja
+        al gateway sin el dato, y guardarla en el buffer la mezclaría con la
+        telemetría, que tiene otra semántica de entrega."""
+        if self.mqtt is None or not self.mqtt.connected:
+            return
+        self.mqtt.publish_health(parsed["origin_id"], parsed)
+
     def _handle_register(self, parsed: dict) -> None:
         """Procesa un fragmento de NODE_REGISTER. Con el catálogo completo:
         decodifica, guarda en node_catalog y responde WELCOME. Idempotente:
@@ -525,16 +557,17 @@ class GatewayService:
         mqtt_up  = self.mqtt.connected if self.mqtt is not None else False
         pub_tel  = self.mqtt.n_pub_tel if self.mqtt is not None else 0
         pub_cat  = self.mqtt.n_pub_cat if self.mqtt is not None else 0
+        pub_hlt  = self.mqtt.n_pub_hlt if self.mqtt is not None else 0
         pending  = self.buf.pending_publish() if self.buf is not None else -1
         LOG.info(
             "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
             "overheard=%d notconf=%d drop=%d micfail=%d buffer=%d "
-            "mqtt=%s pub_tel=%d pub_cat=%d pending=%d",
+            "mqtt=%s pub_tel=%d pub_cat=%d pub_hlt=%d pending=%d",
             self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
             self.n_reg, self.n_welcome,
             self.n_overheard, self.n_notconf, self.n_drop, self.n_micfail,
             self.buf.count() if self.buf is not None else -1,
-            "up" if mqtt_up else "down", pub_tel, pub_cat, pending,
+            "up" if mqtt_up else "down", pub_tel, pub_cat, pub_hlt, pending,
         )
 
     # ----- Estado hacia el visor -----

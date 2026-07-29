@@ -42,6 +42,10 @@ bool LoraP2P::begin(HardwareSerial& uart,
                     uint8_t ttl) {
     initialized_ = false;
     uart_        = &uart;
+    rx_pin_      = rx_pin;
+    tx_pin_      = tx_pin;
+    freq_hz_     = freq_hz;
+    tx_dbm_      = tx_power_dbm;
     network_id_  = network_id;
     node_id_     = node_id;
     ttl_         = ttl;
@@ -49,16 +53,28 @@ bool LoraP2P::begin(HardwareSerial& uart,
     bw_khz_      = bw_khz;
     cr_index_    = cr_index;
 
-    if (!module_.init(&uart, rx_pin, tx_pin, RAK3172_BPS_115200)) {
+    if (!applyRadioConfig()) return false;
+
+    clearFaults();
+    discardTxQueue();
+
+    initialized_ = true;
+    return true;
+}
+
+bool LoraP2P::applyRadioConfig() {
+    if (uart_ == nullptr) return false;
+
+    if (!module_.init(uart_, rx_pin_, tx_pin_, RAK3172_BPS_115200)) {
         return false;
     }
 
-    if (!module_.config(static_cast<long>(freq_hz),
-                        sf,
-                        bw_khz,
-                        cr_index,
+    if (!module_.config(static_cast<long>(freq_hz_),
+                        sf_,
+                        bw_khz_,
+                        cr_index_,
                         kPreambleSymbols,
-                        tx_power_dbm)) {
+                        tx_dbm_)) {
         return false;
     }
 
@@ -79,23 +95,81 @@ bool LoraP2P::begin(HardwareSerial& uart,
         return false;
     }
 
-    // Base temporal de la detección de radio muda: sin fijarla, el criterio
-    // de silencio compararía contra un último DONE en el instante 0 y
-    // dispararía en falso durante el primer ciclo de envío.
-    last_done_ms_  = millis();
-    last_psend_ms_ = last_done_ms_;
+    return true;
+}
+
+void LoraP2P::clearFaults() {
+    // Base temporal de los dos detectores: sin fijarla, el criterio de
+    // silencio compararía contra un último evento en el instante 0 y
+    // dispararía en falso durante el primer ciclo.
+    const uint32_t now = millis();
+
+    last_done_ms_  = now;
+    last_psend_ms_ = now;
     psend_no_done_ = 0;
     mute_flagged_  = false;
 
-    // Un begin() sobre una cola con tramas (reinicialización de la radio) las
-    // pierde: se contabilizan en vez de desaparecer sin rastro.
+    last_rx_ms_       = now;
+    psend_at_last_rx_ = tx_psend_;
+    rx_silent_        = false;
+}
+
+void LoraP2P::discardTxQueue() {
+    // Las tramas encoladas no sobreviven a una reinicialización de la radio:
+    // se contabilizan en vez de desaparecer sin rastro.
     tx_dropped_  += txq_count_;
     txq_head_     = 0;
     txq_count_    = 0;
     tx_in_flight_ = false;
+    line_len_     = 0;
+}
 
+bool LoraP2P::probeModule() {
+    if (uart_ == nullptr) return false;
+
+    // Bloquea una ventana corta. Solo se llama con la radio ya en falta, y
+    // puede tragarse un evento RXP2P que estuviera a medias en el buffer:
+    // coste asumible en ese estado, y el emisor lo reintentará.
+    while (uart_->available() > 0) uart_->read();
+    line_len_ = 0;
+    uart_->print("AT\r\n");
+
+    char   buf[64];
+    size_t n = 0;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < kProbeTimeoutMs) {
+        while (uart_->available() > 0) {
+            const char c = static_cast<char>(uart_->read());
+            if (n < sizeof(buf) - 1) buf[n++] = c;
+        }
+        buf[n] = '\0';
+        if (strstr(buf, "OK") != nullptr) return true;
+    }
+    return false;
+}
+
+bool LoraP2P::reinitRadio() {
+    initialized_ = false;
+    discardTxQueue();
+
+    if (!applyRadioConfig()) return false;
+
+    clearFaults();
     initialized_ = true;
     return true;
+}
+
+bool LoraP2P::resetModule() {
+    if (uart_ == nullptr) return false;
+
+    initialized_ = false;
+    uart_->print("ATZ\r\n");
+    delay(kResetSettleMs);
+    while (uart_->available() > 0) uart_->read();
+
+    // El reset devuelve el módulo a su configuración por defecto: sin la
+    // reinicialización posterior quedaría fuera del canal del despliegue.
+    return reinitRadio();
 }
 
 void LoraP2P::queryVersion() {
@@ -313,6 +387,42 @@ LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
                         ttl_,
                         payload,
                         static_cast<uint8_t>(4u + req_len + resp_len));
+}
+
+LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
+                                        uint8_t fault, uint8_t reset_reason,
+                                        uint16_t boots,
+                                        uint16_t l1, uint16_t l2,
+                                        uint16_t l3, uint16_t l4) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v3.3 (spec §16), 24 bytes. Los contadores de recuperación van
+    // en uint16: un nodo que supere las 65535 recuperaciones tiene un
+    // problema que ningún contador va a resolver.
+    uint8_t payload[24];
+    payload[0] = fault;
+    payload[1] = reset_reason;
+    std::memcpy(&payload[2],  &boots, sizeof(boots));
+    std::memcpy(&payload[4],  &l1,    sizeof(l1));
+    std::memcpy(&payload[6],  &l2,    sizeof(l2));
+    std::memcpy(&payload[8],  &l3,    sizeof(l3));
+    std::memcpy(&payload[10], &l4,    sizeof(l4));
+
+    const uint32_t psend = tx_psend_;
+    const uint32_t done  = tx_done_;
+    const uint32_t rxv   = rx_valid_;
+    std::memcpy(&payload[12], &psend, sizeof(psend));
+    std::memcpy(&payload[16], &done,  sizeof(done));
+    std::memcpy(&payload[20], &rxv,   sizeof(rxv));
+
+    return buildAndSend(hop_dst,
+                        node_id_,
+                        protocol::kAddrGateway,
+                        seq,
+                        protocol::kFrameNodeHealth,
+                        ttl_,
+                        payload,
+                        sizeof(payload));
 }
 
 LoraP2P::Status LoraP2P::sendHeartbeat(uint16_t seq, uint32_t tx_ms,
@@ -708,6 +818,22 @@ void LoraP2P::poll() {
     }
 
     checkMute();
+    checkRxSilence();
+}
+
+void LoraP2P::checkRxSilence() {
+    if (rx_silent_) return;
+
+    // Sin transmisiones desde la última recepción no hay nada que juzgar: una
+    // radio que no habla tampoco recibe ACKs, y el silencio no dice nada del
+    // receptor.
+    if (tx_psend_ == psend_at_last_rx_) return;
+
+    if (static_cast<int32_t>(millis() - last_rx_ms_) >=
+        static_cast<int32_t>(kRxSilenceMs)) {
+        rx_silent_ = true;
+        rx_silence_events_++;
+    }
 }
 
 void LoraP2P::checkMute() {
@@ -933,6 +1059,12 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
 
     ring_count_++;
     rx_valid_++;
+
+    // Prueba de que el receptor sigue vivo: reabre la ventana del detector
+    // de silencio de RX (fase 2).
+    last_rx_ms_       = millis();
+    psend_at_last_rx_ = tx_psend_;
+    rx_silent_        = false;
 }
 
 bool LoraP2P::readFrame(RxFrame& out) {

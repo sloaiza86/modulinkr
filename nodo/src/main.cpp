@@ -60,6 +60,7 @@
 #include <SoftwareSerial.h>
 #include <ArduinoJson.h>
 #include <esp_random.h>
+#include <esp_system.h>
 
 #include "modbus.h"
 #include "lora.h"
@@ -73,11 +74,12 @@
 #include "commission.h"
 #include "sampler.h"
 #include "nodeclock.h"
+#include "health.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.30-tx-queue";
+constexpr const char* kFirmwareVersion = "0.0.31-radio-recovery";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -185,6 +187,26 @@ constexpr uint32_t kRegBackoffMinMs = 5000;
 constexpr uint32_t kRegBackoffMaxMs = 60000;
 constexpr size_t   kCatalogMax      = 700;   // peor caso del config (8r+4w)
 constexpr size_t   kRegFragMax      = protocol::kMaxPayload - 2;
+
+// ----- Supervisión de la radio (fase 2 del watchdog) -----
+//
+// La escalera avanza al ritmo de las ventanas de los detectores del driver:
+// tras ejecutar un nivel se limpian las faltas, y que vuelvan a dispararse es
+// la prueba de que ese nivel no bastó. No hace falta temporizador de escalada.
+constexpr uint32_t kRecoveryVerifyMs   = 200000;    // supera la ventana de RX (180 s)
+constexpr uint32_t kExhaustedRetryMs   = 300000;    // reintento con la escalera agotada
+constexpr uint32_t kRebootWindowMs     = 21600000;  // 6 h
+constexpr uint8_t  kRebootMaxPerWindow = 3;
+constexpr uint32_t kHealthRepeatMs     = 60000;
+constexpr uint8_t  kHealthRepeats      = 3;
+
+health::Record g_health;
+uint8_t  g_recov_level     = 0;   // 0 sana, 1..4 último nivel ejecutado
+uint32_t g_recov_step_ms   = 0;   // millis() de esa ejecución
+uint8_t  g_reboots_window  = 0;
+uint32_t g_reboot_win_ms   = 0;
+uint8_t  g_health_tx_left  = 0;   // emisiones pendientes de NODE_HEALTH
+uint32_t g_health_tx_ms    = 0;
 
 bool     g_registered      = false;
 uint8_t  g_reg_catalog[kCatalogMax];
@@ -698,6 +720,10 @@ void handleWelcome(const LoraP2P::RxFrame& f) {
                 Serial.printf("[reg]    WELCOME: registrado en el gateway, epoch=%lu%s\n",
                               static_cast<unsigned long>(epoch),
                               epoch == 0 ? " (gateway sin hora)" : "");
+                // Primer registro de esta sesión: el gateway recibe el estado
+                // de salud acumulado, incluida la causa de este arranque.
+                g_health_tx_left = kHealthRepeats;
+                g_health_tx_ms   = 0;
             }
             g_registered     = true;
             g_reg_backoff_ms = kRegBackoffMinMs;
@@ -1093,31 +1119,159 @@ void heartbeatTick(uint32_t now) {
                   static_cast<unsigned long>(lora.txDropped()));
 }
 
-// Salud del camino de transmisión (fase 1 del watchdog de radio). Informa
-// del cruce del umbral de sospecha y de la vuelta a la normalidad, sin
-// actuar: la escalera de recuperación llega en la fase 2. Un aviso aquí con
-// el nodo aparentemente sano significa que las tramas no salen al aire,
-// aunque tx_ok siga subiendo.
-void radioHealthTick() {
-    static bool warned = false;
-    const bool mute = lora.muteSuspected();
-
-    if (mute && !warned) {
-        warned = true;
-        Serial.printf("[radio]  AVISO: sin TXP2P DONE, radio muda sospechada  "
-                      "psend=%lu done=%lu busy=%lu err=%lu tx_ms=%lu  eventos=%lu\n",
-                      static_cast<unsigned long>(lora.txPsend()),
-                      static_cast<unsigned long>(lora.txDone()),
-                      static_cast<unsigned long>(lora.busyEvents()),
-                      static_cast<unsigned long>(lora.txErrors()),
-                      static_cast<unsigned long>(lora.txAirtimeMs()),
-                      static_cast<unsigned long>(lora.muteEvents()));
-    } else if (!mute && warned) {
-        warned = false;
-        Serial.printf("[radio]  transmisor recuperado, TXP2P DONE de nuevo  psend=%lu done=%lu\n",
-                      static_cast<unsigned long>(lora.txPsend()),
-                      static_cast<unsigned long>(lora.txDone()));
+// Supervisor de la radio (fase 2). El driver aporta el mecanismo (los dos
+// detectores y los tres niveles de recuperación); aquí vive la política: qué
+// nivel toca, cuándo escalar y hasta dónde. El nivel 4, reiniciar el ESP32,
+// no está en el driver a propósito, porque exige escribir antes el registro
+// persistente y porque un driver no debería poder reiniciar el nodo.
+//
+// El ritmo de escalada lo marcan las propias ventanas de los detectores: tras
+// ejecutar un nivel se limpian las faltas, y que vuelvan a dispararse es la
+// prueba de que ese nivel no sirvió. Con el transmisor mudo eso son unos 25 s
+// por escalón, y con el receptor mudo 180 s.
+void radioHealthTick(uint32_t now) {
+    if (!lora.radioFaulted()) {
+        // Una recuperación solo se da por buena cuando la radio aguanta más
+        // que la ventana del detector más lento: antes de eso, el silencio de
+        // las faltas solo significa que se acaban de limpiar.
+        if (g_recov_level > 0 &&
+            static_cast<int32_t>(now - g_recov_step_ms) >=
+                static_cast<int32_t>(kRecoveryVerifyMs)) {
+            Serial.printf("[radio]  radio estable tras L%u  psend=%lu done=%lu rx=%lu\n",
+                          g_recov_level,
+                          static_cast<unsigned long>(lora.txPsend()),
+                          static_cast<unsigned long>(lora.txDone()),
+                          static_cast<unsigned long>(lora.rxValid()));
+            g_recov_level     = 0;
+            g_health_tx_left  = kHealthRepeats;
+            g_health_tx_ms    = 0;
+        }
+        return;
     }
+
+    // Falta activa: se anota el motivo y la foto de los contadores antes de
+    // tocar nada, para que el registro diga qué se vio y no qué quedó.
+    const health::Fault fault = lora.rxSilent() ? health::Fault::RX_SILENT
+                                                : health::Fault::TX_MUTE;
+    g_health.last_fault       = static_cast<uint8_t>(fault);
+    g_health.last_event_epoch = nodeclock::epochNow();
+    g_health.tx_psend         = lora.txPsend();
+    g_health.tx_done          = lora.txDone();
+    g_health.rx_valid         = lora.rxValid();
+
+    const char* causa = (fault == health::Fault::RX_SILENT)
+                            ? "sin recepciones validas, receptor mudo"
+                            : "sin TXP2P DONE, transmisor mudo";
+
+    // Escalera agotada: se sigue reintentando la reconfiguración con backoff
+    // largo, pero sin más reinicios del nodo. Un nodo aislado de verdad
+    // (gateway apagado o fuera de alcance) acaba aquí, y aquí no hace daño.
+    if (g_recov_level >= 4) {
+        if (static_cast<int32_t>(now - g_recov_step_ms) <
+            static_cast<int32_t>(kExhaustedRetryMs)) {
+            return;
+        }
+        g_recov_step_ms = now;
+        g_health.reinits++;
+        Serial.printf("[radio]  escalera agotada (%s): reintento de reinicializacion\n", causa);
+        lora.reinitRadio();
+        health::save(g_health);
+        return;
+    }
+
+    g_recov_level++;
+    g_recov_step_ms = now;
+
+    switch (g_recov_level) {
+        case 1: {
+            g_health.probes++;
+            const bool vivo = lora.probeModule();
+            Serial.printf("[radio]  L1 sondeo AT (%s): modulo %s\n",
+                          causa, vivo ? "responde" : "MUDO en la UART");
+            // El sondeo no arregla nada por sí solo; deja constancia de si la
+            // UART sigue viva antes de reconfigurar.
+            break;
+        }
+        case 2: {
+            g_health.reinits++;
+            const bool ok = lora.reinitRadio();
+            Serial.printf("[radio]  L2 reinicializacion de la radio: %s\n",
+                          ok ? "OK" : "FALLO");
+            if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
+            break;
+        }
+        case 3: {
+            g_health.resets++;
+            const bool ok = lora.resetModule();
+            Serial.printf("[radio]  L3 ATZ y reconfiguracion: %s\n", ok ? "OK" : "FALLO");
+            if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
+            break;
+        }
+        case 4: {
+            // Tope por ventana contra el bucle de reinicios: superado, el
+            // nodo pasa a reintentar solo la reconfiguración.
+            if (now - g_reboot_win_ms >= kRebootWindowMs) {
+                g_reboot_win_ms  = now;
+                g_reboots_window = 0;
+            }
+            if (g_reboots_window >= kRebootMaxPerWindow) {
+                Serial.printf("[radio]  L4 omitido: %u reinicios en la ventana, "
+                              "se mantiene la radio en reintento\n",
+                              static_cast<unsigned>(g_reboots_window));
+                break;
+            }
+            g_reboots_window++;
+            g_health.reboots++;
+            Serial.printf("[radio]  L4 reinicio del nodo (%s). Registro guardado.\n", causa);
+            Serial.flush();
+            health::save(g_health);
+            delay(100);
+            ESP.restart();
+            break;
+        }
+        default:
+            break;
+    }
+
+    health::save(g_health);
+}
+
+// Emisión de la trama de salud (frame-format.md §16). Sale al completarse el
+// registro y tras cada recuperación confirmada. Es best-effort, porque la
+// cola de pendientes solo sabe reconstruir TELEMETRY para el reintento, así
+// que se compensa repitiendo la emisión kHealthRepeats veces espaciadas: el
+// dato interesa justo cuando el enlace está degradado.
+void nodeHealthTick(uint32_t now) {
+    if (g_health_tx_left == 0) return;
+    if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
+    if (g_health_tx_ms != 0 &&
+        static_cast<int32_t>(now - g_health_tx_ms) < static_cast<int32_t>(kHealthRepeatMs)) {
+        return;
+    }
+
+    nextSeq();
+    if (lora.sendNodeHealth(g_lora_seq, mesh.parentId(),
+                            g_health.last_fault, g_health.reset_reason,
+                            static_cast<uint16_t>(g_health.boots),
+                            static_cast<uint16_t>(g_health.probes),
+                            static_cast<uint16_t>(g_health.reinits),
+                            static_cast<uint16_t>(g_health.resets),
+                            static_cast<uint16_t>(g_health.reboots))
+        != LoraP2P::Status::OK) {
+        return;   // cola llena o radio no lista: se reintenta en el próximo tick
+    }
+
+    g_health_tx_ms = now;
+    g_health_tx_left--;
+    Serial.printf("[radio]  NODE_HEALTH emitida seq=%u boots=%lu L1=%lu L2=%lu L3=%lu L4=%lu arranque=%s (quedan %u)\n",
+                  g_lora_seq,
+                  static_cast<unsigned long>(g_health.boots),
+                  static_cast<unsigned long>(g_health.probes),
+                  static_cast<unsigned long>(g_health.reinits),
+                  static_cast<unsigned long>(g_health.resets),
+                  static_cast<unsigned long>(g_health.reboots),
+                  health::resetReasonName(g_health.reset_reason),
+                  static_cast<unsigned>(g_health_tx_left));
 }
 
 // Construcción y publicación del mensaje de telemetría MQTT
@@ -1274,7 +1428,8 @@ void setup() {
     // Se carga ANTES que todo: el resto del arranque depende de él. Sin
     // config o con config inválido el nodo no opera: el loop queda en
     // modo comisionamiento esperando un CFG.PUT por USB.
-    if (!configstore::begin()) {
+    const bool fs_ready = configstore::begin();
+    if (!fs_ready) {
         snprintf(g_cfg_err, sizeof(g_cfg_err),
                  "LittleFS no monta ni tras formatear");
     } else {
@@ -1288,6 +1443,24 @@ void setup() {
                                      sizeof(g_cfg_err));
             free(cfg_text);
         }
+    }
+
+    // Registro de salud (fase 3): vive en la misma LittleFS que el config, así
+    // que se carga con ella montada. La causa del arranque distingue un
+    // encendido normal de un reinicio propio (L4 de la escalera), de un pánico
+    // o de un brownout, que es justo lo que no se sabía de los dos incidentes.
+    if (fs_ready) {
+        health::load(g_health);
+        g_health.boots++;
+        g_health.reset_reason = static_cast<uint8_t>(esp_reset_reason());
+        health::save(g_health);
+        Serial.printf("[health] arranque %lu, causa: %s  (L1=%lu L2=%lu L3=%lu L4=%lu)\n",
+                      static_cast<unsigned long>(g_health.boots),
+                      health::resetReasonName(g_health.reset_reason),
+                      static_cast<unsigned long>(g_health.probes),
+                      static_cast<unsigned long>(g_health.reinits),
+                      static_cast<unsigned long>(g_health.resets),
+                      static_cast<unsigned long>(g_health.reboots));
     }
 
     // El comisionamiento atiende SIEMPRE, configurado o no: es la vía
@@ -1470,7 +1643,8 @@ void loop() {
             outboxDrainTick(tnow);
             ntpTick();
             heartbeatTick(tnow);
-            radioHealthTick();
+            radioHealthTick(tnow);
+            nodeHealthTick(tnow);
             batchTick(tnow);
         }
 

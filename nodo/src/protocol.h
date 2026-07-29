@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x32;  // v3.2
+constexpr uint8_t kSchemaVersion = 0x33;  // v3.3
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -35,6 +35,7 @@ constexpr uint8_t kFrameAlarm        = 0x03;
 constexpr uint8_t kFrameNodeRegister = 0x04;  // registro del nodo (v2.1, §13)
 constexpr uint8_t kFrameWelcome      = 0x05;  // respuesta al registro (v2.1, §13)
 constexpr uint8_t kFrameModbusDebug  = 0x06;  // transacción Modbus fallida (v3.2, §15)
+constexpr uint8_t kFrameNodeHealth   = 0x07;  // salud de la radio del nodo (v3.3, §16)
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;
 constexpr uint8_t kFrameSnOffer      = 0x12;

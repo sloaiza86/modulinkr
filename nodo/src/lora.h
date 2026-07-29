@@ -144,6 +144,48 @@ public:
     // Tramas esperando turno en la cola de transmisión.
     uint8_t txQueued() const { return static_cast<uint8_t>(txq_count_); }
 
+    // ----- Salud de la recepción (fase 2) -----
+    //
+    // El receptor puede quedarse mudo con el transmisor vivo: el 28-jul-2026
+    // el módulo siguió emitiendo, y el gateway siguió oyéndolo, mientras el
+    // nodo pasaba diez minutos sin recibir un solo beacon ni un ACK. Sin
+    // recepción no hay ACK ni padre, así que el nodo deja de entregar aunque
+    // transmita, y la capa mesh solo concluye que se quedó sin padre, que es
+    // un veredicto de red y no de hardware.
+    //
+    // Límite conocido: un nodo legítimamente aislado (gateway apagado o fuera
+    // de alcance) es indistinguible desde dentro de uno con el receptor roto.
+    // Lo acota la política de main.cpp, que limita hasta dónde se escala.
+    bool     rxSilent() const { return rx_silent_; }
+    uint32_t rxSilenceEvents() const { return rx_silence_events_; }
+
+    // Radio en falta por cualquiera de los dos lados.
+    bool radioFaulted() const { return mute_flagged_ || rx_silent_; }
+
+    // ----- Escalera de recuperación (fase 2) -----
+    //
+    // Mecanismo, no política: el driver sabe reiniciar su radio y main.cpp
+    // decide cuándo escalar y hasta dónde. El ESP32 llega al STM32WLE5 solo
+    // por UART, sin línea de reset ni control de alimentación, así que estos
+    // tres niveles son todo lo que cabe hacer sin reiniciar el propio nodo.
+
+    // L1: escribe AT y espera OK. Distingue la UART muerta, en la que no hay
+    // respuesta a nada, del camino de transmisión colgado con el módulo
+    // despierto, que es lo observado en los dos incidentes.
+    bool probeModule();
+
+    // L2: repite la secuencia de configuración con los parámetros de begin().
+    // Reaplica canal, SF, ancho de banda, potencia, CAD y modo TX+RX.
+    bool reinitRadio();
+
+    // L3: ATZ, reset por software del módulo, seguido de L2, porque el reset
+    // lo devuelve a su configuración por defecto y sin L2 quedaría fuera del
+    // canal del despliegue.
+    bool resetModule();
+
+    // Da por buena la radio y reabre las ventanas de los dos detectores.
+    void clearFaults();
+
     // Construye una trama TELEMETRY v3.2 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
     //             reintentos reutilizan el mismo seq).
@@ -214,6 +256,20 @@ public:
     Status sendHeartbeat(uint16_t seq, uint32_t tx_ms, uint8_t hop_dst,
                          bool nb_present = false, uint8_t nb_flags = 0,
                          uint8_t csq = 0xFF);
+
+    // NODE_HEALTH v3.3 (frame-format.md §16): estado de la radio del nodo,
+    // hacia el gateway vía el padre. Best-effort como el HEARTBEAT, porque la
+    // cola de pendientes solo sabe reconstruir tramas TELEMETRY; el evento
+    // interesa justo cuando el enlace va mal, así que main.cpp compensa
+    // repitiendo la emisión unas cuantas veces espaciadas.
+    //   fault         Motivo del último fallo (health::Fault).
+    //   reset_reason  Causa del último arranque (esp_reset_reason).
+    //   boots         Arranques acumulados.
+    //   l1..l4        Recuperaciones ejecutadas por nivel.
+    Status sendNodeHealth(uint16_t seq, uint8_t hop_dst,
+                          uint8_t fault, uint8_t reset_reason,
+                          uint16_t boots,
+                          uint16_t l1, uint16_t l2, uint16_t l3, uint16_t l4);
 
     // Milisegundos de aire acumulados desde el boot (suma del ToA de cada
     // trama realmente transmitida, contada en el evento TXP2P DONE; los
@@ -299,6 +355,31 @@ private:
 
     // Reevalúa la sospecha de radio muda. La llama poll() en cada vuelta.
     void checkMute();
+
+    // ----- Detección de receptor mudo (fase 2) -----
+    // Umbral al doble del beacon_timeout_ms por defecto (90 s): dos ventanas
+    // seguidas sin recibir nada son seis beacons perdidos, margen de sobra
+    // frente a una interferencia puntual.
+    static constexpr uint32_t kRxSilenceMs   = 180000;
+    static constexpr uint32_t kProbeTimeoutMs = 500;    // espera del OK en L1
+    static constexpr uint32_t kResetSettleMs  = 2000;   // arranque tras ATZ
+    uint32_t last_rx_ms_        = 0;
+    uint32_t psend_at_last_rx_  = 0;  // tx_psend_ en la última recepción
+    bool     rx_silent_         = false;
+    uint32_t rx_silence_events_ = 0;
+    void checkRxSilence();
+
+    // Parámetros de begin() retenidos para poder repetirla en la escalera.
+    int8_t        rx_pin_  = -1;
+    int8_t        tx_pin_  = -1;
+    unsigned long freq_hz_ = 0;
+    uint8_t       tx_dbm_  = 0;
+
+    // Aplica la configuración de radio al módulo. La usan begin() y L2.
+    bool applyRadioConfig();
+
+    // Vacía la cola de transmisión contabilizando lo que se pierde.
+    void discardTxQueue();
 
     // ----- Serialización de las escrituras al módulo -----
     //

@@ -78,6 +78,7 @@ SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
 TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
 REGISTER_TOPIC   = "modulinkr/v1/{origin}/register"
+HEALTH_TOPIC     = "modulinkr/v1/{origin}/health"
 # El gateway se suscribe a la telemetría de TODOS los publishers para ver el
 # camino NB-IoT (failover): un publisher distinto de 255 es un supernodo
 # publicando por celular (db-schema §2, source por el publisher del topic).
@@ -110,6 +111,7 @@ class MqttPublisher:
         # Contadores de diagnóstico (se vuelcan en el STATS del servicio).
         self.n_pub_tel = 0   # muestras de telemetría publicadas (con PUBACK)
         self.n_pub_cat = 0   # catálogos republicados (con PUBACK)
+        self.n_pub_hlt = 0   # tramas de salud publicadas (con PUBACK)
         self.batch_id  = 0   # mensajes de telemetría enviados en esta sesión
 
         # Cola del camino NB-IoT: on_message corre en el hilo de paho y no
@@ -331,6 +333,39 @@ class MqttPublisher:
             LOG.warning("MQTT sin PUBACK topic=%s: %s", topic, e)
             return False
         return info.is_published()
+
+    def publish_health(self, origin: int, health: dict) -> bool:
+        """Publica una trama NODE_HEALTH (frame-format.md §16) al topic de
+        salud del nodo. Sin retain: es un evento con su instante, no un
+        estado actual, y el histórico lo guarda el consumer.
+
+        Se llama desde el bucle principal, el mismo hilo que drain(), así que
+        no hay concurrencia sobre el cliente.
+        """
+        payload = json.dumps({
+            "schema_version": SCHEMA_VERSION,
+            "node_id":        origin,
+            "fault":          health.get("hl_fault_name"),
+            "reset_reason":   health.get("hl_reset_reason"),
+            "boots":          health.get("hl_boots"),
+            "recoveries": {
+                "probe":  health.get("hl_probes"),
+                "reinit": health.get("hl_reinits"),
+                "reset":  health.get("hl_resets"),
+                "reboot": health.get("hl_reboots"),
+            },
+            "radio": {
+                "tx_psend": health.get("hl_tx_psend"),
+                "tx_done":  health.get("hl_tx_done"),
+                "rx_valid": health.get("hl_rx_valid"),
+            },
+        }, separators=(",", ":"))
+
+        if not self._publish(HEALTH_TOPIC.format(origin=origin),
+                             payload, qos=1, retain=False):
+            return False
+        self.n_pub_hlt += 1
+        return True
 
     def _register_payload(self, origin: int, catalog: dict) -> str:
         """Mensaje register retenido de batch-format.md §10.2 a partir del
