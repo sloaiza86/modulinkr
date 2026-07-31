@@ -83,7 +83,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.38-cfg-ota";
+constexpr const char* kFirmwareVersion = "0.0.39-cfg-ota-read";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -1007,6 +1007,109 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     ESP.restart();
 }
 
+// ----- Lectura del config por LoRa (frame-format.md §17.6) -----
+//
+// El gateway pide el config con un mapa de los fragmentos que aún le faltan,
+// y el nodo sube los que ese mapa no marca. Existe porque el catálogo del
+// registro NO contiene la configuración: lleva el nombre de cada lectura y su
+// unidad, pero ni la función Modbus, ni la dirección, ni el tipo, ni la
+// escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Reconstruir un
+// config con lo que el gateway sabe daría un JSON válido que el nodo
+// aceptaría, con el que seguiría registrándose, y que por tanto la ventana de
+// prueba CONFIRMARÍA: el nodo quedaría vivo y en línea midiendo nada.
+constexpr uint32_t kCfgReadFragBytes = 213;   // igual que en la escritura
+
+uint32_t g_cfgread_req    = 0;      // petición en curso, 0 = ninguna
+uint32_t g_cfgread_mask   = 0;      // fragmentos que el gateway aún pide
+uint8_t  g_cfgread_total  = 0;
+uint32_t g_cfgread_next_ms = 0;
+char*    g_cfgread_buf    = nullptr;   // config leído de flash, en heap
+size_t   g_cfgread_len    = 0;
+
+void cfgReadRelease() {
+    if (g_cfgread_buf != nullptr) { free(g_cfgread_buf); g_cfgread_buf = nullptr; }
+    g_cfgread_len = 0;
+    g_cfgread_req = 0;
+    g_cfgread_mask = 0;
+    g_cfgread_total = 0;
+}
+
+void handleConfigGet(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-get"); return; }
+    if (f.payload_length != 8) return;
+
+    uint32_t req, pedido;
+    std::memcpy(&req,    &f.payload[0], sizeof(req));
+    std::memcpy(&pedido, &f.payload[4], sizeof(pedido));
+
+    // Petición nueva: se relee el config de flash. Releerlo en vez de
+    // guardarlo evita que una lectura devuelva algo distinto de lo que hay
+    // escrito, que es justo lo que se quiere comprobar.
+    if (req != g_cfgread_req) {
+        cfgReadRelease();
+        size_t len = 0;
+        char* texto = configstore::read(len);
+        if (texto == nullptr || len == 0) {
+            if (texto != nullptr) free(texto);
+            Serial.println(F("[cfg]    CONFIG_GET: sin config en flash"));
+            return;
+        }
+        g_cfgread_buf   = texto;
+        g_cfgread_len   = len;
+        g_cfgread_req   = req;
+        g_cfgread_total = static_cast<uint8_t>(
+            (len + kCfgReadFragBytes - 1) / kCfgReadFragBytes);
+        Serial.printf("[cfg]    CONFIG_GET req=%08lX: %u B en %u fragmentos\n",
+                      static_cast<unsigned long>(req),
+                      static_cast<unsigned>(len), g_cfgread_total);
+    }
+
+    // El mapa que llega dice lo que el gateway YA tiene; se envía el resto.
+    const uint32_t completo = (g_cfgread_total >= 32)
+                                  ? 0xFFFFFFFFUL
+                                  : ((1UL << g_cfgread_total) - 1UL);
+    g_cfgread_mask   = completo & ~pedido;
+    g_cfgread_next_ms = 0;   // el primero sale en el tick siguiente
+}
+
+// Sube un fragmento por tick, espaciado según el aire que ocupa: el nodo
+// también tiene límite de banda y ocho tramas seguidas se lo comerían.
+void cfgReadTick(uint32_t now) {
+    if (g_cfgread_req == 0 || g_cfgread_mask == 0) return;
+    if (!g_lora_ready || !mesh.hasParent()) return;
+    if (g_cfgread_next_ms != 0 &&
+        static_cast<int32_t>(now - g_cfgread_next_ms) < 0) {
+        return;
+    }
+
+    uint8_t idx = 0;
+    while (idx < g_cfgread_total && !((g_cfgread_mask >> idx) & 1UL)) idx++;
+    if (idx >= g_cfgread_total) { cfgReadRelease(); return; }
+
+    const size_t off = static_cast<size_t>(idx) * kCfgReadFragBytes;
+    size_t len = g_cfgread_len - off;
+    if (len > kCfgReadFragBytes) len = kCfgReadFragBytes;
+
+    nextSeq();
+    if (lora.sendConfigData(g_lora_seq, mesh.parentId(), g_cfgread_req,
+                            idx, g_cfgread_total, static_cast<uint16_t>(off),
+                            reinterpret_cast<const uint8_t*>(g_cfgread_buf + off),
+                            static_cast<uint8_t>(len)) != LoraP2P::Status::OK) {
+        return;   // cola llena o radio ocupada: se reintenta en el próximo tick
+    }
+
+    g_cfgread_mask &= ~(1UL << idx);
+    // Diez veces el aire de la trama deja la banda al 10 %, el mismo criterio
+    // que usa el gateway para espaciar los suyos.
+    g_cfgread_next_ms = now + 10 * lora.lastFrameAirtimeMs();
+    Serial.printf("[cfg]    CONFIG_DATA %u/%u (%u B) enviado\n",
+                  idx, g_cfgread_total, static_cast<unsigned>(len));
+
+    if (g_cfgread_mask == 0) {
+        Serial.println(F("[cfg]    config subido entero, esperando confirmacion"));
+    }
+}
+
 // Reparte las tramas LoRa entrantes por tipo.
 void processLoraRx() {
     LoraP2P::RxFrame f;
@@ -1038,8 +1141,12 @@ void processLoraRx() {
             case protocol::kFrameConfigCommit:
                 handleConfigCommit(f);
                 break;
+            case protocol::kFrameConfigGet:
+                handleConfigGet(f);
+                break;
             case protocol::kFrameConfigAck:
             case protocol::kFrameConfigResult:
+            case protocol::kFrameConfigData:
                 // Subida de otro nodo con este como salto: relay normal.
                 handleUplinkRelay(f);
                 break;
@@ -1937,6 +2044,7 @@ void loop() {
             if (cfgota::expireIfIdle(tnow)) {
                 Serial.println(F("[cfg]    transferencia abandonada por inactividad"));
             }
+            cfgReadTick(tnow);
             batchTick(tnow);
         }
 

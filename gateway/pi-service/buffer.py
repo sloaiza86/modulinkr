@@ -143,6 +143,21 @@ class GatewayBuffer:
                 mqtt_connected INTEGER NOT NULL
             )
         """)
+        # Cola de LECTURAS de configuración por LoRa (spec §17.6). Separada
+        # de config_push porque son operaciones distintas: una entrega un
+        # config y la otra lo trae, y mezclarlas en una tabla obligaría a
+        # adivinar el sentido por los campos que estén rellenos.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_read (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin      INTEGER NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                config      TEXT,
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
         # Cola de envíos de configuración por LoRa (frame-format.md §17). El
         # visor y el servicio del gateway son procesos distintos que ya
         # comparten esta base, así que la cola es el punto de encuentro
@@ -248,6 +263,26 @@ class GatewayBuffer:
                   SET state = ?, detail = ?, updated_ts = ?
                 WHERE id = ?""",
             (state, detail, time.time(), push_id))
+        self.conn.commit()
+
+    def config_read_next(self) -> dict | None:
+        """Siguiente lectura pendiente, o None."""
+        cur = self.conn.execute(
+            """SELECT id, origin FROM config_read
+                WHERE state = 'pending' ORDER BY id LIMIT 1""")
+        row = cur.fetchone()
+        return None if row is None else {"id": row[0], "origin": row[1]}
+
+    def config_read_state(self, read_id: int, state: str,
+                          config: str | None = None,
+                          detail: str | None = None) -> None:
+        """Avanza el estado de una lectura: reading, done o failed."""
+        self.conn.execute(
+            """UPDATE config_read
+                  SET state = ?, config = COALESCE(?, config),
+                      detail = ?, updated_ts = ?
+                WHERE id = ?""",
+            (state, config, detail, time.time(), read_id))
         self.conn.commit()
 
     def mb_debug_all(self) -> dict:

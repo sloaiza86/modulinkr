@@ -259,7 +259,8 @@ import settingsapi  # noqa: E402
 # ----- Módulos: configuración de MQTT y base de datos (acciones sudo) -----
 
 import mqttapi  # noqa: E402
-import dbapi    # noqa: E402
+import dbapi
+import otaapi    # noqa: E402
 
 # ----- Módulo: parámetros de red LoRa del gateway (acción sudo) -----
 
@@ -297,6 +298,7 @@ app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
 app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
 app.include_router(netapi.router, dependencies=[Depends(require_auth)])
 app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
+app.include_router(otaapi.router, dependencies=[Depends(require_auth)])
 app.include_router(wifiapi.router, dependencies=[Depends(require_auth)])
 app.include_router(debugapi.router, dependencies=[Depends(require_auth)])
 

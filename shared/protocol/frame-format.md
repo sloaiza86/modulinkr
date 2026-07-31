@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x35` (= `v3.5`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x36` (= `v3.6`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.6 (31-jul-2026)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
 
 **v3.5 (31-jul-2026)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
 
@@ -84,7 +86,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x35` para v3.5. |
+| `schema_version` | `0x36` para v3.6. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -133,6 +135,8 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x14` | CONFIG_ACK | uplink | Mapa de fragmentos ya recibidos (v3.5). Ver §17. |
 | `0x15` | CONFIG_COMMIT | downlink | Orden de aplicar lo reensamblado (v3.5). Ver §17. |
 | `0x16` | CONFIG_RESULT | uplink | Veredicto de la aplicación (v3.5). Ver §17. |
+| `0x17` | CONFIG_GET | downlink | Pide a un nodo su `config.json` (v3.6). Ver §17.5. |
+| `0x18` | CONFIG_DATA | uplink | Un fragmento del `config.json` del nodo (v3.6). Ver §17.5. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
@@ -947,7 +951,7 @@ Los mismos contadores viven en `/health.json` en la flash del nodo, que es lo qu
 
 El gateway no la confirma ni la mete en su buffer de telemetría: la registra en su log y la publica al topic `modulinkr/v1/{node_id}/health`, sin retain, porque es un evento con su instante y no un estado actual. La repetición del nodo cubre la pérdida de una copia suelta.
 
-## 17. Canal de configuración remota (v3.5)
+## 17. Canal de configuración remota (v3.5, lectura en v3.6)
 
 Sustituye el `config.json` de un nodo por LoRa, sin ir hasta él con un cable. Usa el rango `0x13`-`0x1F` que §11 apartaba para comandos desde el diseño inicial, y la ruta que allí se preveía: visor, Pi del gateway, Heltec, y descenso por el árbol con la ruta inversa de los ACK (§2.4).
 
@@ -1009,7 +1013,35 @@ xfer_id      status     detalle
 
 El veredicto sale **antes** de reiniciar, con margen para que ocupe el aire: reiniciando de inmediato, el emisor no sabría nunca si se aplicó.
 
-### 17.5 Seguridad de la operación
+### 17.5 Lectura del config (CONFIG_GET / CONFIG_DATA, v3.6)
+
+El canal descrito hasta aquí solo escribe. Sin poder leer, editar la configuración de un nodo en remoto obliga a rellenar el formulario a mano o, peor, a reconstruirlo con lo que el gateway cree saber del nodo, y eso es una trampa: el catálogo del NODE_REGISTER (§13.2) lleva el `id`, el `name` y la `unit` de cada lectura, pero **ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque `mesh`, ni el de `nbiot`**.
+
+Un config así sería un JSON válido. El nodo lo aceptaría, y como los parámetros de red no cambian seguiría registrándose, de modo que la ventana de prueba de §17.6 lo **confirmaría** como bueno y la reversión no saltaría nunca. El nodo quedaría vivo, en línea y verde en el visor, midiendo nada.
+
+**CONFIG_GET** (downlink, `frame_type = 0x17`), 8 bytes:
+
+```
+req_id       mask
+(4 B LE)     (4 B LE)
+```
+
+`mask` son los fragmentos que el gateway **ya tiene**: el nodo sube solo los que faltan. En la primera petición va a cero, es decir "mándalos todos", y en los reintentos evita reenviar lo ya recibido. Es el mismo mecanismo del mapa del CONFIG_ACK, en el otro sentido.
+
+**CONFIG_DATA** (uplink, `frame_type = 0x18`), idéntico en forma al CONFIG_PUSH:
+
+```
+req_id       frag_idx   frag_total   offset     fragmento
+(4 B LE)     (1 B)      (1 B)        (2 B LE)   (N B)
+```
+
+Que la forma coincida no es casualidad: así el reensamblado por desplazamiento es el mismo código en los dos sentidos.
+
+El nodo relee su `config.json` de la flash en cada petición nueva, en vez de guardarlo en memoria, porque lo que se quiere comprobar es lo que hay escrito. Sube un fragmento cada diez veces su tiempo de aire, que deja la banda al 10 %, el mismo criterio con el que el gateway espacia los suyos.
+
+Sin sha de conjunto, a diferencia de la escritura. La integridad de cada trama ya la garantizan su CRC16 y su MIC (§14), y lo que se recibe se valida parseándolo como JSON: si faltara o sobrara algo, no parsearía. Una lectura corrupta además no rompe nada, mientras que una escritura corrupta sí, y de ahí la asimetría.
+
+### 17.6 Seguridad de la operación
 
 Un config equivocado por aire puede dejar el nodo incomunicado, y ahí no hay cable que valga. El canal se apoya en la reversión automática que ya protege el camino por USB: el nodo copia su config vigente antes de pisarlo, marca el nuevo como a prueba, y si en la ventana siguiente no consigue registrarse en el gateway restaura el anterior y reinicia. Es la misma red de seguridad para los dos caminos de entrada, porque el peligro es el mismo.
 

@@ -302,6 +302,13 @@ public:
     Status sendConfigAck(uint16_t seq, uint8_t hop_dst,
                          uint32_t xfer_id, uint8_t frag_total, uint32_t mask);
 
+    // CONFIG_DATA: un fragmento del config.json propio, en respuesta a un
+    // CONFIG_GET. Mismo troceado que la escritura pero en sentido contrario,
+    // así que el gateway reensambla con la misma lógica.
+    Status sendConfigData(uint16_t seq, uint8_t hop_dst, uint32_t req_id,
+                          uint8_t frag_idx, uint8_t frag_total,
+                          uint16_t offset, const uint8_t* data, uint8_t len);
+
     // CONFIG_RESULT: veredicto de un COMMIT. `detail` es texto opcional con
     // el motivo del rechazo (el mismo que da la validación del config), que
     // el visor muestra tal cual; se trunca si no cabe.
@@ -337,6 +344,12 @@ public:
                           uint16_t boots,
                           uint16_t l1, uint16_t l2, uint16_t l3, uint16_t l4,
                           uint8_t mb_debug_mode);
+
+    // Tiempo de aire de la última trama emitida, en ms. Sirve para espaciar
+    // ráfagas propias según el ciclo de trabajo sin recalcular el ToA fuera.
+    uint32_t lastFrameAirtimeMs() const {
+        return last_tx_len_ > 0 ? airtimeMs(last_tx_len_) : 100;
+    }
 
     // Milisegundos de aire acumulados desde el boot (suma del ToA de cada
     // trama realmente transmitida, contada en el evento TXP2P DONE; los

@@ -3116,6 +3116,166 @@ function formFuenteLocal() {
   return !!(s && s.value === "local");
 }
 
+// ----- Envío por LoRa (frame-format.md §17) -----
+//
+// El visor no habla por radio: encola la petición y el servicio del gateway
+// la ejecuta. Aquí solo se elige el nodo destino, se avisa de los campos que
+// pueden costar la comunicación y se sigue el progreso.
+
+function formFuenteLora() {
+  const s = document.getElementById("f-fuente");
+  return !!(s && s.value === "lora");
+}
+
+// Campos cuyo cambio puede dejar el nodo incomunicado. El asistente los
+// tiene bloqueados a los valores de la red, así que en condiciones normales
+// no divergen; el aviso existe para el caso en que se hayan desbloqueado por
+// el popup de incongruencia al leer un nodo.
+const LORA_RIESGO = [
+  ["network_id", (c) => c.transport?.lora?.network_id],
+  ["frecuencia", (c) => c.transport?.lora?.frequency_hz],
+  ["SF",         (c) => c.transport?.lora?.sf],
+  ["ancho de banda", (c) => c.transport?.lora?.bw_khz],
+  ["seguridad",  (c) => JSON.stringify(c.transport?.lora?.security ?? null)],
+];
+
+// Compara el config que se va a enviar con los parámetros de la red actual y
+// devuelve la lista de campos que difieren.
+function formLoraRiesgos(cfg) {
+  if (!redActual) return [];
+  const red = {
+    transport: { lora: {
+      network_id: redActual.network_id, frequency_hz: redActual.frequency_hz,
+      sf: redActual.sf, bw_khz: redActual.bw_khz,
+      security: redActual.security ?? null } },
+  };
+  return LORA_RIESGO
+    .filter(([, get]) => get(cfg) !== undefined && String(get(cfg)) !== String(get(red)))
+    .map(([nombre]) => nombre);
+}
+
+// Lista de nodos a los que se puede enviar: los que el gateway conoce.
+async function formLoraNodos() {
+  const sel = document.getElementById("f-lora-nodo");
+  sel.innerHTML = "";
+  try {
+    const r = await fetchApi("/api/red/estado");
+    const nodes = (await r.json()).nodes || [];
+    nodes.filter((n) => n.origin >= 1 && n.origin <= 254).forEach((n) => {
+      const o = document.createElement("option");
+      o.value = n.origin;
+      o.textContent = `${n.name || "nodo"} (${n.origin})`
+        + (n.online ? "" : " — sin señal");
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = "sin nodos conocidos";
+      sel.appendChild(o);
+    }
+  } catch (e) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "error consultando la red";
+    sel.appendChild(o);
+  }
+}
+
+// Lee el config.json de un nodo por radio y rellena el formulario con él.
+//
+// Es la pieza que hace utilizable la edición remota. Sin ella habría que
+// rellenar el formulario a mano o, peor, con lo que el gateway cree saber del
+// nodo: el catálogo del registro lleva el nombre y la unidad de cada lectura,
+// pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los
+// tiempos, ni el bloque mesh. Un config así sería válido, el nodo lo
+// aplicaría, seguiría registrándose y la ventana de prueba lo confirmaría:
+// quedaría vivo, en línea y midiendo nada.
+async function fLeerLora(aviso) {
+  const origin = Number(document.getElementById("f-lora-nodo").value);
+  if (!origin) { aviso.textContent = "elegir primero el nodo en la lista"; return; }
+
+  document.getElementById("f-leer").disabled = true;
+  aviso.textContent = "pidiendo la configuración al nodo por radio...";
+  try {
+    const r = await fetchApi("/api/config/lora/leer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin }) });
+    const d = await r.json();
+    if (!r.ok) { aviso.textContent = d.error ?? "error"; return; }
+
+    // El nodo sube sus fragmentos espaciados por su propio ciclo de trabajo,
+    // así que esto tarda del orden de un minuto.
+    for (let i = 0; i < 150; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      let e;
+      try {
+        const rr = await fetchApi("/api/config/lora/leer/estado?id=" + d.id);
+        e = await rr.json();
+      } catch (err) { continue; }
+
+      if (e.state === "done" && e.config) {
+        let cfg;
+        try { cfg = JSON.parse(e.config); } catch (err) {
+          aviso.textContent = "lo recibido no es JSON válido"; return;
+        }
+        fillForm(cfg);
+        idLeido = Number(document.getElementById("f-id").value);
+        formLive();
+        formNetCheck(cfg);
+        aviso.textContent = `formulario rellenado desde el nodo ${origin} por radio `
+          + `(${e.detail || ""})`;
+        return;
+      }
+      if (e.state === "failed") {
+        aviso.textContent = "no se pudo leer: " + (e.detail || "error");
+        return;
+      }
+      aviso.textContent = `leyendo del nodo ${origin} por radio... `
+        + `(${Math.round(e.elapsed_s)} s)`;
+    }
+    aviso.textContent = "la lectura no terminó en dos minutos y medio";
+  } catch (e) {
+    aviso.textContent = "error: " + e.message;
+  } finally {
+    document.getElementById("f-leer").disabled = false;
+  }
+}
+
+// Sigue el envío hasta que termine. El nodo reinicia al aplicar, así que el
+// estado final llega del propio nodo por su CONFIG_RESULT, no de un timeout.
+async function formLoraSeguir(id, T) {
+  const ETIQ = {
+    pending:    "en cola, esperando al gateway",
+    sending:    "enviando fragmentos por radio",
+    committing: "fragmentos entregados, aplicando en el nodo",
+  };
+  for (let i = 0; i < 240; i++) {         // hasta 4 min, con sondeo de 1 s
+    await new Promise((r) => setTimeout(r, 1000));
+    let d;
+    try {
+      const r = await fetchApi("/api/config/lora/estado?id=" + id);
+      d = await r.json();
+    } catch (e) { continue; }
+    if (d.state === "done") {
+      cfgDialogo(T, "Configuración aplicada en el nodo.<pre>"
+                  + (d.detail || "") + "</pre>El nodo reinicia y dispone de "
+                  + "una ventana para volver a registrarse; si no lo consigue, "
+                  + "restaura sola la configuración anterior.", { cerrar: true });
+      return;
+    }
+    if (d.state === "failed") {
+      cfgDialogo(T, "El envío no se completó:<pre>" + (d.detail || "error")
+                  + "</pre>La configuración del nodo no ha cambiado.",
+                 { cerrar: true });
+      return;
+    }
+    cfgDialogo(T, SPIN + (ETIQ[d.state] || d.state)
+                 + ` (${Math.round(d.elapsed_s)} s)`);
+  }
+  cfgDialogo(T, "El envío sigue en curso tras cuatro minutos. Puedes cerrar "
+              + "esta ventana: el gateway lo termina por su cuenta.",
+             { cerrar: true });
+}
+
 // Abre (o reabre) la sesión Web Serial y devuelve la identidad del nodo.
 // Cada llamada parte de cero, cerrando la anterior y volviendo a pedir el
 // puerto: es la misma cautela que la página de JSON, para no reutilizar un
@@ -3129,16 +3289,26 @@ async function formLocalSesion() {
 // Oculta los controles de puerto de la Pi con la fuente local: ahí el puerto
 // lo elige el popup del navegador, no un desplegable nuestro.
 function formFuenteCtrls() {
-  const local = formFuenteLocal();
+  const usbGateway = !formFuenteLocal() && !formFuenteLora();
+  // Los desplegables de puertos de la Pi solo tienen sentido con el nodo
+  // enchufado a ella; el selector de nodo, solo con el envío por radio.
   ["f-leer-puertos", "f-puertos"].forEach((id) => {
     const el = document.getElementById(id);
-    if (el && local) { el.hidden = true; el.value = ""; }
+    if (el && !usbGateway) { el.hidden = true; el.value = ""; }
   });
+  const lora = document.getElementById("f-lora-nodo");
+  if (lora) lora.hidden = !formFuenteLora();
+  // "Buscar nodo" pasa a ser "Elegir destino" por radio: no hay nada que
+  // detectar, solo listar lo que el gateway ya conoce.
+  const buscar = document.getElementById("f-buscar");
+  if (buscar) buscar.textContent = formFuenteLora() ? "Listar nodos" : "Buscar nodo";
 }
 
 async function fLeer() {
   const aviso = document.getElementById("f-leer-aviso");
   const sel = document.getElementById("f-leer-puertos");
+
+  if (formFuenteLora()) { await fLeerLora(aviso); return; }
 
   if (formFuenteLocal()) {
     document.getElementById("f-leer").disabled = true;
@@ -3325,6 +3495,25 @@ async function formBuscar() {
   const aviso = document.getElementById("f-busqueda-aviso");
   const sel = document.getElementById("f-puertos");
 
+  // Por LoRa no hay nodo que "buscar": el destino se elige de la lista de los
+  // que el gateway conoce, y el envío no puede comprobar antes la versión de
+  // firmware porque eso exigiría una consulta remota que el canal no tiene.
+  if (formFuenteLora()) {
+    await formLoraNodos();
+    const est = document.getElementById("f-fw-estado");
+    est.hidden = false;
+    est.className = "aviso";
+    est.textContent = "Envío por LoRa: se manda solo la configuración, "
+      + "compactada para ahorrar aire. El firmware no se puede actualizar por "
+      + "radio, y la versión del nodo no se comprueba antes porque el canal "
+      + "no tiene consulta de versión.";
+    document.getElementById("f-enviar").disabled = false;
+    formMode = "config";
+    const n = document.getElementById("f-lora-nodo").value;
+    aviso.textContent = n ? `destino: nodo ${n}` : "elegir el nodo arriba";
+    return;
+  }
+
   if (formFuenteLocal()) {
     document.getElementById("f-buscar").disabled = true;
     aviso.textContent = "abriendo el puerto y detectando el nodo...";
@@ -3413,12 +3602,67 @@ async function formVirgen(aviso, sel, chosenPort) {
 async function formEnviar() {
   const res = document.getElementById("f-envio-aviso");
   const texto = document.getElementById("f-preview").value.trim();
-  if (!formPuerto) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
+  // Por LoRa no hay puerto que detectar: el destino es el nodo elegido en la
+  // lista, y esa comprobación la hace la rama de envío por radio de abajo.
+  if (!formPuerto && !formFuenteLora()) {
+    res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return;
+  }
   if (!texto) { res.className = "aviso mal"; res.textContent = "validar primero la configuración"; return; }
   try { JSON.parse(texto); } catch (e) {
     res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
   }
   const T = "Enviar al nodo";
+
+  // Fuente LoRa: se encola y lo ejecuta el gateway. Antes se avisa de los
+  // campos que pueden dejar el nodo sin comunicación, porque por radio no hay
+  // cable con el que arreglarlo; la reversión del nodo lo cubre, pero cuesta
+  // unos minutos y conviene saber en qué se está metiendo uno.
+  if (formFuenteLora()) {
+    const origin = Number(document.getElementById("f-lora-nodo").value);
+    if (!origin) {
+      res.className = "aviso mal";
+      res.textContent = "elegir primero el nodo destino";
+      return;
+    }
+    const riesgos = formLoraRiesgos(JSON.parse(texto));
+    if (riesgos.length) {
+      const seguir = await new Promise((resolve) => {
+        cfgConfirmarCb = () => resolve(true);
+        cfgDialogo(T, "Este envío cambia <b>" + riesgos.join(", ")
+          + "</b>, que son los parámetros con los que el nodo habla con el "
+          + "gateway. Si quedan mal, el nodo deja de responder y solo vuelve "
+          + "gracias a su reversión automática, unos minutos después.",
+          { cancelar: true, confirmar: true, confirmarText: "Enviar igualmente",
+            onCancelar: () => resolve(false) });
+      });
+      if (!seguir) { cfgDialogoCerrar(); return; }
+    }
+
+    // Compactado antes de enviar: el cuadro de vista previa muestra el JSON
+    // con sangría para leerlo, y esos espacios viajan por radio. En banco, el
+    // mismo config pasó de 991 B compactado a 1609 B con sangría, o sea de
+    // cinco fragmentos a ocho. El contenido es idéntico, así que el nodo
+    // recibe exactamente lo mismo con un 38 % menos de aire y de tiempo.
+    const compacto = JSON.stringify(JSON.parse(texto));
+
+    cfgDialogo(T, SPIN + "encolando el envío...");
+    try {
+      const r = await fetchApi("/api/config/lora/enviar", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin, config: compacto }) });
+      const d = await r.json();
+      if (!r.ok) {
+        cfgDialogo(T, "No se pudo encolar:<pre>" + (d.error ?? "error") + "</pre>",
+                   { cerrar: true });
+        return;
+      }
+      cfgDialogo(T, SPIN + `en cola: ${d.bytes} B en ${d.fragmentos} fragmentos`);
+      await formLoraSeguir(d.id, T);
+    } catch (e) {
+      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    }
+    return;
+  }
 
   // Fuente local: el navegador escribe el config por Web Serial con el mismo
   // CFG.PUT que habla la Pi. El flasheo no se ofrece por aquí (vive en la
@@ -3529,6 +3773,11 @@ document.getElementById("f-fuente").addEventListener("change", async () => {
   document.getElementById("f-enviar").disabled = true;
   formFuenteCtrls();
   await cfgLocalCerrar();
+  // El selector de nodo vive arriba, junto al de fuente, porque el destino
+  // forma parte de "por dónde envío" y no de "enviar": con las otras dos
+  // fuentes el equivalente es el puerto, y también se elige aquí. Se rellena
+  // al elegir LoRa, para que esté listo antes de tocar nada más.
+  if (formFuenteLora()) await formLoraNodos();
 });
 document.getElementById("f-generar").addEventListener("click", formGenerar);
 document.getElementById("f-enviar").addEventListener("click", formEnviar);

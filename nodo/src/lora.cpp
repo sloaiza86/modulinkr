@@ -421,6 +421,30 @@ LoraP2P::Status LoraP2P::sendConfigAck(uint16_t seq, uint8_t hop_dst,
                         payload, sizeof(payload));
 }
 
+LoraP2P::Status LoraP2P::sendConfigData(uint16_t seq, uint8_t hop_dst,
+                                        uint32_t req_id, uint8_t frag_idx,
+                                        uint8_t frag_total, uint16_t offset,
+                                        const uint8_t* data, uint8_t len) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (data == nullptr || len == 0) return Status::INVALID_ARGS;
+    if (static_cast<size_t>(8 + len) > protocol::kMaxPayload) {
+        return Status::INVALID_ARGS;
+    }
+
+    // Payload v3.6 (spec §17.7), idéntico en forma al CONFIG_PUSH: quien lo
+    // reensambla usa el mismo código en los dos sentidos.
+    uint8_t payload[8 + 213];
+    std::memcpy(&payload[0], &req_id, sizeof(req_id));
+    payload[4] = frag_idx;
+    payload[5] = frag_total;
+    std::memcpy(&payload[6], &offset, sizeof(offset));
+    std::memcpy(&payload[8], data, len);
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameConfigData, ttl_,
+                        payload, static_cast<uint8_t>(8 + len));
+}
+
 LoraP2P::Status LoraP2P::sendConfigResult(uint16_t seq, uint8_t hop_dst,
                                           uint32_t xfer_id, uint8_t status,
                                           const char* detail) {

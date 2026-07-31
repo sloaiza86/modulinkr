@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x35          # v3.5 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x36          # v3.6 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -130,6 +130,8 @@ FRAME_CONFIG_PUSH   = 0x13
 FRAME_CONFIG_ACK    = 0x14
 FRAME_CONFIG_COMMIT = 0x15
 FRAME_CONFIG_RESULT = 0x16
+FRAME_CONFIG_GET    = 0x17
+FRAME_CONFIG_DATA   = 0x18
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -147,6 +149,8 @@ FRAME_TYPE_NAMES = {
     FRAME_CONFIG_ACK:    'CONFIG_ACK',
     FRAME_CONFIG_COMMIT: 'CONFIG_COMMIT',
     FRAME_CONFIG_RESULT: 'CONFIG_RESULT',
+    FRAME_CONFIG_GET:    'CONFIG_GET',
+    FRAME_CONFIG_DATA:   'CONFIG_DATA',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
@@ -487,6 +491,19 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
             payload[4], f'unknown(0x{payload[4]:02X})')
         out['cfg_detail']      = bytes(payload[5:]).decode('utf-8', errors='replace')
 
+    elif frame_type == FRAME_CONFIG_DATA:
+        # v3.6 (spec §17.7): mismo troceado que el CONFIG_PUSH pero subiendo,
+        # así que el reensamblado del gateway usa la misma lógica.
+        if payload_length < 9:
+            out['error'] = (f'CONFIG_DATA payload_length={payload_length}, '
+                            f'esperado >= 9')
+            return out
+        out['cfg_req']    = struct.unpack_from('<I', payload, 0)[0]
+        out['cfg_idx']    = payload[4]
+        out['cfg_total']  = payload[5]
+        out['cfg_offset'] = struct.unpack_from('<H', payload, 6)[0]
+        out['cfg_chunk']  = payload[8:]
+
     elif frame_type == FRAME_NODE_HEALTH:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
@@ -636,6 +653,32 @@ def build_config_push(dest_id: int, hop_dst: int, xfer_id: int,
     frame[OFF_PAYLOAD + 5] = frag_total & 0xFF
     struct.pack_into('<H', frame, OFF_PAYLOAD + 6, offset & 0xFFFF)
     frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 8 + len(chunk)] = chunk
+    return _finalize(frame, key, sec_ts)
+
+
+def build_config_get(dest_id: int, hop_dst: int, req_id: int, mask: int,
+                     gw_seq: int, network_id: int, ttl: int,
+                     key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Pide a un nodo su config.json (frame-format.md §17.6).
+
+    `mask` son los fragmentos que el gateway YA tiene: el nodo sube solo los
+    que faltan. En la primera petición va a cero, o sea "mándalos todos", y
+    en los reintentos evita reenviar lo que ya llegó, igual que hace el mapa
+    del CONFIG_ACK en el sentido de escritura.
+    """
+    frame = bytearray(HEADER_BYTES + 8)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_CONFIG_GET
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 8
+    struct.pack_into('<I', frame, OFF_PAYLOAD, req_id & 0xFFFFFFFF)
+    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, mask & 0xFFFFFFFF)
     return _finalize(frame, key, sec_ts)
 
 

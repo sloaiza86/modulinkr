@@ -65,6 +65,7 @@ systemd lo relanza.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import random
@@ -112,6 +113,11 @@ CFG_MAX_ROUNDS = 3
 # Oír una trama del nodo es la señal de que acaba de terminar su ciclo. Este
 # margen cubre además la trama de depuración Modbus que sale detrás.
 CFG_QUIET_DELAY_S = 1.5
+# Lectura del config de un nodo (spec §17.6). El nodo sube sus fragmentos a su
+# propio ritmo; el gateway solo pide y espera. Cada petición repite el mapa de
+# lo que le falta, así que un reintento no reenvía lo ya recibido.
+CFG_GET_RETRY_S  = 20.0
+CFG_GET_MAX_TRIES = 5
 
 # Formato de la línea de recepción que emite el Heltec.
 RX_RE = re.compile(
@@ -147,6 +153,7 @@ class GatewayService:
         self.buf: GatewayBuffer | None = None
         self.mb_debug: dict = {}      # origin -> modo de depuración Modbus
         self.cfg_tx: dict | None = None   # transferencia de config en curso
+        self.cfg_rx: dict | None = None   # lectura de config en curso
         self.mqtt: MqttPublisher | None = None
 
         # Periodo del drenado del buffer hacia el broker cloud (segundos).
@@ -387,6 +394,104 @@ class GatewayService:
                 t["sent_all"] = set()
             return
 
+    # ----- Lectura del config de un nodo (spec §17.6) -----
+
+    def config_read_start(self, read_id: int, origin: int) -> None:
+        """Arranca una lectura. El identificador de petición se deriva del
+        instante, así que dos lecturas seguidas del mismo nodo no se
+        confunden entre sí."""
+        self.cfg_rx = {
+            "read_id": read_id, "origin": origin,
+            "req": int(time.time()) & 0xFFFFFFFF,
+            "frags": {}, "total": 0, "tries": 0, "next_ms": 0.0,
+        }
+        self.buf.config_read_state(read_id, "reading", detail="pidiendo al nodo")
+        LOG.info("config-read origin=%d inicio, req=%08X",
+                 origin, self.cfg_rx["req"])
+
+    def config_read_tick(self, now: float) -> None:
+        """Pide, espera y reintenta. Igual que en la escritura, se transmite
+        dentro de la ventana de silencio del nodo."""
+        if self.buf is None:
+            return
+        if self.cfg_rx is None:
+            pend = self.buf.config_read_next()
+            if pend is not None:
+                self.config_read_start(pend["id"], pend["origin"])
+            return
+
+        r = self.cfg_rx
+        if now < r["next_ms"]:
+            return
+        oido = r.get("heard_ms", 0.0)
+        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+            return
+        if now > oido + CFG_QUIET_DELAY_S + CFG_GET_RETRY_S:
+            return
+
+        if r["tries"] >= CFG_GET_MAX_TRIES:
+            self.config_read_finish("failed",
+                                    f"el nodo no completó la subida en "
+                                    f"{CFG_GET_MAX_TRIES} peticiones")
+            return
+
+        # Mapa de lo que YA se tiene: el nodo sube solo el resto.
+        mask = 0
+        for idx in r["frags"]:
+            mask |= 1 << idx
+        r["tries"] += 1
+        frame = protocol.build_config_get(
+            r["origin"], self._config_hop(r["origin"]), r["req"], mask,
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
+        self._tx(frame)
+        r["next_ms"] = now + CFG_GET_RETRY_S
+        LOG.info("config-get origin=%d intento %d, ya tengo %d fragmento(s)",
+                 r["origin"], r["tries"], len(r["frags"]))
+
+    def config_on_data(self, parsed: dict) -> None:
+        """Un fragmento del config que sube el nodo."""
+        r = self.cfg_rx
+        if r is None or parsed["cfg_req"] != r["req"]:
+            return
+        r["total"] = parsed["cfg_total"]
+        r["frags"][parsed["cfg_idx"]] = (parsed["cfg_offset"],
+                                         bytes(parsed["cfg_chunk"]))
+        LOG.info("config-data origin=%s fragmento %d/%d (%d B)",
+                 protocol.addr_name(parsed["origin_id"]),
+                 parsed["cfg_idx"], r["total"], len(parsed["cfg_chunk"]))
+
+        if r["total"] == 0 or len(r["frags"]) < r["total"]:
+            return
+
+        # Completo: se ensambla por desplazamiento, no por orden de llegada.
+        tam = max(off + len(ch) for off, ch in r["frags"].values())
+        buf = bytearray(tam)
+        for off, ch in r["frags"].values():
+            buf[off:off + len(ch)] = ch
+        texto = bytes(buf).decode("utf-8", errors="replace")
+
+        # La integridad de cada trama ya la garantizan su CRC16 y su MIC, así
+        # que aquí basta con comprobar que el conjunto es un JSON entero: si
+        # faltara o sobrara algo, no parsearía.
+        try:
+            json.loads(texto)
+        except ValueError as e:
+            self.config_read_finish("failed", f"lo recibido no es JSON: {e}")
+            return
+        self.config_read_finish("done", f"{tam} B en {r['total']} fragmentos",
+                                config=texto)
+
+    def config_read_finish(self, state: str, detail: str,
+                           config: str | None = None) -> None:
+        if self.cfg_rx is None:
+            return
+        self.buf.config_read_state(self.cfg_rx["read_id"], state,
+                                   config=config, detail=detail)
+        LOG.info("config-read origin=%d terminado: %s (%s)",
+                 self.cfg_rx["origin"], state, detail)
+        self.cfg_rx = None
+
     def config_on_ack(self, parsed: dict) -> None:
         """Mapa de fragmentos recibidos. Un solo mapa dice exactamente qué
         reenviar, sin confirmar fragmento a fragmento."""
@@ -574,6 +679,13 @@ class GatewayService:
                 self.n_notconf += 1
             return
 
+        if ft == protocol.FRAME_CONFIG_DATA:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.config_on_data(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
         if ft == protocol.FRAME_CONFIG_RESULT:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 self.config_on_result(parsed)
@@ -705,6 +817,8 @@ class GatewayService:
         # en la que sí escucha (ver CFG_QUIET_DELAY_S).
         if self.cfg_tx is not None and origin == self.cfg_tx["origin"]:
             self.cfg_tx["heard_ms"] = time.monotonic()
+        if self.cfg_rx is not None and origin == self.cfg_rx["origin"]:
+            self.cfg_rx["heard_ms"] = time.monotonic()
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
@@ -978,6 +1092,7 @@ class GatewayService:
                     # Envío de configuración por LoRa: solo con el puerto
                     # abierto, que es esta rama del bucle.
                     self.config_tick(now)
+                    self.config_read_tick(now)
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)

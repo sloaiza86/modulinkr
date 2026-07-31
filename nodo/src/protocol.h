@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x35;  // v3.5
+constexpr uint8_t kSchemaVersion = 0x36;  // v3.6
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -42,6 +42,8 @@ constexpr uint8_t kFrameConfigPush   = 0x13;  // downlink: un fragmento del JSON
 constexpr uint8_t kFrameConfigAck    = 0x14;  // uplink: mapa de lo recibido
 constexpr uint8_t kFrameConfigCommit = 0x15;  // downlink: aplicar lo reensamblado
 constexpr uint8_t kFrameConfigResult = 0x16;  // uplink: veredicto
+constexpr uint8_t kFrameConfigGet    = 0x17;  // downlink: pide el config
+constexpr uint8_t kFrameConfigData   = 0x18;  // uplink: un fragmento del config
 
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;
