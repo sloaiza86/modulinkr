@@ -61,6 +61,9 @@
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <esp_system.h>
+#include <cstring>
+#include <cstdio>
+#include <new>
 
 #include "modbus.h"
 #include "lora.h"
@@ -75,11 +78,12 @@
 #include "sampler.h"
 #include "nodeclock.h"
 #include "health.h"
+#include "cfgota.h"
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.37-cfg-rollback";
+constexpr const char* kFirmwareVersion = "0.0.38-cfg-ota";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -594,6 +598,29 @@ void fireLora() {
     }
 }
 
+// Reenvío de una trama descendente dirigida a OTRO nodo, por la ruta inversa
+// aprendida del uplink (spec §2.4).
+//
+// Vivía dentro del manejador de ACK, así que solo los ACK bajaban por el
+// árbol. Con el canal de configuración (§17) eso dejaría sin servicio a
+// cualquier nodo que no sea vecino directo del gateway: sus fragmentos
+// morirían en el relay intermedio. Sacarlo aquí lo hace válido para toda
+// trama descendente, incluidas las que se añadan después.
+void relayDownlink(const LoraP2P::RxFrame& f, const char* etiqueta) {
+    if (!g_cfg.relay_enabled || f.ttl == 0) return;
+    uint8_t via = 0;
+    if (!mesh.routeFor(f.dest_id, via)) {
+        // Ruta caducada o reinicio: el origen lo resolverá por timeout.
+        return;
+    }
+    if (lora.forwardFrame(f, via) == LoraP2P::Status::OK) {
+        g_relay_down++;
+        Serial.printf("[relay]  %s dest=%u via=%u  down=%lu\n",
+                      etiqueta, f.dest_id, via,
+                      static_cast<unsigned long>(g_relay_down));
+    }
+}
+
 // ACK entrante: propio (reconciliación) o ajeno (relay hacia abajo).
 void handleAck(const LoraP2P::RxFrame& f) {
     if (f.payload_length != 3) return;
@@ -633,17 +660,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
     }
 
     // ACK para otro nodo: bajar por la ruta inversa (spec §2.4).
-    if (!g_cfg.relay_enabled || f.ttl == 0) return;
-    uint8_t via = 0;
-    if (!mesh.routeFor(f.dest_id, via)) {
-        // Ruta caducada o reinicio: el origen lo resolverá por timeout.
-        return;
-    }
-    if (lora.forwardFrame(f, via) == LoraP2P::Status::OK) {
-        g_relay_down++;
-        Serial.printf("[relay]  ack dest=%u via=%u  down=%lu\n",
-                      f.dest_id, via, static_cast<unsigned long>(g_relay_down));
-    }
+    relayDownlink(f, "ack");
 }
 
 // Telemetría ajena con este nodo como DESTINO FINAL: entrega en custodia
@@ -887,6 +904,109 @@ void handleSnOffer(const LoraP2P::RxFrame& f) {
     }
 }
 
+// ----- Canal de configuración remota (frame-format.md §17) -----
+
+// Un fragmento del config nuevo. Se acumula y se confirma con el mapa de lo
+// recibido, para que el emisor sepa de una sola trama qué le falta reenviar.
+void handleConfigPush(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-push"); return; }
+    if (f.payload_length < 9) return;   // 8 de cabecera + al menos 1 de datos
+
+    uint32_t xfer;
+    uint16_t offset;
+    std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
+    const uint8_t idx   = f.payload[4];
+    const uint8_t total = f.payload[5];
+    std::memcpy(&offset, &f.payload[6], sizeof(offset));
+
+    const uint8_t len = static_cast<uint8_t>(f.payload_length - 8);
+    if (!cfgota::onPush(xfer, idx, total, offset, &f.payload[8], len)) {
+        Serial.printf("[cfg]    fragmento %u/%u rechazado (xfer=%08lX off=%u len=%u)\n",
+                      idx, total, static_cast<unsigned long>(xfer), offset, len);
+        return;
+    }
+
+    Serial.printf("[cfg]    fragmento %u/%u recibido (%u B, off=%u)  mapa=%08lX\n",
+                  idx, total, len, offset,
+                  static_cast<unsigned long>(cfgota::receivedMask()));
+
+    nextSeq();
+    lora.sendConfigAck(g_lora_seq, mesh.parentId(), xfer, total,
+                       cfgota::receivedMask());
+}
+
+// Orden de aplicar lo reensamblado. Se verifica la integridad, se valida el
+// JSON con las MISMAS reglas del arranque y se escribe con el respaldo y la
+// ventana de prueba que ya protegen el camino por USB: un config que deje al
+// nodo sin red se revierte solo, venga del cable o del aire.
+void handleConfigCommit(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-commit"); return; }
+    if (f.payload_length != 38) return;   // xfer(4) + len(2) + sha256(32)
+
+    uint32_t xfer;
+    uint16_t total_len;
+    std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
+    std::memcpy(&total_len, &f.payload[4], sizeof(total_len));
+    const uint8_t* sha = &f.payload[6];
+
+    const char* texto = nullptr;
+    size_t      texto_len = 0;
+    cfgota::Result r = cfgota::verify(xfer, total_len, sha, texto, texto_len);
+
+    char detalle[64] = {0};
+    if (r == cfgota::Result::APPLIED) {
+        // Validación con las mismas reglas del arranque, sobre un Config
+        // temporal de heap (el struct es grande para la pila).
+        auto* tmp = new (std::nothrow) cfg::Config();
+        if (tmp == nullptr) {
+            r = cfgota::Result::WRITE_FAILED;
+            snprintf(detalle, sizeof(detalle), "sin memoria para validar");
+        } else {
+            char err[96];
+            const bool ok = cfg::load(texto, *tmp, err, sizeof(err));
+            delete tmp;
+            if (!ok) {
+                r = cfgota::Result::INVALID;
+                snprintf(detalle, sizeof(detalle), "%s", err);
+            }
+        }
+    }
+
+    if (r == cfgota::Result::APPLIED) {
+        const bool prueba_previa = configstore::trialPending();
+        const bool respaldado    = configstore::backup();
+        if (respaldado) configstore::markTrial();
+        if (!configstore::write(texto, texto_len)) {
+            if (respaldado && !prueba_previa) configstore::clearTrial();
+            r = cfgota::Result::WRITE_FAILED;
+            snprintf(detalle, sizeof(detalle), "fallo escribiendo en flash");
+        } else {
+            snprintf(detalle, sizeof(detalle),
+                     respaldado ? "a prueba hasta confirmar red" : "sin respaldo previo");
+        }
+    }
+
+    Serial.printf("[cfg]    COMMIT xfer=%08lX len=%u -> resultado=%u %s\n",
+                  static_cast<unsigned long>(xfer), total_len,
+                  static_cast<unsigned>(r), detalle);
+
+    // El veredicto sale ANTES de reiniciar, y se le da tiempo al aire: si el
+    // nodo se reiniciara de inmediato, el emisor no sabría nunca si lo aplicó.
+    nextSeq();
+    lora.sendConfigResult(g_lora_seq, mesh.parentId(), xfer,
+                          static_cast<uint8_t>(r), detalle);
+
+    if (r != cfgota::Result::APPLIED) {
+        cfgota::reset();
+        return;
+    }
+
+    cfgota::reset();
+    Serial.flush();
+    delay(1500);
+    ESP.restart();
+}
+
 // Reparte las tramas LoRa entrantes por tipo.
 void processLoraRx() {
     LoraP2P::RxFrame f;
@@ -911,6 +1031,17 @@ void processLoraRx() {
                 break;
             case protocol::kFrameSnOffer:
                 handleSnOffer(f);
+                break;
+            case protocol::kFrameConfigPush:
+                handleConfigPush(f);
+                break;
+            case protocol::kFrameConfigCommit:
+                handleConfigCommit(f);
+                break;
+            case protocol::kFrameConfigAck:
+            case protocol::kFrameConfigResult:
+                // Subida de otro nodo con este como salto: relay normal.
+                handleUplinkRelay(f);
                 break;
             default:
                 break;
@@ -1803,6 +1934,9 @@ void loop() {
             heartbeatTick(tnow);
             radioHealthTick(tnow);
             nodeHealthTick(tnow);
+            if (cfgota::expireIfIdle(tnow)) {
+                Serial.println(F("[cfg]    transferencia abandonada por inactividad"));
+            }
             batchTick(tnow);
         }
 

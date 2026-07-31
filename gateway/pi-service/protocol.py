@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x34          # v3.4 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x35          # v3.5 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -126,6 +126,10 @@ FRAME_NODE_REGISTER = 0x04
 FRAME_WELCOME       = 0x05
 FRAME_MODBUS_DEBUG  = 0x06
 FRAME_NODE_HEALTH   = 0x07
+FRAME_CONFIG_PUSH   = 0x13
+FRAME_CONFIG_ACK    = 0x14
+FRAME_CONFIG_COMMIT = 0x15
+FRAME_CONFIG_RESULT = 0x16
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -139,6 +143,10 @@ FRAME_TYPE_NAMES = {
     FRAME_WELCOME:       'WELCOME',
     FRAME_MODBUS_DEBUG:  'MODBUS_DEBUG',
     FRAME_NODE_HEALTH:   'NODE_HEALTH',
+    FRAME_CONFIG_PUSH:   'CONFIG_PUSH',
+    FRAME_CONFIG_ACK:    'CONFIG_ACK',
+    FRAME_CONFIG_COMMIT: 'CONFIG_COMMIT',
+    FRAME_CONFIG_RESULT: 'CONFIG_RESULT',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
@@ -178,6 +186,17 @@ MB_DEBUG_NAMES = {
     2: 'errors_each',
     3: 'all_last',
     4: 'all_each',
+}
+
+# Veredictos de CONFIG_RESULT (spec §17.4).
+CFG_RESULT_NAMES = {
+    0: 'aplicado',
+    1: 'sha no coincide',
+    2: 'faltan fragmentos',
+    3: 'config invalido',
+    4: 'sin transferencia',
+    5: 'fallo de escritura',
+    6: 'demasiado grande',
 }
 
 ACK_SCHEMA_MISMATCH = 0x02
@@ -447,6 +466,27 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['mb_purged_total'] = struct.unpack_from('<I', payload, off)[0]
         out['mb_resync_total'] = struct.unpack_from('<I', payload, off + 4)[0]
 
+    elif frame_type == FRAME_CONFIG_ACK:
+        # v3.5 (spec §17.2): xfer_id + frag_total + mapa de recibidos.
+        if payload_length != 9:
+            out['error'] = f'CONFIG_ACK payload_length={payload_length}, esperado 9'
+            return out
+        out['cfg_xfer']  = struct.unpack_from('<I', payload, 0)[0]
+        out['cfg_total'] = payload[4]
+        out['cfg_mask']  = struct.unpack_from('<I', payload, 5)[0]
+
+    elif frame_type == FRAME_CONFIG_RESULT:
+        # v3.5 (spec §17.4): xfer_id + status + detalle opcional.
+        if payload_length < 5:
+            out['error'] = (f'CONFIG_RESULT payload_length={payload_length}, '
+                            f'esperado >= 5')
+            return out
+        out['cfg_xfer']        = struct.unpack_from('<I', payload, 0)[0]
+        out['cfg_status']      = payload[4]
+        out['cfg_status_name'] = CFG_RESULT_NAMES.get(
+            payload[4], f'unknown(0x{payload[4]:02X})')
+        out['cfg_detail']      = bytes(payload[5:]).decode('utf-8', errors='replace')
+
     elif frame_type == FRAME_NODE_HEALTH:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
@@ -566,6 +606,65 @@ def build_ack(origin_id: int, hop_dst: int, ack_seq: int, status: int,
     frame[OFF_PAYLOAD_LEN] = 3
     struct.pack_into('<H', frame, OFF_PAYLOAD, ack_seq & 0xFFFF)
     frame[OFF_PAYLOAD + 2] = status & 0xFF
+    return _finalize(frame, key, sec_ts)
+
+
+def build_config_push(dest_id: int, hop_dst: int, xfer_id: int,
+                      frag_idx: int, frag_total: int, offset: int,
+                      chunk: bytes, gw_seq: int, network_id: int, ttl: int,
+                      key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Construye un fragmento del config (frame-format.md §17.1).
+
+    El desplazamiento viaja explícito en vez de deducirse del índice: así el
+    receptor coloca cada trozo sin suponer que todos midan lo mismo ni tener
+    que conocer ese tamaño antes de recibir el primero, que puede ser el
+    último y por tanto más corto.
+    """
+    frame = bytearray(HEADER_BYTES + 8 + len(chunk))
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_CONFIG_PUSH
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 8 + len(chunk)
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    frame[OFF_PAYLOAD + 4] = frag_idx & 0xFF
+    frame[OFF_PAYLOAD + 5] = frag_total & 0xFF
+    struct.pack_into('<H', frame, OFF_PAYLOAD + 6, offset & 0xFFFF)
+    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 8 + len(chunk)] = chunk
+    return _finalize(frame, key, sec_ts)
+
+
+def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
+                        total_len: int, sha256: bytes, gw_seq: int,
+                        network_id: int, ttl: int,
+                        key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Orden de aplicar lo reensamblado (frame-format.md §17.3).
+
+    El sha256 completo viaja aquí y solo aquí: repetirlo en cada fragmento
+    costaba el 14 % del payload útil, y para detectar trozos de dos envíos
+    distintos basta con los 4 bytes del identificador de transferencia.
+    """
+    if len(sha256) != 32:
+        raise ValueError("sha256 debe ser de 32 bytes")
+    frame = bytearray(HEADER_BYTES + 38)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_CONFIG_COMMIT
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 38
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    struct.pack_into('<H', frame, OFF_PAYLOAD + 4, total_len & 0xFFFF)
+    frame[OFF_PAYLOAD + 6:OFF_PAYLOAD + 38] = sha256
     return _finalize(frame, key, sec_ts)
 
 

@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x34;  // v3.4
+constexpr uint8_t kSchemaVersion = 0x35;  // v3.5
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -36,6 +36,13 @@ constexpr uint8_t kFrameNodeRegister = 0x04;  // registro del nodo (v2.1, §13)
 constexpr uint8_t kFrameWelcome      = 0x05;  // respuesta al registro (v2.1, §13)
 constexpr uint8_t kFrameModbusDebug  = 0x06;  // transacción Modbus fallida (v3.2, §15)
 constexpr uint8_t kFrameNodeHealth   = 0x07;  // salud de la radio del nodo (v3.3, §16)
+// Canal de configuración remota (v3.5, §17). El rango 0x13-0x1F lo reserva
+// §11 para comandos por LoRa desde el diseño inicial.
+constexpr uint8_t kFrameConfigPush   = 0x13;  // downlink: un fragmento del JSON
+constexpr uint8_t kFrameConfigAck    = 0x14;  // uplink: mapa de lo recibido
+constexpr uint8_t kFrameConfigCommit = 0x15;  // downlink: aplicar lo reensamblado
+constexpr uint8_t kFrameConfigResult = 0x16;  // uplink: veredicto
+
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;
 constexpr uint8_t kFrameSnOffer      = 0x12;

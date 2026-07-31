@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x34` (= `v3.4`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x35` (= `v3.5`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -40,6 +40,8 @@ Reglas de compatibilidad:
 **v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+
+**v3.5 (31-jul-2026)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
 
 **v3.4 (29-jul-2026)**: reorganización del diagnóstico Modbus. MODBUS_DEBUG (§15.1) gana el campo `purge_len` y, tras la petición y la respuesta, los bytes purgados del cambio de sentido de esa transacción y los dos acumulados del bus, `purged_total` y `resync_total`. NODE_HEALTH (§16.1) gana un byte final con el modo de depuración Modbus vigente. Motiva el cambio que esa información solo existía en la consola del nodo, accesible por USB, y que una pestaña de tramas vacía en el visor no distinguía un bus limpio de una depuración apagada. En el firmware desaparece además la constante de compilación que gobernaba la traza por consola al margen del config: `modbus.debug` pasa a gobernar las dos salidas, consola y aire.
 
@@ -82,7 +84,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x34` para v3.4. |
+| `schema_version` | `0x35` para v3.5. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -127,6 +129,10 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
 | `0x06` | MODBUS_DEBUG | uplink | Transacción Modbus fallida en crudo (v3.2). Ver §15. |
 | `0x07` | NODE_HEALTH | uplink | Estado de la radio del nodo y recuperaciones (v3.3). Ver §16. |
+| `0x13` | CONFIG_PUSH | downlink | Un fragmento del `config.json` (v3.5). Ver §17. |
+| `0x14` | CONFIG_ACK | uplink | Mapa de fragmentos ya recibidos (v3.5). Ver §17. |
+| `0x15` | CONFIG_COMMIT | downlink | Orden de aplicar lo reensamblado (v3.5). Ver §17. |
+| `0x16` | CONFIG_RESULT | uplink | Veredicto de la aplicación (v3.5). Ver §17. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
@@ -941,7 +947,75 @@ Los mismos contadores viven en `/health.json` en la flash del nodo, que es lo qu
 
 El gateway no la confirma ni la mete en su buffer de telemetría: la registra en su log y la publica al topic `modulinkr/v1/{node_id}/health`, sin retain, porque es un evento con su instante y no un estado actual. La repetición del nodo cubre la pérdida de una copia suelta.
 
-## 17. Cambios respecto a v1.0
+## 17. Canal de configuración remota (v3.5)
+
+Sustituye el `config.json` de un nodo por LoRa, sin ir hasta él con un cable. Usa el rango `0x13`-`0x1F` que §11 apartaba para comandos desde el diseño inicial, y la ruta que allí se preveía: visor, Pi del gateway, Heltec, y descenso por el árbol con la ruta inversa de los ACK (§2.4).
+
+La autenticación viene de §14: toda trama va cifrada y autenticada con la clave de red, y el control de frescura de §14.5 cubre el replay. No hace falta nada específico del canal.
+
+### 17.1 CONFIG_PUSH (downlink, `frame_type = 0x13`)
+
+```
+xfer_id      frag_idx   frag_total   offset     fragmento
+(4 B LE)     (1 B)      (1 B)        (2 B LE)   (N B)
+```
+
+| Campo | Contenido |
+| --- | --- |
+| `xfer_id` | Los 4 primeros bytes del sha256 del config completo. Identifica la transferencia y detecta que están llegando trozos de dos envíos distintos. |
+| `frag_idx` | Índice del fragmento, de 0 a `frag_total - 1`. |
+| `frag_total` | Fragmentos de la transferencia. Tope 32, impuesto por el mapa de 32 bits del CONFIG_ACK. |
+| `offset` | Desplazamiento del fragmento dentro del config. |
+| `fragmento` | Los bytes del JSON. |
+
+El sha256 completo **no** viaja en cada fragmento: repetir 32 bytes se comía el 14 % del payload útil, y para detectar mezclas basta con los 4 del identificador. El sha entero va una sola vez, en el COMMIT, que es donde se necesita.
+
+El desplazamiento viaja explícito en lugar de deducirse del índice. Deducirlo obligaría a suponer que todos los fragmentos miden lo mismo y a conocer ese tamaño antes de colocar el primero que llegue, que puede ser el último y por tanto más corto.
+
+### 17.2 CONFIG_ACK (uplink, `frame_type = 0x14`)
+
+```
+xfer_id      frag_total   mask
+(4 B LE)     (1 B)        (4 B LE)
+```
+
+El bit `i` de `mask` indica que el fragmento `i` está recibido. Un solo mapa le dice al emisor exactamente qué reenviar, sin confirmar fragmento a fragmento ni deducirlo por ausencias. El nodo lo emite tras cada fragmento aceptado.
+
+### 17.3 CONFIG_COMMIT (downlink, `frame_type = 0x15`)
+
+```
+xfer_id      total_len    sha256
+(4 B LE)     (2 B LE)     (32 B)
+```
+
+Orden de aplicar. El nodo comprueba que el mapa está completo, que la longitud anunciada coincide con lo escrito y que el sha256 de lo reensamblado es el esperado. Solo entonces valida el JSON con las **mismas reglas del arranque** y lo escribe.
+
+### 17.4 CONFIG_RESULT (uplink, `frame_type = 0x16`)
+
+```
+xfer_id      status     detalle
+(4 B LE)     (1 B)      (0-64 B, texto)
+```
+
+| `status` | Significado |
+| --- | --- |
+| `0` | Aplicado. El nodo reinicia a continuación. |
+| `1` | El sha256 de lo reensamblado no coincide. |
+| `2` | Faltan fragmentos. |
+| `3` | JSON rechazado por la validación del firmware; `detalle` lleva el motivo. |
+| `4` | COMMIT sin transferencia en curso, o de otra. |
+| `5` | Fallo escribiendo en flash. |
+| `6` | No cabe: excede el buffer o el tope de fragmentos. |
+
+El veredicto sale **antes** de reiniciar, con margen para que ocupe el aire: reiniciando de inmediato, el emisor no sabría nunca si se aplicó.
+
+### 17.5 Seguridad de la operación
+
+Un config equivocado por aire puede dejar el nodo incomunicado, y ahí no hay cable que valga. El canal se apoya en la reversión automática que ya protege el camino por USB: el nodo copia su config vigente antes de pisarlo, marca el nuevo como a prueba, y si en la ventana siguiente no consigue registrarse en el gateway restaura el anterior y reinicia. Es la misma red de seguridad para los dos caminos de entrada, porque el peligro es el mismo.
+
+Ritmo de emisión: el gateway espacia los fragmentos a diez veces su tiempo de aire, que deja la banda al 10 %. El emisor solo retira un fragmento de su lista de pendientes cuando el mapa del CONFIG_ACK lo confirma, nunca al enviarlo.
+
+## 18. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -990,7 +1064,7 @@ Resumen para trazabilidad del TFM:
 3. Trama nueva MODBUS_DEBUG (`0x06`, §15): transacción fallida en crudo, activable con `modbus.debug` del config, best-effort sin ACK.
 4. Nota de honestidad habitual: el layout de TELEMETRY no es parseable por un receptor v3.1, pero todo el despliegue se flashea a la vez; se acepta como minor.
 
-## 18. Documentos relacionados
+## 19. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.

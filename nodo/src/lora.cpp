@@ -405,6 +405,45 @@ LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
                         static_cast<uint8_t>(off));
 }
 
+LoraP2P::Status LoraP2P::sendConfigAck(uint16_t seq, uint8_t hop_dst,
+                                       uint32_t xfer_id, uint8_t frag_total,
+                                       uint32_t mask) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v3.5 (spec §17.2), 9 bytes: xfer_id, total y mapa de recibidos.
+    uint8_t payload[9];
+    std::memcpy(&payload[0], &xfer_id, sizeof(xfer_id));
+    payload[4] = frag_total;
+    std::memcpy(&payload[5], &mask, sizeof(mask));
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameConfigAck, ttl_,
+                        payload, sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::sendConfigResult(uint16_t seq, uint8_t hop_dst,
+                                          uint32_t xfer_id, uint8_t status,
+                                          const char* detail) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v3.5 (spec §17.4): xfer_id, status y un texto opcional con el
+    // motivo, sin terminador (la longitud la da payload_length).
+    constexpr size_t kDetailMax = 64;
+    uint8_t payload[5 + kDetailMax];
+    std::memcpy(&payload[0], &xfer_id, sizeof(xfer_id));
+    payload[4] = status;
+
+    size_t n = 0;
+    if (detail != nullptr) {
+        n = strnlen(detail, kDetailMax);
+        std::memcpy(&payload[5], detail, n);
+    }
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameConfigResult, ttl_,
+                        payload, static_cast<uint8_t>(5 + n));
+}
+
 LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
                                         uint8_t fault, uint8_t reset_reason,
                                         uint16_t boots,

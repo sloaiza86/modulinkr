@@ -64,6 +64,7 @@ systemd lo relanza.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import random
@@ -89,6 +90,28 @@ MIN_VALID_EPOCH = 1735689600
 # Un registro fragmentado que no completa en este plazo se descarta (el nodo
 # reintentará la ronda completa de fragmentos, frame-format.md §13.2).
 REG_REASSEMBLY_TIMEOUT_S = 15.0
+
+# ----- Envío de configuración por LoRa (frame-format.md §17) -----
+# Tamaño de fragmento con margen para el sobre de seguridad: el payload útil
+# con seguridad activa son 221 B y la cabecera del CONFIG_PUSH ocupa 8.
+CFG_FRAG_BYTES = 213
+# Espera antes de dar por perdidos los fragmentos sin confirmar y reenviarlos.
+CFG_ACK_WAIT_S = 10.0
+# Rondas de reenvío antes de abandonar. Cada ronda reenvía solo lo que el
+# mapa del CONFIG_ACK marca como ausente, así que convergen rápido.
+CFG_MAX_ROUNDS = 3
+# Espera tras oír una trama del nodo antes de mandarle un fragmento.
+#
+# Enviar a ciegas hacía que los fragmentos cayeran encima del ciclo de envío
+# del nodo, que no puede recibir mientras transmite ni durante la vuelta a
+# escucha. Y como el espaciado por ciclo de trabajo (3,7 s) y el ciclo del
+# nodo (5 s) baten entre sí, la colisión no era un accidente aislado sino
+# periódica: en banco el mismo fragmento se perdió tres veces seguidas
+# mientras los demás pasaban a la primera (31-jul-2026).
+#
+# Oír una trama del nodo es la señal de que acaba de terminar su ciclo. Este
+# margen cubre además la trama de depuración Modbus que sale detrás.
+CFG_QUIET_DELAY_S = 1.5
 
 # Formato de la línea de recepción que emite el Heltec.
 RX_RE = re.compile(
@@ -123,6 +146,7 @@ class GatewayService:
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
         self.mb_debug: dict = {}      # origin -> modo de depuración Modbus
+        self.cfg_tx: dict | None = None   # transferencia de config en curso
         self.mqtt: MqttPublisher | None = None
 
         # Periodo del drenado del buffer hacia el broker cloud (segundos).
@@ -245,6 +269,166 @@ class GatewayService:
                  protocol.addr_name(dest_id),
                  protocol.ACK_STATUS_NAMES.get(status, hex(status)),
                  epoch, protocol.addr_name(hop_dst), seq)
+
+    # ----- Envío de configuración por LoRa (frame-format.md §17) -----
+
+    def config_start(self, push_id: int, origin: int, text: str) -> None:
+        """Prepara una transferencia. El identificador son los 4 primeros
+        bytes del sha256, así que dos envíos del mismo contenido comparten
+        identificador y el nodo puede reanudar en vez de empezar de cero."""
+        data = text.encode("utf-8")
+        sha = hashlib.sha256(data).digest()
+        chunks = [data[i:i + CFG_FRAG_BYTES]
+                  for i in range(0, len(data), CFG_FRAG_BYTES)]
+        if not chunks or len(chunks) > 32:
+            self.buf.config_push_state(
+                push_id, "failed",
+                f"config de {len(data)} B: {len(chunks)} fragmentos, tope 32")
+            return
+
+        # Espaciado entre fragmentos derivado del ciclo de trabajo: el
+        # gateway también tiene límite, y una ráfaga de diez tramas seguidas
+        # se lo comería. Diez veces el tiempo de aire deja el 10 % de la banda.
+        toa = protocol.toa_ms(protocol.OVERHEAD + 8 + CFG_FRAG_BYTES,
+                              self.sf, self.bw_khz)
+        self.cfg_tx = {
+            "push_id": push_id, "origin": origin,
+            "xfer": int.from_bytes(sha[:4], "little"),
+            "sha": sha, "total_len": len(data), "chunks": chunks,
+            "pending": set(range(len(chunks))),
+            "phase": "sending", "next_ms": 0.0,
+            "gap_s": max(toa * 10 / 1000.0, 1.0),
+            "rounds": 0, "waited_s": 0.0,
+        }
+        self.buf.config_push_state(push_id, "sending",
+                                   f"{len(chunks)} fragmentos, {len(data)} B")
+        LOG.info("config-push origin=%d inicio: %d B en %d fragmentos, "
+                 "espaciado %.1f s, xfer=%08X",
+                 origin, len(data), len(chunks), self.cfg_tx["gap_s"],
+                 self.cfg_tx["xfer"])
+
+    def _config_hop(self, origin: int) -> int:
+        """Vecino por el que bajar hacia el nodo. El gateway solo conoce el
+        salto directo; los relays intermedios resuelven el resto con la ruta
+        inversa que aprendieron del uplink (spec §2.4)."""
+        try:
+            return self.buf.hop_for(origin)
+        except Exception:                            # noqa: BLE001
+            return origin
+
+    def config_tick(self, now: float) -> None:
+        """Avanza la transferencia en curso, o arranca la siguiente de la
+        cola. Se llama desde el bucle principal, con el puerto ya abierto."""
+        if self.buf is None:
+            return
+        if self.cfg_tx is None:
+            pend = self.buf.config_push_next()
+            if pend is not None:
+                self.config_start(pend["id"], pend["origin"], pend["config"])
+            return
+
+        t = self.cfg_tx
+        if now < t["next_ms"]:
+            return
+        # Ventana de silencio: solo se transmite poco después de haber oído
+        # al nodo, que es cuando se sabe que está escuchando. Sin haberlo
+        # oído aún, se espera: el nodo emite cada pocos segundos, así que la
+        # ocasión llega sola.
+        oido = t.get("heard_ms", 0.0)
+        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+            return
+        if now > oido + CFG_QUIET_DELAY_S + t["gap_s"]:
+            return   # la ventana ya pasó: se espera a la siguiente trama
+
+        if t["phase"] == "sending":
+            # Los que faltan por confirmar Y aún no se han mandado en esta
+            # ronda. Elegir solo por "pendientes" reenviaba el mismo
+            # fragmento una y otra vez, porque un fragmento no sale de
+            # pendientes hasta que llega su CONFIG_ACK y ese ACK tarda más
+            # que el intervalo entre envíos: medido en banco, 8 tramas al
+            # aire para entregar 5 (31-jul-2026).
+            restantes = t["pending"] - t.get("sent_all", set())
+            if restantes:
+                idx = min(restantes)
+                chunk = t["chunks"][idx]
+                frame = protocol.build_config_push(
+                    t["origin"], self._config_hop(t["origin"]), t["xfer"],
+                    idx, len(t["chunks"]), idx * CFG_FRAG_BYTES, chunk,
+                    self._next_gw_seq(), self.net_id, self.max_ttl,
+                    self.sec_key, self._gw_sec_ts())
+                self._tx(frame)
+                LOG.info("config-push origin=%d fragmento %d/%d (%d B)",
+                         t["origin"], idx, len(t["chunks"]), len(chunk))
+                # No se retira de pendientes al enviarlo: lo retira el mapa
+                # del CONFIG_ACK, que es la única prueba de que llegó.
+                t["next_ms"] = now + t["gap_s"]
+                t["sent_all"] = t.get("sent_all", set()) | {idx}
+            else:
+                # Todo mandado en esta ronda: a esperar los ACK que falten.
+                t["phase"] = "waiting"
+                t["waited_s"] = 0.0
+                t["next_ms"] = now + t["gap_s"]
+            return
+
+        if t["phase"] == "waiting":
+            # Ventana para que lleguen los ACK de los últimos fragmentos.
+            t["waited_s"] += t["gap_s"]
+            t["next_ms"] = now + t["gap_s"]
+            if t["pending"] and t["waited_s"] >= CFG_ACK_WAIT_S:
+                t["rounds"] += 1
+                if t["rounds"] > CFG_MAX_ROUNDS:
+                    self.config_finish("failed",
+                                       f"faltan {len(t['pending'])} fragmentos "
+                                       f"tras {CFG_MAX_ROUNDS} rondas")
+                    return
+                LOG.info("config-push origin=%d ronda %d: faltan %s",
+                         t["origin"], t["rounds"], sorted(t["pending"]))
+                t["phase"] = "sending"
+                t["sent_all"] = set()
+            return
+
+    def config_on_ack(self, parsed: dict) -> None:
+        """Mapa de fragmentos recibidos. Un solo mapa dice exactamente qué
+        reenviar, sin confirmar fragmento a fragmento."""
+        t = self.cfg_tx
+        if t is None or parsed["cfg_xfer"] != t["xfer"]:
+            return
+        mask = parsed["cfg_mask"]
+        t["pending"] = {i for i in range(len(t["chunks"]))
+                        if not (mask >> i) & 1}
+        LOG.info("config-ack origin=%s mapa=%08X faltan=%s",
+                 protocol.addr_name(parsed["origin_id"]), mask,
+                 sorted(t["pending"]) or "nada")
+        if not t["pending"] and t["phase"] != "committing":
+            t["phase"] = "committing"
+            frame = protocol.build_config_commit(
+                t["origin"], self._config_hop(t["origin"]), t["xfer"],
+                t["total_len"], t["sha"], self._next_gw_seq(),
+                self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts())
+            self._tx(frame)
+            self.buf.config_push_state(t["push_id"], "committing",
+                                       "todos los fragmentos entregados")
+            LOG.info("config-commit origin=%d xfer=%08X len=%d",
+                     t["origin"], t["xfer"], t["total_len"])
+
+    def config_on_result(self, parsed: dict) -> None:
+        """Veredicto del nodo. Cierra la transferencia en los dos sentidos."""
+        t = self.cfg_tx
+        if t is None or parsed["cfg_xfer"] != t["xfer"]:
+            return
+        detalle = f"{parsed['cfg_status_name']}: {parsed['cfg_detail']}".strip(": ")
+        LOG.info("config-result origin=%s %s",
+                 protocol.addr_name(parsed["origin_id"]), detalle)
+        self.config_finish("done" if parsed["cfg_status"] == 0 else "failed",
+                           detalle)
+
+    def config_finish(self, state: str, detail: str) -> None:
+        if self.cfg_tx is None:
+            return
+        self.buf.config_push_state(self.cfg_tx["push_id"], state, detail)
+        LOG.info("config-push origin=%d terminado: %s (%s)",
+                 self.cfg_tx["origin"], state, detail)
+        self.cfg_tx = None
 
     def send_ack(self, origin_id: int, hop_dst: int, ack_seq: int,
                  status: int) -> None:
@@ -380,6 +564,23 @@ class GatewayService:
                 self.n_notconf += 1
             return
 
+        # Canal de configuración (v3.5, spec §17): las dos tramas de subida
+        # las consume la transferencia en curso. Sin ACK: el propio mapa del
+        # CONFIG_ACK y el veredicto del CONFIG_RESULT son la confirmación.
+        if ft == protocol.FRAME_CONFIG_ACK:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.config_on_ack(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
+        if ft == protocol.FRAME_CONFIG_RESULT:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.config_on_result(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
         # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
@@ -495,7 +696,15 @@ class GatewayService:
 
         origin = parsed["origin_id"]
         if origin != hs and 1 <= origin <= 254:
-            self.buf.status_update(origin, ft)
+            # Ruta inversa (spec §2.4): el vecino por el que llegó este
+            # uplink es por el que hay que bajar hacia ese nodo. Lo usa el
+            # canal de configuración para alcanzar nodos a más de un salto.
+            self.buf.status_update(origin, ft, hop_src=hs)
+
+        # Marca de "acabo de oír a este nodo", que abre la ventana de silencio
+        # en la que sí escucha (ver CFG_QUIET_DELAY_S).
+        if self.cfg_tx is not None and origin == self.cfg_tx["origin"]:
+            self.cfg_tx["heard_ms"] = time.monotonic()
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
@@ -766,6 +975,9 @@ class GatewayService:
                     if now - last_drain >= self.drain_s:
                         last_drain = now
                         self.mqtt.drain()
+                    # Envío de configuración por LoRa: solo con el puerto
+                    # abierto, que es esta rama del bucle.
+                    self.config_tick(now)
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)

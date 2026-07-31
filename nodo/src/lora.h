@@ -294,6 +294,21 @@ public:
     //   queued  muestras pendientes en la outbox (saturando a 255).
     Status sendSnRequest(uint16_t seq, uint8_t queued);
 
+    // ----- Canal de configuración remota (v3.5, frame-format.md §17) -----
+
+    // CONFIG_ACK: mapa de los fragmentos ya recibidos de una transferencia.
+    // Con un solo mapa el emisor sabe exactamente qué reenviar, sin tener
+    // que confirmar fragmento a fragmento ni deducirlo por ausencias.
+    Status sendConfigAck(uint16_t seq, uint8_t hop_dst,
+                         uint32_t xfer_id, uint8_t frag_total, uint32_t mask);
+
+    // CONFIG_RESULT: veredicto de un COMMIT. `detail` es texto opcional con
+    // el motivo del rechazo (el mismo que da la validación del config), que
+    // el visor muestra tal cual; se trunca si no cabe.
+    Status sendConfigResult(uint16_t seq, uint8_t hop_dst,
+                            uint32_t xfer_id, uint8_t status,
+                            const char* detail);
+
     // HEARTBEAT v3.1 (frame-format.md §6): diagnóstico periódico sin ACK
     // con el contador de aire acumulado (duty cycle medido en el
     // transmisor, EN 300 220-1).

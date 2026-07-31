@@ -110,7 +110,8 @@ class GatewayBuffer:
                 nbiot_flags     INTEGER,
                 nbiot_csq       INTEGER,
                 nbiot_updated   REAL,
-                mqtt_seen       REAL
+                mqtt_seen       REAL,
+                last_hop_src    INTEGER
             )
         """)
         # Último dato de cada nodo recibido del broker cloud por NB-IoT (el
@@ -142,6 +143,22 @@ class GatewayBuffer:
                 mqtt_connected INTEGER NOT NULL
             )
         """)
+        # Cola de envíos de configuración por LoRa (frame-format.md §17). El
+        # visor y el servicio del gateway son procesos distintos que ya
+        # comparten esta base, así que la cola es el punto de encuentro
+        # natural: el visor inserta la petición y el servicio la ejecuta.
+        # En su propio execute: sqlite3 admite una sola sentencia por llamada.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_push (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin      INTEGER NOT NULL,
+                config      TEXT    NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
         self._migrate_node_status_nbiot()
         self.conn.commit()
 
@@ -161,10 +178,11 @@ class GatewayBuffer:
         cur = self.conn.execute("PRAGMA table_info(node_status)")
         cols = [row[1] for row in cur.fetchall()]
         for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen",
-                    "mb_debug", "mb_debug_updated"):
+                    "mb_debug", "mb_debug_updated", "last_hop_src"):
             if col not in cols:
                 col_type = ("INTEGER"
-                            if col in ("nbiot_flags", "nbiot_csq", "mb_debug")
+                            if col in ("nbiot_flags", "nbiot_csq", "mb_debug",
+                                       "last_hop_src")
                             else "REAL")
                 self.conn.execute(
                     f"ALTER TABLE node_status ADD COLUMN {col} {col_type}")
@@ -194,6 +212,42 @@ class GatewayBuffer:
                    mb_debug = excluded.mb_debug,
                    mb_debug_updated = excluded.mb_debug_updated""",
             (origin, mode, time.time()))
+        self.conn.commit()
+
+    def hop_for(self, origin: int) -> int:
+        """Vecino por el que bajar hacia `origin`: el hop_src con el que
+        llegó su último uplink, que es la ruta inversa (spec §2.4). Si no
+        consta, se devuelve el propio nodo, que es lo correcto cuando es
+        vecino directo del gateway."""
+        cur = self.conn.execute(
+            "SELECT last_hop_src FROM node_status WHERE origin = ?", (origin,))
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return origin
+        return int(row[0])
+
+    # ----- Cola de envíos de configuración por LoRa (spec §17) -----
+
+    def config_push_next(self) -> dict | None:
+        """Siguiente petición pendiente, o None. La toma el servicio del
+        gateway; el visor solo inserta y consulta el estado."""
+        cur = self.conn.execute(
+            """SELECT id, origin, config FROM config_push
+                WHERE state = 'pending' ORDER BY id LIMIT 1""")
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "origin": row[1], "config": row[2]}
+
+    def config_push_state(self, push_id: int, state: str,
+                          detail: str | None = None) -> None:
+        """Avanza el estado de una petición: sending, committing, done o
+        failed, con el detalle que el nodo devuelva en su veredicto."""
+        self.conn.execute(
+            """UPDATE config_push
+                  SET state = ?, detail = ?, updated_ts = ?
+                WHERE id = ?""",
+            (state, detail, time.time(), push_id))
         self.conn.commit()
 
     def mb_debug_all(self) -> dict:
@@ -424,7 +478,8 @@ class GatewayBuffer:
                       rssi: Optional[float] = None,
                       snr: Optional[float] = None,
                       parent_id: Optional[int] = None,
-                      hop_count: Optional[int] = None) -> None:
+                      hop_count: Optional[int] = None,
+                      hop_src: Optional[int] = None) -> None:
         """Upsert del estado de un nodo al oír una trama. Los campos None
         no pisan el valor anterior (COALESCE): una trama sin info de
         topología conserva el padre conocido, y una relayada conserva el
@@ -432,17 +487,18 @@ class GatewayBuffer:
         self.conn.execute(
             """INSERT INTO node_status
                    (origin, last_seen, last_frame_type, rssi, snr,
-                    parent_id, hop_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                    parent_id, hop_count, last_hop_src)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(origin) DO UPDATE SET
                    last_seen       = excluded.last_seen,
                    last_frame_type = excluded.last_frame_type,
                    rssi            = COALESCE(excluded.rssi, rssi),
                    snr             = COALESCE(excluded.snr, snr),
                    parent_id       = COALESCE(excluded.parent_id, parent_id),
-                   hop_count       = COALESCE(excluded.hop_count, hop_count)""",
+                   hop_count       = COALESCE(excluded.hop_count, hop_count),
+                   last_hop_src    = COALESCE(excluded.last_hop_src, last_hop_src)""",
             (origin, time.time(), frame_type, rssi, snr,
-             parent_id, hop_count))
+             parent_id, hop_count, hop_src))
         self.conn.commit()
 
     def status_heartbeat(self, lora_link: bool, mqtt_enabled: bool,
