@@ -201,14 +201,34 @@ void handlePut(const char* args) {
         return;
     }
 
+    // Copia del config vigente ANTES de pisarlo: es lo que permite deshacer
+    // el cambio si el nuevo deja el nodo sin red (configstore.h). En el primer
+    // aprovisionamiento no hay nada que copiar y backup() devuelve false, que
+    // no es un error: simplemente no habrá marcha atrás para ese cambio.
+    const bool prueba_previa = configstore::trialPending();
+    const bool respaldado    = configstore::backup();
+
+    // La marca de prueba va ANTES de escribir el config, no después, y el
+    // orden importa. Un corte de alimentación entre las dos operaciones deja
+    // así el config VIEJO con una marca de más, que el arranque siguiente
+    // confirma sola en cuanto el nodo se registre: inofensivo. Al revés, el
+    // mismo corte dejaría el config NUEVO aplicado y sin ninguna red de
+    // seguridad, que es justo el escenario que este mecanismo evita.
+    if (respaldado) configstore::markTrial();
+
     if (!configstore::write(reinterpret_cast<const char*>(buf), len)) {
+        // El config no llegó a aplicarse: la marca sobra. Solo se retira si
+        // la puso esta operación; si ya había una prueba en curso de un
+        // cambio anterior, se respeta.
+        if (respaldado && !prueba_previa) configstore::clearTrial();
         free(buf);
         respondErr("fallo escribiendo en flash");
         return;
     }
     free(buf);
 
-    respond("CFG:OK guardado, reiniciando");
+    respond(respaldado ? "CFG:OK guardado (a prueba hasta confirmar red), reiniciando"
+                       : "CFG:OK guardado, reiniciando");
     Serial.flush();
     delay(300);
     ESP.restart();

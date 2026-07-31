@@ -35,4 +35,52 @@ bool write(const char* text, size_t len);
 // existía: el estado final es el mismo, sin config.
 bool remove();
 
+// ----- Reversión de configuración (29-jul-2026) -----
+//
+// Red de seguridad para el cambio de configuración, imprescindible antes de
+// poder hacerlo por LoRa. Con el cable, un config equivocado se arregla
+// volviendo a enchufar; por aire, uno que toque `network_id`, frecuencia, SF
+// o clave deja el nodo incomunicado y obliga a ir físicamente hasta él.
+//
+// El mecanismo tiene tres piezas: una copia del config vigente antes de
+// pisarlo, una marca de que el config nuevo está a prueba, y una ventana en
+// el arranque siguiente. Si dentro de esa ventana el nodo no consigue
+// registrarse en el gateway, restaura la copia y reinicia.
+//
+// Sesgo deliberado hacia revertir: una reversión en falso (por ejemplo, el
+// gateway apagado justo durante la ventana) sale barata, porque el nodo
+// vuelve a un config que funcionaba y basta con reenviar el nuevo. Una
+// reversión que no ocurre cuando debía cuesta un viaje hasta el nodo.
+
+// Copia /config.json a /config.prev.json. Devuelve si queda una copia
+// utilizable: false solo en el primer aprovisionamiento (no hay config que
+// copiar) o si la escritura falla.
+//
+// Con una prueba pendiente NO rehace la copia y devuelve true si ya la hay.
+// El config en flash es entonces el que está a prueba, y copiarlo perdería
+// el último confirmado, que es el único al que tiene sentido volver. Sin
+// esta guarda, encadenar dos cambios sin esperar a la ventana deja al nodo
+// sin marcha atrás buena.
+bool backup();
+
+// true si existe /config.prev.json.
+bool hasBackup();
+
+// Restaura /config.prev.json sobre /config.json, con el mismo renombrado
+// atómico de write(). La copia se conserva.
+bool restore();
+
+// Marca de prueba: activa entre que se acepta un config nuevo y que el
+// arranque siguiente confirma que la red sigue alcanzable.
+//
+// El estado vive DENTRO del archivo, no en su existencia. La versión previa
+// usaba la ausencia como estado, y como lo normal es no tener prueba en
+// curso, la comprobación de cada arranque abría un archivo que no estaba y
+// el VFS del core lo registraba como error de nivel E: ruido permanente y
+// alarmante en el log de todos los nodos por el caso normal. begin() crea el
+// archivo si falta, así que a partir del primer arranque existe siempre.
+bool markTrial();
+bool trialPending();
+void clearTrial();
+
 }  // namespace configstore

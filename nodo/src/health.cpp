@@ -40,6 +40,7 @@ bool load(Record& out) {
     out.tx_psend         = doc["tx_psend"]         | 0u;
     out.tx_done          = doc["tx_done"]          | 0u;
     out.rx_valid         = doc["rx_valid"]         | 0u;
+    out.cfg_rollbacks    = doc["cfg_rollbacks"]    | 0u;
     return true;
 }
 
@@ -56,6 +57,7 @@ bool save(const Record& r) {
     doc["tx_psend"]         = r.tx_psend;
     doc["tx_done"]          = r.tx_done;
     doc["rx_valid"]         = r.rx_valid;
+    doc["cfg_rollbacks"]    = r.cfg_rollbacks;
 
     File f = LittleFS.open(kTmpPath, "w");
     if (!f) return false;

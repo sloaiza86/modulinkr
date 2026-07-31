@@ -153,6 +153,11 @@ bool LoraP2P::reinitRadio() {
     initialized_ = false;
     discardTxQueue();
 
+    // Sondeo AT antes de reconfigurar: no arregla nada, pero distingue en el
+    // log una UART muerta de un módulo despierto con el camino de datos
+    // colgado, que es la primera pregunta al diagnosticar.
+    probe_ok_ = probeModule();
+
     if (!applyRadioConfig()) return false;
 
     clearFaults();
@@ -865,7 +870,7 @@ void LoraP2P::checkRxSilence() {
     if (tx_psend_ == psend_at_last_rx_) return;
 
     if (static_cast<int32_t>(millis() - last_rx_ms_) >=
-        static_cast<int32_t>(kRxSilenceMs)) {
+        static_cast<int32_t>(rx_silence_ms_)) {
         rx_silent_ = true;
         rx_silence_events_++;
     }

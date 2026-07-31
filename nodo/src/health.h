@@ -34,6 +34,7 @@ struct Record {
     uint32_t tx_psend         = 0;  // contadores de radio en ese momento
     uint32_t tx_done          = 0;
     uint32_t rx_valid         = 0;
+    uint32_t cfg_rollbacks    = 0;  // configs revertidos por no alcanzar la red
 };
 
 // Carga /health.json. Con el archivo ausente o ilegible deja el registro a

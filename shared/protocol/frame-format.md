@@ -905,10 +905,10 @@ Estado de la radio del nodo y de las recuperaciones que ha necesitado. Nace del 
 byte  0      fault             (1 B)   motivo del último fallo
 byte  1      reset_reason      (1 B)   causa del último arranque
 bytes 2-3    boots             (2 B)   arranques acumulados, uint16 LE
-bytes 4-5    probes            (2 B)   recuperaciones de nivel 1
-bytes 6-7    reinits           (2 B)   recuperaciones de nivel 2
-bytes 8-9    resets            (2 B)   recuperaciones de nivel 3
-bytes 10-11  reboots           (2 B)   recuperaciones de nivel 4
+bytes 4-5    probes            (2 B)   sondeos AT sin respuesta del módulo
+bytes 6-7    reinits           (2 B)   recuperaciones de nivel 1 (reconfigurar)
+bytes 8-9    resets            (2 B)   recuperaciones de nivel 2 (ATZ)
+bytes 10-11  reboots           (2 B)   recuperaciones de nivel 3 (reiniciar el nodo)
 bytes 12-15  tx_psend          (4 B)   escrituras AT+PSEND, uint32 LE
 bytes 16-19  tx_done           (4 B)   eventos TXP2P DONE, uint32 LE
 bytes 20-23  rx_valid          (4 B)   tramas válidas recibidas, uint32 LE
@@ -928,6 +928,8 @@ Valores de `fault`:
 `reset_reason` es el valor crudo de `esp_reset_reason()`, que distingue el encendido normal del reinicio por software (nivel 4 de la escalera), del pánico y del brownout.
 
 La relación entre `tx_psend` y `tx_done` es el indicador de salud del transmisor: toda escritura acaba en `TXP2P DONE`, `AT_BUSY_ERROR` o `ERROR`, así que una divergencia sostenida entre ambos significa que el módulo acepta comandos y no transmite. Los contadores de recuperación van en uint16 porque un nodo que supere las 65535 recuperaciones tiene un problema que ningún contador resuelve.
+
+`probes` no cuenta un nivel de la escalera: el sondeo AT no arregla nada por sí solo, así que se hace dentro de la reconfiguración y solo se contabiliza cuando el módulo NO responde por la UART, que es lo que distingue una UART muerta de un módulo despierto con el camino de datos colgado.
 
 ### 16.2 Reglas de emisión
 

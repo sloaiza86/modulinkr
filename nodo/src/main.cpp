@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.35-mb-debug-unificado";
+constexpr const char* kFirmwareVersion = "0.0.37-cfg-rollback";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -199,12 +199,49 @@ constexpr size_t   kRegFragMax      = protocol::kMaxPayload - 2;
 // La escalera avanza al ritmo de las ventanas de los detectores del driver:
 // tras ejecutar un nivel se limpian las faltas, y que vuelvan a dispararse es
 // la prueba de que ese nivel no bastó. No hace falta temporizador de escalada.
-constexpr uint32_t kRecoveryVerifyMs   = 200000;    // supera la ventana de RX (180 s)
+// Una recuperación solo se da por buena cuando la radio aguanta MÁS que la
+// ventana del detector más lento, que es el de silencio de recepción: antes
+// de eso, la ausencia de faltas solo significa que se acaban de limpiar. Se
+// deriva de esa ventana en lugar de fijarse aparte, porque son dos números
+// que deben guardar una relación y confiarla a que nadie toque uno sin mirar
+// el otro es pedirlo. El margen cubre que el detector tarde un ciclo más en
+// volver a dispararse. Se calcula en setup(), con el config ya cargado.
+constexpr uint32_t kRecoveryVerifyMarginMs = 60000;
+uint32_t g_recovery_verify_ms = 240000;
+
 constexpr uint32_t kExhaustedRetryMs   = 300000;    // reintento con la escalera agotada
 constexpr uint32_t kRebootWindowMs     = 21600000;  // 6 h
 constexpr uint8_t  kRebootMaxPerWindow = 3;
 constexpr uint32_t kHealthRepeatMs     = 60000;
 constexpr uint8_t  kHealthRepeats      = 3;
+
+// ----- Ventana de prueba de una configuración nueva (configstore.h) -----
+//
+// Tras aceptar un config nuevo, el nodo dispone de esta ventana para
+// registrarse en el gateway. Si no lo consigue, restaura el config anterior y
+// reinicia.
+//
+// El valor sale de sumar el peor caso razonable de un arranque bueno, no de
+// elegir un número redondo:
+//
+//   arranque del nodo hasta mesh operativa            ~4 s   (medido)
+//   espera de un beacon, con dos perdidos             ~90 s  (3 x 30 s)
+//   reintentos de registro con su backoff (5+10+20)   ~35 s
+//                                                     -----
+//                                                     ~130 s
+//
+// Anclajes del protocolo: el beacon del gateway va cada 30 s, y el propio
+// `mesh.gateway_wait_ms` (90 s por defecto) es la decisión del protocolo
+// sobre cuándo el nodo concluye que no está llegando al gateway. En banco,
+// de arranque a WELCOME se midieron 24 y 31 s.
+//
+// 240 s son ocho periodos de beacon y 2,7 veces el gateway_wait_ms, y cubren
+// además que la Raspberry se esté reiniciando justo en ese momento (menos de
+// un minuto), dejando aún tres minutos para registrarse.
+constexpr uint32_t kTrialWindowMs = 240000;   // 4 min
+
+bool     g_trial_active   = false;
+uint32_t g_trial_start_ms = 0;
 
 health::Record g_health;
 uint8_t  g_recov_level     = 0;   // 0 sana, 1..4 último nivel ejecutado
@@ -1152,7 +1189,7 @@ void radioHealthTick(uint32_t now) {
         // las faltas solo significa que se acaban de limpiar.
         if (g_recov_level > 0 &&
             static_cast<int32_t>(now - g_recov_step_ms) >=
-                static_cast<int32_t>(kRecoveryVerifyMs)) {
+                static_cast<int32_t>(g_recovery_verify_ms)) {
             Serial.printf("[radio]  radio estable tras L%u  psend=%lu done=%lu rx=%lu\n",
                           g_recov_level,
                           static_cast<unsigned long>(lora.txPsend()),
@@ -1161,6 +1198,27 @@ void radioHealthTick(uint32_t now) {
             g_recov_level     = 0;
             g_health_tx_left  = kHealthRepeats;
             g_health_tx_ms    = 0;
+        }
+        return;
+    }
+
+    // Arbitración con la prueba de configuración. Los dos mecanismos miran el
+    // mismo síntoma, "no me llega nada", y sacan conclusiones distintas: este
+    // culpa a la radio, la prueba culpa al config. Justo después de un cambio
+    // de configuración la segunda es la explicación abrumadoramente probable,
+    // y su remedio (volver al config anterior) es el correcto.
+    //
+    // Sin esta cesión los dos corrían a la vez y ganaba el equivocado: la
+    // escalera llegaba a reiniciar el nodo antes de que venciera la ventana
+    // de prueba, y como la marca sobrevive al reinicio, el reloj de la prueba
+    // volvía a cero. Tres reinicios inútiles y unos cuarenta minutos para
+    // hacer algo que debe costar uno y cuatro (medido el 29-jul-2026).
+    if (g_trial_active) {
+        static bool avisado = false;
+        if (!avisado) {
+            avisado = true;
+            Serial.println(F("[radio]  falta detectada, pero hay una configuracion "
+                             "a prueba: la escalera cede, decide la prueba"));
         }
         return;
     }
@@ -1182,7 +1240,7 @@ void radioHealthTick(uint32_t now) {
     // Escalera agotada: se sigue reintentando la reconfiguración con backoff
     // largo, pero sin más reinicios del nodo. Un nodo aislado de verdad
     // (gateway apagado o fuera de alcance) acaba aquí, y aquí no hace daño.
-    if (g_recov_level >= 4) {
+    if (g_recov_level >= 3) {
         if (static_cast<int32_t>(now - g_recov_step_ms) <
             static_cast<int32_t>(kExhaustedRetryMs)) {
             return;
@@ -1200,30 +1258,27 @@ void radioHealthTick(uint32_t now) {
 
     switch (g_recov_level) {
         case 1: {
-            g_health.probes++;
-            const bool vivo = lora.probeModule();
-            Serial.printf("[radio]  L1 sondeo AT (%s): modulo %s\n",
-                          causa, vivo ? "responde" : "MUDO en la UART");
-            // El sondeo no arregla nada por sí solo; deja constancia de si la
-            // UART sigue viva antes de reconfigurar.
+            g_health.reinits++;
+            const bool ok = lora.reinitRadio();
+            if (!lora.lastProbeOk()) g_health.probes++;
+            Serial.printf("[radio]  L1 reinicializacion (%s): sondeo AT %s, radio %s\n",
+                          causa,
+                          lora.lastProbeOk() ? "responde" : "MUDO en la UART",
+                          ok ? "OK" : "FALLO");
+            if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
             break;
         }
         case 2: {
-            g_health.reinits++;
-            const bool ok = lora.reinitRadio();
-            Serial.printf("[radio]  L2 reinicializacion de la radio: %s\n",
+            g_health.resets++;
+            const bool ok = lora.resetModule();
+            if (!lora.lastProbeOk()) g_health.probes++;
+            Serial.printf("[radio]  L2 ATZ y reconfiguracion: sondeo AT %s, radio %s\n",
+                          lora.lastProbeOk() ? "responde" : "MUDO en la UART",
                           ok ? "OK" : "FALLO");
             if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
             break;
         }
         case 3: {
-            g_health.resets++;
-            const bool ok = lora.resetModule();
-            Serial.printf("[radio]  L3 ATZ y reconfiguracion: %s\n", ok ? "OK" : "FALLO");
-            if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
-            break;
-        }
-        case 4: {
             // Tope por ventana contra el bucle de reinicios: superado, el
             // nodo pasa a reintentar solo la reconfiguración.
             if (now - g_reboot_win_ms >= kRebootWindowMs) {
@@ -1231,14 +1286,14 @@ void radioHealthTick(uint32_t now) {
                 g_reboots_window = 0;
             }
             if (g_reboots_window >= kRebootMaxPerWindow) {
-                Serial.printf("[radio]  L4 omitido: %u reinicios en la ventana, "
+                Serial.printf("[radio]  L3 omitido: %u reinicios en la ventana, "
                               "se mantiene la radio en reintento\n",
                               static_cast<unsigned>(g_reboots_window));
                 break;
             }
             g_reboots_window++;
             g_health.reboots++;
-            Serial.printf("[radio]  L4 reinicio del nodo (%s). Registro guardado.\n", causa);
+            Serial.printf("[radio]  L3 reinicio del nodo (%s). Registro guardado.\n", causa);
             Serial.flush();
             health::save(g_health);
             delay(100);
@@ -1250,6 +1305,50 @@ void radioHealthTick(uint32_t now) {
     }
 
     health::save(g_health);
+}
+
+// Ventana de prueba de una configuración nueva (configstore.h). Solo corre
+// cuando el arranque anterior aceptó un config con respaldo disponible.
+//
+// El criterio de éxito es el registro en el gateway, que es la prueba de que
+// el nodo sigue siendo alcanzable: exige oír sus beacons (parámetros de radio
+// correctos), que el gateway entienda sus tramas (network_id y clave
+// correctos) y que responda el WELCOME. Cualquier campo del config que rompa
+// el enlace se manifiesta como ausencia de registro.
+void trialTick(uint32_t now) {
+    if (!g_trial_active) return;
+
+    if (g_registered) {
+        g_trial_active = false;
+        configstore::clearTrial();
+        Serial.printf("[cfg]    configuracion nueva confirmada: red alcanzable "
+                      "en %lu s\n",
+                      static_cast<unsigned long>((now - g_trial_start_ms) / 1000));
+        return;
+    }
+
+    if (static_cast<int32_t>(now - g_trial_start_ms) <
+        static_cast<int32_t>(kTrialWindowMs)) {
+        return;
+    }
+
+    // Ventana agotada sin registro: se asume que el config nuevo dejó al nodo
+    // sin red. Se restaura el anterior y se reinicia. La marca se borra antes
+    // de reiniciar para no encadenar pruebas sobre el config ya restaurado.
+    g_trial_active = false;
+    g_health.cfg_rollbacks++;
+    health::save(g_health);
+
+    const bool ok = configstore::restore();
+    configstore::clearTrial();
+    Serial.printf("[cfg]    SIN RED en %lu s con la configuracion nueva: "
+                  "%s y reiniciando (reversiones=%lu)\n",
+                  static_cast<unsigned long>(kTrialWindowMs / 1000),
+                  ok ? "restaurada la anterior" : "FALLO al restaurar",
+                  static_cast<unsigned long>(g_health.cfg_rollbacks));
+    Serial.flush();
+    delay(200);
+    ESP.restart();
 }
 
 // Emisión de la trama de salud (frame-format.md §16). Sale al completarse el
@@ -1280,13 +1379,13 @@ void nodeHealthTick(uint32_t now) {
 
     g_health_tx_ms = now;
     g_health_tx_left--;
-    Serial.printf("[radio]  NODE_HEALTH emitida seq=%u boots=%lu L1=%lu L2=%lu L3=%lu L4=%lu arranque=%s (quedan %u)\n",
+    Serial.printf("[radio]  NODE_HEALTH emitida seq=%u boots=%lu reinit=%lu atz=%lu reboot=%lu uart_muda=%lu arranque=%s (quedan %u)\n",
                   g_lora_seq,
                   static_cast<unsigned long>(g_health.boots),
-                  static_cast<unsigned long>(g_health.probes),
                   static_cast<unsigned long>(g_health.reinits),
                   static_cast<unsigned long>(g_health.resets),
                   static_cast<unsigned long>(g_health.reboots),
+                  static_cast<unsigned long>(g_health.probes),
                   health::resetReasonName(g_health.reset_reason),
                   static_cast<unsigned>(g_health_tx_left));
 }
@@ -1464,20 +1563,47 @@ void setup() {
 
     // Registro de salud (fase 3): vive en la misma LittleFS que el config, así
     // que se carga con ella montada. La causa del arranque distingue un
-    // encendido normal de un reinicio propio (L4 de la escalera), de un pánico
+    // encendido normal de un reinicio propio (ultimo nivel de la escalera),
+    // de un panico
     // o de un brownout, que es justo lo que no se sabía de los dos incidentes.
     if (fs_ready) {
         health::load(g_health);
         g_health.boots++;
         g_health.reset_reason = static_cast<uint8_t>(esp_reset_reason());
         health::save(g_health);
-        Serial.printf("[health] arranque %lu, causa: %s  (L1=%lu L2=%lu L3=%lu L4=%lu)\n",
+        Serial.printf("[health] arranque %lu, causa: %s  (reinit=%lu atz=%lu reboot=%lu uart_muda=%lu)\n",
                       static_cast<unsigned long>(g_health.boots),
                       health::resetReasonName(g_health.reset_reason),
-                      static_cast<unsigned long>(g_health.probes),
                       static_cast<unsigned long>(g_health.reinits),
                       static_cast<unsigned long>(g_health.resets),
-                      static_cast<unsigned long>(g_health.reboots));
+                      static_cast<unsigned long>(g_health.reboots),
+                      static_cast<unsigned long>(g_health.probes));
+    }
+
+    // ----- Configuración a prueba (configstore.h) -----
+    // El arranque anterior aceptó un config nuevo y dejó marca. Aquí se
+    // decide qué hacer con ella.
+    if (fs_ready && configstore::trialPending()) {
+        if (!g_configured) {
+            // El config nuevo ni siquiera carga: no hay nada que esperar, la
+            // ventana solo serviría para tener el nodo inútil diez minutos.
+            g_health.cfg_rollbacks++;
+            health::save(g_health);
+            const bool ok = configstore::restore();
+            configstore::clearTrial();
+            Serial.printf("[cfg]    la configuracion nueva no valida (%s): %s "
+                          "y reiniciando\n",
+                          g_cfg_err,
+                          ok ? "restaurada la anterior" : "FALLO al restaurar");
+            Serial.flush();
+            delay(200);
+            ESP.restart();
+        }
+        g_trial_active   = true;
+        g_trial_start_ms = millis();
+        Serial.printf("[cfg]    configuracion nueva A PRUEBA: %lu s para "
+                      "registrarse en el gateway o se revierte\n",
+                      static_cast<unsigned long>(kTrialWindowMs / 1000));
     }
 
     // El comisionamiento atiende SIEMPRE, configurado o no: es la vía
@@ -1549,6 +1675,12 @@ void setup() {
         // bloque security del config. Ajuste de TODA la red; el Pi del
         // gateway debe llevar la misma clave.
         lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
+
+        // El detector de receptor mudo sigue al beacon_timeout del despliegue,
+        // no a una constante que asuma el valor por defecto: debe saltar
+        // DESPUÉS de que la capa mesh dé el padre por perdido, nunca antes.
+        lora.setRxSilenceWindow(2 * g_cfg.beacon_timeout_ms);
+        g_recovery_verify_ms = lora.rxSilenceWindow() + kRecoveryVerifyMarginMs;
         Serial.printf("OK  (RAK3172 fw: %s, CAD: %s, security: %s)\n",
                       lora.firmwareVersion(),
                       lora.cadEnabled() ? "on" : "off",
@@ -1599,6 +1731,11 @@ void setup() {
 void loop() {
     // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
     commission::poll();
+
+    // Ventana de prueba de la configuración: fuera del bloque que exige radio
+    // lista, a propósito. Un config que impida inicializar la radio es
+    // justamente uno de los que hay que revertir, y ahí g_lora_ready es false.
+    trialTick(millis());
 
     // Sin config válido: LED rojo parpadeando, recordatorio periódico en
     // el log (con el motivo: ausente o inválido) y nada más que hacer.

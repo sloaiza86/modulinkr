@@ -176,6 +176,17 @@ public:
     bool     rxSilent() const { return rx_silent_; }
     uint32_t rxSilenceEvents() const { return rx_silence_events_; }
 
+    // Umbral de silencio de recepción. Se fija desde el config, al doble del
+    // `mesh.beacon_timeout_ms` del despliegue: dos ventanas completas sin
+    // recibir nada son seis beacons perdidos con el valor por defecto.
+    //
+    // Antes era una constante de 180 s que daba por hecho el beacon_timeout
+    // por defecto de 90 s. En un despliegue que lo subiera, el detector
+    // saltaría antes de que la capa mesh diera el padre por perdido, o sea
+    // antes de que la red se considerase a sí misma en problemas.
+    void     setRxSilenceWindow(uint32_t ms) { rx_silence_ms_ = ms ? ms : kRxSilenceDefaultMs; }
+    uint32_t rxSilenceWindow() const { return rx_silence_ms_; }
+
     // Radio en falta por cualquiera de los dos lados.
     bool radioFaulted() const { return mute_flagged_ || rx_silent_; }
 
@@ -186,22 +197,33 @@ public:
     // por UART, sin línea de reset ni control de alimentación, así que estos
     // tres niveles son todo lo que cabe hacer sin reiniciar el propio nodo.
 
-    // L1: escribe AT y espera OK. Distingue la UART muerta, en la que no hay
-    // respuesta a nada, del camino de transmisión colgado con el módulo
-    // despierto, que es lo observado en los dos incidentes.
+    // Sondeo: escribe AT y espera OK. Distingue la UART muerta, en la que no
+    // hay respuesta a nada, del camino de transmisión colgado con el módulo
+    // despierto, que es lo observado en los dos incidentes. No arregla nada
+    // por sí solo, así que NO es un nivel de la escalera: lo ejecuta
+    // reinitRadio antes de reconfigurar, y su resultado queda en el log.
+    //
+    // Tenerlo como nivel propio era un error: a diferencia de los demás no
+    // limpiaba las faltas, así que el detector seguía disparado y la escalera
+    // saltaba al nivel siguiente un segundo después, quemando un escalón sin
+    // dar tiempo a nada (observado en banco el 29-jul-2026).
     bool probeModule();
 
-    // L2: repite la secuencia de configuración con los parámetros de begin().
-    // Reaplica canal, SF, ancho de banda, potencia, CAD y modo TX+RX.
+    // Nivel 1: repite la secuencia de configuración con los parámetros de
+    // begin(). Reaplica canal, SF, ancho de banda, potencia, CAD y modo TX+RX.
     bool reinitRadio();
 
-    // L3: ATZ, reset por software del módulo, seguido de L2, porque el reset
-    // lo devuelve a su configuración por defecto y sin L2 quedaría fuera del
-    // canal del despliegue.
+    // Nivel 2: ATZ, reset por software del módulo, seguido del nivel 1,
+    // porque el reset lo devuelve a su configuración por defecto y sin
+    // reconfigurar quedaría fuera del canal del despliegue.
     bool resetModule();
 
     // Da por buena la radio y reabre las ventanas de los dos detectores.
     void clearFaults();
+
+    // Resultado del último sondeo AT hecho dentro de reinitRadio: true si el
+    // módulo respondió por la UART.
+    bool lastProbeOk() const { return probe_ok_; }
 
     // Construye una trama TELEMETRY v3.2 y la emite hacia el padre.
     //   seq       Número de secuencia (lo gestiona el llamante; los
@@ -390,8 +412,12 @@ private:
     // Umbral al doble del beacon_timeout_ms por defecto (90 s): dos ventanas
     // seguidas sin recibir nada son seis beacons perdidos, margen de sobra
     // frente a una interferencia puntual.
-    static constexpr uint32_t kRxSilenceMs   = 180000;
-    static constexpr uint32_t kProbeTimeoutMs = 500;    // espera del OK en L1
+    // Valor de respaldo si nadie fija la ventana: el doble del
+    // beacon_timeout_ms por defecto (90 s) del config.
+    static constexpr uint32_t kRxSilenceDefaultMs = 180000;
+    uint32_t rx_silence_ms_ = kRxSilenceDefaultMs;
+    bool     probe_ok_      = false;   // último sondeo AT de reinitRadio
+    static constexpr uint32_t kProbeTimeoutMs = 500;    // espera del OK del sondeo
     static constexpr uint32_t kResetSettleMs  = 2000;   // arranque tras ATZ
     uint32_t last_rx_ms_        = 0;
     uint32_t psend_at_last_rx_  = 0;  // tx_psend_ en la última recepción
