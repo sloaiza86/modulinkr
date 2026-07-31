@@ -16,12 +16,22 @@
 *.map
 *.lst
 
-# Excepción deliberada: los binarios únicos que el Pi flashea por USB (el
-# del Heltec en la instalación fresca, el del nodo desde la página "Cargar
-# firmware"). Los generan los make_dist.sh y viajan con el scp del
-# pi-service.
+# Excepción deliberada: los binarios que el Pi sirve, que no son artefactos
+# de compilación sino parte de lo que se despliega. Los generan los
+# make_dist.sh y viajan con el scp del pi-service, o con el git clone en una
+# instalación fresca: el instalador configura dependencias y systemd sobre el
+# árbol que ya está, no copia código, así que lo que no esté versionado no
+# llega al Pi.
+#
+#   heltec-radio.bin  firmware de la radio, se flashea en la instalación
+#   nodo.bin          imagen completa del nodo, para flashear por USB desde
+#                     la página "Cargar firmware"
+#   nodo-app.bin      la aplicación sola, que es lo que se envía por LoRa
+#                     (§18). Sin ella la actualización por radio no está
+#                     disponible y el visor lo dice.
 !gateway/pi-service/heltec-radio.bin
 !gateway/pi-service/nodo.bin
+!gateway/pi-service/nodo-app.bin
 
 # Dependencias instaladas localmente
 node_modules/

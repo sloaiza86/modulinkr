@@ -174,6 +174,32 @@ class GatewayBuffer:
                 updated_ts  REAL
             )
         """)
+        # Cola de actualizaciones de firmware por LoRa (frame-format.md §18).
+        # Tabla propia y no una columna más en config_push: una transferencia
+        # de firmware dura horas, tiene ventana horaria y se instala con una
+        # orden aparte, así que su ciclo de vida no se parece en nada al de un
+        # config, que va y vuelve en segundos.
+        #
+        # `written` es lo único que hace falta guardar del progreso, porque la
+        # entrega es secuencial. Sobrevivir a un reinicio del servicio es
+        # entonces gratis: se retoma en ese número.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS fw_push (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin      INTEGER NOT NULL,
+                version     TEXT    NOT NULL,
+                total_len   INTEGER NOT NULL,
+                sha256      TEXT    NOT NULL,
+                path        TEXT    NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                written     INTEGER NOT NULL DEFAULT 0,
+                hour_from   INTEGER,
+                hour_to     INTEGER,
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
         self._migrate_node_status_nbiot()
         self.conn.commit()
 
@@ -253,6 +279,67 @@ class GatewayBuffer:
         if row is None:
             return None
         return {"id": row[0], "origin": row[1], "config": row[2]}
+
+    # ----- Cola de firmware por LoRa (spec §18) -----
+
+    def fw_push_next(self) -> dict | None:
+        """Siguiente actualización que toca atender.
+
+        Devuelve tanto las pendientes como las que quedaron a medias: una
+        transferencia de horas atraviesa reinicios del servicio, y retomarla es
+        justo el caso normal, no la excepción.
+        """
+        cur = self.conn.execute(
+            """SELECT id, origin, version, total_len, sha256, path, written,
+                      hour_from, hour_to, state
+                 FROM fw_push
+                WHERE state IN ('pending', 'sending', 'ready', 'install_req',
+                                'installing')
+                ORDER BY id LIMIT 1""")
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "origin": row[1], "version": row[2],
+                "total_len": row[3], "sha256": row[4], "path": row[5],
+                "written": row[6], "hour_from": row[7], "hour_to": row[8],
+                "state": row[9]}
+
+    def fw_push_state(self, push_id: int, state: str,
+                      detail: str | None = None,
+                      written: int | None = None) -> None:
+        """Avanza el estado: sending, ready, installing, done o failed.
+
+        `written` se actualiza solo cuando llega, para que un cambio de estado
+        no pise el progreso con un valor viejo.
+        """
+        if written is None:
+            self.conn.execute(
+                """UPDATE fw_push SET state = ?, detail = ?, updated_ts = ?
+                    WHERE id = ?""", (state, detail, time.time(), push_id))
+        else:
+            self.conn.execute(
+                """UPDATE fw_push
+                      SET state = ?, detail = ?, written = ?, updated_ts = ?
+                    WHERE id = ?""",
+                (state, detail, written, time.time(), push_id))
+        self.conn.commit()
+
+    def fw_push_state_of(self, push_id: int) -> str | None:
+        """Estado actual de una actualización. Lo consulta el servicio para
+        enterarse de que el visor pidió instalar: los dos procesos no se hablan
+        directamente, la tabla es el punto de encuentro."""
+        cur = self.conn.execute("SELECT state FROM fw_push WHERE id = ?",
+                                (push_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def fw_push_progress(self, push_id: int, written: int) -> None:
+        """Solo el progreso, sin tocar estado ni detalle. Se llama a menudo
+        (cada FW_STATUS), de ahí que sea una escritura mínima."""
+        self.conn.execute(
+            "UPDATE fw_push SET written = ?, updated_ts = ? WHERE id = ?",
+            (written, time.time(), push_id))
+        self.conn.commit()
 
     def config_push_state(self, push_id: int, state: str,
                           detail: str | None = None) -> None:

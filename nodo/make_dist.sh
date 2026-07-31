@@ -68,8 +68,32 @@ if [ -n "$VER" ]; then
     printf '%s' "$VER" > "$OUT.version"
 fi
 
+# Segunda salida: la aplicación sola, para la actualización en caliente.
+#
+# El binario de arriba se escribe entero desde 0x0 y lleva gestor de arranque
+# y tabla de particiones, que es lo que necesita un Atom virgen por USB. Una
+# actualización en caliente no puede usarlo: escribe en la partición dormida
+# (app1) mientras el nodo corre desde la otra, y ahí solo cabe la aplicación.
+# Es además la mitad de grande, que por radio importa.
+#
+# El sha256 va en un archivo aparte porque el emisor tiene que anunciarlo
+# antes de mandar nada, y quien lo recibe comprobarlo antes de instalar.
+APP_OUT="$DIR/../gateway/pi-service/nodo-app.bin"
+cp "$BUILD/firmware.bin" "$APP_OUT"
+APP_SHA="$( (shasum -a 256 "$APP_OUT" 2>/dev/null || sha256sum "$APP_OUT") \
+            | awk '{print $1}')"
+printf '%s' "$APP_SHA" > "$APP_OUT.sha256"
+[ -n "$VER" ] && printf '%s' "$VER" > "$APP_OUT.version"
+
 echo
 echo "Generado: $OUT"
 ls -lh "$OUT" | awk '{print "  tamaño:", $5}'
 (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") | awk '{print "  sha256:", $1}'
 [ -n "$VER" ] && echo "  versión: $VER (en $OUT.version)"
+
+APP_BYTES="$(wc -c < "$APP_OUT" | tr -d ' ')"
+echo
+echo "Generado: $APP_OUT"
+echo "  tamaño: $APP_BYTES B ($((APP_BYTES / 1024)) kB, $((APP_BYTES * 100 / 1310720))% de app1)"
+echo "  sha256: $APP_SHA"
+echo "  fragmentos por radio: $(( (APP_BYTES + 212) / 213 ))"

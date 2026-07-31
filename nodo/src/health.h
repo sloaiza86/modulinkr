@@ -35,6 +35,9 @@ struct Record {
     uint32_t tx_done          = 0;
     uint32_t rx_valid         = 0;
     uint32_t cfg_rollbacks    = 0;  // configs revertidos por no alcanzar la red
+    uint32_t fw_installs      = 0;  // imágenes instaladas por radio (v3.7)
+    uint32_t fw_confirms      = 0;  // de esas, las que alcanzaron la red
+    uint32_t fw_rollbacks     = 0;  // y las que el gestor de arranque revirtió
 };
 
 // Carga /health.json. Con el archivo ausente o ilegible deja el registro a

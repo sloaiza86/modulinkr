@@ -2341,9 +2341,162 @@ async function fwCargar() {
 // y se expone en window (ver el shim de index.html), así que funciona offline.
 
 function fwFuenteCtrls() {
-  const local = document.getElementById("fw-fuente").value === "local";
-  document.getElementById("fw-gateway").hidden = local;
-  document.getElementById("fw-local").hidden = !local;
+  const v = document.getElementById("fw-fuente").value;
+  document.getElementById("fw-gateway").hidden = v !== "gateway";
+  document.getElementById("fw-local").hidden   = v !== "local";
+  document.getElementById("fw-lora").hidden    = v !== "lora";
+  if (v === "lora") fwLoraNodos();
+}
+
+// ----- Firmware por LoRa (frame-format.md §18) -----
+//
+// La subida vive en el gateway, no en el navegador: dura horas, respeta una
+// ventana horaria y cede el aire a la telemetría. El visor solo encola, mira el
+// progreso y, cuando la imagen ya está en el nodo, pide instalarla.
+
+let fwLoraId   = null;    // actualización en curso, id de la tabla fw_push
+let fwLoraTimer = null;
+
+async function fwLoraNodos() {
+  const sel = document.getElementById("fw-lora-nodo");
+  sel.innerHTML = "";
+  try {
+    const r = await fetchApi("/api/red/estado");
+    const nodes = (await r.json()).nodes || [];
+    nodes.filter((n) => n.origin >= 1 && n.origin <= 254).forEach((n) => {
+      const o = document.createElement("option");
+      o.value = n.origin;
+      o.textContent = `${n.name || "nodo"} (${n.origin})`
+        + (n.fw_version ? ` · ${n.fw_version}` : "")
+        + (n.online ? "" : " · sin señal");
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = "sin nodos conocidos";
+      sel.appendChild(o);
+    }
+  } catch (e) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "error consultando la red";
+    sel.appendChild(o);
+  }
+  fwLoraAvisoImagen();
+}
+
+// Qué imagen hay y qué va a costar mandarla. Se dice antes de empezar porque
+// una vez lanzada la subida ocupa el aire de la red durante horas.
+async function fwLoraAvisoImagen() {
+  const el = document.getElementById("fw-lora-riesgo");
+  try {
+    const r = await fetchApi("/api/config/lora/firmware");
+    const d = await r.json();
+    if (!d.disponible) {
+      el.className = "aviso mal";
+      el.textContent = d.error || "no hay imagen disponible";
+      document.getElementById("fw-lora-enviar").disabled = true;
+      return;
+    }
+    el.className = "aviso";
+    el.textContent = `Imagen ${d.version}: ${d.bytes} B en ${d.fragmentos} `
+      + `fragmentos, ${d.aire_min} min de tiempo de aire. Repartido en la `
+      + "ventana nocturna suele ser una noche.";
+    document.getElementById("fw-lora-enviar").disabled = false;
+  } catch (e) {
+    el.className = "aviso mal";
+    el.textContent = "no se pudo consultar la imagen: " + e.message;
+  }
+}
+
+async function fwLoraEnviar() {
+  const aviso = document.getElementById("fw-lora-aviso");
+  const origin = Number(document.getElementById("fw-lora-nodo").value);
+  if (!origin) { aviso.className = "aviso mal"; aviso.textContent = "elegir nodo"; return; }
+  const cuerpo = {
+    origin,
+    hour_from: Number(document.getElementById("fw-lora-desde").value),
+    hour_to:   Number(document.getElementById("fw-lora-hasta").value),
+  };
+  aviso.className = "aviso"; aviso.textContent = "encolando...";
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/enviar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cuerpo) });
+    const d = await r.json();
+    if (!r.ok) {
+      aviso.className = "aviso mal";
+      aviso.textContent = d.error || "error";
+      // Con una ya en curso se ofrece seguirla en vez de dejar al usuario
+      // atascado: casi siempre es lo que quería.
+      if (d.id) fwLoraSeguir(d.id);
+      return;
+    }
+    fwLoraSeguir(d.id);
+  } catch (e) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "error: " + e.message;
+  }
+}
+
+// Sondea el progreso. Cada diez segundos y no más rápido: la subida avanza en
+// horas, y consultarla cada segundo solo daría trabajo al Pi.
+function fwLoraSeguir(id) {
+  fwLoraId = id;
+  const barra = document.getElementById("fw-lora-barra");
+  const aviso = document.getElementById("fw-lora-aviso");
+  const instalar = document.getElementById("fw-lora-instalar");
+  barra.hidden = false;
+  if (fwLoraTimer) clearInterval(fwLoraTimer);
+
+  const tick = async () => {
+    try {
+      const r = await fetchApi("/api/config/lora/firmware/estado?id=" + id);
+      const d = await r.json();
+      if (!r.ok) { aviso.textContent = d.error || "error"; return; }
+      barra.value = d.pct;
+      const cerrado = d.state === "done" || d.state === "failed";
+      instalar.hidden = d.state !== "ready";
+      aviso.className = d.state === "failed" ? "aviso mal" : "aviso";
+      aviso.textContent =
+        d.state === "ready"
+          ? `Imagen ${d.version} entera y verificada en el nodo. `
+            + "Instalar reinicia el nodo; si no vuelve a la red en cuatro "
+            + "minutos, el gestor de arranque restaura la anterior solo."
+          : `${d.state}: ${d.pct} % (${d.written}/${d.total_len} B)`
+            + (d.detail ? ` · ${d.detail}` : "");
+      if (cerrado) {
+        clearInterval(fwLoraTimer);
+        fwLoraTimer = null;
+        instalar.hidden = true;
+      }
+    } catch (e) { /* un sondeo fallido no rompe nada: se reintenta */ }
+  };
+  tick();
+  fwLoraTimer = setInterval(tick, 10000);
+}
+
+async function fwLoraInstalar() {
+  const aviso = document.getElementById("fw-lora-aviso");
+  if (!fwLoraId) return;
+  if (!window.confirm(
+      "El nodo se reiniciará con la imagen nueva.\n\n"
+      + "Si no consigue registrarse en la red en cuatro minutos, el gestor de "
+      + "arranque vuelve solo a la versión anterior. Aun así, durante ese rato "
+      + "el nodo no mide.\n\n¿Instalar ahora?")) {
+    return;
+  }
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/instalar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: fwLoraId }) });
+    const d = await r.json();
+    aviso.className = r.ok ? "aviso" : "aviso mal";
+    aviso.textContent = r.ok ? "orden enviada, el nodo reinicia"
+                             : (d.error || "error");
+  } catch (e) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "error: " + e.message;
+  }
 }
 
 async function fwLocalFlash() {
@@ -2489,6 +2642,8 @@ function fwFlash() {
 document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
 document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
+document.getElementById("fw-lora-enviar").addEventListener("click", fwLoraEnviar);
+document.getElementById("fw-lora-instalar").addEventListener("click", fwLoraInstalar);
 document.getElementById("fw-local-flash").addEventListener("click", fwLocalFlash);
 document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
 
@@ -2498,6 +2653,26 @@ let formPuerto = null;
 let formInited = false;
 let nodosConocidos = new Map();  // origin -> nombre, para avisar de ID ya en uso
 let idLeido = null;              // ID leído de un nodo (reconfiguración legítima)
+// Versión de firmware que cada nodo declaró en su NODE_REGISTER, y la del
+// binario que sirve el gateway. Por radio no hay consulta de versión, así que
+// lo que el nodo dijo al registrarse es lo único que se puede enseñar. Es un
+// dato de cuando arrancó: si se le cargó firmware por cable después y no ha
+// vuelto a registrarse, estará atrasado.
+let fwPorNodo = new Map();       // origin -> versión declarada al registrarse
+let fwGateway = null;            // versión del nodo.bin que sirve el gateway
+// Destino confirmado: nodo encontrado por cable o elegido de la lista por
+// radio. Es contexto de la sesión y no lo tumba una edición del formulario;
+// solo lo tumba cambiar de fuente, porque ahí el destino deja de existir.
+let formDestinoListo = false;
+// Rama del asistente: null (sin elegir), "nuevo" o "existente".
+//
+// El asistente entraba directamente al formulario y pedía el nodo dos veces:
+// una arriba para leerlo y otra abajo para buscarlo antes de enviar. Eran la
+// misma pregunta hecha dos veces porque el flujo no distinguía las dos
+// intenciones que en realidad tiene: dar de alta un nodo que aún no existe, y
+// editar uno que ya está en la red. Separadas, cada una pide lo suyo una sola
+// vez.
+let formModo = null;
 
 // Clases de lectura Modbus (orden del array reads[] = orden de telemetría).
 const MB_READS = [
@@ -2627,6 +2802,76 @@ function formInit() {
   formLockRed();
   formNbiotVis();
   formCargarNodos();
+  formSetModo(null);
+}
+
+// ----- Las dos ramas del asistente -----
+
+// Muestra u oculta el resto del asistente según haya rama elegida, y adapta lo
+// que cambia entre ellas: qué destinos tienen sentido y si hay algo que leer.
+function formSetModo(modo) {
+  formModo = modo;
+  const nota = document.getElementById("f-destino-nota");
+  const aviso = document.getElementById("f-modo-aviso");
+
+  // Sin rama elegida no se enseña nada más: el formulario entero depende de
+  // qué se vaya a hacer con él.
+  document.querySelectorAll("#cfg-form .cfg-card").forEach((c) => {
+    if (c.id !== "f-modo-card") c.hidden = (modo === null);
+  });
+  document.getElementById("f-modo-nuevo").classList.toggle("btn-primario", modo !== "existente");
+  document.getElementById("f-modo-existente").classList.toggle("btn-primario", modo !== "nuevo");
+  if (modo === null) {
+    aviso.textContent = "";
+    return;
+  }
+
+  const nuevo = modo === "nuevo";
+  aviso.textContent = nuevo ? "Nodo nuevo" : "Reconfigurar un nodo de la red";
+
+  // Un nodo sin configurar no está en la red, así que por radio no se le llega:
+  // la opción de LoRa desaparece del selector en vez de quedarse ahí para
+  // fallar al pulsarla.
+  const fuente = document.getElementById("f-fuente");
+  const opLora = fuente.querySelector('option[value="lora"]');
+  if (opLora) opLora.hidden = nuevo;
+  if (nuevo && fuente.value === "lora") fuente.value = "gateway";
+
+  // Leer solo tiene sentido sobre un nodo que ya tiene configuración.
+  document.getElementById("f-leer").hidden = nuevo;
+  document.getElementById("f-leer-aviso").textContent = "";
+  nota.textContent = nuevo
+    ? "Elige por dónde se carga el nodo. Los parámetros de red vienen ya "
+      + "puestos con los del gateway y el ID es el primero libre."
+    : "Elige por dónde hablar con el nodo y léelo: lo leído rellena el "
+      + "formulario y ese mismo nodo queda como destino del envío.";
+
+  if (nuevo) formNodoNuevo();
+  formFuenteCtrls();
+  formLive();
+}
+
+// Primer ID libre entre los que el gateway conoce. Con la lista vacía o con un
+// fallo de red devuelve 1, que es lo mismo que proponía el formulario antes.
+function formIdLibre() {
+  for (let i = 1; i <= 254; i++) {
+    if (!nodosConocidos.has(i)) return i;
+  }
+  return 1;
+}
+
+// Deja el formulario listo para un nodo que aún no existe: identidad en blanco
+// y el primer ID libre. Lo que define la red (frecuencia, SF, Network ID,
+// seguridad, broker) ya lo pone formLockRed con los valores reales del
+// gateway, y no se toca aquí.
+function formNodoNuevo() {
+  const sV = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  sV("f-id", formIdLibre());
+  sV("f-name", "");
+  sV("f-desc", "");
+  idLeido = null;
+  formPuerto = null;
+  formDestino(false);
 }
 
 // ----- Validación en vivo del asistente (a medida que se escribe) -----
@@ -2640,9 +2885,28 @@ async function formCargarNodos() {
       const d = await r.json();
       nodosConocidos = new Map(
         (d.nodes || []).map((n) => [Number(n.origin), n.name || ("nodo " + n.origin)]));
+      fwPorNodo = new Map((d.nodes || [])
+        .filter((n) => n.fw_version)
+        .map((n) => [Number(n.origin), n.fw_version]));
     }
   } catch (e) { /* sin lista: se omite el aviso de ID en uso */ }
+  try {
+    const r = await fetchApi("/api/config/firmware");
+    if (r.ok) fwGateway = (await r.json()).version || null;
+  } catch (e) { /* sin versión del binario: se omite la comparación */ }
   formLive();
+}
+
+// Fija si hay destino confirmado y recalcula el botón de envío. Enviar exige
+// las dos cosas a la vez, destino y formulario sin errores, y cada una se
+// entera por su lado: el destino al buscar el nodo o elegirlo de la lista, los
+// errores en cada tecla. Pasar por aquí es lo que evita que una de las dos
+// pise el estado de la otra.
+function formDestino(listo) {
+  formDestinoListo = !!listo;
+  const enviar = document.getElementById("f-enviar");
+  if (!enviar) return;
+  enviar.disabled = !formDestinoListo || fValidate(collectForm()).length > 0;
 }
 
 function marcarCampo(id, malo) {
@@ -2684,8 +2948,18 @@ function formMarcarDevices() {
 }
 
 // Corre en cada input/change del formulario: marca los campos con problema,
-// avisa (sin bloquear) si el ID ya está en uso por otro nodo, y lista lo
-// pendiente. Toda edición invalida una validación previa: hay que revalidar.
+// avisa (sin bloquear) si el ID ya está en uso por otro nodo, lista lo
+// pendiente, regenera el config.json de la caja de revisión y decide si se
+// puede enviar.
+//
+// Antes había un botón de "Validar configuración" que hacía este mismo trabajo
+// a demanda y era el único que rellenaba la caja. Sobraba: la validación ya
+// corría en cada tecla para marcar los campos en rojo, así que el botón solo
+// añadía un clic y un estado más (validado o no) que toda edición invalidaba.
+// Ahora la caja refleja el formulario en todo momento y el envío se habilita
+// solo. La caja no se edita a mano a propósito: con dos fuentes de verdad sobre
+// el mismo dato habría que decidir cuál gana cuando ambas cambian, y para
+// escribir JSON en crudo está la página de carga por USB.
 function formLive() {
   const form = collectForm();
   const errs = fValidate(form);
@@ -2720,17 +2994,28 @@ function formLive() {
   } else {
     pend.className = "aviso";
     pend.textContent = idEnUso
-      ? "Sin errores de formato; revisa el aviso del ID antes de validar."
-      : "Sin errores. Pulsa «Validar configuración».";
+      ? "Sin errores de formato; revisa el aviso del ID antes de enviar."
+      : "Sin errores.";
   }
 
-  // Editar tras validar obliga a revalidar: se apaga buscar/enviar y se
-  // descarta el preview anterior para no enviar una config desincronizada.
-  document.getElementById("f-buscar").disabled = true;
-  document.getElementById("f-enviar").disabled = true;
-  document.getElementById("f-preview").value = "";
-  const res = document.getElementById("f-resultado");
-  res.className = "aviso"; res.textContent = "";
+  // La caja refleja el formulario en todo momento, con errores o sin ellos:
+  // enseñar lo que hay es más útil que dejarla en blanco hasta que todo cuadre,
+  // porque es donde se ve qué campo falta por rellenar.
+  const caja = document.getElementById("f-preview");
+  try {
+    caja.value = JSON.stringify(buildConfig(form), null, 2);
+  } catch (e) {
+    caja.value = "";
+    pend.className = "aviso mal";
+    pend.textContent = "no se puede generar el config: " + e.message;
+  }
+
+  // Buscar el nodo solo tiene sentido con una configuración que se pueda
+  // enviar. El envío pide además destino, que lo fija la búsqueda (por cable)
+  // o la lista de nodos (por radio), y que sobrevive a las ediciones: cambiar
+  // un campo no desconecta el nodo que ya se encontró.
+  document.getElementById("f-buscar").disabled = errs.length > 0;
+  document.getElementById("f-enviar").disabled = errs.length > 0 || !formDestinoListo;
 }
 
 // Campos fijados por la red del gateway: se muestran (referencia) pero no
@@ -3161,11 +3446,14 @@ async function formLoraNodos() {
   try {
     const r = await fetchApi("/api/red/estado");
     const nodes = (await r.json()).nodes || [];
+    fwPorNodo = new Map(nodes.filter((n) => n.fw_version)
+      .map((n) => [Number(n.origin), n.fw_version]));
     nodes.filter((n) => n.origin >= 1 && n.origin <= 254).forEach((n) => {
       const o = document.createElement("option");
       o.value = n.origin;
       o.textContent = `${n.name || "nodo"} (${n.origin})`
-        + (n.online ? "" : " — sin señal");
+        + (n.fw_version ? ` · ${n.fw_version}` : "")
+        + (n.online ? "" : " · sin señal");
       sel.appendChild(o);
     });
     if (!sel.options.length) {
@@ -3298,10 +3586,40 @@ function formFuenteCtrls() {
   });
   const lora = document.getElementById("f-lora-nodo");
   if (lora) lora.hidden = !formFuenteLora();
-  // "Buscar nodo" pasa a ser "Elegir destino" por radio: no hay nada que
-  // detectar, solo listar lo que el gateway ya conoce.
+  // Por radio no hay nodo que buscar: el destino es el que se eligió arriba en
+  // la lista, y el botón desaparece. Antes decía "Listar nodos" y volvía a
+  // preguntar por el mismo nodo que ya estaba seleccionado.
   const buscar = document.getElementById("f-buscar");
-  if (buscar) buscar.textContent = formFuenteLora() ? "Listar nodos" : "Buscar nodo";
+  if (buscar) buscar.hidden = formFuenteLora();
+  const busq = document.getElementById("f-busqueda-aviso");
+  if (busq && formFuenteLora()) busq.textContent = "";
+}
+
+// El nodo elegido en la lista de radio ES el destino: no hace falta
+// confirmarlo con otro botón. Aquí se fija y se cuenta lo que se sabe de él.
+function formLoraDestino() {
+  const sel = document.getElementById("f-lora-nodo");
+  const origin = Number(sel && sel.value);
+  const est = document.getElementById("f-fw-estado");
+  formMode = "config";
+  formDestino(!!origin);
+  if (!est) return;
+  if (!origin) {
+    est.hidden = false; est.className = "aviso";
+    est.textContent = "Elige arriba el nodo de destino.";
+    return;
+  }
+  const ver = fwPorNodo.get(origin) || "";
+  est.hidden = false;
+  est.className = "aviso";
+  est.textContent = (ver
+      ? `El nodo declaró firmware ${ver} al registrarse`
+        + (fwGateway && cmpVersionFw(ver, fwGateway) === -1
+           ? `, anterior al binario del gateway (${fwGateway}). Por radio no se `
+             + "puede actualizar el firmware; para eso hace falta cable. "
+           : ". ")
+      : "El gateway no tiene registrada la versión de firmware de este nodo. ")
+    + "Se envía solo la configuración, compactada para ahorrar aire.";
 }
 
 async function fLeer() {
@@ -3325,6 +3643,10 @@ async function fLeer() {
       idLeido = Number(document.getElementById("f-id").value);
       formLive();
       formNetCheck(cfg);
+      // El nodo que se acaba de leer es el destino: se comprueba su firmware
+      // aquí y se ahorra el "Buscar nodo" de abajo, que preguntaba por segunda
+      // vez lo mismo que esta lectura ya sabe.
+      await formCheckFw(ident || {});
       aviso.textContent = "formulario rellenado desde el nodo en este equipo"
         + (ident && ident.version ? ` (firmware ${ident.version})` : "");
     } catch (e) {
@@ -3358,6 +3680,9 @@ async function fLeer() {
     idLeido = Number(document.getElementById("f-id").value);
     formLive();
     formNetCheck(cfg);
+    // Mismo motivo que en la rama local: el nodo leído es el destino, y su
+    // firmware se comprueba aquí en vez de con otro botón más abajo.
+    await formCheckFw(dd.node || {});
     aviso.textContent = "formulario rellenado desde el nodo en " + dd.port.split("/").pop();
   } catch (e) {
     aviso.textContent = "error: " + e.message;
@@ -3366,23 +3691,94 @@ async function fLeer() {
   }
 }
 
-// ----- Validar configuración: si pasa, generar preview y habilitar buscar -----
+// ----- Cargar, guardar y copiar el config.json del formulario -----
 
-function formGenerar() {
+// Carga un config.json de disco al formulario.
+//
+// Es el único sitio del asistente donde la validación se muestra agrupada en
+// vez de campo a campo. Un archivo puede venir mal por diez sitios a la vez y
+// diez campos en rojo repartidos por la página no se ven; escribiendo a mano,
+// en cambio, el error está donde está el cursor. Si el archivo ni siquiera
+// parsea, el formulario no se toca: dejarlo a medio rellenar con lo poco que
+// se hubiera podido leer sería peor que no hacer nada.
+async function formCargarArchivo(file) {
   const res = document.getElementById("f-resultado");
-  const form = collectForm();
-  const errs = fValidate(form);
-  document.getElementById("f-enviar").disabled = true;
-  if (errs.length) {
+  let cfg;
+  try {
+    cfg = JSON.parse(await file.text());
+  } catch (e) {
     res.className = "aviso mal";
-    res.textContent = "Corrige: " + errs.slice(0, 4).join("; ")
-      + (errs.length > 4 ? ` (+${errs.length - 4} más)` : "");
-    document.getElementById("f-buscar").disabled = true;
+    res.textContent = `«${file.name}» no es JSON válido: ${e.message}. `
+      + "El formulario no se ha tocado.";
     return;
   }
-  document.getElementById("f-preview").value = JSON.stringify(buildConfig(form), null, 2);
-  document.getElementById("f-buscar").disabled = false;
-  res.className = "aviso"; res.textContent = "Configuración válida. Ahora buscar el nodo.";
+  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+    res.className = "aviso mal";
+    res.textContent = `«${file.name}» no contiene un objeto de configuración. `
+      + "El formulario no se ha tocado.";
+    return;
+  }
+
+  fillForm(cfg);
+  idLeido = null;          // viene de un archivo, no de un nodo: el ID no está
+                           // "en uso por sí mismo" y el aviso de choque aplica
+  formLive();
+
+  const errs = fValidate(collectForm());
+  if (errs.length) {
+    res.className = "aviso mal";
+    res.textContent = `«${file.name}» cargado con ${errs.length} `
+      + (errs.length === 1 ? "problema" : "problemas") + ": " + errs.join("; ");
+  } else {
+    res.className = "aviso";
+    res.textContent = `«${file.name}» cargado sin errores.`;
+  }
+  // Los parámetros de red del archivo pueden no ser los del gateway: el mismo
+  // popup que avisa al leer de un nodo sirve aquí.
+  formNetCheck(cfg);
+}
+
+function formGuardarArchivo() {
+  const res = document.getElementById("f-resultado");
+  const texto = document.getElementById("f-preview").value;
+  if (!texto) {
+    res.className = "aviso mal";
+    res.textContent = "no hay config que guardar";
+    return;
+  }
+  const form = collectForm();
+  const id = Number(form.node.id) || 0;
+  const mote = (form.node.name || "nodo").toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "nodo";
+  const url = URL.createObjectURL(new Blob([texto], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `config-${id}-${mote}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  res.className = "aviso";
+  res.textContent = "guardado como " + a.download;
+}
+
+async function formCopiar() {
+  const res = document.getElementById("f-resultado");
+  const texto = document.getElementById("f-preview").value;
+  if (!texto) {
+    res.className = "aviso mal";
+    res.textContent = "no hay config que copiar";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(texto);
+    res.className = "aviso";
+    res.textContent = "config copiado al portapapeles";
+  } catch (e) {
+    // El portapapeles exige contexto seguro: por http a la IP de la Pi no está.
+    res.className = "aviso mal";
+    res.textContent = "el navegador no deja copiar aquí (" + e.message
+      + "): selecciona el texto de la caja y cópialo a mano.";
+  }
 }
 
 // Estado del firmware tras encontrar el nodo. formMode gobierna lo que hará
@@ -3415,8 +3811,7 @@ function cmpVersionFw(a, b) {
 
 async function formCheckFw(node) {
   const est = document.getElementById("f-fw-estado");
-  const enviar = document.getElementById("f-enviar");
-  est.hidden = false; enviar.disabled = true;
+  est.hidden = false; formDestino(false);
   const fw = node.fw || "", ver = node.version || "";
   let latest = null;
   try { const fr = await fetchApi("/api/config/firmware"); latest = (await fr.json()).version; } catch (e) { /* sin versión */ }
@@ -3431,7 +3826,7 @@ async function formCheckFw(node) {
       est.textContent = (latest && ver ? `Firmware ModuLinkr ${ver} (última versión). `
                                        : `Firmware ModuLinkr ${ver || "detectado"}. `)
         + "Al enviar se cargará solo la configuración.";
-      enviar.disabled = false;
+      formDestino(true);
       return;
     }
 
@@ -3445,7 +3840,7 @@ async function formCheckFw(node) {
         + `del gateway (${latest}). Cargar el firmware lo haría retroceder, así que `
         + "al enviar se cargará solo la configuración. Para poder actualizar nodos "
         + "hay que regenerar nodo.bin con nodo/make_dist.sh y copiarlo al gateway.";
-      enviar.disabled = false;
+      formDestino(true);
       return;
     }
 
@@ -3455,7 +3850,7 @@ async function formCheckFw(node) {
       est.className = "aviso";
       est.textContent = `Firmware ModuLinkr ${ver} y binario del gateway ${latest}: `
         + "no se pueden comparar. Al enviar se cargará solo la configuración.";
-      enviar.disabled = false;
+      formDestino(true);
       return;
     }
   }
@@ -3473,7 +3868,7 @@ async function formCheckFw(node) {
       : "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
         + "Cárgale el firmware desde la página de firmware con la fuente "
         + "'este equipo' y vuelve aquí.";
-    enviar.disabled = !fw.startsWith("ModuLinkr");
+    formDestino(fw.startsWith("ModuLinkr"));
     return;
   }
 
@@ -3488,31 +3883,17 @@ async function formCheckFw(node) {
     est.textContent = "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
       + "Al enviar se cargará el firmware y luego la configuración.";
   }
-  enviar.disabled = false;
+  formDestino(true);
 }
 
 async function formBuscar() {
   const aviso = document.getElementById("f-busqueda-aviso");
   const sel = document.getElementById("f-puertos");
 
-  // Por LoRa no hay nodo que "buscar": el destino se elige de la lista de los
-  // que el gateway conoce, y el envío no puede comprobar antes la versión de
-  // firmware porque eso exigiría una consulta remota que el canal no tiene.
-  if (formFuenteLora()) {
-    await formLoraNodos();
-    const est = document.getElementById("f-fw-estado");
-    est.hidden = false;
-    est.className = "aviso";
-    est.textContent = "Envío por LoRa: se manda solo la configuración, "
-      + "compactada para ahorrar aire. El firmware no se puede actualizar por "
-      + "radio, y la versión del nodo no se comprueba antes porque el canal "
-      + "no tiene consulta de versión.";
-    document.getElementById("f-enviar").disabled = false;
-    formMode = "config";
-    const n = document.getElementById("f-lora-nodo").value;
-    aviso.textContent = n ? `destino: nodo ${n}` : "elegir el nodo arriba";
-    return;
-  }
+  // Por radio el botón está oculto: el destino es el nodo elegido arriba y lo
+  // fija formLoraDestino en cuanto se selecciona. Si aun así se llegara aquí,
+  // se delega en él en vez de duplicar la lógica.
+  if (formFuenteLora()) { formLoraDestino(); return; }
 
   if (formFuenteLocal()) {
     document.getElementById("f-buscar").disabled = true;
@@ -3607,7 +3988,17 @@ async function formEnviar() {
   if (!formPuerto && !formFuenteLora()) {
     res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return;
   }
-  if (!texto) { res.className = "aviso mal"; res.textContent = "validar primero la configuración"; return; }
+  // La caja la genera el formulario y se revalida aquí de todos modos: es la
+  // última barrera antes de ocupar el aire o el cable con algo que el nodo
+  // vaya a rechazar.
+  const errs = fValidate(collectForm());
+  if (errs.length) {
+    res.className = "aviso mal";
+    res.textContent = `la configuración tiene ${errs.length} `
+      + (errs.length === 1 ? "problema" : "problemas") + ": " + errs.join("; ");
+    return;
+  }
+  if (!texto) { res.className = "aviso mal"; res.textContent = "no hay configuración que enviar"; return; }
   try { JSON.parse(texto); } catch (e) {
     res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
   }
@@ -3750,8 +4141,10 @@ document.getElementById("f-devices").addEventListener("input", (e) => {
   if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
 });
 document.getElementById("f-type").addEventListener("change", formNbiotVis);
-// Validación en vivo: cualquier input/change del asistente la dispara. Se
-// excluye el textarea del preview para no borrarlo mientras se revisa.
+// Validación en vivo: cualquier input/change del asistente la dispara, y con
+// ella se regenera la caja de revisión. El propio textarea no la dispara: es
+// de solo lectura y se rellena desde aquí, así que un evento suyo solo podría
+// ser eco de esa escritura.
 document.getElementById("cfg-form").addEventListener("input", (e) => {
   if (e.target.id !== "f-preview") formLive();
 });
@@ -3760,6 +4153,10 @@ document.getElementById("cfg-form").addEventListener("change", (e) => {
 });
 document.getElementById("f-leer").addEventListener("click", fLeer);
 document.getElementById("f-buscar").addEventListener("click", formBuscar);
+document.getElementById("f-modo-nuevo").addEventListener("click", () => formSetModo("nuevo"));
+document.getElementById("f-modo-existente").addEventListener("click", () => formSetModo("existente"));
+// Elegir nodo en la lista de radio ES elegir destino: no hace falta confirmarlo.
+document.getElementById("f-lora-nodo").addEventListener("change", formLoraDestino);
 // Cambiar de fuente invalida el nodo detectado: obliga a volver a buscarlo
 // donde toca, en vez de enviar al que quedó de la fuente anterior.
 document.getElementById("f-fuente").addEventListener("change", async () => {
@@ -3770,17 +4167,28 @@ document.getElementById("f-fuente").addEventListener("change", async () => {
   document.getElementById("f-leer-aviso").textContent = "";
   const est = document.getElementById("f-fw-estado");
   if (est) est.hidden = true;
-  document.getElementById("f-enviar").disabled = true;
+  formDestino(false);
   formFuenteCtrls();
   await cfgLocalCerrar();
   // El selector de nodo vive arriba, junto al de fuente, porque el destino
   // forma parte de "por dónde envío" y no de "enviar": con las otras dos
   // fuentes el equivalente es el puerto, y también se elige aquí. Se rellena
   // al elegir LoRa, para que esté listo antes de tocar nada más.
-  if (formFuenteLora()) await formLoraNodos();
+  if (formFuenteLora()) {
+    await formLoraNodos();
+    formLoraDestino();
+  }
 });
-document.getElementById("f-generar").addEventListener("click", formGenerar);
 document.getElementById("f-enviar").addEventListener("click", formEnviar);
+document.getElementById("f-cargar-archivo").addEventListener("click", () =>
+  document.getElementById("f-archivo").click());
+document.getElementById("f-archivo").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";           // permitir recargar el mismo archivo
+  if (f) formCargarArchivo(f);
+});
+document.getElementById("f-guardar-archivo").addEventListener("click", formGuardarArchivo);
+document.getElementById("f-copiar").addEventListener("click", formCopiar);
 document.getElementById("cfg-archivo-btn").addEventListener("click", () =>
   document.getElementById("cfg-archivo").click());
 document.getElementById("cfg-archivo").addEventListener("change", (e) => {

@@ -236,6 +236,7 @@
               <select id="fw-fuente">
                 <option value="gateway">el gateway (Pi)</option>
                 <option value="local">este equipo</option>
+                <option value="lora">nada: enviar por LoRa</option>
               </select>
             </label>
           </div>
@@ -264,6 +265,28 @@
               <span id="fw-local-aviso" class="aviso"></span>
             </div>
             <pre id="fw-local-log" class="dbg-consola" hidden></pre>
+          </div>
+          <div id="fw-lora" hidden>
+            <p class="aviso">Sube la imagen al nodo por radio, sin cable. Tarda
+              horas: son unos 2500 fragmentos y el gateway cede el aire a la
+              telemetría, así que va de fondo. La subida no toca el firmware que
+              está corriendo, se escribe en la partición dormida. Instalar es una
+              orden aparte, y solo aparece cuando el nodo tiene la imagen entera
+              y verificada.</p>
+            <div class="cfg-fila">
+              <select id="fw-lora-nodo"></select>
+              <label class="cfg-campo"><span>Desde (hora)</span>
+                <input id="fw-lora-desde" type="number" min="0" max="23" value="23"></label>
+              <label class="cfg-campo"><span>Hasta (hora)</span>
+                <input id="fw-lora-hasta" type="number" min="0" max="23" value="6"></label>
+            </div>
+            <p class="aviso" id="fw-lora-riesgo"></p>
+            <div class="cfg-fila">
+              <button id="fw-lora-enviar" class="btn-primario">Enviar por LoRa</button>
+              <button id="fw-lora-instalar" hidden>Instalar en el nodo</button>
+              <span id="fw-lora-aviso" class="aviso"></span>
+            </div>
+            <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"></progress>
           </div>
         </div>
       </div>
@@ -559,13 +582,18 @@
           <h2>Asistente de configuración de nodo</h2>
         </div>
 
-        <div class="card cfg-card">
-          <h3>Leer configuración de nodo</h3>
-          <p class="aviso">Opcional: leer el config.json de un Atom ya configurado
-            (conectado por USB) para rellenar el formulario y editarlo desde ahí.
-            La fuente elegida aquí vale para todo el asistente, también para el
-            envío del final: el gateway lo lee la Pi, este equipo lo lee el
-            navegador por Web Serial (solo Chrome o Edge de escritorio).</p>
+        <div class="card cfg-card" id="f-modo-card">
+          <h3>¿Qué vas a hacer?</h3>
+          <div class="cfg-fila">
+            <button id="f-modo-nuevo" class="btn-primario">Configurar nodo nuevo</button>
+            <button id="f-modo-existente" class="btn-primario">Reconfigurar nodo existente</button>
+            <span id="f-modo-aviso" class="aviso"></span>
+          </div>
+        </div>
+
+        <div class="card cfg-card" id="f-destino-card">
+          <h3>Nodo y conexión</h3>
+          <p class="aviso" id="f-destino-nota"></p>
           <div class="cfg-fila">
             <select id="f-fuente">
               <option value="gateway">Conectado al gateway</option>
@@ -690,16 +718,21 @@
         </div>
 
         <div class="card cfg-card">
-          <h3>Validar y enviar</h3>
-          <p class="aviso">Primero validar el formulario. Con la configuración
-            válida se habilita buscar el nodo (conectado por USB); el nodo lo
+          <h3>Revisar y enviar</h3>
+          <p class="aviso">El config.json de abajo se regenera con cada cambio
+            del formulario y refleja exactamente lo que se enviaría. No se edita
+            a mano: para escribir JSON en crudo está la página «Cargar JSON vía
+            USB». Con el formulario sin errores se habilita el envío; el nodo lo
             valida de nuevo y solo graba si pasa sus reglas.</p>
           <p class="aviso" id="f-pendientes"></p>
           <div class="cfg-fila">
-            <button id="f-generar" class="btn-primario">Validar configuración</button>
+            <button id="f-cargar-archivo">Cargar de archivo</button>
+            <button id="f-guardar-archivo">Guardar en archivo</button>
+            <button id="f-copiar">Copiar</button>
+            <input id="f-archivo" type="file" accept=".json,application/json" hidden>
             <span id="f-resultado" class="aviso"></span>
           </div>
-          <textarea id="f-preview" spellcheck="false" placeholder="El config.json generado aparece aquí tras validar, para revisarlo antes de enviar."></textarea>
+          <textarea id="f-preview" spellcheck="false" readonly placeholder="El config.json generado aparece aquí a medida que se rellena el formulario."></textarea>
           <div class="cfg-fila">
             <button id="f-buscar" disabled>Buscar nodo</button>
             <select id="f-puertos" hidden></select>

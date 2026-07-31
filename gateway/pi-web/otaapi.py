@@ -16,11 +16,13 @@ no puede tocar la telemetría ni el estado de la red.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import sqlite3
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
@@ -28,6 +30,14 @@ from fastapi.responses import JSONResponse
 LOG = logging.getLogger("modulinkr.web.ota")
 
 DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
+
+# La aplicación sola, que es lo que se envía por radio. El binario de al lado
+# (`nodo.bin`) lleva además gestor de arranque y tabla de particiones y solo
+# sirve para flashear un Atom virgen por USB.
+SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
+APP_BIN = SERVICE_DIR / "nodo-app.bin"
+APP_VER = SERVICE_DIR / "nodo-app.bin.version"
+APP_SHA = SERVICE_DIR / "nodo-app.bin.sha256"
 
 router = APIRouter(prefix="/api/config/lora")
 
@@ -157,6 +167,160 @@ def leer_estado(id: int):
     origin, state, config, detail, created = fila
     return {"id": id, "origin": origin, "state": state, "config": config,
             "detail": detail, "elapsed_s": round(time.time() - created, 1)}
+
+
+# ----- Actualización de firmware por LoRa (frame-format.md §18) -----
+
+@router.get("/firmware")
+def firmware():
+    """Qué imagen hay disponible para enviar por radio.
+
+    El sha256 se lee del archivo que genera `make_dist.sh` en vez de calcularlo
+    aquí: así lo que se anuncia al nodo es exactamente lo que se empaquetó, y un
+    binario copiado a medias se delata en vez de anunciarse con su hash nuevo.
+    """
+    if not APP_BIN.is_file():
+        return {"disponible": False,
+                "error": "no hay nodo-app.bin: generar con nodo/make_dist.sh"}
+    try:
+        tam = APP_BIN.stat().st_size
+        version = APP_VER.read_text().strip() if APP_VER.is_file() else ""
+        sha = APP_SHA.read_text().strip() if APP_SHA.is_file() else ""
+    except OSError as e:
+        return {"disponible": False, "error": f"no se puede leer: {e}"}
+    if len(sha) != 64:
+        return {"disponible": False,
+                "error": "falta nodo-app.bin.sha256 o está mal formado"}
+    return {"disponible": True, "version": version, "bytes": tam,
+            "sha256": sha, "fragmentos": -(-tam // 213),
+            "aire_min": round(-(-tam // 213) * 0.380 / 60, 1)}
+
+
+@router.post("/firmware/enviar")
+def firmware_enviar(body: dict = Body(...)):
+    """Encola la subida de la imagen a un nodo.
+
+    Encolar no instala nada: la subida es inocua y puede tardar horas. La orden
+    de instalar es un endpoint aparte, y solo se acepta con la imagen ya arriba
+    y verificada por el nodo.
+    """
+    origin = body.get("origin")
+    desde = body.get("hour_from")
+    hasta = body.get("hour_to")
+
+    if not isinstance(origin, int) or not 1 <= origin <= 254:
+        return JSONResponse(status_code=400,
+                            content={"error": "origin fuera de 1-254"})
+    for nombre, v in (("hour_from", desde), ("hour_to", hasta)):
+        if v is not None and (not isinstance(v, int) or not 0 <= v <= 23):
+            return JSONResponse(status_code=400,
+                                content={"error": f"{nombre} fuera de 0-23"})
+
+    info = firmware()
+    if not info.get("disponible"):
+        return JSONResponse(status_code=409, content={"error": info["error"]})
+
+    # Se comprueba que el binario en disco sigue siendo el del sha anunciado.
+    # Es barato (medio mega) y evita mandar horas de radio de algo que el nodo
+    # va a rechazar al final por no cuadrar el hash.
+    try:
+        real = hashlib.sha256(APP_BIN.read_bytes()).hexdigest()
+    except OSError as e:
+        return JSONResponse(status_code=503,
+                            content={"error": f"no se puede leer el binario: {e}"})
+    if real != info["sha256"]:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "el nodo-app.bin no coincide con su .sha256: "
+                              "regenerar con nodo/make_dist.sh"})
+
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                """SELECT id, state FROM fw_push
+                    WHERE origin = ? AND state IN ('pending','sending','ready','installing')
+                    ORDER BY id DESC LIMIT 1""", (origin,)).fetchone()
+            if fila is not None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"ya hay una actualización en curso al nodo "
+                                      f"{origin} (id {fila[0]}, {fila[1]})",
+                             "id": fila[0]})
+            cur = c.execute(
+                """INSERT INTO fw_push (origin, version, total_len, sha256, path,
+                                        created_ts, hour_from, hour_to)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (origin, info["version"], info["bytes"], info["sha256"],
+                 str(APP_BIN), time.time(), desde, hasta))
+            c.commit()
+            push_id = cur.lastrowid
+    except sqlite3.Error as e:
+        return JSONResponse(status_code=503,
+                            content={"error": f"buffer no disponible: {e}"})
+
+    LOG.info("firmware encolado id=%d origin=%d %s (%d B, ventana %s-%s)",
+             push_id, origin, info["version"], info["bytes"], desde, hasta)
+    return {"id": push_id, "version": info["version"], "bytes": info["bytes"],
+            "fragmentos": info["fragmentos"]}
+
+
+@router.get("/firmware/estado")
+def firmware_estado(id: int):
+    """Progreso de una subida, para la barra del visor."""
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                """SELECT origin, version, total_len, written, state, detail,
+                          created_ts, hour_from, hour_to
+                     FROM fw_push WHERE id = ?""", (id,)).fetchone()
+    except sqlite3.Error as e:
+        return JSONResponse(status_code=503,
+                            content={"error": f"buffer no disponible: {e}"})
+    if fila is None:
+        return JSONResponse(status_code=404,
+                            content={"error": "actualización no encontrada"})
+    origin, version, total, written, state, detail, created, desde, hasta = fila
+    pct = round(100.0 * written / total, 1) if total else 0.0
+    return {"id": id, "origin": origin, "version": version,
+            "total_len": total, "written": written, "pct": pct,
+            "state": state, "detail": detail,
+            "hour_from": desde, "hour_to": hasta,
+            "elapsed_s": round(time.time() - created, 1)}
+
+
+@router.post("/firmware/instalar")
+def firmware_instalar(body: dict = Body(...)):
+    """Marca una subida completa como lista para instalar.
+
+    El visor no habla por radio: deja la intención en la tabla y el servicio del
+    gateway emite el FW_INSTALL en su siguiente vuelta, que es el mismo patrón
+    del resto del canal.
+    """
+    push_id = body.get("id")
+    if not isinstance(push_id, int):
+        return JSONResponse(status_code=400, content={"error": "falta id"})
+    try:
+        with _conn() as c:
+            fila = c.execute("SELECT state FROM fw_push WHERE id = ?",
+                             (push_id,)).fetchone()
+            if fila is None:
+                return JSONResponse(status_code=404,
+                                    content={"error": "no encontrada"})
+            if fila[0] != "ready":
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"la imagen no está lista (estado: {fila[0]}). "
+                                      "Solo se instala lo que el nodo ya tiene "
+                                      "entero y verificado."})
+            c.execute(
+                "UPDATE fw_push SET state = 'install_req', updated_ts = ? "
+                "WHERE id = ?", (time.time(), push_id))
+            c.commit()
+    except sqlite3.Error as e:
+        return JSONResponse(status_code=503,
+                            content={"error": f"buffer no disponible: {e}"})
+    LOG.info("instalación pedida para la actualización id=%d", push_id)
+    return {"id": push_id, "state": "install_req"}
 
 
 @router.get("/estado")

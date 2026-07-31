@@ -316,6 +316,21 @@ public:
                             uint32_t xfer_id, uint8_t status,
                             const char* detail);
 
+    // ----- Actualización de firmware (v3.7, frame-format.md §18) -----
+
+    // FW_STATUS: por qué byte va la imagen y en qué estado está. Sustituye al
+    // mapa de bits del canal de configuración, que no escala a los 2446
+    // fragmentos de una imagen: con entrega secuencial basta un número, y ese
+    // número sirve a la vez para reanudar, informar del progreso y pedir que
+    // el emisor rebobine cuando llega un fragmento adelantado.
+    Status sendFwStatus(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
+                        uint32_t written, uint8_t state);
+
+    // FW_RESULT: veredicto tras instalar. Lo emite la imagen nueva cuando se
+    // confirma, o la anterior cuando la reversión la devuelve al mando.
+    Status sendFwResult(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
+                        uint8_t status, const char* detail);
+
     // HEARTBEAT v3.1 (frame-format.md §6): diagnóstico periódico sin ACK
     // con el contador de aire acumulado (duty cycle medido en el
     // transmisor, EN 300 220-1).

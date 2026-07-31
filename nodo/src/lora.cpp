@@ -468,6 +468,47 @@ LoraP2P::Status LoraP2P::sendConfigResult(uint16_t seq, uint8_t hop_dst,
                         payload, static_cast<uint8_t>(5 + n));
 }
 
+LoraP2P::Status LoraP2P::sendFwStatus(uint16_t seq, uint8_t hop_dst,
+                                      uint32_t xfer_id, uint32_t written,
+                                      uint8_t state) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v3.7 (spec §18.3), 9 bytes: xfer_id, bytes escritos y estado.
+    // El contador es de 32 bits y no de 16 como el desplazamiento del canal de
+    // configuración, porque una imagen de 508 kB no cabe en 16.
+    uint8_t payload[9];
+    std::memcpy(&payload[0], &xfer_id, sizeof(xfer_id));
+    std::memcpy(&payload[4], &written, sizeof(written));
+    payload[8] = state;
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameFwStatus, ttl_,
+                        payload, sizeof(payload));
+}
+
+LoraP2P::Status LoraP2P::sendFwResult(uint16_t seq, uint8_t hop_dst,
+                                      uint32_t xfer_id, uint8_t status,
+                                      const char* detail) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v3.7 (spec §18.5): misma forma que el CONFIG_RESULT, para que el
+    // decodificador del gateway sea el mismo con otro nombre.
+    constexpr size_t kDetailMax = 64;
+    uint8_t payload[5 + kDetailMax];
+    std::memcpy(&payload[0], &xfer_id, sizeof(xfer_id));
+    payload[4] = status;
+
+    size_t n = 0;
+    if (detail != nullptr) {
+        n = strnlen(detail, kDetailMax);
+        std::memcpy(&payload[5], detail, n);
+    }
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameFwResult, ttl_,
+                        payload, static_cast<uint8_t>(5 + n));
+}
+
 LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
                                         uint8_t fault, uint8_t reset_reason,
                                         uint16_t boots,

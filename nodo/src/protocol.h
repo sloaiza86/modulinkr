@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x36;  // v3.6
+constexpr uint8_t kSchemaVersion = 0x37;  // v3.7
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -44,6 +44,12 @@ constexpr uint8_t kFrameConfigCommit = 0x15;  // downlink: aplicar lo reensambla
 constexpr uint8_t kFrameConfigResult = 0x16;  // uplink: veredicto
 constexpr uint8_t kFrameConfigGet    = 0x17;  // downlink: pide el config
 constexpr uint8_t kFrameConfigData   = 0x18;  // uplink: un fragmento del config
+// Actualización de firmware por LoRa (v3.7, §18).
+constexpr uint8_t kFrameFwOffer      = 0x19;  // downlink: anuncio de imagen
+constexpr uint8_t kFrameFwData       = 0x1A;  // downlink: un trozo de la imagen
+constexpr uint8_t kFrameFwStatus     = 0x1B;  // uplink: por dónde va y en qué estado
+constexpr uint8_t kFrameFwInstall    = 0x1C;  // downlink: orden de instalar
+constexpr uint8_t kFrameFwResult     = 0x1D;  // uplink: veredicto tras arrancar
 
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;

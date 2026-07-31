@@ -64,6 +64,7 @@ systemd lo relanza.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import logging
@@ -97,7 +98,38 @@ REG_REASSEMBLY_TIMEOUT_S = 15.0
 # con seguridad activa son 221 B y la cabecera del CONFIG_PUSH ocupa 8.
 CFG_FRAG_BYTES = 213
 # Espera antes de dar por perdidos los fragmentos sin confirmar y reenviarlos.
-CFG_ACK_WAIT_S = 10.0
+#
+# Se dimensiona sobre el ritmo real de envío: con ráfaga, una ronda entera de
+# fragmentos sale en una o dos ventanas, así que esperar diez segundos por los
+# ACK que falten solo alarga la transferencia. Cuatro segundos cubren de sobra
+# el ACK medido en banco (unos 220 ms) más el ciclo del nodo.
+CFG_ACK_WAIT_S = 4.0
+# Tope de fragmentos seguidos dentro de una misma ventana de silencio.
+#
+# Es un techo, no la cifra que se usa: cuántos caben de verdad se calcula en
+# cada transferencia a partir del tiempo de aire. El techo existe porque el
+# límite real no es el aire sino lo que tarde el nodo en procesar cada
+# fragmento. Subirlo exige medirlo en banco antes.
+CFG_BURST_MAX = 4
+# Suelo de la guarda entre fragmentos de una misma ráfaga.
+#
+# La guarda no es un margen de cortesía: es el hueco en el que el nodo confirma.
+# El nodo emite un CONFIG_ACK por cada fragmento y no puede recibir mientras
+# transmite, así que si el siguiente fragmento sale antes de que esa
+# confirmación termine, se pierde. Por eso la guarda se deriva del tiempo de
+# aire del propio CONFIG_ACK (al doble) y no de una constante: a SF7 son 57 ms,
+# pero a SF12 son 1483 y cualquier número fijo se quedaría corto.
+#
+# Este suelo cubre lo otro que la guarda absorbe, la granularidad del bucle
+# principal, que despierta cada 100 ms por el timeout del puerto serie y que
+# solo puede retrasar un envío, nunca adelantarlo.
+CFG_BURST_GUARD_MIN_S = 0.15
+# Ancho de la ventana de escucha del nodo, contado desde que se le oye y ya
+# descontada la espera de CFG_QUIET_DELAY_S. Conservador frente al intervalo de
+# envío por defecto (5 s): si el despliegue lo bajara, un fragmento tardío
+# caería sobre la siguiente emisión del nodo y se perdería, cosa que el mapa del
+# CONFIG_ACK detecta y la ronda siguiente repara.
+CFG_WINDOW_S = 2.5
 # Rondas de reenvío antes de abandonar. Cada ronda reenvía solo lo que el
 # mapa del CONFIG_ACK marca como ausente, así que convergen rápido.
 CFG_MAX_ROUNDS = 3
@@ -119,6 +151,26 @@ CFG_QUIET_DELAY_S = 1.5
 CFG_GET_RETRY_S  = 20.0
 CFG_GET_MAX_TRIES = 5
 
+# ----- Actualización de firmware por LoRa (frame-format.md §18) -----
+# Mismo troceado que la configuración: lo que cambia es la escala.
+FW_FRAG_BYTES = 213
+# Margen de aire que la subida de firmware NO puede tocar, en porcentaje del
+# presupuesto del gateway.
+#
+# Es lo que separa "el firmware convive con la red" de "el firmware la asfixia".
+# La telemetría, los ACK y los beacons no piden permiso al presupuesto porque no
+# pueden esperar; el firmware sí, y se para dejando este colchón para ellos. Con
+# el 8 % de techo y un tercio reservado quedan unos 190 s de aire por hora para
+# la imagen, que sobre 15,7 minutos de aire total son unas cinco horas.
+FW_RESERVE_PCT = 0.33
+# Espera tras un FW_OFFER antes de darlo por perdido y repetirlo.
+FW_OFFER_RETRY_S = 30.0
+FW_OFFER_MAX_TRIES = 5
+# Sin noticias del nodo en este plazo, la transferencia se da por muerta. Es
+# generoso porque las pausas son normales: fuera de la ventana horaria o con el
+# presupuesto agotado pueden pasar horas sin mandar nada.
+FW_IDLE_TIMEOUT_S = 7200.0
+
 # Formato de la línea de recepción que emite el Heltec.
 RX_RE = re.compile(
     r"\[rx\]\s*#(?P<count>\d+)\s+"
@@ -127,6 +179,59 @@ RX_RE = re.compile(
     r"snr=(?P<snr>[-\d.]+)\s+"
     r"hex=(?P<hex>[0-9A-Fa-f]+)"
 )
+
+
+class DutyBudget:
+    """Aire consumido por el gateway en una ventana deslizante de una hora.
+
+    La norma (EN 300 220-1) limita el porcentaje de tiempo que un transmisor
+    ocupa el aire medido sobre una hora, no la separación entre dos tramas
+    consecutivas. Frenar tras cada trama respeta el límite en todo instante,
+    pero desperdicia el presupuesto acumulado: la transferencia medida en banco
+    el 31-jul-2026 gastó 1,9 s de los 360 disponibles y tardó 28 en entregar
+    cinco fragmentos.
+
+    Esta clase lleva la cuenta real. Cada transmisión se anota con su tiempo de
+    aire y caduca sola al salir de la ventana.
+
+    El techo por defecto es del 8 % y no del 10 % normativo. Los dos puntos de
+    margen quedan para lo que no puede esperar (beacon, ACK y WELCOME), que
+    consulta el presupuesto pero nunca se frena por él: el que cede es siempre
+    el tráfico a granel.
+    """
+
+    def __init__(self, limit_pct: float = 8.0, window_s: float = 3600.0):
+        self.window_s = window_s
+        self.limit_ms = window_s * 1000.0 * limit_pct / 100.0
+        self._ev: collections.deque = collections.deque()   # (t, toa_ms)
+        self._used_ms = 0.0
+
+    def _prune(self, now: float) -> None:
+        while self._ev and now - self._ev[0][0] > self.window_s:
+            self._used_ms -= self._ev.popleft()[1]
+        if self._used_ms < 0.0:          # deriva por coma flotante
+            self._used_ms = 0.0
+
+    def add(self, now: float, toa_ms: float) -> None:
+        self._prune(now)
+        self._ev.append((now, toa_ms))
+        self._used_ms += toa_ms
+
+    def used_ms(self, now: float) -> float:
+        self._prune(now)
+        return self._used_ms
+
+    def used_pct(self, now: float) -> float:
+        return 100.0 * self.used_ms(now) / (self.window_s * 1000.0)
+
+    def fits(self, now: float, toa_ms: float, headroom_ms: float = 0.0) -> bool:
+        """Si cabe una trama más dejando `headroom_ms` sin tocar.
+
+        El margen reservado es lo que permite que un consumidor de baja
+        prioridad (el firmware por LoRa, cuando exista) se pare antes de
+        agotar el presupuesto y deje aire a la telemetría.
+        """
+        return self.used_ms(now) + toa_ms <= self.limit_ms - headroom_ms
 
 
 class GatewayService:
@@ -149,11 +254,17 @@ class GatewayService:
 
         self.gw_seq   = 0               # contador downlink (ACK + BEACON)
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
+        # Presupuesto de aire en ventana deslizante. El acumulado de arriba
+        # sigue siendo el que se reporta (es monótono, y así lo espera el
+        # visor); este es el que decide si se puede transmitir ahora.
+        self.duty = DutyBudget(
+            float(os.environ.get("MODULINKR_DUTY_PCT", "8.0")))
         self.ser: serial.Serial | None = None
         self.buf: GatewayBuffer | None = None
         self.mb_debug: dict = {}      # origin -> modo de depuración Modbus
         self.cfg_tx: dict | None = None   # transferencia de config en curso
         self.cfg_rx: dict | None = None   # lectura de config en curso
+        self.fw_tx: dict | None = None    # subida de firmware en curso
         self.mqtt: MqttPublisher | None = None
 
         # Periodo del drenado del buffer hacia el broker cloud (segundos).
@@ -229,11 +340,15 @@ class GatewayService:
     # ----- Emisión hacia el Heltec -----
 
     def _tx(self, frame: bytes) -> None:
+        """Ordena al Heltec transmitir una trama ya construida."""
         # Duty cycle propio del gateway (v3.1, EN 300 220-1: por
         # transmisor): todo lo que el Pi ordena emitir suma su ToA aquí,
-        # el único punto de salida hacia el Heltec.
-        self.gw_tx_ms += protocol.toa_ms(len(frame), self.sf, self.bw_khz)
-        """Ordena al Heltec transmitir una trama ya construida."""
+        # el único punto de salida hacia el Heltec. Se anota en los dos
+        # contadores: el acumulado que se reporta y el presupuesto de la
+        # ventana deslizante que decide si cabe la siguiente.
+        toa = protocol.toa_ms(len(frame), self.sf, self.bw_khz)
+        self.gw_tx_ms += toa
+        self.duty.add(time.monotonic(), toa)
         line = "TX " + frame.hex().upper() + "\n"
         self.ser.write(line.encode("ascii"))
 
@@ -293,26 +408,37 @@ class GatewayService:
                 f"config de {len(data)} B: {len(chunks)} fragmentos, tope 32")
             return
 
-        # Espaciado entre fragmentos derivado del ciclo de trabajo: el
-        # gateway también tiene límite, y una ráfaga de diez tramas seguidas
-        # se lo comería. Diez veces el tiempo de aire deja el 10 % de la banda.
+        # Separación entre fragmentos de una misma ráfaga: el tiempo de aire de
+        # la trama más el hueco que el nodo necesita para confirmarla. No lleva
+        # el factor diez del ciclo de trabajo porque ese límite es horario y lo
+        # vigila `self.duty`, que es quien frena cuando el presupuesto se agota.
         toa = protocol.toa_ms(protocol.OVERHEAD + 8 + CFG_FRAG_BYTES,
                               self.sf, self.bw_khz)
+        toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
+        guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
+        gap_s = toa / 1000.0 + guarda
+        # Cuántos caben de verdad en la ventana de escucha del nodo. Con un
+        # factor de dispersión alto no cabe ni uno entero, y entonces se manda
+        # uno por ventana igualmente: es el único modo de avanzar, y la trama
+        # que se solape con la siguiente emisión del nodo la repara el mapa.
+        burst_max = max(1, min(CFG_BURST_MAX, int(CFG_WINDOW_S / gap_s)))
         self.cfg_tx = {
             "push_id": push_id, "origin": origin,
             "xfer": int.from_bytes(sha[:4], "little"),
             "sha": sha, "total_len": len(data), "chunks": chunks,
             "pending": set(range(len(chunks))),
             "phase": "sending", "next_ms": 0.0,
-            "gap_s": max(toa * 10 / 1000.0, 1.0),
-            "rounds": 0, "waited_s": 0.0,
+            "toa_ms": toa,
+            "gap_s": gap_s,
+            "burst": 0, "burst_max": burst_max,
+            "rounds": 0,
         }
         self.buf.config_push_state(push_id, "sending",
                                    f"{len(chunks)} fragmentos, {len(data)} B")
         LOG.info("config-push origin=%d inicio: %d B en %d fragmentos, "
-                 "espaciado %.1f s, xfer=%08X",
-                 origin, len(data), len(chunks), self.cfg_tx["gap_s"],
-                 self.cfg_tx["xfer"])
+                 "%.2f s por trama, hasta %d por ventana, xfer=%08X",
+                 origin, len(data), len(chunks), gap_s,
+                 burst_max, self.cfg_tx["xfer"])
 
     def _config_hop(self, origin: int) -> int:
         """Vecino por el que bajar hacia el nodo. El gateway solo conoce el
@@ -335,6 +461,35 @@ class GatewayService:
             return
 
         t = self.cfg_tx
+
+        # Espera de las confirmaciones que falten. No transmite nada, así que
+        # no depende de la ventana de escucha del nodo y se mide con el reloj
+        # real en vez de acumulando el espaciado, que con ráfaga ya no guarda
+        # relación con el tiempo transcurrido.
+        if t["phase"] == "waiting":
+            if now < t["wait_until"]:
+                return
+            if not t["pending"]:
+                # El último CONFIG_ACK sigue en vuelo; al llegar pasa a
+                # committing por sí solo. Se reabre la espera para no quedar
+                # girando en vacío.
+                t["wait_until"] = now + CFG_ACK_WAIT_S
+                return
+            t["rounds"] += 1
+            if t["rounds"] > CFG_MAX_ROUNDS:
+                self.config_finish("failed",
+                                   f"faltan {len(t['pending'])} fragmentos "
+                                   f"tras {CFG_MAX_ROUNDS} rondas")
+                return
+            LOG.info("config-push origin=%d ronda %d: faltan %s",
+                     t["origin"], t["rounds"], sorted(t["pending"]))
+            t["phase"] = "sending"
+            t["sent_all"] = set()
+            return
+
+        if t["phase"] != "sending":
+            return                       # committing: manda config_on_result
+
         if now < t["next_ms"]:
             return
         # Ventana de silencio: solo se transmite poco después de haber oído
@@ -344,55 +499,61 @@ class GatewayService:
         oido = t.get("heard_ms", 0.0)
         if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
             return
-        if now > oido + CFG_QUIET_DELAY_S + t["gap_s"]:
+        if now > oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S:
             return   # la ventana ya pasó: se espera a la siguiente trama
 
-        if t["phase"] == "sending":
-            # Los que faltan por confirmar Y aún no se han mandado en esta
-            # ronda. Elegir solo por "pendientes" reenviaba el mismo
-            # fragmento una y otra vez, porque un fragmento no sale de
-            # pendientes hasta que llega su CONFIG_ACK y ese ACK tarda más
-            # que el intervalo entre envíos: medido en banco, 8 tramas al
-            # aire para entregar 5 (31-jul-2026).
-            restantes = t["pending"] - t.get("sent_all", set())
-            if restantes:
-                idx = min(restantes)
-                chunk = t["chunks"][idx]
-                frame = protocol.build_config_push(
-                    t["origin"], self._config_hop(t["origin"]), t["xfer"],
-                    idx, len(t["chunks"]), idx * CFG_FRAG_BYTES, chunk,
-                    self._next_gw_seq(), self.net_id, self.max_ttl,
-                    self.sec_key, self._gw_sec_ts())
-                self._tx(frame)
-                LOG.info("config-push origin=%d fragmento %d/%d (%d B)",
-                         t["origin"], idx, len(t["chunks"]), len(chunk))
-                # No se retira de pendientes al enviarlo: lo retira el mapa
-                # del CONFIG_ACK, que es la única prueba de que llegó.
-                t["next_ms"] = now + t["gap_s"]
-                t["sent_all"] = t.get("sent_all", set()) | {idx}
-            else:
-                # Todo mandado en esta ronda: a esperar los ACK que falten.
-                t["phase"] = "waiting"
-                t["waited_s"] = 0.0
-                t["next_ms"] = now + t["gap_s"]
+        # Cada ciclo del nodo abre una ventana nueva, y con ella una cuenta de
+        # ráfaga nueva. La comparación no puede ser contra el instante exacto
+        # en que se le oyó, porque un ciclo del nodo emite varias tramas (la
+        # telemetría y la de depuración Modbus) y cada una movería la marca:
+        # la cuenta se reiniciaría dos o tres veces dentro de la misma ventana
+        # y el tope dejaría de tener efecto. Dos tramas separadas por menos de
+        # lo que dura una ventana pertenecen al mismo ciclo.
+        if oido - t.get("burst_at", -1e9) > CFG_WINDOW_S:
+            t["burst_at"] = oido
+            t["burst"] = 0
+        if t["burst"] >= t["burst_max"]:
             return
 
-        if t["phase"] == "waiting":
-            # Ventana para que lleguen los ACK de los últimos fragmentos.
-            t["waited_s"] += t["gap_s"]
-            t["next_ms"] = now + t["gap_s"]
-            if t["pending"] and t["waited_s"] >= CFG_ACK_WAIT_S:
-                t["rounds"] += 1
-                if t["rounds"] > CFG_MAX_ROUNDS:
-                    self.config_finish("failed",
-                                       f"faltan {len(t['pending'])} fragmentos "
-                                       f"tras {CFG_MAX_ROUNDS} rondas")
-                    return
-                LOG.info("config-push origin=%d ronda %d: faltan %s",
-                         t["origin"], t["rounds"], sorted(t["pending"]))
-                t["phase"] = "sending"
-                t["sent_all"] = set()
+        # Presupuesto de aire. Aquí es donde se respeta el ciclo de trabajo,
+        # que es un límite horario, en vez de frenando tras cada trama.
+        if not self.duty.fits(now, t["toa_ms"]):
+            if not t.get("duty_avisado"):
+                t["duty_avisado"] = True
+                LOG.warning("config-push origin=%d en pausa: aire al %.1f %% "
+                            "del presupuesto", t["origin"], self.duty.used_pct(now))
+            t["next_ms"] = now + 30.0
             return
+        t["duty_avisado"] = False
+
+        # Los que faltan por confirmar Y aún no se han mandado en esta ronda.
+        # Elegir solo por "pendientes" reenviaba el mismo fragmento una y otra
+        # vez, porque un fragmento no sale de pendientes hasta que llega su
+        # CONFIG_ACK y ese ACK tarda más que el intervalo entre envíos: medido
+        # en banco, 8 tramas al aire para entregar 5 (31-jul-2026).
+        restantes = t["pending"] - t.get("sent_all", set())
+        if not restantes:
+            # Todo mandado en esta ronda: a esperar los ACK que falten.
+            t["phase"] = "waiting"
+            t["wait_until"] = now + CFG_ACK_WAIT_S
+            return
+
+        idx = min(restantes)
+        chunk = t["chunks"][idx]
+        frame = protocol.build_config_push(
+            t["origin"], self._config_hop(t["origin"]), t["xfer"],
+            idx, len(t["chunks"]), idx * CFG_FRAG_BYTES, chunk,
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
+        self._tx(frame)
+        t["burst"] += 1
+        LOG.info("config-push origin=%d fragmento %d/%d (%d B) %d/%d de ventana",
+                 t["origin"], idx, len(t["chunks"]), len(chunk),
+                 t["burst"], t["burst_max"])
+        # No se retira de pendientes al enviarlo: lo retira el mapa del
+        # CONFIG_ACK, que es la única prueba de que llegó.
+        t["next_ms"] = now + t["gap_s"]
+        t["sent_all"] = t.get("sent_all", set()) | {idx}
 
     # ----- Lectura del config de un nodo (spec §17.6) -----
 
@@ -491,6 +652,310 @@ class GatewayService:
         LOG.info("config-read origin=%d terminado: %s (%s)",
                  self.cfg_rx["origin"], state, detail)
         self.cfg_rx = None
+
+    # ----- Subida de firmware por LoRa (frame-format.md §18) -----
+
+    def fw_start(self, row: dict) -> bool:
+        """Prepara o retoma una subida. Devuelve si quedó lista para avanzar.
+
+        La imagen no se carga en memoria: son medio mega y el proceso vive en
+        una Raspberry que además hace de gateway. Se abre el archivo y se lee
+        el trozo que toca en cada envío, que es una lectura de disco cada medio
+        segundo y no cuesta nada.
+        """
+        try:
+            tam = os.path.getsize(row["path"])
+        except OSError as e:
+            self.buf.fw_push_state(row["id"], "failed", f"no se puede leer: {e}")
+            return False
+        if tam != row["total_len"]:
+            self.buf.fw_push_state(
+                row["id"], "failed",
+                f"el binario cambió: {tam} B ahora, {row['total_len']} al encolar")
+            return False
+
+        try:
+            sha = bytes.fromhex(row["sha256"])
+        except ValueError:
+            self.buf.fw_push_state(row["id"], "failed", "sha256 mal formado")
+            return False
+        if len(sha) != 32:
+            self.buf.fw_push_state(row["id"], "failed", "sha256 no mide 32 bytes")
+            return False
+
+        toa = protocol.toa_ms(protocol.OVERHEAD + 8 + FW_FRAG_BYTES,
+                              self.sf, self.bw_khz)
+        toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
+        guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
+        gap_s = toa / 1000.0 + guarda
+
+        self.fw_tx = {
+            "push_id": row["id"], "origin": row["origin"],
+            "version": row["version"], "path": row["path"],
+            "total_len": row["total_len"], "sha": sha,
+            # El identificador son los 4 primeros bytes del sha, igual que en
+            # el canal de configuración: dos ofertas de la misma imagen
+            # comparten identificador y el nodo reanuda en vez de reempezar.
+            "xfer": int.from_bytes(sha[:4], "little"),
+            "written": row["written"],
+            "hour_from": row["hour_from"], "hour_to": row["hour_to"],
+            # Fase de arranque según el estado guardado. Una imagen que ya
+            # estaba lista no vuelve a subirse tras un reinicio del servicio:
+            # sigue en el nodo, y lo único pendiente es la orden de instalar.
+            # `installing` entra aquí porque el servicio puede reiniciarse
+            # entre la orden y el veredicto: sin recordarla, el FW_RESULT del
+            # nodo llegaría a un gateway que ya no sabe de qué le hablan. El
+            # nodo repite ese veredicto tres veces espaciadas un minuto, así
+            # que un reinicio corto se recupera solo.
+            "phase": {"pending": "offer", "sending": "sending",
+                      "ready": "ready", "install_req": "ready",
+                      "installing": "installing"}[row["state"]],
+            "toa_ms": toa, "gap_s": gap_s,
+            "burst_max": max(1, min(CFG_BURST_MAX, int(CFG_WINDOW_S / gap_s))),
+            "burst": 0, "burst_at": -1e9,
+            "next_ms": 0.0, "tries": 0, "last_news": time.monotonic(),
+            "duty_avisado": False, "fuera_avisado": False,
+        }
+        # El estado solo se pisa si aún se está transfiriendo. Una imagen ya
+        # lista o con la instalación pedida conserva el suyo: marcarla como
+        # "sending" al retomar la haría volver a subirse entera.
+        if self.fw_tx["phase"] not in ("ready", "installing"):
+            self.buf.fw_push_state(row["id"], "sending",
+                                   f"{row['version']}, {row['total_len']} B, "
+                                   f"desde {row['written']} B")
+        LOG.info("fw-push origin=%d %s: %d B, retomando en %d B, "
+                 "%.2f s por trama, hasta %d por ventana, xfer=%08X",
+                 row["origin"], row["version"], row["total_len"],
+                 row["written"], gap_s, self.fw_tx["burst_max"],
+                 self.fw_tx["xfer"])
+        return True
+
+    def _fw_en_ventana(self, t: dict) -> bool:
+        """Si la hora local cae dentro de la ventana de la tarea.
+
+        Sin ventana definida, siempre. Con `hour_from` mayor que `hour_to` la
+        ventana cruza medianoche, que es el caso normal de una actualización
+        nocturna (de 23 a 6).
+        """
+        desde, hasta = t.get("hour_from"), t.get("hour_to")
+        if desde is None or hasta is None or desde == hasta:
+            return True
+        h = time.localtime().tm_hour
+        return desde <= h < hasta if desde < hasta else (h >= desde or h < hasta)
+
+    def fw_tick(self, now: float) -> None:
+        """Avanza la subida en curso, o arranca la siguiente de la cola."""
+        if self.buf is None:
+            return
+        if self.fw_tx is None:
+            pend = self.buf.fw_push_next()
+            if pend is not None:
+                self.fw_start(pend)
+            return
+
+        t = self.fw_tx
+
+        # Sin noticias del nodo en mucho rato: se abandona. El progreso queda
+        # anotado, así que reencolarla continúa donde se quedó.
+        if now - t["last_news"] > FW_IDLE_TIMEOUT_S:
+            self.fw_finish("failed", "el nodo dejó de responder")
+            return
+
+        # Imagen arriba: se espera a que el operador pida instalar desde el
+        # visor, que lo deja anotado en la tabla. El sondeo es de un segundo
+        # (este tick), y no cuesta nada porque es una consulta a una fila.
+        if t["phase"] == "ready":
+            if self.buf.fw_push_state_of(t["push_id"]) == "install_req":
+                self.fw_install(t["push_id"])
+            return
+
+        if t["phase"] == "installing":
+            return          # esperando el FW_RESULT tras el reinicio del nodo
+
+        if now < t["next_ms"]:
+            return
+
+        # Ventana horaria: es lo primero que se mira, porque estar fuera de
+        # ella no es un fallo sino el estado normal durante el día.
+        if not self._fw_en_ventana(t):
+            if not t["fuera_avisado"]:
+                t["fuera_avisado"] = True
+                LOG.info("fw-push origin=%d en pausa: fuera de la ventana "
+                         "de %02d:00 a %02d:00", t["origin"],
+                         t["hour_from"], t["hour_to"])
+            t["next_ms"] = now + 300.0
+            t["last_news"] = now      # esperar no cuenta como no responder
+            return
+        t["fuera_avisado"] = False
+
+        # Anuncio de la imagen. Hasta que el nodo la acepta no se manda nada:
+        # medio mega a un nodo que la rechaza sería el peor uso posible del aire.
+        if t["phase"] == "offer":
+            if t["tries"] >= FW_OFFER_MAX_TRIES:
+                self.fw_finish("failed",
+                               f"el nodo no respondió a {FW_OFFER_MAX_TRIES} ofertas")
+                return
+            if not self._fw_ventana_nodo(t, now):
+                return
+            frame = protocol.build_fw_offer(
+                t["origin"], self._config_hop(t["origin"]), t["xfer"],
+                t["total_len"], t["sha"], t["version"],
+                self._next_gw_seq(), self.net_id, self.max_ttl,
+                self.sec_key, self._gw_sec_ts())
+            self._tx(frame)
+            t["tries"] += 1
+            t["next_ms"] = now + FW_OFFER_RETRY_S
+            LOG.info("fw-push origin=%d oferta %s (intento %d)",
+                     t["origin"], t["version"], t["tries"])
+            return
+
+        # Envío de trozos.
+        if not self._fw_ventana_nodo(t, now):
+            return
+
+        # Presupuesto de aire con margen reservado: el firmware se para antes
+        # de agotarlo para que la telemetría y los ACK no compitan con él.
+        reserva = self.duty.limit_ms * FW_RESERVE_PCT
+        if not self.duty.fits(now, t["toa_ms"], headroom_ms=reserva):
+            if not t["duty_avisado"]:
+                t["duty_avisado"] = True
+                LOG.info("fw-push origin=%d en pausa: aire al %.1f %% y el "
+                         "resto queda reservado para la red",
+                         t["origin"], self.duty.used_pct(now))
+            t["next_ms"] = now + 60.0
+            t["last_news"] = now
+            return
+        t["duty_avisado"] = False
+
+        off = t["written"]
+        if off >= t["total_len"]:
+            t["next_ms"] = now + 10.0    # esperando el FW_STATUS de completada
+            return
+        try:
+            with open(t["path"], "rb") as fh:
+                fh.seek(off)
+                trozo = fh.read(FW_FRAG_BYTES)
+        except OSError as e:
+            self.fw_finish("failed", f"error leyendo el binario: {e}")
+            return
+        if not trozo:
+            t["next_ms"] = now + 10.0
+            return
+
+        frame = protocol.build_fw_data(
+            t["origin"], self._config_hop(t["origin"]), t["xfer"], off, trozo,
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
+        self._tx(frame)
+        t["burst"] += 1
+        # El cursor avanza al enviar, no al confirmar: con entrega secuencial
+        # una pérdida la delata el propio nodo con un FW_STATUS de hueco, y
+        # esperar confirmación de cada trozo costaría 2485 esperas.
+        t["written"] = off + len(trozo)
+        t["next_ms"] = now + t["gap_s"]
+
+    def _fw_ventana_nodo(self, t: dict, now: float) -> bool:
+        """Ventana de escucha del nodo y cuenta de ráfaga, igual que en el
+        canal de configuración: solo se transmite poco después de haberlo
+        oído, que es cuando se sabe que está escuchando."""
+        oido = t.get("heard_ms", 0.0)
+        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+            return False
+        if now > oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S:
+            return False
+        if oido - t["burst_at"] > CFG_WINDOW_S:
+            t["burst_at"] = oido
+            t["burst"] = 0
+        return t["burst"] < t["burst_max"]
+
+    def fw_on_status(self, parsed: dict) -> None:
+        """Por dónde va el nodo. Con entrega secuencial este número lo dice
+        todo: progreso, punto de reanudación y, si es menor que el cursor del
+        gateway, que hubo un hueco y hay que rebobinar."""
+        t = self.fw_tx
+        if t is None or parsed["fw_xfer"] != t["xfer"]:
+            return
+        estado = parsed["fw_state"]
+        escritos = parsed["fw_written"]
+        t["last_news"] = time.monotonic()
+
+        if estado == protocol.FW_REJECTED:
+            self.fw_finish("failed", "el nodo rechazó la imagen "
+                                     "(¿ya la tiene, o es anterior a la suya?)")
+            return
+        if estado == protocol.FW_ERROR:
+            self.fw_finish("failed", "el nodo falló escribiendo la imagen")
+            return
+
+        if estado == protocol.FW_ACCEPTED and t["phase"] == "offer":
+            t["phase"] = "sending"
+            t["written"] = escritos
+            t["tries"] = 0
+            LOG.info("fw-push origin=%d oferta aceptada, empezando en %d B",
+                     t["origin"], escritos)
+            self.buf.fw_push_state(t["push_id"], "sending",
+                                   f"aceptada, desde {escritos} B", escritos)
+            return
+
+        if estado == protocol.FW_READY:
+            t["phase"] = "ready"
+            t["written"] = t["total_len"]
+            self.buf.fw_push_state(t["push_id"], "ready",
+                                   "imagen completa y verificada en el nodo",
+                                   t["total_len"])
+            LOG.info("fw-push origin=%d IMAGEN LISTA: esperando la orden "
+                     "de instalar", t["origin"])
+            return
+
+        # Hueco, o simple informe de progreso. En los dos casos el número del
+        # nodo manda sobre el del gateway: es el que está escrito de verdad.
+        if escritos < t["written"]:
+            LOG.info("fw-push origin=%d rebobinando de %d a %d B",
+                     t["origin"], t["written"], escritos)
+        t["written"] = escritos
+        self.buf.fw_push_progress(t["push_id"], escritos)
+        if estado != protocol.FW_GAP:
+            pct = 100.0 * escritos / t["total_len"] if t["total_len"] else 0.0
+            LOG.info("fw-push origin=%d %d/%d B (%.1f %%), aire al %.1f %%",
+                     t["origin"], escritos, t["total_len"], pct,
+                     self.duty.used_pct(time.monotonic()))
+
+    def fw_install(self, push_id: int) -> bool:
+        """Manda la orden de instalar. La pide el visor, no la máquina: subir
+        es inocuo y puede correr de noche, instalar reinicia el nodo."""
+        t = self.fw_tx
+        if t is None or t["push_id"] != push_id or t["phase"] != "ready":
+            return False
+        frame = protocol.build_fw_install(
+            t["origin"], self._config_hop(t["origin"]), t["xfer"], t["sha"],
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts())
+        self._tx(frame)
+        t["phase"] = "installing"
+        t["last_news"] = time.monotonic()
+        self.buf.fw_push_state(push_id, "installing", "orden enviada al nodo")
+        LOG.info("fw-install origin=%d xfer=%08X", t["origin"], t["xfer"])
+        return True
+
+    def fw_on_result(self, parsed: dict) -> None:
+        """Veredicto tras el reinicio. Lo emite la imagen nueva al confirmarse,
+        o la anterior si el gestor de arranque la devolvió al mando."""
+        t = self.fw_tx
+        if t is None:
+            return
+        detalle = f"{parsed['fw_status_name']}: {parsed['fw_detail']}".strip(": ")
+        LOG.info("fw-result origin=%s %s",
+                 protocol.addr_name(parsed["origin_id"]), detalle)
+        self.fw_finish("done" if parsed["fw_status"] == 0 else "failed", detalle)
+
+    def fw_finish(self, state: str, detail: str) -> None:
+        if self.fw_tx is None:
+            return
+        self.buf.fw_push_state(self.fw_tx["push_id"], state, detail,
+                               self.fw_tx["written"])
+        LOG.info("fw-push origin=%d terminado: %s (%s)",
+                 self.fw_tx["origin"], state, detail)
+        self.fw_tx = None
 
     def config_on_ack(self, parsed: dict) -> None:
         """Mapa de fragmentos recibidos. Un solo mapa dice exactamente qué
@@ -693,6 +1158,23 @@ class GatewayService:
                 self.n_notconf += 1
             return
 
+        # Firmware (v3.7, spec §18). Tampoco se confirman: el propio FW_STATUS
+        # es la confirmación, y confirmarlo generaría tráfico de vuelta en un
+        # canal que ya va justo de aire.
+        if ft == protocol.FRAME_FW_STATUS:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.fw_on_status(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
+        if ft == protocol.FRAME_FW_RESULT:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.fw_on_result(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
         # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
@@ -819,6 +1301,8 @@ class GatewayService:
             self.cfg_tx["heard_ms"] = time.monotonic()
         if self.cfg_rx is not None and origin == self.cfg_rx["origin"]:
             self.cfg_rx["heard_ms"] = time.monotonic()
+        if self.fw_tx is not None and origin == self.fw_tx["origin"]:
+            self.fw_tx["heard_ms"] = time.monotonic()
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
@@ -1093,6 +1577,10 @@ class GatewayService:
                     # abierto, que es esta rama del bucle.
                     self.config_tick(now)
                     self.config_read_tick(now)
+                    # El firmware va después de la configuración a propósito:
+                    # con las dos en cola, la que se resuelve en segundos pasa
+                    # primero, en vez de esperar horas detrás de una imagen.
+                    self.fw_tick(now)
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)

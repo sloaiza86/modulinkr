@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x36          # v3.6 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x37          # v3.7 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -132,6 +132,11 @@ FRAME_CONFIG_COMMIT = 0x15
 FRAME_CONFIG_RESULT = 0x16
 FRAME_CONFIG_GET    = 0x17
 FRAME_CONFIG_DATA   = 0x18
+FRAME_FW_OFFER      = 0x19
+FRAME_FW_DATA       = 0x1A
+FRAME_FW_STATUS     = 0x1B
+FRAME_FW_INSTALL    = 0x1C
+FRAME_FW_RESULT     = 0x1D
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -151,6 +156,11 @@ FRAME_TYPE_NAMES = {
     FRAME_CONFIG_RESULT: 'CONFIG_RESULT',
     FRAME_CONFIG_GET:    'CONFIG_GET',
     FRAME_CONFIG_DATA:   'CONFIG_DATA',
+    FRAME_FW_OFFER:      'FW_OFFER',
+    FRAME_FW_DATA:       'FW_DATA',
+    FRAME_FW_STATUS:     'FW_STATUS',
+    FRAME_FW_INSTALL:    'FW_INSTALL',
+    FRAME_FW_RESULT:     'FW_RESULT',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
@@ -201,6 +211,32 @@ CFG_RESULT_NAMES = {
     4: 'sin transferencia',
     5: 'fallo de escritura',
     6: 'demasiado grande',
+}
+
+# Estados del FW_STATUS (spec §18.3).
+FW_ACCEPTED  = 0
+FW_RECEIVING = 1
+FW_GAP       = 2
+FW_READY     = 3
+FW_REJECTED  = 4
+FW_ERROR     = 5
+FW_STATE_NAMES = {
+    FW_ACCEPTED:  'aceptada',
+    FW_RECEIVING: 'recibiendo',
+    FW_GAP:       'hueco',
+    FW_READY:     'lista',
+    FW_REJECTED:  'rechazada',
+    FW_ERROR:     'error',
+}
+
+# Veredictos del FW_RESULT (spec §18.5).
+FW_RESULT_NAMES = {
+    0: 'confirmada',
+    1: 'sin imagen',
+    2: 'sha no coincide',
+    3: 'fallo marcando el arranque',
+    4: 'revertida',
+    5: 'instalando',
 }
 
 ACK_SCHEMA_MISMATCH = 0x02
@@ -504,6 +540,34 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['cfg_offset'] = struct.unpack_from('<H', payload, 6)[0]
         out['cfg_chunk']  = payload[8:]
 
+    elif frame_type == FRAME_FW_STATUS:
+        # v3.7 (spec §18.3): xfer_id + bytes escritos + estado.
+        #
+        # El contador es de 32 bits, no de 16 como el desplazamiento del canal
+        # de configuración: una imagen de 508 kB no cabe en 16. Y no hay mapa
+        # de fragmentos porque la entrega es secuencial, así que un solo número
+        # dice a la vez por dónde va y desde dónde reanudar.
+        if payload_length != 9:
+            out['error'] = f'FW_STATUS payload_length={payload_length}, esperado 9'
+            return out
+        out['fw_xfer']       = struct.unpack_from('<I', payload, 0)[0]
+        out['fw_written']    = struct.unpack_from('<I', payload, 4)[0]
+        out['fw_state']      = payload[8]
+        out['fw_state_name'] = FW_STATE_NAMES.get(
+            payload[8], f'unknown(0x{payload[8]:02X})')
+
+    elif frame_type == FRAME_FW_RESULT:
+        # v3.7 (spec §18.5): misma forma que el CONFIG_RESULT.
+        if payload_length < 5:
+            out['error'] = (f'FW_RESULT payload_length={payload_length}, '
+                            f'esperado >= 5')
+            return out
+        out['fw_xfer']        = struct.unpack_from('<I', payload, 0)[0]
+        out['fw_status']      = payload[4]
+        out['fw_status_name'] = FW_RESULT_NAMES.get(
+            payload[4], f'unknown(0x{payload[4]:02X})')
+        out['fw_detail']      = bytes(payload[5:]).decode('utf-8', errors='replace')
+
     elif frame_type == FRAME_NODE_HEALTH:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
@@ -679,6 +743,96 @@ def build_config_get(dest_id: int, hop_dst: int, req_id: int, mask: int,
     frame[OFF_PAYLOAD_LEN] = 8
     struct.pack_into('<I', frame, OFF_PAYLOAD, req_id & 0xFFFFFFFF)
     struct.pack_into('<I', frame, OFF_PAYLOAD + 4, mask & 0xFFFFFFFF)
+    return _finalize(frame, key, sec_ts)
+
+
+# ----- Actualización de firmware por LoRa (frame-format.md §18) -----
+
+def build_fw_offer(dest_id: int, hop_dst: int, xfer_id: int, total_len: int,
+                   sha256: bytes, version: str, gw_seq: int, network_id: int,
+                   ttl: int, key: Optional[bytes] = None,
+                   sec_ts: int = 0) -> bytes:
+    """Anuncia una imagen antes de mandar nada (frame-format.md §18.1).
+
+    Lleva la versión para que el nodo pueda rechazar lo que ya tiene o algo
+    anterior, con la misma comparación numérica que hace el visor para no
+    ofrecer un binario que haría retroceder al nodo. El sha256 completo viaja
+    aquí y en el FW_INSTALL, no en cada trozo: repetir 32 bytes en 2483
+    fragmentos se comería el 15 % del aire.
+    """
+    if len(sha256) != 32:
+        raise ValueError('sha256 debe medir 32 bytes')
+    ver = version.encode('utf-8')[:32]
+    frame = bytearray(HEADER_BYTES + 40 + len(ver))
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_OFFER
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 40 + len(ver)
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, total_len & 0xFFFFFFFF)
+    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 40] = sha256
+    frame[OFF_PAYLOAD + 40:OFF_PAYLOAD + 40 + len(ver)] = ver
+    return _finalize(frame, key, sec_ts)
+
+
+def build_fw_data(dest_id: int, hop_dst: int, xfer_id: int, offset: int,
+                  chunk: bytes, gw_seq: int, network_id: int, ttl: int,
+                  key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Un trozo de la imagen (frame-format.md §18.2).
+
+    El desplazamiento es de 32 bits, frente a los 16 del CONFIG_PUSH, porque
+    508 kB no caben en 16. A cambio no lleva índice ni total de fragmentos: con
+    2483 no cabrían en un byte, y la entrega secuencial no los necesita, porque
+    el desplazamiento ya dice dónde va cada trozo.
+    """
+    frame = bytearray(HEADER_BYTES + 8 + len(chunk))
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_DATA
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 8 + len(chunk)
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, offset & 0xFFFFFFFF)
+    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 8 + len(chunk)] = chunk
+    return _finalize(frame, key, sec_ts)
+
+
+def build_fw_install(dest_id: int, hop_dst: int, xfer_id: int, sha256: bytes,
+                     gw_seq: int, network_id: int, ttl: int,
+                     key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Orden de instalar la imagen ya subida (frame-format.md §18.4).
+
+    Va separada del transporte a propósito: subir es inocuo y puede correr de
+    noche sin vigilancia, mientras que instalar reinicia el nodo y se decide
+    cuando alguien mira. El sha viaja de nuevo para que el nodo lo compruebe
+    contra lo que tiene escrito antes de tocar la partición de arranque.
+    """
+    if len(sha256) != 32:
+        raise ValueError('sha256 debe medir 32 bytes')
+    frame = bytearray(HEADER_BYTES + 36)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_INSTALL
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 36
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    frame[OFF_PAYLOAD + 4:OFF_PAYLOAD + 36] = sha256
     return _finalize(frame, key, sec_ts)
 
 

@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x36` (= `v3.6`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x37` (= `v3.7`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -42,6 +42,8 @@ Reglas de compatibilidad:
 **v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
 **v3.6 (31-jul-2026)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
+
+**v3.7 (31-jul-2026)**: actualización de firmware por LoRa (§18), con FW_OFFER (`0x19`), FW_DATA (`0x1A`), FW_STATUS (`0x1B`), FW_INSTALL (`0x1C`) y FW_RESULT (`0x1D`). La entrega es secuencial y no lleva mapa de fragmentos: el mapa de 32 bits del canal de configuración no escala a los 2485 fragmentos de una imagen, y la escritura en la partición es secuencial de todos modos, así que un único número (por qué byte va el nodo) resuelve a la vez el progreso, la reanudación tras un reinicio y la detección de huecos. Bump aditivo.
 
 **v3.5 (31-jul-2026)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
 
@@ -86,7 +88,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x36` para v3.6. |
+| `schema_version` | `0x37` para v3.7. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -137,10 +139,15 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x16` | CONFIG_RESULT | uplink | Veredicto de la aplicación (v3.5). Ver §17. |
 | `0x17` | CONFIG_GET | downlink | Pide a un nodo su `config.json` (v3.6). Ver §17.5. |
 | `0x18` | CONFIG_DATA | uplink | Un fragmento del `config.json` del nodo (v3.6). Ver §17.5. |
+| `0x19` | FW_OFFER | downlink | Anuncio de una imagen de firmware (v3.7). Ver §18. |
+| `0x1A` | FW_DATA | downlink | Un trozo de la imagen (v3.7). Ver §18.2. |
+| `0x1B` | FW_STATUS | uplink | Por dónde va el nodo y en qué estado (v3.7). Ver §18.3. |
+| `0x1C` | FW_INSTALL | downlink | Orden de instalar la imagen subida (v3.7). Ver §18.4. |
+| `0x1D` | FW_RESULT | uplink | Veredicto tras arrancar con ella (v3.7). Ver §18.5. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
-| `0x13`-`0x7F` | reservados |  | Disponibles para extensiones futuras (comandos downlink, OTA, ...). |
+| `0x1E`-`0x7F` | reservados |  | Disponibles para extensiones futuras. |
 | `0x80`-`0xFF` | propios del despliegue |  | Espacio para custom sin colisionar con el estándar. |
 
 ## 2. Red mesh en árbol
@@ -1037,7 +1044,7 @@ req_id       frag_idx   frag_total   offset     fragmento
 
 Que la forma coincida no es casualidad: así el reensamblado por desplazamiento es el mismo código en los dos sentidos.
 
-El nodo relee su `config.json` de la flash en cada petición nueva, en vez de guardarlo en memoria, porque lo que se quiere comprobar es lo que hay escrito. Sube un fragmento cada diez veces su tiempo de aire, que deja la banda al 10 %, el mismo criterio con el que el gateway espacia los suyos.
+El nodo relee su `config.json` de la flash en cada petición nueva, en vez de guardarlo en memoria, porque lo que se quiere comprobar es lo que hay escrito. Sube un fragmento cada diez veces su tiempo de aire, que deja la banda al 10 %. El gateway usa otro criterio para bajar los suyos (§17.6) porque su problema es distinto: tiene que colarse en la ventana en la que el nodo escucha, mientras que el nodo sube cuando quiere.
 
 Sin sha de conjunto, a diferencia de la escritura. La integridad de cada trama ya la garantizan su CRC16 y su MIC (§14), y lo que se recibe se valida parseándolo como JSON: si faltara o sobrara algo, no parsearía. Una lectura corrupta además no rompe nada, mientras que una escritura corrupta sí, y de ahí la asimetría.
 
@@ -1045,9 +1052,115 @@ Sin sha de conjunto, a diferencia de la escritura. La integridad de cada trama y
 
 Un config equivocado por aire puede dejar el nodo incomunicado, y ahí no hay cable que valga. El canal se apoya en la reversión automática que ya protege el camino por USB: el nodo copia su config vigente antes de pisarlo, marca el nuevo como a prueba, y si en la ventana siguiente no consigue registrarse en el gateway restaura el anterior y reinicia. Es la misma red de seguridad para los dos caminos de entrada, porque el peligro es el mismo.
 
-Ritmo de emisión: el gateway espacia los fragmentos a diez veces su tiempo de aire, que deja la banda al 10 %. El emisor solo retira un fragmento de su lista de pendientes cuando el mapa del CONFIG_ACK lo confirma, nunca al enviarlo.
+Ritmo de emisión: el ciclo de trabajo es un límite horario (EN 300 220-1 lo mide sobre una hora), así que el gateway lo lleva como presupuesto en ventana deslizante y no como separación fija entre tramas. Dentro de la ventana de escucha del nodo emite fragmentos seguidos mientras quede presupuesto, separados por el tiempo de aire de la trama más el hueco en el que el nodo confirma, que se deriva del tiempo de aire del propio CONFIG_ACK. Cuántos caben se calcula con esas dos cifras: a SF7 y 125 kHz son cuatro, y con factores de dispersión altos baja a uno, que es lo que había antes.
 
-## 18. Cambios respecto a v1.0
+El emisor solo retira un fragmento de su lista de pendientes cuando el mapa del CONFIG_ACK lo confirma, nunca al enviarlo.
+
+## 18. Actualización de firmware por LoRa (v3.7)
+
+La imagen de aplicación del nodo son unos 520 kB, 545 veces un `config.json`. Por radio eso son 2485 fragmentos y unos 16 minutos de tiempo de aire, que respetando el ciclo de trabajo se reparten en varias horas. El canal está pensado para eso: subir de fondo durante una ventana nocturna, cediendo el aire a la telemetría, y dejar la instalación para una orden aparte.
+
+### 18.0 Entrega secuencial, y por qué no hay mapa
+
+El canal de configuración usa un mapa de bits de lo recibido (§17.2), que permite entregar en cualquier orden y reparar huecos con una sola trama. Aquí no vale: son 32 bits para 32 fragmentos y una imagen tiene 2485. Ampliar el mapa tampoco tendría sentido, porque la escritura en la partición del ESP32 es secuencial de todos modos.
+
+Prescindir del mapa deja el estado en un único número, por qué byte va el nodo, y ese número resuelve tres cosas a la vez:
+
+- **Progreso**: es directamente lo que hay que enseñar.
+- **Reanudación**: lo recibido está en flash, no en memoria, así que tras un reinicio basta con continuar en ese byte. Una transferencia de horas los va a ver.
+- **Detección de huecos**: si llega un fragmento con desplazamiento mayor del esperado, falta algo en medio. El nodo contesta el desplazamiento que sí tiene y el emisor rebobina. No hacen falta rondas de reenvío ni listas de pendientes.
+
+Una pausa larga no cancela nada. El emisor cede el aire y respeta la ventana horaria, así que con una ventana nocturna hay diecisiete horas de silencio cada día: caducar la transferencia por inactividad la haría fallar todas las mañanas. Lo recibido vive en una partición que no se usa para nada más, de modo que conservarlo no retiene ningún recurso. Lo único que el nodo suelta tras una pausa es el búfer intermedio de RAM, y con él los bytes que aún no habían llegado a flash, menos de un sector, que el emisor reenvía solo al reanudar.
+
+El nodo escribe en la partición OTA dormida y arranca desde la otra, así que en ningún momento se toca el firmware que está corriendo. Lo que se envía es la aplicación sola, no el binario completo que se flashea por USB: ese lleva además gestor de arranque y tabla de particiones, que en caliente no se tocan, y es la mitad de grande.
+
+### 18.1 FW_OFFER (downlink, `frame_type = 0x19`)
+
+Anuncia la imagen antes de mandar nada. Medio mega a un nodo que la va a rechazar sería el peor uso posible del aire.
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Los 4 primeros bytes del sha256 de la imagen. Dos ofertas de la misma imagen comparten identificador, y el nodo reanuda en vez de reempezar. |
+| 4 | `total_len` | 4 | Tamaño de la imagen en bytes. |
+| 8 | `sha256` | 32 | Hash de la imagen completa. |
+| 40 | `version` | 0-32 | Versión del firmware ofrecido, sin terminador. |
+
+El sha completo viaja aquí y en el FW_INSTALL, no en cada trozo: repetir 32 bytes en 2485 fragmentos se comería el 15 % del aire.
+
+La versión permite al nodo rechazar lo que ya tiene o algo anterior, con la misma comparación numérica que usa el visor para no ofrecer un binario que haría retroceder al nodo. Ante una versión que no se puede interpretar, la oferta se acepta: decide el operador, que sabe más que esa comparación.
+
+### 18.2 FW_DATA (downlink, `frame_type = 0x1A`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+| 4 | `offset` | 4 | Desplazamiento del trozo dentro de la imagen. |
+| 8 | `data` | 1-213 | Los bytes. |
+
+El desplazamiento es de 32 bits y no de 16 como en CONFIG_PUSH (§17.1), porque 520 kB no caben en 16. A cambio desaparecen el índice y el total de fragmentos, que con 2485 tampoco cabrían en un byte y que la entrega secuencial no necesita.
+
+### 18.3 FW_STATUS (uplink, `frame_type = 0x1B`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+| 4 | `written` | 4 | Bytes ya escritos en la partición, que es por donde debe continuar el emisor. |
+| 8 | `state` | 1 | Ver tabla. |
+
+| Valor | Estado | Significado |
+| --- | --- | --- |
+| `0x00` | ACCEPTED | Oferta aceptada, listo para recibir desde `written`. |
+| `0x01` | RECEIVING | Progreso normal. |
+| `0x02` | GAP | Llegó un fragmento adelantado: rebobinar a `written`. |
+| `0x03` | READY | Imagen completa y sha256 verificado, a la espera de la orden. |
+| `0x04` | REJECTED | Oferta rechazada (ya se tiene esa versión, o una posterior). |
+| `0x05` | ERROR | Fallo escribiendo o abriendo la partición. |
+
+El nodo no confirma cada trozo: serían 2485 subidas de aire para nada. Emite un FW_STATUS cada 32 fragmentos, uno inmediato ante un hueco, y uno final al completar y verificar.
+
+### 18.4 FW_INSTALL (downlink, `frame_type = 0x1C`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+| 4 | `sha256` | 32 | Hash de la imagen, para comprobarlo contra lo escrito. |
+
+Va separada del transporte a propósito: subir es inocuo y puede correr de noche sin vigilancia, mientras que instalar reinicia el nodo y se decide cuando alguien mira.
+
+El nodo reverifica el sha releyendo la partición antes de aceptar, aunque ya lo hiciera al completar: entre una cosa y la otra pueden haber pasado horas y un reinicio. Solo entonces marca la partición de arranque y reinicia.
+
+### 18.5 FW_RESULT (uplink, `frame_type = 0x1D`)
+
+Misma forma que el CONFIG_RESULT (§17.4): `xfer_id` (4), `status` (1) y un detalle opcional en texto, que aquí lleva la versión que quedó corriendo.
+
+| Valor | Veredicto |
+| --- | --- |
+| `0x00` | Confirmada: arrancó con la imagen nueva y se registró en la malla. |
+| `0x01` | Sin imagen completa que instalar. |
+| `0x02` | Lo escrito no es lo que el emisor anunció. |
+| `0x03` | No se pudo marcar la partición de arranque. |
+| `0x04` | Revertida: arrancó, no se registró, y volvió a la anterior. |
+| `0x05` | Instalando: partición marcada, reiniciando. |
+
+### 18.6 Ventana de prueba y reversión
+
+Un firmware equivocado por radio deja el nodo incomunicado, y ahí no hay cable que valga. La red de seguridad tiene dos capas.
+
+La primera la pone el propio gestor de arranque del ESP32, compilado con la reversión activada: una imagen arrancada desde una partición OTA nace **a prueba**, y si nadie la confirma vuelve a la anterior al siguiente reinicio. Eso cubre incluso una imagen que no llegue a ejecutar una sola instrucción propia, que es justo lo que la ventana de prueba de la configuración (§17.6) no puede cubrir.
+
+La segunda la pone el firmware, y consiste en **aplazar** esa confirmación. El núcleo Arduino confirma la imagen nada más arrancar si el programa no dice lo contrario, y eso desarmaría la primera capa justo cuando más falta hace: quedaría confirmada sin saber todavía si el nodo comunica. El firmware del nodo redefine ese comportamiento y confirma solo tras registrarse en la malla, con la misma ventana y el mismo criterio que la configuración: registrarse exige oír los beacons, que el gateway entienda las tramas y que responda el WELCOME.
+
+Si la ventana vence sin registro, el nodo pide la reversión y reinicia con la imagen anterior. El registro de salud del nodo (§16) anota instalaciones, confirmaciones y reversiones.
+
+Orden entre las dos ventanas cuando coinciden: primero la de configuración, porque esa se revierte con un simple reinicio, mientras que revertir una imagen exige que la imagen llegue a ejecutarse.
+
+### 18.7 Reparto del aire
+
+El emisor es el consumidor de menor prioridad de la red. Lleva un presupuesto de aire en ventana deslizante de una hora (§17.6) y se para dejando un margen reservado, de forma que la telemetría, los ACK y los beacons nunca compitan con la subida. Además respeta una ventana horaria, pensada para que la transferencia ocurra de noche.
+
+La restricción que decide hasta dónde escala esto no es el tamaño de la imagen sino el ACK que el gateway emite por cada telemetría, que crece con el número de nodos y con la frecuencia de muestreo. Con un intervalo de 5 segundos, el gateway agota su propio presupuesto a partir de ocho nodos sin haber enviado un solo byte de firmware; con un intervalo de un minuto, veinte nodos siguen dejando sitio para una imagen por noche.
+
+## 19. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -1096,7 +1209,7 @@ Resumen para trazabilidad del TFM:
 3. Trama nueva MODBUS_DEBUG (`0x06`, §15): transacción fallida en crudo, activable con `modbus.debug` del config, best-effort sin ACK.
 4. Nota de honestidad habitual: el layout de TELEMETRY no es parseable por un receptor v3.1, pero todo el despliegue se flashea a la vez; se acepta como minor.
 
-## 19. Documentos relacionados
+## 20. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.

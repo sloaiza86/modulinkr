@@ -79,11 +79,26 @@
 #include "nodeclock.h"
 #include "health.h"
 #include "cfgota.h"
+#include "fwota.h"
+
+// Aplaza la confirmación de una imagen recién instalada (v3.7, spec §18.6).
+//
+// El núcleo Arduino declara esta función como símbolo débil que devuelve false,
+// y con ese valor confirma la imagen nueva nada más arrancar, antes de que el
+// programa haya ejecutado una sola línea. Con la reversión del gestor de
+// arranque activada eso desarma la red de seguridad justo cuando más falta
+// hace: la imagen quedaría confirmada sin saber todavía si el nodo comunica.
+//
+// Definirla aquí anula la débil del núcleo y devuelve la decisión al firmware,
+// que confirma en trialFwTick al registrarse en la malla. Va fuera del espacio
+// de nombres anónimo y con enlace C porque el núcleo la busca por ese nombre
+// exacto, sin decorar.
+extern "C" bool verifyRollbackLater() { return true; }
 
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.39-cfg-ota-read";
+constexpr const char* kFirmwareVersion = "0.0.41-fw-ota";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -246,6 +261,22 @@ constexpr uint32_t kTrialWindowMs = 240000;   // 4 min
 
 bool     g_trial_active   = false;
 uint32_t g_trial_start_ms = 0;
+
+// Prueba de la imagen recién instalada (v3.7, spec §18.6). Con la reversión
+// del gestor de arranque activada, una imagen arrancada desde una partición
+// OTA nace a prueba y vuelve a la anterior al siguiente reinicio si nadie la
+// confirma. La confirmación se aplaza hasta el registro en la malla, que es la
+// misma prueba de vida que usa la ventana de la configuración: exige oír los
+// beacons, que el gateway entienda las tramas y que responda el WELCOME.
+//
+// La ventana es la misma que la de configuración por el mismo razonamiento, y
+// se reutiliza la constante en vez de duplicar el número.
+bool     g_fw_trial_active = false;
+uint32_t g_fw_trial_start  = 0;
+uint32_t g_fw_result_left  = 0;   // emisiones pendientes de FW_RESULT
+uint32_t g_fw_result_ms    = 0;
+uint32_t g_fw_result_xfer  = 0;
+uint8_t  g_fw_result_code  = 0;
 
 health::Record g_health;
 uint8_t  g_recov_level     = 0;   // 0 sana, 1..4 último nivel ejecutado
@@ -1110,6 +1141,169 @@ void cfgReadTick(uint32_t now) {
     }
 }
 
+// ----- Actualización de firmware por LoRa (frame-format.md §18) -----
+
+// Emite un FW_STATUS con el estado que toque. Se aparta en una función porque
+// se llama desde cuatro sitios y siempre con los mismos tres datos: qué
+// transferencia, por dónde va y en qué estado está.
+void sendFwStatus(fwota::State estado) {
+    if (!g_lora_ready || !mesh.hasParent()) return;
+    nextSeq();
+    lora.sendFwStatus(g_lora_seq, mesh.parentId(), fwota::xfer(),
+                      fwota::written(), static_cast<uint8_t>(estado));
+}
+
+// FW_OFFER: anuncio de imagen. El nodo decide si la quiere.
+void handleFwOffer(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-offer"); return; }
+    if (f.payload_length < 40) return;   // xfer(4) + total(4) + sha256(32)
+
+    uint32_t xfer, total;
+    std::memcpy(&xfer,  &f.payload[0], sizeof(xfer));
+    std::memcpy(&total, &f.payload[4], sizeof(total));
+    const uint8_t* sha = &f.payload[8];
+
+    // La versión viaja sin terminador: la longitud la da payload_length.
+    char version[33] = {0};
+    const size_t vn = f.payload_length - 40;
+    if (vn > 0) std::memcpy(version, &f.payload[40],
+                            vn < sizeof(version) - 1 ? vn : sizeof(version) - 1);
+
+    const fwota::State estado = fwota::onOffer(xfer, total, sha, version);
+    Serial.printf("[fw]     oferta %s de %u B: %s\n",
+                  version[0] ? version : "?", static_cast<unsigned>(total),
+                  estado == fwota::State::ACCEPTED  ? "aceptada"
+                : estado == fwota::State::READY     ? "ya completa"
+                : estado == fwota::State::REJECTED  ? "rechazada"
+                                                    : "error");
+    sendFwStatus(estado);
+}
+
+// FW_DATA: un trozo de la imagen. No se confirma cada uno, que serían 2446
+// subidas de aire para nada; se confirma cada kStatusEvery y en el acto ante
+// un hueco, que es cuando el emisor necesita saberlo.
+void handleFwData(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-data"); return; }
+    if (f.payload_length < 9) return;    // xfer(4) + offset(4) + al menos 1
+
+    uint32_t xfer, offset;
+    std::memcpy(&xfer,   &f.payload[0], sizeof(xfer));
+    std::memcpy(&offset, &f.payload[4], sizeof(offset));
+
+    const fwota::State estado = fwota::onData(
+        xfer, offset, &f.payload[8], f.payload_length - 8);
+
+    switch (estado) {
+        case fwota::State::GAP:
+            Serial.printf("[fw]     hueco: llego %u y se esperaba %u\n",
+                          static_cast<unsigned>(offset),
+                          static_cast<unsigned>(fwota::written()));
+            sendFwStatus(estado);
+            break;
+        case fwota::State::READY:
+        case fwota::State::ERROR:
+        case fwota::State::REJECTED:
+            sendFwStatus(estado);
+            break;
+        default:
+            if (fwota::statusDue()) {
+                const uint32_t total = fwota::totalLen();
+                Serial.printf("[fw]     %u/%u B (%u%%)\n",
+                              static_cast<unsigned>(fwota::written()),
+                              static_cast<unsigned>(total),
+                              total ? static_cast<unsigned>(
+                                          100ull * fwota::written() / total) : 0);
+                sendFwStatus(estado);
+            }
+            break;
+    }
+}
+
+// FW_INSTALL: orden de instalar. Separada del transporte a propósito, porque
+// subir es inocuo y se puede hacer de noche sin vigilancia, mientras que
+// instalar reinicia el nodo y se decide cuando alguien mira.
+void handleFwInstall(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-install"); return; }
+    if (f.payload_length != 36) return;   // xfer(4) + sha256(32)
+
+    uint32_t xfer;
+    std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
+    const fwota::Result r = fwota::install(xfer, &f.payload[4]);
+
+    if (r != fwota::Result::INSTALLING) {
+        Serial.printf("[fw]     instalacion rechazada (codigo %u)\n",
+                      static_cast<unsigned>(r));
+        nextSeq();
+        lora.sendFwResult(g_lora_seq, mesh.parentId(), xfer,
+                          static_cast<uint8_t>(r), nullptr);
+        return;
+    }
+
+    // Se anota la instalación ANTES de reiniciar: si la imagen nueva no
+    // arranca, el registro es lo único que quedará contándolo.
+    g_health.fw_installs++;
+    health::save(g_health);
+    Serial.println(F("[fw]     instalando y reiniciando"));
+    Serial.flush();
+    delay(300);
+    ESP.restart();
+}
+
+// Ventana de prueba de la imagen recién instalada. Mismo criterio que la de la
+// configuración, el registro en la malla, porque la pregunta es la misma: si
+// el nodo sigue siendo alcanzable. La diferencia es quién revierte: aquí lo
+// hace el gestor de arranque, que no necesita que el firmware coopere.
+void fwTrialTick(uint32_t now) {
+    if (!g_fw_trial_active) return;
+
+    if (g_registered) {
+        g_fw_trial_active = false;
+        fwota::confirmRunning();
+        g_health.fw_confirms++;
+        health::save(g_health);
+        Serial.printf("[fw]     imagen nueva confirmada: red alcanzable en %lu s\n",
+                      static_cast<unsigned long>((now - g_fw_trial_start) / 1000));
+        // El veredicto se anuncia al gateway con la misma repetición espaciada
+        // de la trama de salud, porque interesa justo cuando el enlace va mal.
+        g_fw_result_xfer = 0;
+        g_fw_result_code = static_cast<uint8_t>(fwota::Result::CONFIRMED);
+        g_fw_result_left = kHealthRepeats;
+        g_fw_result_ms   = now;
+        return;
+    }
+
+    if (static_cast<int32_t>(now - g_fw_trial_start) <
+        static_cast<int32_t>(kTrialWindowMs)) {
+        return;
+    }
+
+    g_fw_trial_active = false;
+    g_health.fw_rollbacks++;
+    health::save(g_health);
+    Serial.printf("[fw]     SIN RED en %lu s con la imagen nueva: revirtiendo "
+                  "(reversiones=%lu)\n",
+                  static_cast<unsigned long>(kTrialWindowMs / 1000),
+                  static_cast<unsigned long>(g_health.fw_rollbacks));
+    Serial.flush();
+    delay(200);
+    fwota::rollbackRunning();     // no retorna: reinicia con la anterior
+}
+
+// Anuncia el veredicto de la instalación, repetido y espaciado como la trama
+// de salud. Es best-effort: la cola de pendientes solo sabe reconstruir
+// TELEMETRY para el reintento.
+void fwResultTick(uint32_t now) {
+    if (g_fw_result_left == 0) return;
+    if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
+    if (static_cast<int32_t>(now - g_fw_result_ms) < 0) return;
+
+    nextSeq();
+    lora.sendFwResult(g_lora_seq, mesh.parentId(), g_fw_result_xfer,
+                      g_fw_result_code, kFirmwareVersion);
+    g_fw_result_left--;
+    g_fw_result_ms = now + kHealthRepeatMs;
+}
+
 // Reparte las tramas LoRa entrantes por tipo.
 void processLoraRx() {
     LoraP2P::RxFrame f;
@@ -1144,9 +1338,20 @@ void processLoraRx() {
             case protocol::kFrameConfigGet:
                 handleConfigGet(f);
                 break;
+            case protocol::kFrameFwOffer:
+                handleFwOffer(f);
+                break;
+            case protocol::kFrameFwData:
+                handleFwData(f);
+                break;
+            case protocol::kFrameFwInstall:
+                handleFwInstall(f);
+                break;
             case protocol::kFrameConfigAck:
             case protocol::kFrameConfigResult:
             case protocol::kFrameConfigData:
+            case protocol::kFrameFwStatus:
+            case protocol::kFrameFwResult:
                 // Subida de otro nodo con este como salto: relay normal.
                 handleUplinkRelay(f);
                 break;
@@ -1844,6 +2049,25 @@ void setup() {
                       static_cast<unsigned long>(kTrialWindowMs / 1000));
     }
 
+    // ----- Firmware a prueba (fwota.h, spec §18.6) -----
+    //
+    // Va después del bloque de la configuración y no antes porque el orden
+    // importa: si el arranque anterior instaló una imagen Y aceptó un config,
+    // el config se revierte solo con un reinicio, mientras que revertir la
+    // imagen exige que esta llegue a ejecutarse. Atender primero lo que puede
+    // reiniciar deja lo demás sin tocar.
+    if (fs_ready) {
+        fwota::begin(kFirmwareVersion);
+        if (fwota::pendingVerify()) {
+            g_fw_trial_active = true;
+            g_fw_trial_start  = millis();
+            Serial.printf("[fw]     imagen nueva A PRUEBA: %lu s para "
+                          "registrarse en el gateway o el gestor de arranque "
+                          "vuelve a la anterior\n",
+                          static_cast<unsigned long>(kTrialWindowMs / 1000));
+        }
+    }
+
     // El comisionamiento atiende SIEMPRE, configurado o no: es la vía
     // para cargar el primer config y para reemplazarlo sin recompilar.
     {
@@ -1970,10 +2194,11 @@ void loop() {
     // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
     commission::poll();
 
-    // Ventana de prueba de la configuración: fuera del bloque que exige radio
-    // lista, a propósito. Un config que impida inicializar la radio es
-    // justamente uno de los que hay que revertir, y ahí g_lora_ready es false.
+    // Ventanas de prueba, las dos fuera del bloque que exige radio lista, a
+    // propósito. Un config o una imagen que impidan inicializar la radio son
+    // justamente los que hay que revertir, y ahí g_lora_ready es false.
     trialTick(millis());
+    fwTrialTick(millis());
 
     // Sin config válido: LED rojo parpadeando, recordatorio periódico en
     // el log (con el motivo: ausente o inválido) y nada más que hacer.
@@ -2045,6 +2270,8 @@ void loop() {
                 Serial.println(F("[cfg]    transferencia abandonada por inactividad"));
             }
             cfgReadTick(tnow);
+            fwota::expireIfIdle(tnow);
+            fwResultTick(tnow);
             batchTick(tnow);
         }
 
