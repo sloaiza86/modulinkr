@@ -348,6 +348,16 @@ void processFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
 }
 
 void setup() {
+    // Búfer de recepción amplio ANTES de abrir el puerto.
+    //
+    // radio.transmit() es bloqueante: durante los 185 ms que dura un fragmento
+    // este bucle no lee nada de lo que el Pi le manda, y con el búfer por
+    // defecto lo que llegue en ese rato se pierde. El 1-ago-2026 el nodo se
+    // perdió la mitad de los beacons durante una subida de firmware y llegó a
+    // quedarse sin padre cuatro veces: el Pi los emitía puntualmente y aquí no
+    // llegaban. Una línea de fragmento son unos 470 caracteres, así que el
+    // búfer tiene que tener holgura para varias.
+    Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     // Espera a que el host abra el CDC, máximo 3 s.
     while (!Serial && millis() < 3000) {

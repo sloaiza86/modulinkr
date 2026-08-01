@@ -64,7 +64,26 @@ fi
 # para saber si el Atom está en la última versión.
 VER="$(grep -oE 'kFirmwareVersion[^"]*"[^"]+"' "$DIR/src/main.cpp" \
        | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+
+# La versión sale del CÓDIGO y el binario del directorio de compilación, así
+# que pueden no corresponderse: basta con bumpear main.cpp y empaquetar sin
+# recompilar para producir un paquete que ANUNCIA una versión y CONTIENE otra.
+# El sha no lo detecta, porque cuadra con los bytes que hay.
+#
+# Pasó el 1-ago-2026: se subió por radio un paquete etiquetado 0.0.46 que
+# llevaba dentro la 0.0.45. La transferencia, la verificación y la instalación
+# funcionaron perfectamente y el nodo arrancó con la versión anterior. Como
+# todo el sistema decide si actualizar comparando versiones, una etiqueta que
+# miente es peor que no tenerla.
+#
+# La cadena de versión está literalmente dentro del binario (es un string del
+# firmware), así que comprobarlo es buscarla ahí.
 if [ -n "$VER" ]; then
+    if ! grep -qa -- "$VER" "$BUILD/firmware.bin"; then
+        echo "ERROR: main.cpp dice version '$VER' pero el binario compilado no" >&2
+        echo "       la contiene. Falta compilar tras cambiar la version." >&2
+        exit 1
+    fi
     printf '%s' "$VER" > "$OUT.version"
 fi
 

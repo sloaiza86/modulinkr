@@ -40,7 +40,13 @@ Reglas de compatibilidad:
 
 El salto de 1.0 a 2.0 introduce la red mesh: campos obligatorios nuevos en `lora` (`network_id`, `max_retries`), el bloque obligatorio `transport.mesh` y el campo `nbiot.relay_enabled`. Al ser campos obligatorios, un config 1.0 no valida contra 2.0, de ahí el bump de major. La cabecera de la trama LoRa cambió de forma incompatible en paralelo (ver `frame-format.md` §1.2).
 
-El firmware **rechaza al cargar** cualquier `config.json` con una `schema_version` que no entienda.
+El firmware **rechaza al cargar** cualquier `config.json` con una `schema_version` que no entienda, y desde v3.7 **declara cuáles entiende** para que quien envía pueda comprobarlo antes.
+
+La lista viaja en dos sitios donde el nodo ya se presenta: el `CFG.HELLO` del comisionamiento por USB, en el campo `schemas`, y el final del catálogo del `NODE_REGISTER` (`frame-format.md` §13.2). Va al final del catálogo a propósito, de modo que un gateway anterior siga leyendo el resto tal cual, y es opcional: un nodo con firmware anterior no la manda y quien lo lea obtiene cadena vacía, que significa "no lo declara" y no "no soporta ninguno".
+
+Existe porque sin ella nadie podía responder si un config iba a ser aceptado. El visor generaba una versión fija y el firmware aceptaba un rango escrito en el código, así que funcionaba por coincidencia: al añadir una versión nueva, un config generado por un visor actualizado se enviaba a un nodo viejo, se rechazaba al cargar y la ventana de prueba lo revertía minutos después. El resultado era seguro pero caro, y por radio además gastaba aire para descubrir algo que se sabía de antemano.
+
+El error de rechazo nombra las dos partes, la versión recibida y las que el firmware acepta, porque ese texto viaja en el `CONFIG_RESULT` y es lo que se lee en el visor.
 
 ## 2. Estructura general
 
@@ -69,6 +75,7 @@ Identifica al dispositivo dentro del despliegue. Estos datos son los que aparece
 "node": {
   "id":          1,
   "type":        "node",
+  "class":       "C",
   "name":        "Banco de pruebas TFM",
   "description": "Atom Lite + DTU LoRa + XY-MD02 ambiente"
 }
@@ -78,8 +85,15 @@ Identifica al dispositivo dentro del despliegue. Estos datos son los que aparece
 | --- | --- | --- | --- | --- |
 | `id` | integer | sí | `1`-`254` | Entero único en el despliegue. `0` y `255` reservados (broadcast / gateway). En la trama LoRa va como u8. |
 | `type` | string | sí | `"node"`, `"super_node"` | Discriminador del rol. Determina qué bloques aparecen en `transport`. |
+| `class` | string | no (v4.0) | `"A"`, `"C"` | Cuándo puede el gateway hablarle. Por defecto `"C"`. Ver `frame-format.md` §21: es lo que decide la latencia de bajada y si el nodo puede recibir una difusión. |
 | `name` | string | sí | 1-64 caracteres | Etiqueta humana. No se transmite por aire; uso en logs/UI. |
 | `description` | string | no | 0-256 caracteres | Notas libres. |
+
+**Sobre `class`.** Vocabulario tomado de LoRaWAN, y con el mismo significado. `"C"` es un nodo que escucha siempre salvo mientras transmite, y al que por tanto se le puede hablar en cualquier momento. `"A"` es un nodo al que solo se le habla justo después de haberle oído. Un nodo alimentado de red es `"C"`; uno a pilas sería `"A"`.
+
+El valor por defecto es `"C"` porque es lo que son todos los nodos de este despliegue: van enchufados y llevan colgado un sensor Modbus que consume mucho más que la radio.
+
+**Aviso, para que no se compre lo que todavía no se vende:** poner `"A"` hoy **no ahorra batería**. El módulo de radio queda en recepción continua desde el arranque, así que la clase solo cambia cuándo le habla el gateway, no lo que consume el nodo. Para que `"A"` signifique consumo hay que apagar el receptor entre ventanas, y eso es trabajo del firmware del nodo que no está hecho.
 
 ## 4. Bloque `transport`
 

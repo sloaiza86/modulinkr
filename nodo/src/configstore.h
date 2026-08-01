@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>   // uint32_t, la hora de la escritura aplazada
 
 namespace configstore {
 
@@ -82,5 +83,35 @@ bool restore();
 bool markTrial();
 bool trialPending();
 void clearTrial();
+
+// ----- Escritura aplazada (v3.9, frame-format.md §17.7) -----
+//
+// Un config que se guarda sin aplicar, con la hora a la que aplicarlo. Existe
+// para poder cambiar los parámetros de red de toda la malla: repartir el
+// config nuevo lleva minutos, y si cada nodo lo aplicara al recibirlo, los
+// primeros saltarían a unos parámetros con los que el gateway todavía no
+// habla, no conseguirían registrarse y su ventana de prueba los revertiría
+// antes de que les llegara el turno a los últimos. Separando el reparto del
+// salto, todos cambian a la vez.
+//
+// NO es un cuarto estado de la configuración. Al llegar la hora se ejecuta la
+// misma secuencia de siempre (backup, marca de prueba, escritura, reinicio),
+// sin una sola diferencia: esto es una escritura aplazada y nada más. Por eso
+// el único añadido al protocolo es un campo con la hora, donde el cero
+// significa "ahora" y reproduce el comportamiento anterior.
+
+// Guarda el texto como pendiente y anota cuándo aplicarlo. Reemplaza a
+// cualquier otro pendiente: el último manda.
+bool writePending(const char* text, size_t len, uint32_t apply_at);
+
+// Hora de aplicación del pendiente, o 0 si no hay ninguno.
+uint32_t pendingAt();
+
+// Lee el texto pendiente. Mismo contrato que read(): buffer de heap que
+// libera quien llama, o nullptr.
+char* readPending(size_t& len);
+
+// Descarta el pendiente. Se llama al aplicarlo y al reemplazarlo.
+void clearPending();
 
 }  // namespace configstore

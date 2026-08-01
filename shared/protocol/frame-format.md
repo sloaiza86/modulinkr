@@ -26,7 +26,7 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x37` (= `v3.7`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x39` (= `v3.9`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
 **Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
 
@@ -44,6 +44,10 @@ Reglas de compatibilidad:
 **v3.6 (31-jul-2026)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
 
 **v3.7 (31-jul-2026)**: actualización de firmware por LoRa (§18), con FW_OFFER (`0x19`), FW_DATA (`0x1A`), FW_STATUS (`0x1B`), FW_INSTALL (`0x1C`) y FW_RESULT (`0x1D`). La entrega es secuencial y no lleva mapa de fragmentos: el mapa de 32 bits del canal de configuración no escala a los 2485 fragmentos de una imagen, y la escritura en la partición es secuencial de todos modos, así que un único número (por qué byte va el nodo) resuelve a la vez el progreso, la reanudación tras un reinicio y la detección de huecos. Bump aditivo.
+
+**v3.8 (31-jul-2026)**: ventana de silencio (§19), con la trama QUIET (`0x1E`). El gateway anuncia un intervalo durante el cual los nodos retienen su cola de transmisión, para poder emitir algo a toda la red sin que se lo tapen entre ellos. Trama propia y no un campo del BEACON, porque el payload del beacon es de tamaño fijo y validado: ensancharlo dejaría a un nodo anterior descartando todos los beacons, sin hora ni padre, huérfano en 90 s. Bump aditivo.
+
+**v3.9 (31-jul-2026)**: escritura aplazada de configuración (§17.7). El CONFIG_COMMIT gana un campo con la hora de aplicación, donde el cero significa "ahora" y reproduce exactamente el comportamiento anterior, de modo que la trama sigue saliendo con sus 38 bytes cuando no se usa. Con hora, el nodo guarda el config sin aplicarlo y sigue operando con el suyo hasta ese instante. Hace falta para cambiar los parámetros de red de toda la malla: repartir lleva minutos y el salto tiene que ser simultáneo. Bump aditivo.
 
 **v3.5 (31-jul-2026)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
 
@@ -88,7 +92,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x37` para v3.7. |
+| `schema_version` | `0x39` para v3.9. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -144,10 +148,11 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x1B` | FW_STATUS | uplink | Por dónde va el nodo y en qué estado (v3.7). Ver §18.3. |
 | `0x1C` | FW_INSTALL | downlink | Orden de instalar la imagen subida (v3.7). Ver §18.4. |
 | `0x1D` | FW_RESULT | uplink | Veredicto tras arrancar con ella (v3.7). Ver §18.5. |
+| `0x1E` | QUIET | downlink (broadcast) | Reserva el aire durante una ventana (v3.8). Ver §19. |
 | `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
 | `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
 | `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
-| `0x1E`-`0x7F` | reservados |  | Disponibles para extensiones futuras. |
+| `0x1F`-`0x7F` | reservados |  | Disponibles para extensiones futuras. |
 | `0x80`-`0xFF` | propios del despliegue |  | Espacio para custom sin colisionar con el estándar. |
 
 ## 2. Red mesh en árbol
@@ -459,7 +464,7 @@ hop_count   parent_id   flags    epoch
 | `hop_count` | Distancia al gateway **del emisor de este salto**: 0 en el gateway, `hop_propio` en cada re-emisor. |
 | `parent_id` | Padre actual del emisor de este salto: `0x00` en el gateway (raíz, sin padre) y el id del padre en cada re-emisor. Habilita la regla anti-bucle de §2.2: un nodo nunca adopta como padre a un vecino que lo anuncia a él como padre. Sin este campo, dos nodos con enlaces marginales al gateway pueden elegirse mutuamente (bucle observado en banco, con `hop_count` inflándose en cada ciclo de beacon). |
 | `flags` | Reservado, `0x00` en v2.1. |
-| `epoch` | Añadido en v2.1. Hora del gateway al construir el beacon: epoch Unix en segundos, UTC (el Pi la toma de su reloj de sistema, mantenido por NTP). `0` = gateway sin hora sincronizada (arranque sin Internet); los nodos ignoran un epoch a 0. Todo nodo que recibe un beacon con `epoch != 0` resincroniza su reloj: es la fuente de hora continua de la red, complementaria al WELCOME de §13. |
+| `epoch` | Añadido en v2.1. Hora del gateway al construir el beacon: epoch Unix en segundos, UTC (el Pi la toma de su reloj de sistema, mantenido por NTP). `0` = gateway sin hora **sincronizada**, no solo sin hora plausible: la condición es el estado que reporta el kernel en `adjtimex(2)`, y el motivo de esa precisión está en §14.5. Los nodos ignoran un epoch a 0. Todo nodo que recibe un beacon con `epoch != 0` resincroniza su reloj: es la fuente de hora continua de la red, complementaria al WELCOME de §13. |
 
 `hop_count` y `parent_id` son los campos que un re-emisor reescribe. El `epoch` **no se reescribe**: el error acumulado por los retardos de re-emisión (jitter de 100-400 ms más ToA por salto) queda por debajo de 1 s en las profundidades de árbol de este proyecto, dentro de la precisión objetivo (resolución de 1 s del `ts`).
 
@@ -716,6 +721,10 @@ frag_idx    frag_total   catálogo (fragmento)
 
 Con `frag_total = 1` (el caso normal) el catálogo viaja completo en una trama. Si el descriptor supera el payload disponible (§3.3), se parte en fragmentos numerados desde 0; el gateway reensambla y responde WELCOME solo al recibir el conjunto completo. Sin WELCOME, el nodo reintenta la ronda completa de fragmentos.
 
+El catálogo reensamblado lleva, en este orden y con strings precedidos por su longitud en un byte: `fw_version`, `node_name`, el número de lecturas y sus tríos `id`/`name`/`unit`, el número de escrituras con los suyos, y desde v3.7 la lista de versiones del schema del `config.json` que el firmware sabe cargar, separadas por comas.
+
+Esa última va al final y es **opcional**: un nodo con firmware anterior no la manda, y el receptor debe tolerar su ausencia devolviendo cadena vacía, que significa "no lo declara" y no "no soporta ninguna". Lo que sobre y no sea un string bien formado sigue siendo un error de catálogo: la tolerancia es a que falte, no a que haya basura. Ver `node-config.md` §1 para el porqué.
+
 El **catálogo** es un descriptor binario compacto derivado del `config.json` del nodo (`node-config.md`). Todos los strings van como `len (1 B) + ASCII`:
 
 ```
@@ -850,6 +859,17 @@ Donde el replay sí hace daño es en las tramas de **control**, cuyo efecto no p
 **Regla**: el receptor descarta (con log) una trama de tipo **ACK (`0x01`), WELCOME (`0x05`), BEACON (`0x10`) o SN_OFFER (`0x12`)** si `|reloj_propio − sec_ts| > kSecFreshnessWindow`. Constante de firmware, no de config: **300 s** recomendados (cubre con margen holgado los segundos de vida real de estas tramas más la deriva del oscilador entre beacons).
 
 El control se **omite** cuando falta cualquiera de las dos horas: si el reloj propio del receptor no está sincronizado, o si `sec_ts < 0x40000000` (salt de emisor sin hora, §14.4). Riesgo residual aceptado y documentado: (a) un receptor sin hora no puede validar frescura (es la ventana entre el boot y el primer beacon/WELCOME); (b) tramas de control emitidas por un gateway sin hora (arranque sin NTP) viajan con salt y quedan exentas, con una ventana de exposición igual de corta. En ambos casos el atacante sigue sin poder **fabricar** tramas; solo reemitir, y solo durante esas ventanas.
+
+**Encierro por reloj desfasado y salida (1-ago-2026).** La regla anterior tiene un punto ciego que se manifestó en banco. Cubre el caso del emisor **sin** hora, que va con salt y queda exento, pero no el del emisor con una hora **equivocada y plausible**, que va con `sec_ts` normal. El Pi del gateway no lleva reloj de batería: al arrancar restaura la hora del último apagado, que está horas atrás pero es perfectamente posterior a cualquier umbral de plausibilidad. El gateway repartió esa hora en su primer beacon, un nodo la adoptó como propia, y veinte segundos después el NTP corrigió el Pi doce horas de golpe. A partir de ese instante toda trama del gateway llegaba con un `sec_ts` doce horas por delante del reloj del nodo, que las descartaba por rancias. Incluido el BEACON, que es lo único capaz de corregir la hora. El nodo quedó sordo de forma permanente: transmitía, el gateway recibía y confirmaba, y ninguna confirmación entraba. Su detector de receptor mudo escaló hasta reiniciar la radio, que estaba perfecta, y la telemetría de ese rato se publicó fechada doce horas antes.
+
+La corrección va en los dos extremos, porque cada uno arregla la mitad:
+
+1. **El gateway no reparte hora que no esté disciplinada.** No basta con que la época sea plausible: la condición es que el reloj de sistema esté sincronizado, lo que el kernel responde en `adjtimex(2)` (el bit `STA_UNSYNC`, que es lo que lee `timedatectl` en su línea "System clock synchronized"). Mientras no lo esté, `epoch = 0` en BEACON y WELCOME y `sec_ts` cae al salt de sesión, con lo que se entra por la exención ya prevista en el párrafo anterior. Esto elimina la causa.
+2. **El nodo puede salir del encierro.** Tras `kStaleBeaconResync` BEACON seguidos descartados por rancios, sin ninguna trama admitida por medio, el siguiente se **admite** y su `epoch` pone el reloj en hora. Tres beacons son unos 90 s con el periodo de 30 s. Esto elimina la trampa, venga el desfase de donde venga (un cambio de hora manual en el Pi, un NTP que corrige mucho tras semanas sin red).
+
+Lo que se cede con el punto 2: quien grabe un beacon viejo y consiga tapar al gateway durante esos 90 s puede arrastrar el reloj del nodo a la hora de la grabación. Se acepta por dos razones. El beacon sigue exigiendo MIC válido, así que hace falta la clave de la red para siquiera intentarlo, y a esas alturas el atacante tiene ataques mejores. Y el nodo encerrado no es un riesgo hipotético sino algo que ya ocurrió, mientras que el replay de beacon sigue siendo teórico.
+
+**Diagnóstico.** El nodo cuenta las tramas descartadas por frescura y las publica en el log junto al resto de contadores de recepción cuando salta el detector de receptor mudo. Sin ese contador a la vista, un reloj desfasado, una clave que no cuadra y un aire vacío producen exactamente el mismo síntoma.
 
 ### 14.6 Validación en recepción (complemento a §10)
 
@@ -1056,6 +1076,50 @@ Ritmo de emisión: el ciclo de trabajo es un límite horario (EN 300 220-1 lo mi
 
 El emisor solo retira un fragmento de su lista de pendientes cuando el mapa del CONFIG_ACK lo confirma, nunca al enviarlo.
 
+Con el nodo a más de un salto el hueco entre tramas se ensancha, porque un relay que está reenviando no puede recibir: la trama siguiente caería encima del reenvío de la anterior y se perdería una de cada dos. El hueco pasa entonces a cubrir dos tiempos de aire, lo que el relay tarda en oír una trama y en volver a emitirla. Medido sobre una imagen entera, ensanchar el hueco entrega lo mismo con la mitad de tramas al aire que mantener el ritmo corto, y además más deprisa, porque aprovecha mejor la ventana; acortar la ráfaga en cambio ahorra el aire pero tarda el doble. El emisor distingue los dos casos por la ruta inversa: si el salto hacia el nodo es el propio nodo, es vecino directo.
+
+### 17.7 Escritura aplazada (v3.9)
+
+El CONFIG_COMMIT admite un campo más al final, `apply_at`, con la hora Unix a la que aplicar el config. El payload pasa de 38 a 42 bytes solo cuando se usa: con `apply_at = 0`, que significa "ahora", la trama sale idéntica a la de v3.5 y un nodo anterior la entiende sin cambios.
+
+**Un campo y no un indicador aparte.** Dos datos podrían contradecirse, un indicador que diga "inmediato" con una hora futura, y alguien tendría que decidir cuál gana. Esa decisión se olvida y acaba implementada distinta en cada lado. Con un solo campo la pregunta no existe.
+
+**No es un cuarto estado de la configuración, es una escritura aplazada.** Al llegar la hora, el nodo ejecuta la misma secuencia de siempre (copia de respaldo, marca de prueba, escritura, reinicio) sin una sola diferencia: aquí solo se decide *cuándo*, no *cómo*. La ventana de prueba de §17.6 arranca al aplicarlo, no al recibirlo, de modo que un config aplazado tiene exactamente la misma red de seguridad.
+
+Para qué existe: cambiar los parámetros de red de toda la malla. Repartir el config nuevo lleva minutos, y si cada nodo lo aplicara al recibirlo, los primeros saltarían a unos parámetros con los que el gateway todavía no habla, no conseguirían registrarse, y su ventana de prueba los revertiría antes de que les llegara el turno a los últimos. Separando el reparto del salto, todos cambian a la vez. Y se da como instante absoluto y no como "dentro de N segundos" porque los nodos comparten reloj: una orden se puede perder, un instante ya entregado no.
+
+Reglas de convivencia, que son lo que evita el desorden:
+
+1. **Un config nuevo sustituye a cualquier pendiente**, sea inmediato o aplazado. El último manda, y el nodo lo dice en su veredicto.
+2. **El pendiente sobrevive a los reinicios.** Vive en el sistema de archivos como el resto, con el mismo temporal y renombrado. La hora se escribe después del texto, de modo que un corte entre las dos deja un texto sin hora, que se lee como "no hay pendiente"; al revés dejaría una hora apuntando a un texto que no está.
+3. **Con una prueba sin confirmar no se acepta ni se aplica.** Encadenar dos cambios sin haber confirmado el primero es lo que la copia de respaldo ya se niega a hacer, y aquí rige el mismo criterio. Si la prueba aparece después de guardar el pendiente, al llegar la hora se descarta y se dice.
+4. **Sin hora válida no hay aplazamiento.** El nodo rechaza en vez de aplicar en el acto, porque aplicar a destiempo un config de red es justo lo que el aplazamiento existe para evitar.
+5. **Por cable no existe.** El comisionamiento por USB escribe en el acto: con el cable delante no hay razón para programar nada, y añadirlo daría una segunda forma de hacer lo mismo.
+
+### 17.8 Cambio coordinado de parámetros de red (v3.9)
+
+La escritura aplazada de §17.7 resuelve el lado de los nodos. Falta el del gateway, que también tiene que saltar, y el de los que se queden atrás. El procedimiento completo tiene cinco pasos y ninguno cambia el formato de las tramas: se construye entero sobre el `apply_at` que ya existe.
+
+1. **Programación.** El operador fija los parámetros de destino y una hora de salto T. Se guarda la operación con los dos juegos de parámetros, el de partida y el de destino, pero **no se cambia nada todavía**. T sale de un único sitio y se reparte desde ahí, porque nodos citados a una hora y gateway a otra es el fallo más tonto que esta operación admite.
+2. **Reparto.** El config nuevo se envía a cada nodo con ese `apply_at`. Cada uno lo guarda como pendiente y sigue operando con el suyo.
+3. **Recuento.** Antes de T se ve quién tiene el pendiente y quién no. Si faltan nodos, T se corre o la operación se tira a la basura: hasta el salto no ha cambiado nada, y esa es la propiedad que hace segura toda esta forma de trabajar.
+4. **Salto.** En T cada nodo aplica y reinicia, y el gateway cambia su radio en el mismo instante. Los que llegaron al reparto se reencuentran en los parámetros nuevos.
+5. **Recuperación.** Durante las horas siguientes el gateway vuelve periódicamente a los parámetros viejos, unos segundos cada pocos minutos, y emite un beacon nada más llegar. Un rezagado (uno que no recibió el config, o cuya ventana de prueba venció y revirtió) se registra ahí, y se le puede repartir de nuevo con un T nuevo.
+
+**Los parámetros van juntos o no van.** El juego que se cambia incluye `network_id`, frecuencia, SF, ancho de banda, TTL máximo y la clave de red. La clave viaja con el resto a propósito: cambiarla incomunica igual que cambiar el canal, así que pertenece al mismo salto y a la misma vuelta atrás. Separarlas daría un estado en el que el gateway escucha en el canal correcto y no entiende nada de lo que oye.
+
+**La alternancia se deriva de la hora absoluta**, como `(ahora − T) mód periodo`, y no de un temporizador propio. Así un reinicio del servicio cae en la fase que le toca en vez de reiniciar el ciclo, y el panel puede predecir la próxima ventana sin preguntarle a nadie.
+
+**El primer periodo entero después del salto no se toca.** La primera ventana de recuperación empieza un periodo completo después de T, no antes. Justo después del salto los nodos están reiniciando y buscando al gateway en los parámetros nuevos, con su ventana de prueba ya corriendo, y encontrarse el aire vacío es precisamente lo que les hace revertir. La recuperación no puede fabricar los rezagados que viene a recoger.
+
+**Durante las ventanas en los viejos no se envía nada más.** Las transferencias de configuración y de firmware se pausan: hablarían al mundo equivocado, gastarían aire, no llegarían, y contarían los reintentos como si el nodo no respondiera. Continúan solas al volver.
+
+**El coste, que conviene tener a la vista.** Mientras el gateway escucha en los viejos no oye a los que ya migraron. Los valores por defecto son 15 s cada 300, un 5 % del tiempo, fracción que los reintentos de esos nodos absorben sin perder una sola medida. Los 15 s salen de lo que tarda un rezagado en volver: beacon al entrar, el nodo lo oye, adopta padre y se registra, un par de segundos con margen de sobra.
+
+**El pase de lista tiene tres respuestas, no dos.** Oído en los nuevos es que migró; oído en los viejos es un rezagado; no oído en ninguno es la tercera, y hay que poder distinguirla para no dar por perdido a un nodo que solo llevaba un rato callado. Un nodo con rastro en los dos mundos migró y luego revirtió, o al revés: manda el más reciente.
+
+**Cierre.** Al cerrar la operación, los parámetros nuevos se escriben en la configuración del gateway y pasan a ser el estado normal de la instalación. Si tras el plazo de recuperación quedan nodos sin migrar, la respuesta honesta es que ahí hace falta cable, y el panel debe decirlo con nombres.
+
 ## 18. Actualización de firmware por LoRa (v3.7)
 
 La imagen de aplicación del nodo son unos 520 kB, 545 veces un `config.json`. Por radio eso son 2485 fragmentos y unos 16 minutos de tiempo de aire, que respetando el ciclo de trabajo se reparten en varias horas. El canal está pensado para eso: subir de fondo durante una ventana nocturna, cediendo el aire a la telemetría, y dejar la instalación para una orden aparte.
@@ -1160,7 +1224,300 @@ El emisor es el consumidor de menor prioridad de la red. Lleva un presupuesto de
 
 La restricción que decide hasta dónde escala esto no es el tamaño de la imagen sino el ACK que el gateway emite por cada telemetría, que crece con el número de nodos y con la frecuencia de muestreo. Con un intervalo de 5 segundos, el gateway agota su propio presupuesto a partir de ocho nodos sin haber enviado un solo byte de firmware; con un intervalo de un minuto, veinte nodos siguen dejando sitio para una imagen por noche.
 
-## 19. Cambios respecto a v1.0
+## 19. Ventana de silencio (v3.8)
+
+Emitir algo a toda la red a la vez tropieza con que los nodos no están callados. Cada uno transmite con su propio ciclo, sin coordinación con los demás, y eso estropea una difusión por dos vías: un nodo no oye mientras transmite, y un nodo que transmite tapa la emisión para sus vecinos.
+
+Medido en simulación, con cada nodo emitiendo 0,4 s de cada 5 y fases aleatorias, el porcentaje de tramas de una difusión que recibe el peor nodo:
+
+```
+ nodos    solo sordera propia    + interferencia de vecinos    con silencio
+     1                   84 %                          84 %          100 %
+     5                   84 %                          42 %          100 %
+    10                   84 %                           6 %          100 %
+    20                   84 %                           3 %          100 %
+```
+
+Con diez nodos habría que emitir cada trama dieciséis veces para que la recibieran todos, lo que sale más caro que entregarla a cada uno por separado. La ventana de silencio no es una mejora de la difusión: es su condición de existencia.
+
+### 19.1 QUIET (downlink broadcast, `frame_type = 0x1E`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `start_epoch` | 4 | Instante en que empieza el silencio, epoch Unix en segundos. |
+| 4 | `duration_s` | 2 | Cuánto dura, en segundos. |
+
+La ventana se da como **instante absoluto** y no como "dentro de N segundos" porque los nodos comparten reloj: el BEACON lleva la hora del gateway (§7.2) y desde v3.0 un nodo sin hora ni siquiera muestrea. Así el anuncio se puede repetir tal cual sin recalcular nada, y dos nodos que lo reciban con segundos de diferencia callan igualmente a la vez.
+
+Se re-emite como el BEACON, para alcanzar a los nodos a más de un salto. Sin eso, una difusión solo silenciaría el primer anillo.
+
+### 19.2 Por qué una trama propia y no un campo del BEACON
+
+El BEACON sería el vehículo natural: ya inunda la red cada 30 s. Pero su payload es de tamaño fijo y los nodos lo validan (§10, regla 8), así que ensancharlo dejaría a un nodo con firmware anterior descartando **todos** los beacons. Perdería la hora y el padre, y en 90 s quedaría huérfano.
+
+Con un tipo nuevo, ese mismo nodo se limita a ignorarlo: sigue transmitiendo y lo único que ocurre es que estorba a la difusión de sus vecinos. Un nodo que molesta es preferible a un nodo que se pierde, y esa es toda la razón de la decisión.
+
+### 19.3 Reglas del receptor
+
+1. **Sin hora, no se participa.** Un nodo sin reloj sincronizado no puede saber cuándo empieza la ventana, así que la ignora y lo dice.
+2. **Tope de duración.** Se rechaza una ventana por encima del tope del firmware (900 s), de modo que ni una trama corrupta ni un gateway confundido puedan dejar la red muda mucho rato.
+3. **La retención se refresca, no se fija.** El nodo retiene su cola en tramos cortos que renueva mientras dura la ventana, en vez de retenerla de una vez por toda la duración: si pierde la cuenta, la retención expira sola en un segundo en lugar de dejarlo mudo hasta el final.
+4. **La medición manda sobre el silencio.** El muestreo sigue y la outbox retiene lo capturado, pero la outbox es finita (32 muestras) y al llenarse pisa la más antigua: callar más de lo que cabe no retrasa la entrega, la pierde. El nodo vigila el sitio que le queda y **rompe el silencio** al acercarse al límite, avisando por consola.
+
+   Esa decisión es del nodo y no del emisor, porque el emisor no sabe el intervalo de muestreo de cada uno ni cuánto lleva acumulado. Y ni siquiera hace falta calcularlo: basta con mirar si queda sitio. Cuánto aguanta cada nodo sale de su propio intervalo:
+
+   ```
+   intervalo    silencio máximo
+        5 s      140 s (2,3 min)
+       15 s      420 s (7,0 min)
+       30 s      840 s (14 min)
+       60 s     1680 s (28 min)
+   ```
+
+   El tope de la trama (900 s) solo llega a mandar con intervalos de 30 s o más; por debajo manda la outbox. La consecuencia para quien difunda algo largo es que **no debe pedir una ventana única y larga, sino varias cortas con huecos de drenado entre ellas**: estropear una difusión es barato porque se reintenta, perder una medida no se recupera.
+
+### 19.4 Reglas del emisor
+
+**La duración la recorta el emisor, no quien la pide.** La regla 4 del receptor deja al nodo romper el silencio si su outbox se llena, y eso es correcto porque una medida perdida no se recupera. Pero medido en simulación esa ruptura no es un goteo: todos los nodos tienen la misma outbox y ritmos parecidos, de modo que rompen con diez segundos de diferencia entre el primero y el último. Una ventana pasada de larga no se degrada, se derrumba: con veinte nodos el peor pasa de recibir el 100 % al 45 %.
+
+Por eso el recorte va en el origen. El emisor no pregunta el intervalo de muestreo a nadie: lo mide sobre los tiempos de captura que ya tiene en su buffer, tomando la mediana de las diferencias de cada nodo (la mediana y no la media, porque un hueco por una entrega perdida inflaría el promedio y haría creer que hay más margen del que hay) y quedándose con el mínimo de la red. Sin historia suficiente supone el intervalo más rápido plausible: equivocarse por corto solo cuesta repetir la ventana, mientras que equivocarse por largo tira medidas.
+
+El anuncio se hace con un margen antes de que la ventana empiece, para que recorra la malla entera: si callaran los nodos cercanos y los lejanos no, se tendría la mitad del coste sin la mitad del beneficio. Durante ese margen el anuncio se repite cada pocos segundos, porque no hay confirmación y la única defensa contra un anuncio perdido es repetirlo. Una vez empezada la ventana, deja de anunciarse.
+
+## 20. Difusión de firmware (v4.0)
+
+La entrega de §18 va nodo a nodo. Con la red en la mesa eso basta, pero el coste crece con el número de nodos: la imagen entera por cada uno. Medido con el ciclo de trabajo del 8 % mandando, veinte nodos son 65 horas de emisión, y esa cifra no es un inconveniente sino una imposibilidad práctica.
+
+La difusión emite la imagen **una vez para todos**. El suelo son 3,2 horas, que es lo que cuesta emitir 2498 fragmentos, y ese suelo no depende del número de nodos. Todo lo que aparece por encima es reparación.
+
+### 20.0 A quién alcanza, y por qué no reemplaza a §18
+
+**Solo alcanza a nodos en clase C** (§21.6). Un nodo que solo escucha tras haber hablado no puede recibir una emisión para todos, porque su ventana no coincide con la de nadie. El panel debe decirlo antes de emitir, no después.
+
+
+
+Sigue haciendo falta la entrega individual, y por tres motivos que no desaparecen: actualizar un solo nodo, reponer lo que a un nodo concreto le falte cuando ya no compensa emitirlo a todos, y atender a los nodos en clase A, que quedan fuera de la difusión por construcción. La difusión es un atajo para el caso de "todos a la vez", no un sustituto. El lado del nodo (escribir en la partición, instalar, ventana de prueba y vuelta atrás) es el mismo en los dos caminos.
+
+### 20.1 Fragmentos de 212 bytes, y por qué no 213
+
+En §18 la entrega es secuencial, así que el nodo acumula fragmentos hasta completar un sector de 4 kB y lo vuelca de una vez, porque la escritura en flash exige alineación a 4 bytes y 213 no lo es. Ese truco no vale aquí: en difusión los fragmentos llegan repartidos por toda la imagen y con huecos, de modo que harían falta los 124 sectores a la vez.
+
+La salida es bajar el fragmento a **212 bytes**, que sí es múltiplo de cuatro. Entonces el fragmento `i` cae en el desplazamiento `212·i`, que está alineado, y se puede escribir directamente donde le toque llegue cuando llegue. La partición se borra entera al aceptar la oferta, y a partir de ahí cada fragmento se escribe una sola vez sobre flash ya borrada.
+
+Cuesta un byte por fragmento, un 0,5 % de aire. A cambio **desaparece el búfer intermedio de 4 kB**: recibir por difusión gasta menos memoria que recibir por el camino individual.
+
+### 20.2 Corrección de errores sistemática
+
+Sin confirmación por nodo no hay rebobinado, así que se emiten fragmentos de más. La forma **sistemática** es la que se usa: primero los `K` originales del bloque tal cual, después `R` mezclas de repuesto. Lo que llega bien se queda escrito siempre, y las mezclas solo sirven para rellenar huecos.
+
+Esa elección no es de estilo. Con un código no sistemático (solo mezclas), el bloque es de todo o nada: si faltan dos mezclas no se puede despejar ninguno de los `K` fragmentos, y la pérdida se multiplica por el tamaño del bloque. Con el bloque pequeño que impone la memoria del nodo, eso sale **peor que no tener corrección**, medido en simulación. La variante sistemática no puede empeorar nunca: en el peor caso las mezclas no sirven y queda la reparación de §20.5.
+
+Y tiene una segunda propiedad que decide: si el generador de mezclas no coincidiera entre los dos extremos, las mezclas serían inservibles pero los originales llegan igual y la reparación recoge lo que falte. Degrada a no tener corrección, no corrompe la imagen.
+
+**Parámetros: `K = 128`, `R = 10`.** El bloque grande no cuesta memoria porque los originales viven en la flash, no en RAM. Lo único que se guarda son las mezclas del bloque en curso: `R · 212 = 2120` bytes, más `R · 16 = 160` bytes de máscaras. El sobrecoste de aire es `R/K`, un 8 %.
+
+Medido, esto recorta la cola de reparación de 1,1 h a 0,2 h con veinte nodos y pérdida del 2 %, que es el régimen al que apunta la ventana de silencio de §19. Con pérdida alta no aporta nada, porque hay más huecos por bloque que mezclas: ahí trabaja la reparación.
+
+### 20.3 El generador de las mezclas
+
+La mezcla `p` del bloque `b` es el XOR de un subconjunto de los `K` originales de ese bloque. El subconjunto sale de un generador que **los dos extremos calculan por su cuenta**, así que no viaja por el aire.
+
+Aritmética de 32 bits explícita, sin nada que dependa del tamaño de entero del lenguaje:
+
+```
+semilla(xfer, b, p) = (xfer XOR (b · 0x9E3779B1) XOR ((p+1) · 0x85EBCA6B)) mod 2^32
+                      (si sale 0, se sustituye por 0xA5A5A5A5)
+
+siguiente(x):  x ^= x << 13   (mod 2^32)
+               x ^= x >> 17
+               x ^= x << 5    (mod 2^32)
+```
+
+La máscara se llena tomando bits del estado, 32 por iteración, del bit 0 al 31, y avanzando el generador entre iteraciones. El original `j` entra en la mezcla si su bit correspondiente vale 1. Densidad 1/2. Si la máscara saliera vacía se fuerza el bit 0, porque una mezcla vacía no aporta nada.
+
+**Vectores de prueba, con `K = 128`.** Las dos implementaciones deben reproducirlos exactamente; es la comprobación que evita el fallo silencioso:
+
+| `xfer_id` | bloque | mezcla | grado | máscara (little endian, hex) |
+| --- | --- | --- | --- | --- |
+| `0x00000000` | 0 | 0 | 64 | `38537c6895647fa103ae51f0ab35a477` |
+| `0x12345678` | 0 | 0 | 64 | `9d09e4ef364024b4c75a71b8339917f6` |
+| `0x12345678` | 0 | 1 | 60 | `d57c7057a0e4b445308e31fd2be10a52` |
+| `0x12345678` | 3 | 7 | 66 | `96978d3309f29dae8796470bcc4376cb` |
+| `0xFFFFFFFF` | 19 | 9 | 57 | `874f6edc480c4aa6898aac1f17534051` |
+
+### 20.4 Cómo despeja el nodo, sin releer la flash
+
+Las máscaras dependen solo de `(xfer, bloque, mezcla)`, no del contenido, así que el nodo las calcula **al empezar el bloque**, antes de recibir nada. Entonces, según llega cada original, lo escribe en la flash y de paso lo va sumando (XOR) a las mezclas que lo contienen. Cuando llegan las mezclas de repuesto, las suma también.
+
+El resultado es que cada mezcla queda valiendo exactamente el XOR de los originales que **faltan**. No hace falta releer un solo byte de la flash.
+
+Despejar es entonces resolver un sistema de ecuaciones XOR con tantas incógnitas como huecos y tantas ecuaciones como mezclas recibidas. Se hace por eliminación sobre las propias máscaras, en el sitio.
+
+Con `m` huecos y `j` mezclas recibidas hace falta `j ≥ m`, y aun así el sistema puede salir dependiente. Medido con 400 casos por punto y `R = 10` recibidas: 1 a 4 huecos se resuelven prácticamente siempre, 6 huecos el 94 %, 8 el 80 %, 10 el 29 %, y 11 o más nunca (no hay ecuaciones suficientes). Lo que no se resuelve no se pierde: pasa a la reparación.
+
+### 20.5 El mapa y la reemisión, que son lo que garantiza el final
+
+Ninguna cantidad de corrección asegura que todos acabaron. Eso lo asegura el mapa.
+
+Terminada una pasada, el gateway pregunta a cada nodo, uno por uno, qué le falta. El nodo responde con un mapa de bits de los originales recibidos, 313 bytes para una imagen de 517 kB, troceado en dos tramas. El gateway junta lo que falta a todos y **reemite la unión**, otra vez en difusión. Se repite hasta que no falte nada.
+
+Preguntar de uno en uno y no a todos a la vez es deliberado: veinte nodos contestando a la vez se pisan, y el mapa es justo la trama que no conviene perder.
+
+Es el mismo patrón que el mapa de fragmentos de §17.4, y por el mismo motivo: un solo mapa dice exactamente qué reenviar, sin confirmar fragmento a fragmento.
+
+### 20.6 FW_BCAST_OFFER (difusión, `frame_type = 0x1F`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Los 4 primeros bytes del sha256, como en §18.1. |
+| 4 | `total_len` | 4 | Tamaño de la imagen en bytes. |
+| 8 | `sha256` | 32 | Hash de la imagen completa. |
+| 40 | `block_k` | 2 | Originales por bloque. |
+| 42 | `block_r` | 1 | Mezclas de repuesto por bloque. |
+| 43 | `version` | 0-32 | Versión ofrecida, sin terminador. |
+
+Se emite repetido durante el margen previo, como el anuncio de §19: no hay confirmación y la única defensa contra un anuncio perdido es repetirlo. Un nodo que lo pierda entero no participa en la pasada y lo recoge la reparación.
+
+`block_k` y `block_r` viajan en la oferta en vez de estar fijados en el firmware para no atar el formato a una decisión que puede cambiar con el tamaño de la imagen o con la pérdida medida.
+
+### 20.7 FW_BCAST_DATA (difusión, `frame_type = 0x20`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+| 4 | `index` | 2 | Número de fragmento. Ver abajo. |
+| 6 | `data` | 1-212 | Los bytes. |
+
+Índice y no desplazamiento, al revés que §18.2, porque aquí hace falta numerar también las mezclas, que no tienen desplazamiento en la imagen. Con `n_orig` originales: los índices `0` a `n_orig−1` son originales, y el original `i` va al desplazamiento `212·i`. Los índices desde `n_orig` en adelante son mezclas: la mezcla `p` del bloque `b` tiene el índice `n_orig + b·R + p`.
+
+Dos bytes bastan (2498 originales más 200 mezclas) y ahorran dos frente al desplazamiento de 32 bits, que a 2698 fragmentos son 5,4 kB de aire.
+
+### 20.8 FW_BCAST_POLL (downlink, `frame_type = 0x21`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+
+Unicast a un nodo: "dime qué te falta". Se pregunta de uno en uno.
+
+### 20.9 FW_BCAST_MAP (uplink, `frame_type = 0x22`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
+| 4 | `part` | 1 | Parte del mapa, desde 0. |
+| 5 | `parts` | 1 | Total de partes. |
+| 6 | `bits` | 1-212 | Trozo del mapa de originales recibidos, un bit por original, del menos significativo al más. |
+
+Solo se mapean los originales. Las mezclas no se piden nunca: una mezcla perdida no se echa de menos, se sustituye por el original que iba a rellenar.
+
+### 20.10 Convivencia con la ventana de silencio
+
+La difusión se emite dentro de las ventanas de silencio de §19, troceada según la regla ya fijada allí: el silencio se dimensiona a lo que aguanta la outbox del nodo que muestrea más deprisa, y entre silencio y silencio se deja el hueco de drenado. Sin esa coordinación la difusión recibe el 6 % de lo emitido con diez nodos y es peor que la entrega individual, así que la ventana de silencio no es una mejora de la difusión sino su condición de existencia.
+
+### 20.11 Convivencia con el relay
+
+Difusión y relay juntos son inundación. Si cada nodo repitiera lo que oye, en una malla con lazos cada fragmento se multiplicaría, y además cada repetición es una transmisión, o sea un nodo que durante ese rato no escucha. Sería romper la ventana de silencio de §19 con las propias tramas de la difusión, que es exactamente lo que esa ventana existe para impedir.
+
+**Regla: las tramas de difusión no se repiten.** Ni el anuncio ni los fragmentos. Sale gratis de la estructura que ya hay, porque el reenvío de bajada busca una ruta hacia el destino y una trama de difusión no tiene destino concreto, pero conviene que esté escrita: es una decisión, no una casualidad, y sin dejarla anotada el primer intento de "mejorar el alcance" la desharía.
+
+**Consecuencia, que hay que asumir con los ojos abiertos:** la difusión llega a los nodos que oyen al gateway directamente. Un nodo a dos saltos no recibe nada de la pasada, su mapa sale vacío, y lo que le falta acaba entregándose por el camino individual de §18. O sea que la difusión ahorra proporcionalmente a cuántos nodos estén a un salto, no a cuántos haya.
+
+En el despliegue de este trabajo eso cubre el caso real. Para una malla profunda, la continuación natural no es inundar sino **repetir por niveles**: un nodo que ya tiene la imagen entera y verificada puede reemitirla a sus hijos en su propia ventana de silencio, con la misma numeración de fragmentos y las mismas mezclas, porque el generador solo depende del identificador de transferencia. Queda apuntado y fuera del alcance de v4.0.
+
+### 20.12 El envío a un solo nodo usa este mismo transporte (v4.0)
+
+Este apartado deja sin uso el camino secuencial de §18, y conviene el porqué entero porque la conclusión es contraria a lo que parecía obvio.
+
+§18 entrega la imagen en orden y el nodo solo acepta el fragmento que le toca. Si se pierde uno, todo lo que llega después se descarta y hay que rebobinar. Para pedir ese rebobinado **el nodo tiene que hablar**, y ahí está el problema: una radio que transmite no oye, así que cada vez que el nodo abre la boca pierde el fragmento que llegaba en ese instante.
+
+Medido en banco el 1-ago-2026, con el resto de fallos ya corregidos, quedó un patrón perfectamente periódico: un rebobinado cada 32 fragmentos exactos, que es cada cuántos el nodo emite su reporte de progreso. **El propio informe de progreso era lo que provocaba la pérdida siguiente.** Se puede paliar dejando un hueco tras cada informe, que es lo que hacen SIFS en 802.11 o el silencio de 3,5 caracteres de Modbus RTU, pero eso mitiga el síntoma.
+
+El transporte de §20 no tiene ese problema en absoluto, y no por casualidad: **el receptor no habla en toda la transferencia**. Recibe en cualquier orden, escribe cada fragmento en su sitio porque están alineados, lleva un mapa de bits de lo recibido, y solo al final, cuando le preguntan, dice qué le falta. Cero transmisiones durante la emisión, cero sordera propia, cero rebobinados, porque no hay nada que rebobinar.
+
+**Así que el envío a un nodo pasa a ser una difusión con un solo destinatario.** Todo lo de §20.1 a §20.9 vale igual, y las únicas diferencias son dos:
+
+1. **La trama va dirigida.** `dest_id` lleva el identificador del nodo en vez del de difusión, y el `hop_dst` la ruta hacia él. Nada más cambia en el formato.
+2. **La oferta se contesta.** A la difusión no se responde, porque veinte nodos contestando a la vez costarían más que el propio anuncio. A la dirigida sí, una sola vez y antes de que empiecen a llegar datos, con el FW_STATUS de §18.3 que el emisor ya sabe leer. Sirve para lo de siempre: no gastar medio mega en un nodo que va a rechazar la imagen por tener ya esa versión. Y no rompe el silencio de la transferencia, porque ocurre antes de que empiece.
+
+De ahí sale además el margen de anuncio: en difusión el aviso se repite durante un rato para que recorra la malla, porque nadie contesta. Dirigido no hace falta esperar nada, se empieza en cuanto el destinatario acepta.
+
+**Lo que se gana, más allá de la velocidad:** un solo receptor de firmware en el nodo en vez de dos que hacen casi lo mismo de formas distintas. Dos implementaciones del mismo mecanismo siempre acaban con una de las dos vieja, y con el firmware de un nodo remoto esa es la peor forma posible de descubrir un fallo.
+
+**Lo que no cambia:** la instalación. Sigue siendo el FW_INSTALL de §18.4 y el FW_RESULT de §18.5, con su verificación del sha, su ventana de prueba y su vuelta atrás. Dos transportes para traer los bytes, uno solo para instalarlos, que es la parte delicada.
+
+## 21. Clases de nodo y latencia de bajada (v4.0)
+
+Esta sección sale de una medida de banco del 1-ago-2026 y de la conversación que provocó. La primera subida de firmware a un nodo real iba camino de tardar nueve horas, y al buscar por qué apareció que el problema no era de radio sino de una regla del gateway heredada de un caso que este despliegue no tiene.
+
+### 21.1 La regla que había, y de dónde venía
+
+El gateway solo transmitía a un nodo dentro de una ventana de 2,5 segundos que se abría poco después de **oírle**. La justificación era buena: una radio que transmite no recibe, y oír al nodo es la señal de que acaba de terminar su ciclo.
+
+Pero eso convierte la cadencia de subida del nodo en el techo de la de bajada. Con el nodo hablando cada cinco segundos no se nota. Con el nodo hablando cada diez minutos, que es lo razonable en un despliegue real de temperatura y humedad, la ventana se abre cada diez minutos y una imagen de medio mega pasa de horas a **días**.
+
+Y el mismo techo se aplicaría a cualquier otra cosa que haya que mandar hacia abajo, incluida la escritura de un registro o un coil en un dispositivo Modbus remoto. Esperar diez minutos a que un relé cambie de estado no es un inconveniente, es que la funcionalidad no existe.
+
+### 21.2 Las tres clases, que no hay que inventar
+
+El problema es viejo y su vocabulario está fijado en LoRaWAN. Se adopta tal cual, porque nombrar las cosas como las nombra el resto del mundo ahorra explicaciones:
+
+- **Clase A**: el dispositivo solo escucha en ventanas cortas justo después de haber transmitido. Es lo que hacía el gateway hasta ahora. Es el estándar **para dispositivos a pilas**, donde escuchar cuesta autonomía, y su precio es que la latencia de bajada es el periodo de subida.
+- **Clase B**: el dispositivo abre ventanas de escucha en instantes derivados de un beacon común. Concertado y determinista, con latencia acotada, para dispositivos a pilas.
+- **Clase C**: el dispositivo escucha continuamente salvo mientras transmite, y se le puede hablar cuando haga falta. Para dispositivos alimentados.
+
+**Los nodos de este despliegue son clase C.** Van enchufados, llevan colgado un sensor Modbus que consume mucho más que la radio, y su módulo queda en recepción continua desde el arranque. El gateway los estaba tratando como clase A, o sea aplicando una restricción pensada para un problema de batería que aquí no existe.
+
+### 21.3 El parámetro
+
+La clase deja de ser una constante del código y pasa a `node.class` en la configuración (`node-config.md` §3), con `"C"` por defecto. Deja de ser algo que alguien escribió una vez y pasa a ser una decisión con nombre, distinta para cada nodo si hace falta.
+
+**Con una advertencia que se repite aquí porque es fácil de olvidar:** hoy declarar `"A"` no ahorra consumo, porque el receptor del nodo sigue encendido igual. Solo cambia cuándo le habla el gateway. La clase A con ahorro real exige apagar el receptor entre ventanas, y ese firmware no está escrito.
+
+### 21.4 Qué hace el gateway con cada clase
+
+**Clase C**: se le transmite cuando haga falta. La latencia de bajada pasa a ser el vuelo de una trama, décimas de segundo, para un comando, un fragmento de configuración o uno de firmware.
+
+**Clase A**: se mantiene la ventana tras oírle, que es lo único posible si el nodo no escucha el resto del tiempo. La consecuencia hay que decirla antes de empezar y no descubrirla a mitad: el visor calcula cuánto tardará una transferencia con el intervalo medido de ese nodo y lo enseña.
+
+**Y el batimiento, que es lo que la ventana también resolvía sin querer.** En banco se vio un fragmento perdiéndose tres veces seguidas mientras los demás pasaban a la primera (31-jul-2026): dos ritmos periódicos que se enganchan producen colisiones repetidas, no aleatorias. La respuesta no es predecir cuándo hablará el nodo sino **desordenar un poco el propio ritmo**, con un pequeño azar en el hueco entre tramas. Es lo mismo que hace Ethernet con su espera aleatoria y lo que LoRaWAN obliga en los reintentos, y cuesta una línea.
+
+### 21.5 Cuándo hace falta silencio, y cuándo sobra
+
+La ventana de silencio de §19 es un acuerdo: el gateway anuncia el instante y la duración, y los nodos retienen su cola. Su valor depende por completo de cuánto habla la red.
+
+```
+telemetría cada    el nodo está mudo    aporta el silencio
+        5 s              92 % del rato   sí: quita un 8 % de sordera propia
+       60 s            99,3 % del rato   marginal
+      600 s           99,97 % del rato   nada
+```
+
+Con telemetría lenta el aire ya está libre casi todo el tiempo, y la única colisión posible es que el gateway esté a mitad de fragmento justo cuando el nodo suelta su medida: cuatro fragmentos de dos mil quinientos.
+
+**La regla, entonces, se deriva de dos medidas que el gateway ya tiene** y no de ningún parámetro nuevo: la clase del nodo y el intervalo de muestreo que mide sobre su propio buffer. Con clase A, la transferencia va al ritmo de las subidas del nodo. Con clase C, se emite libremente, y **solo se pide silencio si el intervalo medido es lo bastante corto como para que la sordera propia cueste más que el silencio**.
+
+No es que la ventana se dimensione con el intervalo, es que con intervalos largos la ventana no se pide.
+
+Cuando sí se pide, su duración sigue saliendo de lo que aguanta la outbox, 28 muestras por el intervalo medido, como ya establecía §19.4. Y ahí aparece una simetría que conviene ver: cuanto más lenta es la telemetría, menos falta hace el silencio y más largo puede ser. Con muestreo cada diez minutos la outbox tolera casi cinco horas de silencio, y la imagen entera a 250 kHz son diez minutos de emisión seguida.
+
+### 21.6 La difusión exige clase C
+
+No es que a un nodo clase A la difusión le llegue más despacio: **no le puede llegar**. Cada nodo clase A abre su ventana en un instante distinto, marcado por su propia subida, así que no existe un momento en que todos estén escuchando a la vez, y una emisión para todos necesita exactamente eso.
+
+Por tanto §20 solo alcanza a nodos en clase C (o en clase B, con ranuras acordadas, cuando exista). El panel de la difusión debe decir **antes de empezar** qué nodos quedan fuera, porque descubrirlo tres horas después es descubrirlo tarde. Un nodo clase A se actualiza por el camino individual de §18.
+
+### 21.7 Cambio temporal de clase
+
+Para una campaña de actualización tiene sentido subir un nodo a clase C mientras dura y devolverlo después, y el visor debería proponerlo en vez de limitarse a informar del tiempo.
+
+En un nodo a pilas la cuenta sale a favor incluso en consumo: quince minutos con el receptor encendido gastan menos que treinta horas de transferencia a saltos, aunque entre ventanas duerma. O sea que subir de clase para actualizar no es solo más rápido, es probablemente también más barato.
+
+### 21.8 Clase B, fuera de alcance
+
+Queda apuntada y no se construye. Todo lo que necesita ya existe: el beacon da un reloj común a la red, el periodo es conocido y cada nodo tiene identificador, así que las ranuras de escucha se derivan sin negociar nada. Es la respuesta cuando aparezca un nodo a pilas que necesite latencia de bajada acotada, y conviene que esté escrito para que ese día no se resuelva improvisando.
+
+## 22. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 
@@ -1209,7 +1566,7 @@ Resumen para trazabilidad del TFM:
 3. Trama nueva MODBUS_DEBUG (`0x06`, §15): transacción fallida en crudo, activable con `modbus.debug` del config, best-effort sin ACK.
 4. Nota de honestidad habitual: el layout de TELEMETRY no es parseable por un receptor v3.1, pero todo el despliegue se flashea a la vez; se acepta como minor.
 
-## 20. Documentos relacionados
+## 21. Documentos relacionados
 
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.

@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x37          # v3.7 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x39          # v3.9 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -137,6 +137,11 @@ FRAME_FW_DATA       = 0x1A
 FRAME_FW_STATUS     = 0x1B
 FRAME_FW_INSTALL    = 0x1C
 FRAME_FW_RESULT     = 0x1D
+FRAME_QUIET         = 0x1E
+FRAME_FW_BCAST_OFFER = 0x1F
+FRAME_FW_BCAST_DATA  = 0x20
+FRAME_FW_BCAST_POLL  = 0x21
+FRAME_FW_BCAST_MAP   = 0x22
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -161,6 +166,11 @@ FRAME_TYPE_NAMES = {
     FRAME_FW_STATUS:     'FW_STATUS',
     FRAME_FW_INSTALL:    'FW_INSTALL',
     FRAME_FW_RESULT:     'FW_RESULT',
+    FRAME_QUIET:         'QUIET',
+    FRAME_FW_BCAST_OFFER: 'FW_BCAST_OFFER',
+    FRAME_FW_BCAST_DATA:  'FW_BCAST_DATA',
+    FRAME_FW_BCAST_POLL:  'FW_BCAST_POLL',
+    FRAME_FW_BCAST_MAP:   'FW_BCAST_MAP',
     FRAME_BEACON:        'BEACON',
     FRAME_SN_REQUEST:    'SN_REQUEST',
     FRAME_SN_OFFER:      'SN_OFFER',
@@ -229,7 +239,11 @@ FW_STATE_NAMES = {
     FW_ERROR:     'error',
 }
 
-# Veredictos del FW_RESULT (spec §18.5).
+# Veredictos del FW_RESULT (spec §18.5). El 5 (instalando) es de paso: el nodo
+# lo emite justo antes de reiniciar, y el veredicto de verdad llega después.
+FW_CONFIRMED = 0
+FW_INSTALLING = 5
+
 FW_RESULT_NAMES = {
     0: 'confirmada',
     1: 'sin imagen',
@@ -614,10 +628,20 @@ def parse_catalog(data: bytes) -> dict:
 
     Formato (§13.2, strings con prefijo de longitud de 1 B):
       fw_version, node_name, n_reads, [id, name, unit]*, n_writes,
-      [id, name, unit]*
+      [id, name, unit]*, schemas (v3.7, opcional), class (v4.0, opcional)
 
-    Devuelve dict con 'fw_version', 'node_name', 'reads', 'writes';
-    o dict con 'error' si el descriptor está malformado."""
+    `schemas` son las versiones del schema del config.json que el firmware del
+    nodo sabe cargar, separadas por comas. Va al final y es opcional: un nodo
+    con firmware anterior a v3.7 no lo manda, y entonces se devuelve cadena
+    vacía, que el visor interpreta como "no lo declara" y no como "ninguna".
+
+    `class` es un byte, 'A' o 'C' (§21): dice cuándo puede el gateway hablarle.
+    Igual de opcional y por el mismo motivo, y con el mismo criterio para el
+    valor ausente: 'C', que es lo que era todo nodo antes de que el campo
+    existiera y sigue siendo lo que son los nodos alimentados de red.
+
+    Devuelve dict con 'fw_version', 'node_name', 'reads', 'writes', 'schemas'
+    y 'class'; o dict con 'error' si el descriptor está malformado."""
     try:
         off = 0
         fw, off = _read_lstr(data, off)
@@ -638,10 +662,26 @@ def parse_catalog(data: bytes) -> dict:
 
         reads, off = read_entries(off)
         writes, off = read_entries(off)
+
+        # Campo opcional del final. Lo que sobre y no sea un string bien
+        # formado sigue siendo un error: la tolerancia es a que falte, no a
+        # que haya basura.
+        schemas = ''
+        if off < len(data):
+            schemas, off = _read_lstr(data, off)
+        nclass = 'C'
+        if off < len(data):
+            b = data[off]
+            off += 1
+            if b in (0x41, 0x43):          # 'A' o 'C'
+                nclass = chr(b)
+            else:
+                raise ValueError(f'clase de nodo invalida: 0x{b:02X}')
         if off != len(data):
             raise ValueError(f'{len(data) - off} bytes sobrantes tras el catalogo')
         return {'fw_version': fw, 'node_name': name,
-                'reads': reads, 'writes': writes}
+                'reads': reads, 'writes': writes, 'schemas': schemas,
+                'class': nclass}
     except ValueError as e:
         return {'error': str(e)}
 
@@ -746,7 +786,209 @@ def build_config_get(dest_id: int, hop_dst: int, req_id: int, mask: int,
     return _finalize(frame, key, sec_ts)
 
 
+def build_quiet(start_epoch: int, duration_s: int, gw_seq: int,
+                network_id: int, ttl: int, key: Optional[bytes] = None,
+                sec_ts: int = 0) -> bytes:
+    """Anuncia una ventana de silencio a toda la red (frame-format.md §19).
+
+    Es una trama propia y no un campo del beacon a propósito. El beacon tiene
+    un payload de tamaño fijo que los nodos validan, así que ensancharlo dejaría
+    a un nodo con firmware anterior descartando todos los beacons: perdería la
+    hora y el padre, y en 90 s se quedaría huérfano. Con un tipo nuevo, ese nodo
+    simplemente lo ignora, sigue transmitiendo y lo único que pasa es que
+    estorba un poco. Preferible un nodo que molesta a un nodo que se pierde.
+
+    La ventana se da como instante absoluto y no como "dentro de N segundos"
+    porque los nodos comparten reloj (el beacon lleva la hora y desde v3.0 un
+    nodo sin hora ni siquiera muestrea). Así el anuncio se puede repetir sin
+    recalcular nada, y dos nodos que lo reciban con segundos de diferencia
+    callan igualmente a la vez.
+    """
+    frame = bytearray(HEADER_BYTES + 6)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = ADDR_BROADCAST
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = ADDR_BROADCAST
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_QUIET
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 6
+    struct.pack_into('<I', frame, OFF_PAYLOAD, start_epoch & 0xFFFFFFFF)
+    struct.pack_into('<H', frame, OFF_PAYLOAD + 4, duration_s & 0xFFFF)
+    return _finalize(frame, key, sec_ts)
+
+
 # ----- Actualización de firmware por LoRa (frame-format.md §18) -----
+
+# ----- Difusión de firmware (frame-format.md §20) -----
+
+# Tamaño del fragmento de difusión. 212 y no 213 porque tiene que ser múltiplo
+# de cuatro: así el fragmento i cae en el desplazamiento 212·i, que está
+# alineado, y el nodo puede escribirlo directamente aunque lleguen desordenados
+# (§20.1). El byte que se pierde es un 0,5 % del aire, y a cambio desaparece el
+# búfer de 4 kB que hoy hace falta para alinear.
+BCAST_FRAG_BYTES = 212
+
+# Bloque de la corrección sistemática (§20.2): K originales y R mezclas.
+BCAST_K = 128
+BCAST_R = 10
+
+_M32 = 0xFFFFFFFF
+
+
+def bcast_seed(xfer_id: int, block: int, parity: int) -> int:
+    """Semilla de una mezcla (§20.3). Aritmética de 32 bits explícita, para que
+    el nodo la reproduzca en C++ sin depender del tamaño de int del lenguaje."""
+    x = (xfer_id ^ ((block * 0x9E3779B1) & _M32)
+                 ^ (((parity + 1) * 0x85EBCA6B) & _M32)) & _M32
+    return x if x else 0xA5A5A5A5      # el cero es punto fijo del xorshift
+
+
+def bcast_next(x: int) -> int:
+    x = (x ^ (x << 13)) & _M32
+    x = (x ^ (x >> 17)) & _M32
+    x = (x ^ (x << 5)) & _M32
+    return x
+
+
+def bcast_mask(xfer_id: int, block: int, parity: int, k: int) -> bytes:
+    """Qué originales del bloque entran en esta mezcla (§20.3).
+
+    No viaja por el aire: los dos extremos la calculan. Densidad 1/2, tomando
+    32 bits del estado por iteración del bit 0 al 31. Los vectores de prueba de
+    §20.3 son la comprobación de que las dos implementaciones coinciden, y son
+    la defensa contra el único fallo que aquí sería silencioso.
+    """
+    st = bcast_seed(xfer_id, block, parity)
+    bits = bytearray((k + 7) // 8)
+    i = 0
+    while i < k:
+        st = bcast_next(st)
+        for b in range(32):
+            if i >= k:
+                break
+            if (st >> b) & 1:
+                bits[i >> 3] |= 1 << (i & 7)
+            i += 1
+    if not any(bits):
+        bits[0] |= 1                   # una mezcla vacía no aporta nada
+    return bytes(bits)
+
+
+def bcast_parity(data: bytes, block: int, xfer_id: int,
+                 k: int = BCAST_K, r: int = BCAST_R) -> list:
+    """Las R mezclas de un bloque, rellenando con ceros el último fragmento.
+
+    El relleno importa: el nodo suma (XOR) los originales que recibe, y si aquí
+    se tomara el último fragmento corto y allí completo, las cuentas no
+    cuadrarían justo en el bloque final y en ningún otro, que es la clase de
+    fallo que solo aparece con imágenes de cierto tamaño.
+    """
+    F = BCAST_FRAG_BYTES
+    base = block * k * F
+    orig = []
+    for j in range(k):
+        trozo = data[base + j * F: base + (j + 1) * F]
+        if not trozo:
+            break
+        orig.append(trozo.ljust(F, b'\x00'))
+    out = []
+    for p in range(r):
+        mask = bcast_mask(xfer_id, block, p, k)
+        acc = bytearray(F)
+        for j, frag in enumerate(orig):
+            if (mask[j >> 3] >> (j & 7)) & 1:
+                for n in range(F):
+                    acc[n] ^= frag[n]
+        out.append(bytes(acc))
+    return out
+
+
+def build_fw_bcast_offer(xfer_id: int, total_len: int, sha256: bytes,
+                         version: str, gw_seq: int, network_id: int, ttl: int,
+                         key: Optional[bytes] = None, sec_ts: int = 0,
+                         block_k: int = BCAST_K, block_r: int = BCAST_R,
+                         dest_id: int = ADDR_BROADCAST,
+                         hop_dst: int = ADDR_BROADCAST) -> bytes:
+    """Anuncia la imagen (§20.6).
+
+    Con `dest_id` de difusión va a toda la red; con el de un nodo concreto, a
+    ese y solo a ese. El transporte es el mismo en los dos casos y esa es toda
+    la diferencia: escribir en cualquier orden, mapa de bits y reparación al
+    final valen igual para uno que para veinte (§20.12).
+    """
+    if len(sha256) != 32:
+        raise ValueError('sha256 debe medir 32 bytes')
+    ver = version.encode('utf-8')[:32]
+    frame = bytearray(HEADER_BYTES + 43 + len(ver))
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_BCAST_OFFER
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 43 + len(ver)
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, total_len & 0xFFFFFFFF)
+    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 40] = sha256
+    struct.pack_into('<H', frame, OFF_PAYLOAD + 40, block_k)
+    frame[OFF_PAYLOAD + 42] = block_r
+    frame[OFF_PAYLOAD + 43:OFF_PAYLOAD + 43 + len(ver)] = ver
+    return _finalize(frame, key, sec_ts)
+
+
+def build_fw_bcast_data(xfer_id: int, index: int, chunk: bytes, gw_seq: int,
+                        network_id: int, ttl: int, key: Optional[bytes] = None,
+                        sec_ts: int = 0, dest_id: int = ADDR_BROADCAST,
+                        hop_dst: int = ADDR_BROADCAST) -> bytes:
+    """Un fragmento de la difusión, original o mezcla (§20.7).
+
+    Índice y no desplazamiento, al revés que §18.2, porque hay que numerar
+    también las mezclas, que no ocupan sitio en la imagen. Dos bytes en vez de
+    cuatro ahorran 5,4 kB de aire en una pasada completa.
+    """
+    frame = bytearray(HEADER_BYTES + 6 + len(chunk))
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_BCAST_DATA
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 6 + len(chunk)
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    struct.pack_into('<H', frame, OFF_PAYLOAD + 4, index & 0xFFFF)
+    frame[OFF_PAYLOAD + 6:OFF_PAYLOAD + 6 + len(chunk)] = chunk
+    return _finalize(frame, key, sec_ts)
+
+
+def build_fw_bcast_poll(dest_id: int, hop_dst: int, xfer_id: int, gw_seq: int,
+                        network_id: int, ttl: int, key: Optional[bytes] = None,
+                        sec_ts: int = 0) -> bytes:
+    """Pregunta a UN nodo qué le falta (§20.8). De uno en uno a propósito:
+    veinte nodos contestando a la vez se pisan, y el mapa es justo la trama que
+    no conviene perder."""
+    frame = bytearray(HEADER_BYTES + 4)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_BCAST_POLL
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 4
+    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    return _finalize(frame, key, sec_ts)
+
 
 def build_fw_offer(dest_id: int, hop_dst: int, xfer_id: int, total_len: int,
                    sha256: bytes, version: str, gw_seq: int, network_id: int,
@@ -839,7 +1081,8 @@ def build_fw_install(dest_id: int, hop_dst: int, xfer_id: int, sha256: bytes,
 def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
                         total_len: int, sha256: bytes, gw_seq: int,
                         network_id: int, ttl: int,
-                        key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+                        key: Optional[bytes] = None, sec_ts: int = 0,
+                        apply_at: int = 0) -> bytes:
     """Orden de aplicar lo reensamblado (frame-format.md §17.3).
 
     El sha256 completo viaja aquí y solo aquí: repetirlo en cada fragmento
@@ -848,7 +1091,16 @@ def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
     """
     if len(sha256) != 32:
         raise ValueError("sha256 debe ser de 32 bytes")
-    frame = bytearray(HEADER_BYTES + 38)
+    # `apply_at` a cero significa "ahora", que es el comportamiento de
+    # siempre: entonces la trama sale con los 38 bytes de v3.5 y un nodo
+    # anterior la entiende igual. Con hora, se añaden 4 bytes al final y el
+    # nodo guarda el config sin aplicarlo hasta ese instante (spec §17.7).
+    #
+    # Un campo y no un indicador aparte: dos datos podrían contradecirse
+    # ("inmediato" con una hora futura) y alguien tendría que decidir cuál
+    # gana, decisión que se olvida y se implementa distinta en cada lado.
+    largo = 38 if apply_at == 0 else 42
+    frame = bytearray(HEADER_BYTES + largo)
     frame[OFF_SCHEMA]      = SCHEMA_VERSION
     frame[OFF_NETWORK_ID]  = network_id
     frame[OFF_HOP_SRC]     = ADDR_GATEWAY
@@ -858,10 +1110,12 @@ def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
     struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
     frame[OFF_FRAME_TYPE]  = FRAME_CONFIG_COMMIT
     frame[OFF_TTL]         = ttl
-    frame[OFF_PAYLOAD_LEN] = 38
+    frame[OFF_PAYLOAD_LEN] = largo
     struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
     struct.pack_into('<H', frame, OFF_PAYLOAD + 4, total_len & 0xFFFF)
     frame[OFF_PAYLOAD + 6:OFF_PAYLOAD + 38] = sha256
+    if apply_at:
+        struct.pack_into('<I', frame, OFF_PAYLOAD + 38, apply_at & 0xFFFFFFFF)
     return _finalize(frame, key, sec_ts)
 
 

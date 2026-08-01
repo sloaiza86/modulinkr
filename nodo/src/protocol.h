@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x37;  // v3.7
+constexpr uint8_t kSchemaVersion = 0x39;  // v3.9
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -50,6 +50,15 @@ constexpr uint8_t kFrameFwData       = 0x1A;  // downlink: un trozo de la imagen
 constexpr uint8_t kFrameFwStatus     = 0x1B;  // uplink: por dónde va y en qué estado
 constexpr uint8_t kFrameFwInstall    = 0x1C;  // downlink: orden de instalar
 constexpr uint8_t kFrameFwResult     = 0x1D;  // uplink: veredicto tras arrancar
+// Ventana de silencio (v3.8, §19): el gateway reserva el aire y los nodos
+// retienen su cola durante ese rato.
+constexpr uint8_t kFrameQuiet        = 0x1E;  // downlink broadcast
+// Difusión de firmware (v4.0, §20). Camino paralelo al de §18: la imagen se
+// emite una vez para toda la red en vez de una vez por nodo.
+constexpr uint8_t kFrameFwBcastOffer = 0x1F;  // difusión: anuncio
+constexpr uint8_t kFrameFwBcastData  = 0x20;  // difusión: original o mezcla
+constexpr uint8_t kFrameFwBcastPoll  = 0x21;  // downlink: dime qué te falta
+constexpr uint8_t kFrameFwBcastMap   = 0x22;  // uplink: mapa de recibidos
 
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;
@@ -113,6 +122,26 @@ constexpr uint32_t kSecSaltMax = 0x40000000UL;
 // Ventana de frescura para tramas de control (ACK, WELCOME, BEACON,
 // SN_OFFER), spec §14.5. Constante de firmware, no de config.
 constexpr uint32_t kSecFreshnessWindowS = 300;
+
+// Salida del encierro por reloj desfasado (spec §14.5, 1-ago-2026).
+//
+// La ventana de arriba se aplica también al BEACON, y ahí se muerde la cola:
+// si el reloj del nodo se va lejos del de la red, el beacon es lo único que
+// puede corregirlo y es justo lo que la ventana descarta. Pasó en banco con un
+// gateway sin RTC que repartió su hora de arranque y veinte segundos después
+// saltó doce horas al sincronizar por NTP: el nodo quedó sordo a todo hasta
+// que se reinició a mano.
+//
+// La salida: tras este número de BEACON seguidos descartados por rancios y sin
+// ninguna recepción válida por medio, el siguiente se admite y su epoch pone
+// el reloj en hora. Tres beacons son unos 90 s con el periodo de 30 s.
+//
+// Lo que se cede: quien grabe un beacon viejo y consiga tapar al gateway ese
+// tiempo puede arrastrar el reloj del nodo a la hora de la grabación. Se acepta
+// porque el beacon sigue exigiendo MIC válido, así que hace falta la clave de
+// la red para siquiera intentarlo, y porque el nodo encerrado no es un riesgo
+// hipotético sino algo que ya ocurrió.
+constexpr uint8_t kStaleBeaconResync = 3;
 
 // Comparación modular de seq (frame-format.md §5.4):
 // a es anterior a b si la distancia hacia delante es menor que medio rango.

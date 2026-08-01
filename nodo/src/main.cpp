@@ -80,6 +80,7 @@
 #include "health.h"
 #include "cfgota.h"
 #include "fwota.h"
+#include "fwbcast.h"
 
 // Aplaza la confirmación de una imagen recién instalada (v3.7, spec §18.6).
 //
@@ -98,7 +99,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.41-fw-ota";
+constexpr const char* kFirmwareVersion = "0.0.50-prueba-final";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -345,6 +346,19 @@ size_t buildCatalog(uint8_t* buf, size_t cap) {
             }
         }
     }
+
+    // Schemas del config.json que este firmware sabe cargar (v3.7). Va al
+    // final y no en la cabecera del catálogo a propósito: así un gateway
+    // anterior, que no lo espera, sigue leyendo el resto tal cual. Son unos
+    // quince bytes en una trama que se emite una vez por arranque.
+    if (!putStr(cfg::kSchemasSoportados, 64)) return 0;
+
+    // Clase del nodo (v4.0, §21). Va detrás de los schemas y por el mismo
+    // motivo: un gateway anterior que no la espera sigue leyendo el resto sin
+    // enterarse. Un byte, y le ahorra al gateway tener que suponer cuándo
+    // puede hablarle.
+    if (p + 1 > cap) return 0;
+    buf[p++] = static_cast<uint8_t>(g_cfg.node_class);
     return p;
 }
 
@@ -438,6 +452,10 @@ void printBanner() {
         }
     }
 
+    Serial.printf("  Clase : %c (%s)\n", g_cfg.node_class,
+                  g_cfg.node_class == 'C'
+                      ? "escucha siempre: bajada inmediata, alcanza la difusion"
+                      : "solo escucha tras hablar: bajada al ritmo del muestreo");
     if (g_cfg.super_node) {
         Serial.println(F("  Rol   : SUPERNODO (respaldo selectivo NB-IoT)"));
         Serial.printf ("  MQTT  : %s:%u  %s  auth=%s  topic_batch=%s\n",
@@ -455,7 +473,11 @@ void setLed(uint32_t color) {
     M5.dis.drawpix(0, color);
 }
 
-void fireLora() {
+// Toma una muestra y la emite. Devuelve si el turno debe darse por consumido:
+// false solo cuando el cerrojo de muestreo estaba cerrado y no llegó a
+// intentarse nada, para que el llamante reintente en la vuelta siguiente en
+// vez de esperar otro intervalo entero (ver el porqué en el llamante).
+bool fireLora() {
     // Cerrojo de muestreo (v2.3): al arrancar no se toma ninguna medida
     // Modbus hasta que el nodo completa su registro en la red LoRa (primer
     // WELCOME del gateway). Así el bus arranca sincronizado con el envío,
@@ -475,7 +497,7 @@ void fireLora() {
                 last_wait_log_ms = now;
                 Serial.println(F("[sampler] sin hora sincronizada: muestreo en espera (v3.0)"));
             }
-            return;
+            return false;
         }
 
         const bool timed_out = millis() >= g_cfg.gateway_wait_ms;
@@ -502,7 +524,7 @@ void fireLora() {
                 last_gw_log_ms = now;
                 Serial.println(F("[sampler] con hora, esperando registro o timeout de gateway"));
             }
-            return;
+            return false;
         }
     }
 
@@ -521,11 +543,11 @@ void fireLora() {
     uint8_t sts[cfg::kMaxReadsTotal];
     uint8_t n_values = 0;
     if (!sampler.snapshot(values, sts, cfg::kMaxReadsTotal, n_values, millis())) {
-        return;  // sin reads en el config o no caben: nada que enviar
+        return true;  // sin reads en el config o no caben: nada que enviar
     }
     if (!g_lora_ready) {
         Serial.println(F("[lora]   tx skip, driver no inicializado"));
-        return;
+        return true;
     }
 
     // Traza de los valores que van en la trama (equivale al log de
@@ -558,7 +580,7 @@ void fireLora() {
                       g_lora_seq,
                       static_cast<unsigned>(outbox.count()),
                       static_cast<unsigned>(mesh.neighborCount()));
-        return;
+        return true;   // la medida está tomada y guardada: el turno se gastó
     }
 
     if (!g_registered) {
@@ -570,7 +592,7 @@ void fireLora() {
                     capture_ms, ts, nodeclock::synced());
         Serial.printf("[outbox] sin registro, muestra retenida seq=%u  outbox=%u\n",
                       g_lora_seq, static_cast<unsigned>(outbox.count()));
-        return;
+        return true;   // la medida está tomada y guardada: el turno se gastó
     }
 
     nextSeq();
@@ -627,6 +649,7 @@ void fireLora() {
         Serial.printf("[mb] trama debug dev=%u status=0x%02X req=%uB resp=%uB purgados=%uB\n",
                       d.dev, d.status_byte, d.req_len, d.resp_len, d.purged_len);
     }
+    return true;
 }
 
 // Reenvío de una trama descendente dirigida a OTRO nodo, por la ruta inversa
@@ -779,11 +802,26 @@ void handleBeacon(const LoraP2P::RxFrame& f) {
 
     // Resincronización continua: cualquier beacon con hora vale (los
     // relays no reescriben el epoch; el error por jitter es < 1 s).
-    const bool first_sync = !nodeclock::synced() && epoch != 0;
+    const bool     first_sync = !nodeclock::synced() && epoch != 0;
+    const uint32_t antes      = nodeclock::epochNow();
     nodeclock::sync(epoch);  // ignora epoch == 0
     if (first_sync) {
         Serial.printf("[clock]  hora por beacon: epoch=%lu\n",
                       static_cast<unsigned long>(epoch));
+    } else if (epoch != 0 && antes != 0) {
+        // Un salto grande se anota siempre, venga de donde venga. Es el aviso
+        // de que las muestras de antes del salto llevan una hora que no era, y
+        // el único rastro legible de que el reloj de la red se movió.
+        const int32_t salto = static_cast<int32_t>(epoch - antes);
+        if (salto > static_cast<int32_t>(protocol::kSecFreshnessWindowS) ||
+            salto < -static_cast<int32_t>(protocol::kSecFreshnessWindowS)) {
+            Serial.printf("[clock]  SALTO de hora por beacon: %+ld s "
+                          "(de %lu a %lu), resyncs=%lu\n",
+                          static_cast<long>(salto),
+                          static_cast<unsigned long>(antes),
+                          static_cast<unsigned long>(epoch),
+                          static_cast<unsigned long>(lora.rxResync()));
+        }
     }
 
     // Traza de todo beacon audible: es el mapa de vecinos en crudo.
@@ -970,15 +1008,42 @@ void handleConfigPush(const LoraP2P::RxFrame& f) {
 // JSON con las MISMAS reglas del arranque y se escribe con el respaldo y la
 // ventana de prueba que ya protegen el camino por USB: un config que deje al
 // nodo sin red se revierte solo, venga del cable o del aire.
+// Aplica un config ya verificado y validado: copia de respaldo, marca de
+// prueba, escritura y reinicio. Es la secuencia de siempre, extraída aquí
+// porque ahora la ejecutan dos caminos, el inmediato y el aplazado, y tienen
+// que ser exactamente la misma o el aplazamiento habría creado una segunda
+// forma de aplicar configuraciones.
+cfgota::Result aplicarConfig(const char* texto, size_t texto_len,
+                             char* detalle, size_t detalle_len) {
+    const bool prueba_previa = configstore::trialPending();
+    const bool respaldado    = configstore::backup();
+    if (respaldado) configstore::markTrial();
+    if (!configstore::write(texto, texto_len)) {
+        if (respaldado && !prueba_previa) configstore::clearTrial();
+        snprintf(detalle, detalle_len, "fallo escribiendo en flash");
+        return cfgota::Result::WRITE_FAILED;
+    }
+    snprintf(detalle, detalle_len,
+             respaldado ? "a prueba hasta confirmar red" : "sin respaldo previo");
+    return cfgota::Result::APPLIED;
+}
+
 void handleConfigCommit(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-commit"); return; }
-    if (f.payload_length != 38) return;   // xfer(4) + len(2) + sha256(32)
+    // 38 = xfer(4) + len(2) + sha256(32), la forma de v3.5.
+    // 42 = lo mismo más la hora de aplicación (v3.9, spec §17.7).
+    if (f.payload_length != 38 && f.payload_length != 42) return;
 
     uint32_t xfer;
     uint16_t total_len;
     std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
     std::memcpy(&total_len, &f.payload[4], sizeof(total_len));
     const uint8_t* sha = &f.payload[6];
+
+    uint32_t apply_at = 0;
+    if (f.payload_length == 42) {
+        std::memcpy(&apply_at, &f.payload[38], sizeof(apply_at));
+    }
 
     const char* texto = nullptr;
     size_t      texto_len = 0;
@@ -1004,16 +1069,35 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     }
 
     if (r == cfgota::Result::APPLIED) {
-        const bool prueba_previa = configstore::trialPending();
-        const bool respaldado    = configstore::backup();
-        if (respaldado) configstore::markTrial();
-        if (!configstore::write(texto, texto_len)) {
-            if (respaldado && !prueba_previa) configstore::clearTrial();
-            r = cfgota::Result::WRITE_FAILED;
-            snprintf(detalle, sizeof(detalle), "fallo escribiendo en flash");
-        } else {
+        if (apply_at == 0) {
+            // Camino de siempre: se aplica y el nodo reinicia.
+            r = aplicarConfig(texto, texto_len, detalle, sizeof(detalle));
+        } else if (!nodeclock::synced()) {
+            // Sin reloj no se puede esperar a una hora. Se rechaza en vez de
+            // aplicar en el acto, porque aplicar a destiempo un config de red
+            // es justo lo que el aplazamiento existe para evitar.
+            r = cfgota::Result::INVALID;
             snprintf(detalle, sizeof(detalle),
-                     respaldado ? "a prueba hasta confirmar red" : "sin respaldo previo");
+                     "aplazado a %lu pero el nodo no tiene hora",
+                     static_cast<unsigned long>(apply_at));
+        } else if (configstore::trialPending()) {
+            // Encadenar un cambio sobre otro sin confirmar el primero es lo
+            // que backup() ya se niega a hacer; aquí se aplica el mismo
+            // criterio en vez de inventar otro.
+            r = cfgota::Result::INVALID;
+            snprintf(detalle, sizeof(detalle),
+                     "hay una configuracion a prueba sin confirmar");
+        } else if (!configstore::writePending(texto, texto_len, apply_at)) {
+            r = cfgota::Result::WRITE_FAILED;
+            snprintf(detalle, sizeof(detalle), "fallo guardando el pendiente");
+        } else {
+            const int32_t faltan =
+                static_cast<int32_t>(apply_at - nodeclock::epochNow());
+            snprintf(detalle, sizeof(detalle), "guardado, se aplica en %ld s",
+                     static_cast<long>(faltan));
+            Serial.printf("[cfg]    config APLAZADO: %ld s por delante, "
+                          "el nodo sigue con el actual\n",
+                          static_cast<long>(faltan));
         }
     }
 
@@ -1027,14 +1111,69 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     lora.sendConfigResult(g_lora_seq, mesh.parentId(), xfer,
                           static_cast<uint8_t>(r), detalle);
 
-    if (r != cfgota::Result::APPLIED) {
-        cfgota::reset();
+    cfgota::reset();
+    if (r != cfgota::Result::APPLIED) return;
+
+    // Un config aplazado NO reinicia: se ha guardado y el nodo sigue operando
+    // con el suyo hasta que llegue la hora. Ahí es donde el aplazamiento gana
+    // lo que quiere ganar, porque el reparto a toda la malla puede tardar
+    // minutos sin que nadie deje de medir mientras tanto.
+    if (apply_at != 0) return;
+
+    Serial.flush();
+    delay(1500);
+    ESP.restart();
+}
+
+// Aplica el config pendiente cuando llega su hora (spec §17.7).
+//
+// Ejecuta la MISMA secuencia que el camino inmediato, sin una sola diferencia:
+// aquí solo se decide cuándo, no cómo. Corre en el tick de un segundo, fuera
+// del bloque que exige radio lista, porque el salto tiene que ocurrir a su
+// hora aunque la radio esté en plena recuperación.
+void pendingTick() {
+    // Una vez por segundo, no en cada vuelta del bucle. La comprobación es
+    // barata (una variable en RAM), pero el resto de la función abre archivos
+    // y reinicia el nodo: conviene que corra al ritmo que dice su nombre.
+    static uint32_t ultimo_ms = 0;
+    const uint32_t ahora_ms = millis();
+    if (ahora_ms - ultimo_ms < 1000) return;
+    ultimo_ms = ahora_ms;
+
+    const uint32_t at = configstore::pendingAt();
+    if (at == 0) return;
+    if (!nodeclock::synced()) return;         // sin hora no se decide nada
+    if (nodeclock::epochNow() < at) return;   // todavía no
+
+    // Una prueba sin confirmar manda sobre el salto: encadenar dos cambios
+    // dejaría al nodo sin marcha atrás buena. Se descarta el pendiente y se
+    // dice, en vez de guardarlo indefinidamente esperando una confirmación
+    // que quizá no llegue.
+    if (configstore::trialPending()) {
+        Serial.println(F("[cfg]    pendiente DESCARTADO: hay una configuracion "
+                         "a prueba sin confirmar"));
+        configstore::clearPending();
         return;
     }
 
-    cfgota::reset();
+    size_t len = 0;
+    char* texto = configstore::readPending(len);
+    if (texto == nullptr) {
+        Serial.println(F("[cfg]    pendiente ilegible, descartado"));
+        configstore::clearPending();
+        return;
+    }
+
+    char detalle[64] = {0};
+    const cfgota::Result r = aplicarConfig(texto, len, detalle, sizeof(detalle));
+    free(texto);
+    configstore::clearPending();
+
+    Serial.printf("[cfg]    llego la hora del config aplazado -> %s\n", detalle);
+    if (r != cfgota::Result::APPLIED) return;
+
     Serial.flush();
-    delay(1500);
+    delay(200);
     ESP.restart();
 }
 
@@ -1141,16 +1280,271 @@ void cfgReadTick(uint32_t now) {
     }
 }
 
+// ----- Ventana de silencio (frame-format.md §19) -----
+//
+// El gateway puede reservarse el aire durante un rato, y los nodos retienen su
+// cola de transmisión mientras dura. Hace falta para difundir algo a toda la
+// red: cada nodo emite con su propio ciclo, sin coordinación, y no solo no oye
+// mientras transmite sino que además tapa la emisión para sus vecinos. Medido
+// en simulación con diez nodos, el peor recibía el 6 % de una difusión; con
+// silencio, el 100 %.
+//
+// Las muestras no se pierden al callarse: la outbox las retiene y salen
+// después. Lo que se retrasa es su entrega, no su captura.
+uint32_t g_quiet_desde = 0;      // epoch de inicio, 0 = sin ventana
+uint16_t g_quiet_dur   = 0;      // segundos
+
+// Tope de lo que se acepta callar de una vez. Una trama corrupta o un gateway
+// confundido no puede dejar al nodo mudo un día entero; pasado el tope, la
+// ventana se ignora y se dice por consola.
+constexpr uint16_t kQuietMaxS = 900;   // 15 min
+
+// Huecos que se dejan libres en la outbox antes de romper el silencio. Cuatro
+// dan margen para que el drenado arranque y saque varias muestras antes de que
+// entre la siguiente, en vez de ir justo al borde.
+constexpr size_t kQuietOutboxMargen = 4;
+
+void handleQuiet(const LoraP2P::RxFrame& f) {
+    if (f.payload_length != 6) return;
+
+    uint32_t desde;
+    uint16_t dur;
+    std::memcpy(&desde, &f.payload[0], sizeof(desde));
+    std::memcpy(&dur,   &f.payload[4], sizeof(dur));
+
+    if (dur == 0 || dur > kQuietMaxS) {
+        Serial.printf("[quiet]  ventana de %u s ignorada (tope %u s)\n",
+                      dur, kQuietMaxS);
+        return;
+    }
+    // Sin hora no hay forma de saber cuándo empieza. Un nodo sin reloj no
+    // muestrea desde v3.0, así que ya está en un estado conocido; aquí se
+    // limita a no participar.
+    if (!nodeclock::synced()) {
+        Serial.println(F("[quiet]  ventana ignorada: sin hora sincronizada"));
+        return;
+    }
+
+    if (desde != g_quiet_desde || dur != g_quiet_dur) {
+        g_quiet_desde = desde;
+        g_quiet_dur   = dur;
+        const uint32_t ahora = nodeclock::epochNow();
+        Serial.printf("[quiet]  ventana de %u s %s\n", dur,
+                      (desde > ahora)
+                          ? "programada"
+                          : (ahora < desde + dur ? "en curso" : "ya pasada"));
+    }
+    // Se reenvía como el beacon, para que llegue a los nodos a más de un
+    // salto. Sin esto, una difusión solo silenciaría el primer anillo.
+    relayDownlink(f, "quiet");
+}
+
+// Mantiene la cola retenida mientras dura la ventana. Se refresca cada tick de
+// un segundo en vez de retener de una vez toda la duración: si el nodo pierde
+// la cuenta o la ventana se cancela, la retención expira sola en un segundo en
+// lugar de dejarlo mudo hasta el final.
+void quietTick(uint32_t now_ms) {
+    if (g_quiet_desde == 0) return;
+    if (!nodeclock::synced()) return;
+
+    const uint32_t ahora = nodeclock::epochNow();
+    if (ahora < g_quiet_desde) return;              // aún no empieza
+    if (ahora >= g_quiet_desde + g_quiet_dur) {     // ya terminó
+        Serial.println(F("[quiet]  ventana terminada, la cola vuelve a salir"));
+        g_quiet_desde = 0;
+        g_quiet_dur   = 0;
+        return;
+    }
+    // La medición manda sobre el silencio. La outbox guarda 32 muestras y al
+    // llenarse PISA la más antigua, así que callar más de lo que cabe no
+    // retrasa la entrega: la pierde. Con el intervalo del banco (5 s) son 160
+    // segundos de margen; con uno de minuto, media hora.
+    //
+    // Quien tiene que decidir esto es el nodo y no el emisor, porque el
+    // emisor no sabe el intervalo de muestreo de cada uno ni cuánto llevan ya
+    // acumulado. Aquí no hace falta ni calcularlo: basta con mirar si queda
+    // sitio. Al quedarse sin margen, el nodo rompe el silencio y lo dice.
+    //
+    // Estropear una difusión es barato, porque se reintenta. Perder una
+    // medida no se recupera.
+    if (outbox.space() <= kQuietOutboxMargen) {
+        Serial.printf("[quiet]  silencio ROTO: la outbox se llena (%u libres). "
+                      "Se prefiere estorbar a perder medidas\n",
+                      static_cast<unsigned>(outbox.space()));
+        g_quiet_desde = 0;
+        g_quiet_dur   = 0;
+        return;
+    }
+
+    lora.holdQueue(1500);   // algo más que el tick, para no dejar huecos
+    static uint32_t ultimo_log = 0;
+    if (now_ms - ultimo_log > 30000) {
+        ultimo_log = now_ms;
+        Serial.printf("[quiet]  callado, quedan %lu s (outbox %u/%u libres)\n",
+                      static_cast<unsigned long>(g_quiet_desde + g_quiet_dur - ahora),
+                      static_cast<unsigned>(outbox.space()),
+                      static_cast<unsigned>(Outbox::capacity()));
+    }
+}
+
 // ----- Actualización de firmware por LoRa (frame-format.md §18) -----
 
 // Emite un FW_STATUS con el estado que toque. Se aparta en una función porque
 // se llama desde cuatro sitios y siempre con los mismos tres datos: qué
 // transferencia, por dónde va y en qué estado está.
-void sendFwStatus(fwota::State estado) {
+// Estado de una transferencia hacia el emisor. El identificador y los bytes
+// van por parámetro porque hay dos transportes: el secuencial de §18, cuyo
+// estado vive en fwota, y el de §20, que vive en fwbcast. Los valores por
+// defecto son los del primero, que es quien más veces lo llama.
+void sendFwStatus(fwota::State estado, uint32_t xfer_id = 0xFFFFFFFFu,
+                  uint32_t escritos = 0xFFFFFFFFu) {
     if (!g_lora_ready || !mesh.hasParent()) return;
+    if (xfer_id  == 0xFFFFFFFFu) xfer_id  = fwota::xfer();
+    if (escritos == 0xFFFFFFFFu) escritos = fwota::written();
     nextSeq();
-    lora.sendFwStatus(g_lora_seq, mesh.parentId(), fwota::xfer(),
-                      fwota::written(), static_cast<uint8_t>(estado));
+    lora.sendFwStatus(g_lora_seq, mesh.parentId(), xfer_id,
+                      escritos, static_cast<uint8_t>(estado));
+}
+
+// ----- Difusión de firmware (§20) -----
+//
+// Camino paralelo al de §18, no sustituto. Aquí no se confirma nada durante la
+// transferencia: el nodo escucha, escribe lo que le llega y solo habla cuando
+// le preguntan. Veinte nodos confirmando fragmentos convertirían la difusión
+// en algo más caro que la entrega individual, que es lo que viene a evitar.
+
+// FW_BCAST_OFFER: anuncio de imagen. A toda la red, o a este nodo en concreto.
+//
+// El transporte es el mismo en los dos casos (§20.12): escribir en cualquier
+// orden, mapa de bits y reparación al final valen igual para uno que para
+// veinte. Lo único que cambia es a quién va dirigida y si se contesta.
+//
+// A la difusión NO se contesta: veinte nodos respondiendo a la vez costarían
+// más que el propio anuncio y se pisarían entre ellos. A la dirigida SÍ, una
+// sola vez y antes de que empiecen a llegar datos, porque el emisor necesita
+// saber si el nodo la acepta o la rechaza por tener ya esa versión. Durante la
+// emisión el nodo sigue callado, que es de lo que se trata.
+void handleFwBcastOffer(const LoraP2P::RxFrame& f) {
+    const bool dirigida = (f.dest_id == g_cfg.node_id);
+    if (!dirigida && f.dest_id != protocol::kAddrBroadcast) {
+        relayDownlink(f, "fw-bcast-offer");
+        return;
+    }
+    if (f.payload_length < 43) return;   // xfer+len+sha+K+R
+    uint32_t xfer, total;
+    uint16_t bk;
+    std::memcpy(&xfer,  &f.payload[0], sizeof(xfer));
+    std::memcpy(&total, &f.payload[4], sizeof(total));
+    const uint8_t* sha = &f.payload[8];
+    std::memcpy(&bk, &f.payload[40], sizeof(bk));
+    const uint8_t br = f.payload[42];
+
+    char version[33] = {0};
+    const size_t vn = f.payload_length - 43;
+    if (vn > 0) std::memcpy(version, &f.payload[43],
+                            vn < sizeof(version) - 1 ? vn : sizeof(version) - 1);
+
+    static uint32_t ultimo_anunciado = 0;
+    const fwbcast::Offer r = fwbcast::onOffer(xfer, total, sha, version, bk, br);
+
+    // La respuesta usa el FW_STATUS de §18.3, que el emisor ya sabe leer, en
+    // vez de inventar una trama nueva para decir lo mismo.
+    if (dirigida) {
+        // El identificador es el de ESTA transferencia, no el de fwota: en el
+        // camino de §20 el estado vive en fwbcast, y el emisor descarta un
+        // estado cuyo identificador no cuadre con el suyo.
+        sendFwStatus(r == fwbcast::Offer::ACCEPTED ? fwota::State::ACCEPTED
+                   : r == fwbcast::Offer::REJECTED ? fwota::State::REJECTED
+                                                   : fwota::State::ERROR,
+                     xfer, 0);
+    }
+    // El anuncio se repite durante todo el margen previo (§20.6), así que el
+    // log solo habla la primera vez de cada transferencia: si no, serían
+    // decenas de líneas idénticas antes de recibir un solo byte.
+    if (ultimo_anunciado != xfer) {
+        ultimo_anunciado = xfer;
+        Serial.printf("[fwbc]  difusion %s de %lu B: %s\n",
+                      version[0] ? version : "?",
+                      static_cast<unsigned long>(total),
+                      r == fwbcast::Offer::ACCEPTED ? "aceptada"
+                    : r == fwbcast::Offer::REJECTED ? "rechazada"
+                                                    : "error");
+    }
+}
+
+// FW_BCAST_DATA: un fragmento, original o mezcla.
+//
+// NO se reenvía, y es deliberado (§20.11). Repetir lo que se oye en una malla
+// con lazos multiplica cada fragmento, y cada repetición es una transmisión, o
+// sea un nodo que durante ese rato no escucha: sería romper la ventana de
+// silencio con las propias tramas de la difusión. El precio es que un nodo a
+// dos saltos no recibe la pasada y lo que le falta acaba entregándose por el
+// camino individual de §18.
+void handleFwBcastData(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id && f.dest_id != protocol::kAddrBroadcast) {
+        relayDownlink(f, "fw-bcast-data");
+        return;
+    }
+    if (f.payload_length < 7) return;    // xfer(4) + index(2) + al menos 1
+    uint32_t xfer;
+    uint16_t index;
+    std::memcpy(&xfer,  &f.payload[0], sizeof(xfer));
+    std::memcpy(&index, &f.payload[4], sizeof(index));
+    fwbcast::onData(xfer, index, &f.payload[6], f.payload_length - 6);
+
+    // Traza cada 256 fragmentos: con 2698 por pasada, una línea por fragmento
+    // llenaría el log y ralentizaría la propia recepción.
+    static uint16_t vistos = 0;
+    if (++vistos >= 256) {
+        vistos = 0;
+        Serial.printf("[fwbc]  recibidos %u de %u originales\n",
+                      static_cast<unsigned>(fwbcast::totalFrags() - fwbcast::missing()),
+                      static_cast<unsigned>(fwbcast::totalFrags()));
+    }
+}
+
+// FW_BCAST_POLL: el gateway pregunta a ESTE nodo qué le falta. Se cierra el
+// bloque abierto antes de contestar, porque sus mezclas todavía pueden rellenar
+// huecos y pedir lo que se puede despejar solo sería gastar aire de más.
+void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-bcast-poll"); return; }
+    if (f.payload_length < 4) return;
+    uint32_t xfer;
+    std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
+
+    // Los dos motivos por los que esta respuesta puede no salir SE DICEN, y no
+    // se descartan en silencio. El 1-ago-2026 el nodo tenía la imagen entera y
+    // verificada, no contestó a esta pregunta, y el emisor dio por fallida una
+    // entrega impecable. Se supo razonando sobre el código en vez de leyéndolo,
+    // que es justo lo que un log evita.
+    if (xfer != fwbcast::xfer()) {
+        Serial.printf("[fwbc]  pregunta IGNORADA: preguntan por %08lX y aqui "
+                      "hay %08lX\n", static_cast<unsigned long>(xfer),
+                      static_cast<unsigned long>(fwbcast::xfer()));
+        return;
+    }
+    if (!mesh.hasParent()) {
+        Serial.println(F("[fwbc]  pregunta SIN RESPONDER: no hay padre por el "
+                         "que subir el mapa"));
+        return;
+    }
+
+    fwbcast::closeBlock();
+
+    const uint8_t partes = fwbcast::mapParts();
+    uint8_t bits[212];
+    for (uint8_t i = 0; i < partes; ++i) {
+        const size_t n = fwbcast::mapPart(i, bits, sizeof(bits));
+        if (n == 0) break;
+        nextSeq();
+        lora.sendFwBcastMap(g_lora_seq, mesh.parentId(), xfer, i, partes, bits, n);
+        // Espaciado entre partes: salen seguidas del mismo nodo y sin este
+        // hueco la segunda pisaría la confirmación de la primera en el aire.
+        lora.holdQueue(600);
+    }
+    Serial.printf("[fwbc]  mapa enviado: faltan %u de %u\n",
+                  static_cast<unsigned>(fwbcast::missing()),
+                  static_cast<unsigned>(fwbcast::totalFrags()));
 }
 
 // FW_OFFER: anuncio de imagen. El nodo decide si la quiere.
@@ -1347,11 +1741,24 @@ void processLoraRx() {
             case protocol::kFrameFwInstall:
                 handleFwInstall(f);
                 break;
+            case protocol::kFrameQuiet:
+                handleQuiet(f);
+                break;
+            case protocol::kFrameFwBcastOffer:
+                handleFwBcastOffer(f);
+                break;
+            case protocol::kFrameFwBcastData:
+                handleFwBcastData(f);
+                break;
+            case protocol::kFrameFwBcastPoll:
+                handleFwBcastPoll(f);
+                break;
             case protocol::kFrameConfigAck:
             case protocol::kFrameConfigResult:
             case protocol::kFrameConfigData:
             case protocol::kFrameFwStatus:
             case protocol::kFrameFwResult:
+            case protocol::kFrameFwBcastMap:
                 // Subida de otro nodo con este como salto: relay normal.
                 handleUplinkRelay(f);
                 break;
@@ -1604,7 +2011,7 @@ void heartbeatTick(uint32_t now) {
     } else {
         lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
     }
-    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)  psend=%lu done=%lu busy=%lu err=%lu timeout=%lu drop=%lu\n",
+    Serial.printf("[duty]   heartbeat seq=%u tx_ms=%lu (%.2f%% desde boot)  psend=%lu done=%lu busy=%lu err=%lu timeout=%lu drop=%lu  micfail=%lu stale=%lu\n",
                   g_lora_seq, static_cast<unsigned long>(tx_ms),
                   now > 0 ? (100.0 * tx_ms / now) : 0.0,
                   static_cast<unsigned long>(lora.txPsend()),
@@ -1612,7 +2019,9 @@ void heartbeatTick(uint32_t now) {
                   static_cast<unsigned long>(lora.busyEvents()),
                   static_cast<unsigned long>(lora.txErrors()),
                   static_cast<unsigned long>(lora.txTimeouts()),
-                  static_cast<unsigned long>(lora.txDropped()));
+                  static_cast<unsigned long>(lora.txDropped()),
+                  static_cast<unsigned long>(lora.rxMicFail()),
+                  static_cast<unsigned long>(lora.rxStale()));
 }
 
 // Supervisor de la radio (fase 2). El driver aporta el mecanismo (los dos
@@ -1679,6 +2088,21 @@ void radioHealthTick(uint32_t now) {
     const char* causa = (fault == health::Fault::RX_SILENT)
                             ? "sin recepciones validas, receptor mudo"
                             : "sin TXP2P DONE, transmisor mudo";
+
+    // Por qué no llega nada, antes de tocar la radio. "Receptor mudo" es un
+    // síntoma con varias causas muy distintas, y la escalera solo sabe curar
+    // una de ellas: el aire vacío se ve con todos los contadores quietos, una
+    // clave que no cuadra sube micfail, y un reloj desfasado sube stale. Los
+    // dos últimos no se arreglan reiniciando la radio, y sin esta línea no
+    // había forma de distinguirlos desde el log (costó una tarde el
+    // 1-ago-2026: eran tramas descartadas por rancias, no un receptor roto).
+    Serial.printf("[radio]  RX: valid=%lu descartadas=%lu micfail=%lu "
+                  "stale=%lu resyncs=%lu\n",
+                  static_cast<unsigned long>(lora.rxValid()),
+                  static_cast<unsigned long>(lora.rxDiscarded()),
+                  static_cast<unsigned long>(lora.rxMicFail()),
+                  static_cast<unsigned long>(lora.rxStale()),
+                  static_cast<unsigned long>(lora.rxResync()));
 
     // Escalera agotada: se sigue reintentando la reconfiguración con backoff
     // largo, pero sin más reinicios del nodo. Un nodo aislado de verdad
@@ -2058,6 +2482,7 @@ void setup() {
     // reiniciar deja lo demás sin tocar.
     if (fs_ready) {
         fwota::begin(kFirmwareVersion);
+        fwbcast::begin(kFirmwareVersion);
         if (fwota::pendingVerify()) {
             g_fw_trial_active = true;
             g_fw_trial_start  = millis();
@@ -2199,6 +2624,7 @@ void loop() {
     // justamente los que hay que revertir, y ahí g_lora_ready es false.
     trialTick(millis());
     fwTrialTick(millis());
+    pendingTick();
 
     // Sin config válido: LED rojo parpadeando, recordatorio periódico en
     // el log (con el motivo: ausente o inválido) y nada más que hacer.
@@ -2233,8 +2659,19 @@ void loop() {
     }
 
     if (now - last_lora_ms >= g_cfg.send_interval_ms) {
-        last_lora_ms += g_cfg.send_interval_ms;
-        fireLora();
+        // El turno solo se consume si de verdad se pudo muestrear. Si el
+        // cerrojo estaba cerrado (sin hora todavía, o sin registro), se
+        // reintenta en la vuelta siguiente en vez de esperar otro intervalo
+        // entero.
+        //
+        // Con cinco segundos entre muestras esto no se notaba. Con diez
+        // minutos son diez minutos sin un solo dato tras cada reinicio, que
+        // es lo que se vio el 1-ago-2026: el primer disparo cayó a los cuatro
+        // segundos del arranque, cuando el nodo aún no tenía hora, se gastó
+        // en vacío, y la primera medida no llegó hasta 600 segundos después.
+        if (fireLora()) {
+            last_lora_ms += g_cfg.send_interval_ms;
+        }
     }
 
     // Recepción, reconciliación y mantenimiento mesh en cada vuelta.
@@ -2270,7 +2707,9 @@ void loop() {
                 Serial.println(F("[cfg]    transferencia abandonada por inactividad"));
             }
             cfgReadTick(tnow);
+            quietTick(tnow);
             fwota::expireIfIdle(tnow);
+            fwbcast::expireIfIdle(tnow);
             fwResultTick(tnow);
             batchTick(tnow);
         }

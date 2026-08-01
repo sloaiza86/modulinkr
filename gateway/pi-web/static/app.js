@@ -275,6 +275,11 @@ function tarjetaGateway(data) {
 // muestreo puede ser más lento que los beacons. Único punto de verdad:
 // lo usan la tarjeta y el panel de detalle.
 function chipEstado(n, ult, onlineS) {
+  // Cada nodo trae su propio umbral, medido sobre su ritmo de muestreo. El
+  // parámetro queda como respaldo para un nodo que no lo traiga (gateway
+  // anterior). Sin esto, un nodo que muestrea cada diez minutos aparecía
+  // "sin datos" durante 450 de cada 600 segundos, estando perfecto.
+  onlineS = n.online_s || onlineS;
   let cls = "off", txt = "sin señal";
   if (n.online) {
     if (ult && ult.ago_s <= onlineS * 5) {
@@ -300,6 +305,7 @@ function chipEstado(n, ult, onlineS) {
 // sin señal no se muestra chip Modbus (no hay dato reciente). El chip
 // NB-IoT/MQTT del supernodo es fase 2 (requiere que el nodo lo reporte).
 function chipsNodo(n, ult, onlineS) {
+  onlineS = n.online_s || onlineS;
   const chips = [n.online ? { cls: "on", txt: "En línea LoRa" }
                           : { cls: "off", txt: "LoRa sin señal" }];
   const viaNb = !!(ult && ult.via_nbiot);
@@ -1050,6 +1056,11 @@ document.getElementById("hasta").value = isoDefault(0);
 // los botones se bloquean durante cada una.
 
 let cfgPuerto = null;   // puerto serie del nodo detectado
+// Versiones del config que el nodo detectado dice entender. Llegan en el
+// CFG.HELLO, igual que por radio llegan en el catálogo del registro, así que
+// la comprobación es la misma para las dos vías. Vacío si el nodo no las
+// declara (firmware anterior a v3.7) o si no hay nodo detectado.
+let cfgSchemas = "";
 
 // Panel visible según la subruta: menú, "Configurar nodo", la página USB
 // o la radio LoRa (esta última carga su estado al entrar).
@@ -1069,14 +1080,18 @@ function cfgRuta() {
   document.getElementById("cfg-fw").hidden       = sub !== "nodo/firmware";
   document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
-  if (sub === "red-lora") redloraCargar();
+  // El panel del cambio coordinado sondea cada pocos segundos, así que su
+  // sondeo se para al salir de la página igual que el stream de depuración.
+  if (sub === "red-lora") { redloraCargar(); migSondeoArrancar(); }
+  else migSondeoParar();
   if (sub === "wifi") wifiCargar();
   // Al salir de depuración se corta el stream SSE abierto.
   if (sub === "depuracion") debugInit(); else debugStop();
   if (sub === "zona") tzCargar();
   if (sub === "bd") bdCargar();
   if (sub === "mqtt") mqttCargar();
-  if (sub === "nodo/firmware") fwCargar();
+  if (sub === "nodo/firmware") { fwCargar(); bcSondeoArrancar(); }
+  else bcSondeoParar();
   if (sub === "nodo/form") formInit();
 }
 
@@ -1137,6 +1152,9 @@ async function cfgEsperarReinicio() {
 
 function cfgPintarNodo(port, n) {
   cfgPuerto = port;
+  // Único embudo de las dos vías de esta página, la del puerto del Pi y la del
+  // USB de este equipo, así que fijarlo aquí las cubre a las dos.
+  cfgSchemas = n.schemas || "";
   const chip = n.configured
     ? '<span class="chip on">configurado</span>'
     : '<span class="chip ambar">sin configurar</span>';
@@ -1329,6 +1347,7 @@ async function cfgLocalEnviar() {
   try { JSON.parse(texto); } catch (e) {
     res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
   }
+  if (!await schemaPuerta(cfgSchemaVersion(texto), cfgSchemas)) return;
   res.className = "aviso"; res.textContent = "";
   cfgBotones(true);
   const T = "Enviar config al nodo";
@@ -1432,6 +1451,81 @@ async function cfgLeer() {
   }
 }
 
+// Puerta de compatibilidad de schema, común a las tres vías de envío.
+//
+// Los cuatro casos posibles y qué hace cada uno, en un solo sitio para que no
+// puedan divergir:
+//
+//   el nodo declara y la versión encaja     pasa sin decir nada
+//   el nodo declara y no encaja             diálogo que NO deja enviar
+//   el nodo no declara                      diálogo que avisa y deja elegir
+//   no se sabe qué se envía o a quién       pasa (no hay nada que comparar)
+//
+// En diálogo y no en una línea al lado del botón: una línea junto a un botón
+// que sigue funcionando se lee después de haber pulsado, y el caso que
+// importa, el que va a fallar seguro, tiene que interrumpir. El bloqueo no
+// ofrece "enviar de todos modos" a propósito: no es una advertencia sobre un
+// riesgo, es la certeza de que el nodo lo va a rechazar.
+//
+// Devuelve una promesa: true si se puede seguir.
+function schemaPuerta(versionTexto, declarados) {
+  const T = "Compatibilidad del config";
+  const lista = (declarados || "").split(",").map((x) => x.trim()).filter(Boolean);
+
+  if (!versionTexto) return Promise.resolve(true);
+
+  if (!lista.length) {
+    return new Promise((resolve) => {
+      cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
+      cfgDialogo(T,
+        "<p>Este nodo <b>no declara</b> qué versiones del config entiende, "
+        + "porque lleva un firmware anterior.</p>"
+        + `<p>El config que se va a enviar es de la versión <b>${versionTexto}</b>. `
+        + "Si el nodo no la soporta, la rechazará al aplicarla y volverá sola "
+        + "a la anterior en unos minutos.</p>",
+        { cancelar: true, confirmar: true, confirmarText: "Enviar igualmente",
+          confirmarPeligro: false,
+          onCancelar: () => { cfgDialogoCerrar(); resolve(false); } });
+    });
+  }
+
+  if (lista.includes(String(versionTexto))) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    cfgDialogo(T,
+      `<p>Este config declara la versión <b>${versionTexto}</b> y el nodo solo `
+      + `entiende <b>${lista.join(", ")}</b>.</p>`
+      + "<p>El nodo lo rechazaría al aplicarlo, así que no se envía. Corrige la "
+      + "versión del archivo, o actualiza antes el firmware del nodo.</p>",
+      { cerrar: true });
+    // Sin botón de seguir: el único camino es cerrar y arreglarlo. El cierre
+    // del diálogo ya lo hace su listener permanente; aquí solo hace falta
+    // enterarse, y por eso el oyente es de una sola vez.
+    document.getElementById("cfg-dialogo-cerrar").addEventListener(
+      "click", () => resolve(false), { once: true });
+  });
+}
+
+// Comprobación previa de esta página, que envía el texto TAL CUAL.
+//
+// El asistente no la necesita porque regenera el JSON con la versión que él
+// sabe escribir. Aquí no: el texto puede venir de un archivo, de una lectura
+// del nodo o de una edición a mano, y ahí es donde se cuela una versión que el
+// nodo no entiende. Pasó en banco el 1-ago-2026 con un config de schema 3.9
+// contra un nodo que acepta hasta 3.3.
+//
+// Solo bloquea cuando SE SABE que va a fallar, o sea cuando el nodo declara su
+// lista y la versión del texto no está en ella. Si el nodo no la declara, se
+// deja pasar: castigar por no saber impediría justo lo que haría falta, mandar
+// una configuración a un nodo viejo. Es el mismo criterio de §17 y del
+// asistente, y tenerlo distinto en dos sitios sería peor que no tenerlo.
+function cfgSchemaVersion(texto) {
+  try {
+    const v = JSON.parse(texto).schema_version;
+    return v == null ? "" : String(v);
+  } catch (e) { return ""; }
+}
+
 async function cfgEnviar() {
   if (cfgFuenteLocal()) { cfgLocalEnviar(); return; }
   const res = document.getElementById("cfg-resultado");
@@ -1451,6 +1545,7 @@ async function cfgEnviar() {
     res.textContent = "no es JSON válido: " + e.message;
     return;
   }
+  if (!await schemaPuerta(cfgSchemaVersion(texto), cfgSchemas)) return;
   res.className = "aviso"; res.textContent = "";
   cfgBotones(true);
   const T = "Enviar config al nodo";
@@ -1532,6 +1627,7 @@ document.getElementById("cfg-buscar").addEventListener("click", cfgDetectar);
 document.getElementById("cfg-fuente").addEventListener("change", () => {
   cfgLocalCerrar();
   cfgPuerto = null;
+  cfgSchemas = "";
   document.getElementById("cfg-nodo").hidden = true;
   document.getElementById("cfg-editor").hidden = true;
   document.getElementById("cfg-busqueda-aviso").textContent = "";
@@ -1885,6 +1981,11 @@ async function redloraCargar() {
     const r = await fetchApi("/api/config/red");
     const d = await r.json();
     if (!r.ok) { res.className = "aviso mal"; res.textContent = "Estado no disponible."; return; }
+    // Se guardan también como referencia: al guardar hay que saber qué
+    // cambia de verdad para avisar solo entonces, y hasta ahora esta variable
+    // solo la rellenaba el asistente, de modo que entrando directo a esta
+    // pantalla no había con qué comparar.
+    redActual = d;
     const sV = (id, v) => { if (v != null && v !== "") document.getElementById(id).value = v; };
     sV("r-region", d.region); sV("r-freq", d.frequency_hz); sV("r-netid", d.network_id);
     sV("r-sf", d.sf); sV("r-bw", d.bw_khz); sV("r-ttl", d.max_ttl);
@@ -1928,6 +2029,83 @@ function redloraLive() {
   }
 }
 
+// Qué parámetros de red cambian respecto a los vigentes, con nombre legible.
+//
+// Sirve para dos cosas: no molestar cuando no cambia nada de lo que rompe la
+// red, y poder decir exactamente qué se está tocando. La clave se trata aparte
+// porque el campo vacío significa "conservar la vigente" y no "borrarla".
+function redloraCambios(body, actual) {
+  if (!actual) return null;          // sin referencia no se puede comparar
+  const campos = [
+    ["network_id",       "ID de red",        actual.network_id],
+    ["frequency_hz",     "frecuencia",       actual.frequency_hz],
+    ["sf",               "SF",               actual.sf],
+    ["bw_khz",           "ancho de banda",   actual.bw_khz],
+    ["region",           "región",           actual.region],
+  ];
+  const out = [];
+  campos.forEach(([k, etiqueta, antes]) => {
+    if (antes != null && String(body[k]) !== String(antes)) {
+      out.push(`${etiqueta}: ${antes} a ${body[k]}`);
+    }
+  });
+  const secAntes = !!(actual.security && actual.security.enabled);
+  if (body.security_enabled !== secAntes) {
+    out.push(`seguridad: ${secAntes ? "activa" : "inactiva"} a `
+             + `${body.security_enabled ? "activa" : "inactiva"}`);
+  }
+  // La clave se compara contra la vigente, no contra vacío: el formulario la
+  // precarga al abrir la pantalla, así que "hay algo escrito" no significa
+  // "se cambia". Avisar por eso saltaría siempre y el aviso se aprendería a
+  // ignorar, que es peor que no tenerlo.
+  const claveAntes = (actual.security && actual.security.key) || "";
+  if (body.security_key && body.security_key !== claveAntes) {
+    out.push("clave de red: se reemplaza");
+  }
+  return out;
+}
+
+// Confirmación antes de tocar los parámetros de red.
+//
+// Cambiarlos deja incomunicado a todo nodo que siga con los viejos, y hasta
+// ahora eso solo se advertía en un párrafo encima del formulario y en la
+// documentación. El aviso pasa a estar delante del botón, con la lista de lo
+// que cambia y los nodos afectados por su nombre, porque "se perderán los
+// nodos" y "vas a perder NodoV1 y SuperNodoV2.1" no se leen igual.
+//
+// El TTL no entra en la lista: cambiarlo altera el alcance del relay pero no
+// impide a un nodo hablar con el gateway, así que no deja a nadie fuera.
+async function redloraConfirmar(cambios) {
+  let nodos = [];
+  try {
+    const r = await fetchApi("/api/red/estado");
+    if (r.ok) {
+      nodos = ((await r.json()).nodes || [])
+        .filter((n) => n.origin >= 1 && n.origin <= 254);
+    }
+  } catch (e) { /* sin lista: se avisa igual, sin nombres */ }
+
+  const lista = nodos.length
+    ? "<ul>" + nodos.map((n) =>
+        `<li>${n.name || "nodo"} (${n.origin})`
+        + (n.online ? "" : ", ya sin señal") + "</li>").join("") + "</ul>"
+    : "<p>El gateway no conoce ningún nodo todavía.</p>";
+
+  return new Promise((resolve) => {
+    cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
+    cfgDialogo("Cambiar los parámetros de red",
+      "<p>Va a cambiar:</p><ul>"
+      + cambios.map((c) => `<li>${c}</li>`).join("")
+      + "</ul><p><b>Estos nodos dejarán de comunicarse</b> hasta que se les "
+      + "reconfigure con los mismos valores:</p>" + lista
+      + "<p>Un nodo que no se pueda alcanzar por radio después del cambio "
+      + "necesitará cable. Reconfigúralos <b>antes</b> de confirmar si puedes, "
+      + "o ten a mano cómo llegar a ellos.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Cambiar de todos modos",
+        onCancelar: () => resolve(false) });
+  });
+}
+
 async function redloraGuardar() {
   const res = document.getElementById("r-resultado");
   const body = {
@@ -1940,6 +2118,23 @@ async function redloraGuardar() {
     security_enabled: document.getElementById("r-sec").checked,
     security_key: document.getElementById("r-seckey").value.trim(),
   };
+
+  // Solo se pregunta si de verdad cambia algo que rompa la red. Guardar sin
+  // tocar nada relevante (o tocando solo el TTL) no debe pedir confirmación:
+  // un aviso que salta siempre se aprende a ignorar.
+  const cambios = redloraCambios(body, redActual);
+  if (cambios === null || cambios.length > 0) {
+    const seguir = await redloraConfirmar(
+      cambios === null
+        ? ["no se pudieron leer los parámetros vigentes para compararlos"]
+        : cambios);
+    if (!seguir) {
+      res.className = "aviso";
+      res.textContent = "Cancelado. No se ha cambiado nada.";
+      return;
+    }
+  }
+
   res.className = "aviso";
   res.textContent = "Guardando y reiniciando el servicio del gateway...";
   try {
@@ -1953,6 +2148,402 @@ async function redloraGuardar() {
       + "Heltec. Recuerda reconfigurar los nodos con estos parámetros.";
   } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
 }
+
+// ----- Cambio coordinado de parámetros de red (§17.8, fase C4) -----
+//
+// El panel de una operación que dura horas y que, si sale mal, deja nodos
+// incomunicados. Lo que tiene que contestar en todo momento es qué falta para
+// el salto, en qué mundo está el gateway ahora, y sobre todo quién ha migrado
+// y quién no. Sin eso el procedimiento existe pero no es usable: una operación
+// de este tipo a ciegas es una forma elaborada de perder nodos.
+
+let migTimer = null;      // sondeo del panel, solo con la página a la vista
+
+async function migLeer() {
+  try {
+    const r = await fetchApi("/api/net/migracion");
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+// Duración en palabras, no en segundos crudos. "faltan 7412 s" obliga a hacer
+// una división mental cada vez que se mira, y esto se mira muchas veces.
+function migDuracion(s) {
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60), seg = s % 60;
+  if (d) return `${d} d ${h} h`;
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${String(seg).padStart(2, "0")} s`;
+  return `${seg} s`;
+}
+
+function migPerfilTexto(p) {
+  return `red ${p.network_id}  ${(p.freq_hz / 1e6).toFixed(3)} MHz  `
+       + `SF${p.sf}  BW${p.bw_khz}  TTL ${p.max_ttl}  `
+       + `clave ${p.sec_key ? p.sec_key.slice(0, 4) + "..." : "sin cifrar"}`;
+}
+
+function migDato(k, v, clase = "") {
+  return `<div class="mig-dato"><span class="k">${k}</span>`
+       + `<span class="v ${clase}">${v}</span></div>`;
+}
+
+function migPintar(d) {
+  const nueva = document.getElementById("mig-nueva");
+  const panel = document.getElementById("mig-panel");
+  if (!d || !d.activa) {
+    nueva.hidden = false;
+    panel.hidden = true;
+    return;
+  }
+  nueva.hidden = true;
+  panel.hidden = false;
+
+  const est = document.getElementById("mig-estado");
+  const T = new Date(d.apply_at * 1000).toLocaleString();
+  let html = "";
+  if (d.state === "programada") {
+    html += migDato("Estado", "reparto en curso, nadie ha cambiado todavía");
+    html += migDato("Salto", T);
+    html += migDato("Falta", migDuracion(d.faltan_s), "mig-cuenta");
+  } else {
+    html += migDato("Estado", "saltada, recogiendo rezagados");
+    html += migDato("Salto", T);
+    html += migDato("Gateway ahora en",
+                    d.mundo === "viejo" ? "los parámetros VIEJOS"
+                                        : "los parámetros nuevos");
+    html += migDato("Cambia en", migDuracion(d.proximo_cambio_s), "mig-cuenta");
+    html += migDato("Recuperación acaba en",
+                    migDuracion(d.recuperacion_restante_s), "mig-cuenta");
+  }
+  html += `<pre class="mig-perfiles">viejos: ${migPerfilTexto(d.old_profile)}\n`
+        + `nuevos: ${migPerfilTexto(d.new_profile)}</pre>`;
+  est.innerHTML = html;
+
+  const tb = document.querySelector("#mig-tabla tbody");
+  const ETIQ = { migrado: ["migrado", "migrado"],
+                 rezagado: ["rezagado", "rezagado"],
+                 "sin noticias": ["mudo", "sin noticias"] };
+  if (!d.nodos.length) {
+    tb.innerHTML = `<tr><td colspan="3">${
+      d.state === "programada"
+        ? "El pase de lista empieza en el salto."
+        : "Todavía no se ha oído a ningún nodo desde el salto."
+    }</td></tr>`;
+  } else {
+    tb.innerHTML = d.nodos.map((n) => {
+      const [clase, texto] = ETIQ[n.estado] || ["mudo", n.estado];
+      const ts = Math.max(n.nuevo || 0, n.viejo || 0);
+      return `<tr><td>${n.node_id}</td>`
+           + `<td><span class="mig-pill ${clase}">${texto}</span></td>`
+           + `<td>${ts ? new Date(ts * 1000).toLocaleTimeString() : "nunca"}</td></tr>`;
+    }).join("");
+  }
+
+  // Abortar solo tiene sentido antes del salto: después ya cambió el mundo y
+  // lo que queda es cerrar. Deshabilitarlo dice eso mejor que un error.
+  document.getElementById("mig-abortar").disabled = d.state !== "programada";
+  document.getElementById("mig-cerrar").textContent =
+    d.state === "programada" ? "Cerrar sin saltar" : "Cerrar operación";
+}
+
+async function migRefrescar() {
+  migPintar(await migLeer());
+}
+
+function migSondeoArrancar() {
+  migRefrescar();
+  if (migTimer === null) migTimer = setInterval(migRefrescar, 5000);
+}
+
+function migSondeoParar() {
+  if (migTimer !== null) { clearInterval(migTimer); migTimer = null; }
+}
+
+async function migProgramar() {
+  const res = document.getElementById("mig-resultado");
+  const t = document.getElementById("mig-t").value;
+  if (!t) {
+    res.className = "aviso mal";
+    res.textContent = "falta la hora del salto";
+    return;
+  }
+  const body = {
+    region: document.getElementById("r-region").value,
+    frequency_hz: Number(document.getElementById("r-freq").value),
+    network_id: Number(document.getElementById("r-netid").value),
+    sf: Number(document.getElementById("r-sf").value),
+    bw_khz: Number(document.getElementById("r-bw").value),
+    max_ttl: Number(document.getElementById("r-ttl").value),
+    security_enabled: document.getElementById("r-sec").checked,
+    security_key: document.getElementById("r-seckey").value.trim(),
+    apply_at: Math.floor(new Date(t).getTime() / 1000),
+    recov_win_s: Number(document.getElementById("mig-win").value),
+    recov_per_s: Number(document.getElementById("mig-per").value),
+    recov_h: Number(document.getElementById("mig-h").value),
+  };
+
+  // La misma lista de lo que cambia que el camino directo, pero con otra
+  // pregunta detrás: aquí no se avisa de que se van a perder nodos, porque el
+  // procedimiento existe justamente para no perderlos. Se avisa de que a
+  // partir de ahora todo envío de configuración lleva la cita.
+  const cambios = redloraCambios(body, redActual);
+  if (!cambios || !cambios.length) {
+    res.className = "aviso mal";
+    res.textContent = "los parámetros de arriba son los que ya están vigentes";
+    return;
+  }
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Programar cambio coordinado",
+      "<p>Se va a programar el salto de <b>" + cambios.join(", ")
+      + "</b> para el <b>" + new Date(t).toLocaleString() + "</b>.</p>"
+      + "<p>Ahora mismo no cambia nada. A partir de aquí, cada configuración "
+      + "que envíes a un nodo se le entrega con esa cita y el nodo la guarda "
+      + "sin aplicarla. Reparte a todos los nodos antes de esa hora y "
+      + "comprueba en esta misma página quién la tiene.</p>"
+      + "<p>Si falta alguno, aborta: hasta el salto no se ha cambiado nada.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Programar",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+
+  res.className = "aviso";
+  res.textContent = "Programando...";
+  try {
+    const r = await fetchApi("/api/net/migracion", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) {
+      res.className = "aviso mal";
+      res.textContent = "Error: " + (d.error ?? "no programada");
+      return;
+    }
+    res.className = "aviso";
+    res.textContent = "Programada. Reparte ahora la configuración a los nodos.";
+    migRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+async function migTerminar(abortar) {
+  const res = document.getElementById("mig-resultado2");
+  const d0 = await migLeer();
+  const saltada = d0 && d0.state === "saltada";
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo(abortar ? "Abortar la operación" : "Cerrar la operación",
+      abortar
+        ? "<p>La operación se descarta y no habrá salto. Nada ha cambiado "
+          + "todavía, así que no hay nada que deshacer.</p><p>Los nodos que ya "
+          + "tengan la configuración citada la conservarán guardada y llegada "
+          + "la hora la aplicarán igualmente: si eso no es lo que quieres, "
+          + "envíales cualquier otra configuración, que sustituye a la "
+          + "pendiente.</p>"
+        : (saltada
+            ? "<p>Los parámetros nuevos pasan a ser los de la instalación y el "
+              + "gateway deja de volver a los viejos.</p><p>Cualquier nodo que "
+              + "siga en los viejos dejará de ser alcanzable por radio y "
+              + "necesitará cable.</p>"
+            : "<p>La operación termina sin haber saltado.</p>"),
+      { cancelar: true, confirmar: true,
+        confirmarText: abortar ? "Abortar" : "Cerrar",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+
+  res.className = "aviso";
+  res.textContent = abortar ? "Abortando..." : "Cerrando...";
+  try {
+    const r = await fetchApi("/api/net/migracion/cerrar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ abortar }) });
+    const d = await r.json();
+    if (!r.ok) {
+      res.className = "aviso mal";
+      res.textContent = "Error: " + (d.error ?? "no cerrada");
+      migRefrescar();
+      return;
+    }
+    res.className = "aviso";
+    res.textContent = abortar ? "Abortada." : "Cerrada y fijada en el gateway.";
+    migRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+// ----- Difusión de firmware a toda la red (§20) -----
+//
+// El panel de una emisión que dura horas. Lo que tiene que dejar claro en todo
+// momento es en qué fase va y cuánto lleva recibido cada nodo, porque durante
+// la mayor parte del tiempo no pasa nada visible y sin eso no hay forma de
+// distinguir "avanzando despacio" de "colgada".
+
+let bcTimer = null;
+let clasePorNodo = new Map();   // origin -> 'A' | 'C' (§21)
+
+// Nodos que la difusión NO puede alcanzar.
+//
+// No es que a un nodo clase A le llegue más despacio: no le puede llegar. Su
+// ventana de escucha se abre tras su propia subida, en un instante distinto
+// al de cualquier otro, así que no existe un momento en que todos escuchen a
+// la vez, y una emisión para todos necesita exactamente eso.
+//
+// Se dice ANTES de emitir. Descubrirlo tres horas después es descubrirlo
+// tarde, y es el tipo de cosa que solo se ve si alguien la escribe delante.
+function bcFueraDeAlcance() {
+  const fuera = [];
+  clasePorNodo.forEach((clase, origin) => {
+    if (clase === "A") fuera.push(nodosConocidos.get(origin) || ("nodo " + origin));
+  });
+  return fuera;
+}
+
+const BC_FASE = {
+  offering:  "anunciando a la red",
+  sending:   "emitiendo la imagen",
+  polling:   "preguntando a los nodos qué les falta",
+  repairing: "reemitiendo lo que falta",
+  ready:     "entregada",
+  failed:    "fallida",
+  cancelled: "cancelada",
+};
+
+function bcPintar(d) {
+  const panel = document.getElementById("bc-panel");
+  const cancelar = document.getElementById("bc-cancelar");
+  const lanzar = document.getElementById("bc-lanzar");
+  if (!d || !d.id) {
+    panel.hidden = true;
+    cancelar.hidden = true;
+    // Sin difusión propia, el botón solo se apaga si hay un envío a un nodo
+    // ocupando el aire: las dos operaciones comparten transporte y no caben a
+    // la vez (§20.12).
+    lanzar.disabled = !!(d && d.otra_en_curso);
+    document.getElementById("bc-aviso").textContent = d && d.otra_en_curso
+      ? `Hay una subida en curso al nodo ${d.otra_en_curso.nodo}. `
+        + "La difusión ocupa el mismo aire, así que espera a que termine."
+      : "";
+    return;
+  }
+  panel.hidden = false;
+  cancelar.hidden = !d.activa;
+  lanzar.disabled = !!d.activa;
+
+  const est = document.getElementById("bc-estado");
+  let html = migDato("Fase", BC_FASE[d.state] || d.state);
+  html += migDato("Versión", d.version || "?");
+  html += migDato("Pasada", String((d.pass_no || 0) + 1));
+  html += migDato("En marcha desde hace", migDuracion(d.elapsed_s), "mig-cuenta");
+  if (d.detail) html += migDato("Detalle", d.detail);
+  est.innerHTML = html;
+
+  const tb = document.querySelector("#bc-tabla tbody");
+  if (!d.nodos.length) {
+    // El recuento no existe hasta la primera ronda de preguntas, y decirlo
+    // evita leer la tabla vacía como "ningún nodo está recibiendo".
+    tb.innerHTML = `<tr><td colspan="4">Los nodos no dicen lo que llevan hasta `
+                 + `que termina la primera pasada y se les pregunta.</td></tr>`;
+    return;
+  }
+  tb.innerHTML = d.nodos.map((n) => {
+    const clase = n.missing === 0 ? "migrado" : "rezagado";
+    return `<tr><td>${n.node_id}</td>`
+         + `<td><span class="mig-pill ${clase}">${n.pct} %</span></td>`
+         + `<td>${n.missing}</td>`
+         + `<td>${new Date(n.ts * 1000).toLocaleTimeString()}</td></tr>`;
+  }).join("");
+}
+
+async function bcRefrescar() {
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/difusion");
+    bcPintar(await r.json());
+  } catch (e) { /* el sondeo siguiente lo reintenta */ }
+}
+
+function bcSondeoArrancar() {
+  bcRefrescar();
+  if (bcTimer === null) bcTimer = setInterval(bcRefrescar, 5000);
+}
+
+function bcSondeoParar() {
+  if (bcTimer !== null) { clearInterval(bcTimer); bcTimer = null; }
+}
+
+async function bcLanzar() {
+  const res = document.getElementById("bc-aviso");
+  const fuera = bcFueraDeAlcance();
+  const avisoClase = fuera.length
+    ? "<p><b>Estos nodos no la van a recibir</b>, porque están en clase A y "
+      + "solo escuchan justo después de haber hablado: <b>" + fuera.join(", ")
+      + "</b>. A esos hay que subirles la imagen una a una.</p>"
+    : "";
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Difundir a toda la red",
+      "<p>Se va a emitir la imagen a toda la red. Son unas <b>tres horas</b> de "
+      + "emisión de fondo, cediendo el aire a la telemetría.</p>"
+      + avisoClase
+      + "<p>No se instala nada: al terminar, cada nodo que la haya completado "
+      + "tiene la imagen guardada y verificada en su partición dormida, y la "
+      + "orden de instalar sigue siendo aparte y nodo a nodo.</p>"
+      + "<p>Llega a los nodos que oyen al gateway directamente. A los que estén "
+      + "a dos saltos habrá que subírsela por el camino individual.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Difundir",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+
+  res.className = "aviso";
+  res.textContent = "Lanzando...";
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/difundir",
+                             { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) {
+      res.className = "aviso mal";
+      res.textContent = "Error: " + (d.error ?? "no lanzada");
+      return;
+    }
+    res.className = "aviso";
+    res.textContent = `Difundiendo ${d.version} (${d.bytes} B).`;
+    bcRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+async function bcCancelar() {
+  const res = document.getElementById("bc-aviso");
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Cancelar la difusión",
+      "<p>Se corta la emisión. Lo que cada nodo ya haya recibido sigue escrito "
+      + "en su partición dormida, así que una difusión posterior de la misma "
+      + "imagen continúa donde esta lo dejó en vez de empezar de cero.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Cancelar difusión",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/difusion/cancelar",
+                             { method: "POST" });
+    const d = await r.json();
+    res.className = r.ok ? "aviso" : "aviso mal";
+    res.textContent = r.ok ? "Difusión cancelada." : ("Error: " + (d.error ?? ""));
+    bcRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+document.getElementById("bc-lanzar").addEventListener("click", bcLanzar);
+document.getElementById("bc-cancelar").addEventListener("click", bcCancelar);
+
+document.getElementById("mig-programar").addEventListener("click", migProgramar);
+document.getElementById("mig-abortar").addEventListener("click", () => migTerminar(true));
+document.getElementById("mig-cerrar").addEventListener("click", () => migTerminar(false));
 
 document.getElementById("r-region").addEventListener("change", (e) => {
   const f = REGION_FREQ[e.target.value];
@@ -2316,6 +2907,10 @@ document.getElementById("dbg-limpiar").addEventListener("click", () => {
 let fwPuerto = null;
 
 async function fwCargar() {
+  // Lo primero: recuperar la subida en curso, si la hay. Va antes que nada
+  // porque cambia la fuente y el nodo elegidos, y hacerlo después pisaría lo
+  // que el operador acabara de tocar.
+  fwLoraRecuperar();
   document.getElementById("fw-resultado").textContent = "";
   document.getElementById("fw-flash").disabled = true;
   document.getElementById("fw-busqueda-aviso").textContent = "";
@@ -2345,7 +2940,12 @@ function fwFuenteCtrls() {
   document.getElementById("fw-gateway").hidden = v !== "gateway";
   document.getElementById("fw-local").hidden   = v !== "local";
   document.getElementById("fw-lora").hidden    = v !== "lora";
-  if (v === "lora") fwLoraNodos();
+  // Devuelve la promesa del poblado de la lista de nodos. Quien solo cambia de
+  // fuente puede ignorarla; quien necesita elegir un nodo CONCRETO después
+  // tiene que esperarla, porque la lista se reconstruye entera y fijar el
+  // valor antes no serviría de nada (así fallaba la recuperación de la subida
+  // en curso, que elegía un nodo y acto seguido se quedaba en blanco).
+  return v === "lora" ? fwLoraNodos() : Promise.resolve();
 }
 
 // ----- Firmware por LoRa (frame-format.md §18) -----
@@ -2354,7 +2954,8 @@ function fwFuenteCtrls() {
 // ventana horaria y cede el aire a la telemetría. El visor solo encola, mira el
 // progreso y, cuando la imagen ya está en el nodo, pide instalarla.
 
-let fwLoraId   = null;    // actualización en curso, id de la tabla fw_push
+let fwLoraId   = null;    // transferencia en curso, id de la tabla
+let fwLoraVentanaPuesta = false;  // ventana ya devuelta al formulario
 let fwLoraTimer = null;
 
 async function fwLoraNodos() {
@@ -2438,9 +3039,33 @@ async function fwLoraEnviar() {
   }
 }
 
+// Recupera la subida en curso al entrar en la página.
+//
+// Una subida dura horas y nadie se queda con la pestaña abierta mirándola. Sin
+// esto, cerrar el navegador equivalía a perder de vista la operación: la barra
+// solo existía mientras el propio navegador la seguía, y al volver la página
+// aparecía como si no hubiera nada en marcha. El estado real vive en el
+// gateway desde el principio; solo faltaba preguntarlo.
+async function fwLoraRecuperar() {
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/encurso");
+    const d = await r.json();
+    if (!r.ok || !d.activa) return;
+    // La lista de nodos se rellena sola al cambiar de fuente, así que hay que
+    // esperarla antes de elegir uno: si no, se elige sobre una lista vacía.
+    document.getElementById("fw-fuente").value = "lora";
+    await fwFuenteCtrls();
+    const sel = document.getElementById("fw-lora-nodo");
+    if (sel && d.origin) sel.value = String(d.origin);
+    fwLoraSeguir(d.id);
+  } catch (e) { /* sin respuesta: la página queda como estaba */ }
+}
+
 // Sondea el progreso. Cada diez segundos y no más rápido: la subida avanza en
 // horas, y consultarla cada segundo solo daría trabajo al Pi.
 function fwLoraSeguir(id) {
+  // Cambiar de transferencia reabre la posibilidad de devolver su ventana.
+  if (fwLoraId !== id) fwLoraVentanaPuesta = false;
   fwLoraId = id;
   const barra = document.getElementById("fw-lora-barra");
   const aviso = document.getElementById("fw-lora-aviso");
@@ -2454,8 +3079,25 @@ function fwLoraSeguir(id) {
       const d = await r.json();
       if (!r.ok) { aviso.textContent = d.error || "error"; return; }
       barra.value = d.pct;
-      const cerrado = d.state === "done" || d.state === "failed";
+      // Los campos vuelven a la ventana con la que se LANZÓ esta subida, no a
+      // la que tuviera el formulario. Al recargar la página aparecían los
+      // valores por defecto y daban a entender que la subida corría con ellos.
+      if (d.hour_from != null && d.hour_to != null && !fwLoraVentanaPuesta) {
+        fwLoraVentanaPuesta = true;
+        document.getElementById("fw-lora-desde").value = d.hour_from;
+        document.getElementById("fw-lora-hasta").value = d.hour_to;
+      }
+      const viva = ["pending", "sending", "committing"].includes(d.state);
+      // Con una subida viva no se lanza otra: el botón se apaga en vez de
+      // dejar pulsarlo para que el Pi conteste que ya hay una en curso.
+      document.getElementById("fw-lora-enviar").disabled = viva;
+      const cerrado = d.state === "done" || d.state === "failed"
+                   || d.state === "cancelled";
       instalar.hidden = d.state !== "ready";
+      // Cancelar solo mientras hay algo que cortar. Con la imagen ya arriba no
+      // queda emisión que parar, y lo que toca entonces es instalar o no.
+      document.getElementById("fw-lora-cancelar").hidden =
+        !["pending", "sending", "committing"].includes(d.state);
       aviso.className = d.state === "failed" ? "aviso mal" : "aviso";
       aviso.textContent =
         d.state === "ready"
@@ -2463,11 +3105,22 @@ function fwLoraSeguir(id) {
             + "Instalar reinicia el nodo; si no vuelve a la red en cuatro "
             + "minutos, el gestor de arranque restaura la anterior solo."
           : `${d.state}: ${d.pct} % (${d.written}/${d.total_len} B)`
+            // La ventana horaria de la subida EN CURSO, que puede no ser la
+            // que muestren los campos de arriba: quien vuelve a la página se
+            // encuentra los valores por defecto y no los que se usaron al
+            // lanzarla, y sin esto no hay forma de saber por qué está parada.
+            + (d.hour_from != null && d.hour_to != null
+                 && d.hour_from !== d.hour_to
+                 ? ` · ventana ${String(d.hour_from).padStart(2, "0")}:00 a `
+                   + `${String(d.hour_to).padStart(2, "0")}:00`
+                 : " · sin ventana horaria")
             + (d.detail ? ` · ${d.detail}` : "");
       if (cerrado) {
         clearInterval(fwLoraTimer);
         fwLoraTimer = null;
         instalar.hidden = true;
+        document.getElementById("fw-lora-cancelar").hidden = true;
+        document.getElementById("fw-lora-enviar").disabled = false;
       }
     } catch (e) { /* un sondeo fallido no rompe nada: se reintenta */ }
   };
@@ -2475,16 +3128,55 @@ function fwLoraSeguir(id) {
   fwLoraTimer = setInterval(tick, 10000);
 }
 
+async function fwLoraCancelar() {
+  const aviso = document.getElementById("fw-lora-aviso");
+  if (!fwLoraId) return;
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Cancelar la subida",
+      "<p>Se corta la emisión. <b>Lo que el nodo ya ha recibido no se pierde</b>: "
+      + "sigue escrito en su partición dormida, y una subida posterior de la "
+      + "misma imagen continúa donde esta lo deje en vez de empezar de cero.</p>"
+      + "<p>El firmware que el nodo está ejecutando no se toca en ningún "
+      + "momento, ni ahora ni durante la subida.</p>",
+      { cancelar: true, cancelarText: "Seguir subiendo",
+        confirmar: true, confirmarText: "Cancelar subida",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/cancelar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: fwLoraId }) });
+    const d = await r.json();
+    aviso.className = r.ok ? "aviso" : "aviso mal";
+    aviso.textContent = r.ok
+      ? "Subida cancelada. Lo recibido sigue en el nodo."
+      : "Error: " + (d.error ?? "no cancelada");
+  } catch (e) { aviso.className = "aviso mal"; aviso.textContent = "Error: " + e.message; }
+}
+
 async function fwLoraInstalar() {
   const aviso = document.getElementById("fw-lora-aviso");
   if (!fwLoraId) return;
-  if (!window.confirm(
-      "El nodo se reiniciará con la imagen nueva.\n\n"
-      + "Si no consigue registrarse en la red en cuatro minutos, el gestor de "
-      + "arranque vuelve solo a la versión anterior. Aun así, durante ese rato "
-      + "el nodo no mide.\n\n¿Instalar ahora?")) {
-    return;
-  }
+  // Diálogo propio y no el del navegador. Era el último sitio que usaba
+  // window.confirm: se distingue a la legua del resto de la interfaz, no
+  // admite formato, y en algunos navegadores se puede silenciar sin que el
+  // operador se entere, justo en la confirmación que reinicia un nodo.
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Instalar en el nodo",
+      "<p>El nodo se reiniciará con la imagen nueva.</p>"
+      + "<p>Si no consigue registrarse en la red en <b>cuatro minutos</b>, el "
+      + "gestor de arranque vuelve solo a la versión anterior. Aun así, "
+      + "durante ese rato el nodo no mide.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Instalar",
+        confirmarPeligro: false,
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
   try {
     const r = await fetchApi("/api/config/lora/firmware/instalar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2643,6 +3335,7 @@ document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
 document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
 document.getElementById("fw-lora-enviar").addEventListener("click", fwLoraEnviar);
+document.getElementById("fw-lora-cancelar").addEventListener("click", fwLoraCancelar);
 document.getElementById("fw-lora-instalar").addEventListener("click", fwLoraInstalar);
 document.getElementById("fw-local-flash").addEventListener("click", fwLocalFlash);
 document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
@@ -2660,6 +3353,12 @@ let idLeido = null;              // ID leído de un nodo (reconfiguración legí
 // vuelto a registrarse, estará atrasado.
 let fwPorNodo = new Map();       // origin -> versión declarada al registrarse
 let fwGateway = null;            // versión del nodo.bin que sirve el gateway
+// Schemas del config.json que declara soportar el nodo destino, tal cual los
+// anuncia él. Cadena vacía significa que no lo declara (firmware anterior a
+// v3.7), que no es lo mismo que no soportar ninguno: en ese caso solo se
+// avisa, porque bloquear por no saber castigaría a los nodos viejos.
+let schemasDestino = "";
+let schemasPorNodo = new Map();  // origin -> cadena declarada al registrarse
 // Destino confirmado: nodo encontrado por cable o elegido de la lista por
 // radio. Es contexto de la sesión y no lo tumba una edición del formulario;
 // solo lo tumba cambiar de fuente, porque ahí el destino deja de existir.
@@ -2888,6 +3587,10 @@ async function formCargarNodos() {
       fwPorNodo = new Map((d.nodes || [])
         .filter((n) => n.fw_version)
         .map((n) => [Number(n.origin), n.fw_version]));
+      schemasPorNodo = new Map((d.nodes || [])
+        .map((n) => [Number(n.origin), n.schemas || ""]));
+      clasePorNodo = new Map((d.nodes || [])
+        .map((n) => [Number(n.origin), n.class || "C"]));
     }
   } catch (e) { /* sin lista: se omite el aviso de ID en uso */ }
   try {
@@ -2895,6 +3598,52 @@ async function formCargarNodos() {
     if (r.ok) fwGateway = (await r.json()).version || null;
   } catch (e) { /* sin versión del binario: se omite la comparación */ }
   formLive();
+}
+
+// ----- Compatibilidad del schema con el firmware del destino -----
+
+// Devuelve null si el config que genera el visor es compatible con lo que el
+// nodo declara, y si no, un objeto con el aviso y si debe bloquear el envío.
+//
+// Tres respuestas y no dos, porque hay tres situaciones distintas:
+//
+//   el nodo declara y encaja        se envía sin decir nada
+//   el nodo declara y no encaja     se bloquea: se sabe que va a fallar
+//   el nodo no declara              se avisa y se deja pasar
+//
+// El tercer caso es un firmware anterior a v3.7, que no anuncia sus schemas.
+// Bloquear ahí sería castigar por no saber, y además impediría justo lo que
+// haría falta: enviarle una configuración a un nodo viejo.
+function schemaCompat(declarados) {
+  if (!declarados) {
+    return { bloquea: false, texto:
+      `Este nodo no declara qué versiones del config entiende (firmware `
+      + `anterior). El visor genera la ${SCHEMA_GENERADO}; si el nodo no la `
+      + `soporta, la rechazará al aplicarla y revertirá sola en unos minutos.` };
+  }
+  const lista = declarados.split(",").map((x) => x.trim()).filter(Boolean);
+  if (lista.includes(SCHEMA_GENERADO)) return null;
+  return { bloquea: true, texto:
+    `El visor genera el config con schema ${SCHEMA_GENERADO} y este nodo solo `
+    + `entiende ${lista.join(", ")}. Lo rechazaría al aplicarlo. Actualiza `
+    + `antes el firmware del nodo.` };
+}
+
+// Pinta el veredicto donde toca y devuelve si bloquea. El aviso va en la caja
+// del estado de firmware, que es donde el operador ya mira antes de enviar.
+function schemaAviso(declarados) {
+  const est = document.getElementById("f-schema-aviso");
+  const r = schemaCompat(declarados);
+  if (!est) return false;
+  if (r === null) {
+    est.hidden = true;
+    est.textContent = "";
+    return false;
+  }
+  est.hidden = false;
+  est.className = r.bloquea ? "aviso mal" : "aviso ambar";
+  est.textContent = r.texto;
+  return r.bloquea;
 }
 
 // Fija si hay destino confirmado y recalcula el botón de envío. Enviar exige
@@ -2906,7 +3655,13 @@ function formDestino(listo) {
   formDestinoListo = !!listo;
   const enviar = document.getElementById("f-enviar");
   if (!enviar) return;
-  enviar.disabled = !formDestinoListo || fValidate(collectForm()).length > 0;
+  // Dos condiciones para el botón: destino y formulario sin errores. El schema
+  // ya no lo deshabilita, aunque se sigue pintando el aviso al lado: quien
+  // decide es el diálogo de schemaPuerta al pulsar enviar. Un botón apagado no
+  // dice por qué está apagado, y el motivo es justo lo que hay que leer.
+  schemaAviso(schemasDestino);
+  enviar.disabled = !formDestinoListo
+                    || fValidate(collectForm()).length > 0;
 }
 
 function marcarCampo(id, malo) {
@@ -3239,8 +3994,13 @@ function mbDebugValor(d) {
   return ["off", "errors_last", "errors_each", "all_last", "all_each"].includes(d) ? d : "off";
 }
 
+// Schema del config.json que genera este visor. En un solo sitio porque hay
+// que compararlo con lo que el nodo declara soportar, y dos copias que se
+// separan darían un aviso que miente.
+const SCHEMA_GENERADO = "3.3";
+
 function buildConfig(f) {
-  const cfg = { schema_version: "3.3", node: {}, transport: {}, modbus: {} };
+  const cfg = { schema_version: SCHEMA_GENERADO, node: {}, transport: {}, modbus: {} };
   cfg.node.id = fNum(f.node.id, 1);
   cfg.node.type = f.node.type;
   cfg.node.name = f.node.name || "";
@@ -3530,11 +4290,13 @@ async function fLeerLora(aviso) {
 
 // Sigue el envío hasta que termine. El nodo reinicia al aplicar, así que el
 // estado final llega del propio nodo por su CONFIG_RESULT, no de un timeout.
-async function formLoraSeguir(id, T) {
+async function formLoraSeguir(id, T, applyAt = 0) {
   const ETIQ = {
     pending:    "en cola, esperando al gateway",
     sending:    "enviando fragmentos por radio",
-    committing: "fragmentos entregados, aplicando en el nodo",
+    committing: applyAt
+      ? "fragmentos entregados, guardando en el nodo hasta la hora del salto"
+      : "fragmentos entregados, aplicando en el nodo",
   };
   for (let i = 0; i < 240; i++) {         // hasta 4 min, con sondeo de 1 s
     await new Promise((r) => setTimeout(r, 1000));
@@ -3544,10 +4306,20 @@ async function formLoraSeguir(id, T) {
       d = await r.json();
     } catch (e) { continue; }
     if (d.state === "done") {
-      cfgDialogo(T, "Configuración aplicada en el nodo.<pre>"
-                  + (d.detail || "") + "</pre>El nodo reinicia y dispone de "
-                  + "una ventana para volver a registrarse; si no lo consigue, "
-                  + "restaura sola la configuración anterior.", { cerrar: true });
+      // Con cita, el nodo no ha cambiado nada todavía: la ha guardado. Decir
+      // "aplicada" aquí sería mentir en el momento en que más importa saber
+      // exactamente qué ha pasado y qué falta por pasar.
+      cfgDialogo(T, applyAt
+        ? ("Configuración <b>guardada</b> en el nodo, sin aplicar.<pre>"
+           + (d.detail || "") + "</pre>La aplicará el "
+           + new Date(applyAt * 1000).toLocaleString()
+           + ", a la vez que el resto de la red y que el propio gateway. "
+           + "Hasta entonces sigue funcionando con la que tenía, y la "
+           + "operación se puede abortar sin consecuencias.")
+        : ("Configuración aplicada en el nodo.<pre>"
+           + (d.detail || "") + "</pre>El nodo reinicia y dispone de "
+           + "una ventana para volver a registrarse; si no lo consigue, "
+           + "restaura sola la configuración anterior."), { cerrar: true });
       return;
     }
     if (d.state === "failed") {
@@ -3602,6 +4374,10 @@ function formLoraDestino() {
   const origin = Number(sel && sel.value);
   const est = document.getElementById("f-fw-estado");
   formMode = "config";
+  // Los schemas del destino se fijan ANTES de recalcular el botón, porque es
+  // formDestino quien los consulta: al revés decidiría con los del nodo
+  // anterior y el aviso iría siempre un nodo por detrás.
+  schemasDestino = origin ? (schemasPorNodo.get(origin) || "") : "";
   formDestino(!!origin);
   if (!est) return;
   if (!origin) {
@@ -3811,6 +4587,10 @@ function cmpVersionFw(a, b) {
 
 async function formCheckFw(node) {
   const est = document.getElementById("f-fw-estado");
+  // Por cable la lista de schemas llega en el CFG.HELLO, junto a la versión
+  // de firmware. Es el mismo dato que por radio trae el catálogo del
+  // registro, así que la comprobación de abajo es una sola para las dos vías.
+  schemasDestino = node.schemas || "";
   est.hidden = false; formDestino(false);
   const fw = node.fw || "", ver = node.version || "";
   let latest = null;
@@ -4002,6 +4782,11 @@ async function formEnviar() {
   try { JSON.parse(texto); } catch (e) {
     res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
   }
+
+  // Misma puerta que la página de JSON en crudo, y por el mismo motivo. Aquí
+  // la versión sale de la caja, que la regenera el propio asistente.
+  if (!await schemaPuerta(cfgSchemaVersion(texto), schemasDestino)) return;
+
   const T = "Enviar al nodo";
 
   // Fuente LoRa: se encola y lo ejecuta el gateway. Antes se avisa de los
@@ -4036,19 +4821,34 @@ async function formEnviar() {
     // recibe exactamente lo mismo con un 38 % menos de aire y de tiempo.
     const compacto = JSON.stringify(JSON.parse(texto));
 
+    // Cita del cambio coordinado (§17.8). Con una operación programada y su
+    // hora aún por llegar, TODO envío se hace con esa cita, sin preguntar y
+    // sin opción de saltársela: el sentido de la operación es que nadie cambie
+    // antes de tiempo, y un envío inmediato en medio del reparto deja al nodo
+    // hablando solo hasta que le llegue el turno al resto.
+    let applyAt = 0;
+    const mig = await migLeer();
+    if (mig && mig.activa && mig.state === "programada" && mig.faltan_s > 0) {
+      applyAt = mig.apply_at;
+    }
+
     cfgDialogo(T, SPIN + "encolando el envío...");
     try {
       const r = await fetchApi("/api/config/lora/enviar", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ origin, config: compacto }) });
+        body: JSON.stringify({ origin, config: compacto, apply_at: applyAt }) });
       const d = await r.json();
       if (!r.ok) {
         cfgDialogo(T, "No se pudo encolar:<pre>" + (d.error ?? "error") + "</pre>",
                    { cerrar: true });
         return;
       }
-      cfgDialogo(T, SPIN + `en cola: ${d.bytes} B en ${d.fragmentos} fragmentos`);
-      await formLoraSeguir(d.id, T);
+      const cita = applyAt
+        ? `, a aplicar el ${new Date(applyAt * 1000).toLocaleString()}`
+        : "";
+      cfgDialogo(T, SPIN + `en cola: ${d.bytes} B en ${d.fragmentos} fragmentos`
+                 + cita);
+      await formLoraSeguir(d.id, T, applyAt);
     } catch (e) {
       cfgDialogo(T, "Error: " + e.message, { cerrar: true });
     }
@@ -4167,6 +4967,7 @@ document.getElementById("f-fuente").addEventListener("change", async () => {
   document.getElementById("f-leer-aviso").textContent = "";
   const est = document.getElementById("f-fw-estado");
   if (est) est.hidden = true;
+  schemasDestino = "";
   formDestino(false);
   formFuenteCtrls();
   await cfgLocalCerrar();

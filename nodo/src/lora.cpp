@@ -486,6 +486,25 @@ LoraP2P::Status LoraP2P::sendFwStatus(uint16_t seq, uint8_t hop_dst,
                         payload, sizeof(payload));
 }
 
+LoraP2P::Status LoraP2P::sendFwBcastMap(uint16_t seq, uint8_t hop_dst,
+                                        uint32_t xfer_id, uint8_t part,
+                                        uint8_t parts, const uint8_t* bits,
+                                        size_t len) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+    if (len > protocol::kMaxPayloadSecure - 6) return Status::INVALID_ARGS;
+
+    // Payload v4.0 (spec §20.9), 6 bytes de cabecera y el trozo del mapa.
+    uint8_t payload[protocol::kMaxPayloadSecure];
+    std::memcpy(&payload[0], &xfer_id, sizeof(xfer_id));
+    payload[4] = part;
+    payload[5] = parts;
+    std::memcpy(&payload[6], bits, len);
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameFwBcastMap, ttl_,
+                        payload, 6 + len);
+}
+
 LoraP2P::Status LoraP2P::sendFwResult(uint16_t seq, uint8_t hop_dst,
                                       uint32_t xfer_id, uint8_t status,
                                       const char* detail) {
@@ -1018,6 +1037,19 @@ void LoraP2P::handleLine(const char* line) {
         // debe contar como silencio del transmisor. El reintento rápido de
         // abajo vuelve a escribir y a contabilizarse.
         if (psend_no_done_ > 0) psend_no_done_--;
+        // Y cuenta como prueba de vida del transmisor, igual que un DONE.
+        //
+        // Un BUSY significa que el módulo escuchó el canal, lo encontró
+        // ocupado y lo dijo: para responder eso tiene que estar despierto y
+        // con la radio funcionando, que es justo lo que el detector quiere
+        // saber. Sin esto, el criterio por silencio (30 s sin un DONE con
+        // envíos en espera) confunde "el canal está ocupado" con "mi
+        // transmisor está muerto".
+        //
+        // Pasó el 1-ago-2026 durante una subida de firmware: el gateway
+        // llenaba el aire, el CAD del nodo aplazó 32 envíos, y el nodo
+        // reinicializó su radio por creerla muda estando perfectamente bien.
+        last_done_ms_ = millis();
         if (last_tx_len_ > 0 && busy_tries_ < kBusyMaxTries) {
             // La trama sigue en vuelo: el reintento rápido de poll() la
             // reescribe, así que la cola no avanza todavía.
@@ -1168,8 +1200,27 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
             const uint32_t delta = now >= sec_ts ? now - sec_ts : sec_ts - now;
             if (delta > kSecFreshnessWindowS) {
                 rx_stale_++;
-                rx_discarded_++;
-                return;
+
+                // Salida del encierro por reloj desfasado (§14.5). El beacon
+                // rancio se cuenta, y pasados kStaleBeaconResync seguidos se
+                // deja entrar: es la única trama que puede corregir la hora, y
+                // descartarla siempre convierte un reloj desfasado en un nodo
+                // sordo permanente. El razonamiento largo, en protocol.h.
+                if (ft == kFrameBeacon) {
+                    if (stale_beacons_ < 0xFF) stale_beacons_++;
+                    if (stale_beacons_ >= kStaleBeaconResync) {
+                        rx_resync_++;
+                        // No se toca el reloj aquí: la trama sigue su camino
+                        // al ring y la pone en hora quien ya lo hacía, el
+                        // consumidor del beacon. Esto solo levanta el veto.
+                    } else {
+                        rx_discarded_++;
+                        return;
+                    }
+                } else {
+                    rx_discarded_++;
+                    return;
+                }
             }
         }
     }
@@ -1203,6 +1254,11 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
 
     ring_count_++;
     rx_valid_++;
+
+    // Cualquier trama admitida prueba que el reloj cuadra con el de quien la
+    // envió, así que la cuenta de beacons rancios vuelve a cero: el umbral
+    // exige que sean SEGUIDOS y sin nada válido por medio.
+    stale_beacons_ = 0;
 
     // Prueba de que el receptor sigue vivo: reabre la ventana del detector
     // de silencio de RX (fase 2).

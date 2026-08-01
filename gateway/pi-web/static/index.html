@@ -283,10 +283,42 @@
             <p class="aviso" id="fw-lora-riesgo"></p>
             <div class="cfg-fila">
               <button id="fw-lora-enviar" class="btn-primario">Enviar por LoRa</button>
+              <button id="fw-lora-cancelar" hidden>Cancelar subida</button>
               <button id="fw-lora-instalar" hidden>Instalar en el nodo</button>
               <span id="fw-lora-aviso" class="aviso"></span>
             </div>
             <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"></progress>
+          </div>
+        </div>
+
+        <!-- Difusión a toda la red (§20). Va en la misma página que la subida
+             individual porque son el mismo trabajo por dos caminos, y quien
+             busca "cargar firmware" tiene que encontrar los dos. -->
+        <div class="card cfg-card" id="bc-card">
+          <h3>Difundir a toda la red</h3>
+          <p class="aviso">La subida de arriba manda la imagen a <b>un</b> nodo, y
+            cuesta lo mismo por cada uno: con veinte nodos son sesenta y cinco
+            horas de emisión. La difusión la emite <b>una sola vez para todos</b>,
+            algo más de tres horas, y ese tiempo no crece con el número de
+            nodos. Se emiten además unos fragmentos de repuesto que permiten
+            rellenar huecos sin pedirlos, y al terminar cada pasada el gateway
+            pregunta a cada nodo qué le falta y reemite solo eso.
+            <br><br>
+            Llega a los nodos que oyen al gateway <b>directamente</b>. Uno que
+            esté a dos saltos no la recibe, y hay que subirle la imagen por el
+            camino individual. Como aquella, esto no instala nada: la orden de
+            instalar sigue siendo aparte y nodo a nodo.</p>
+          <div class="cfg-fila">
+            <button id="bc-lanzar" class="btn-primario">Difundir a toda la red</button>
+            <button id="bc-cancelar" hidden>Cancelar difusión</button>
+            <span id="bc-aviso" class="aviso"></span>
+          </div>
+          <div id="bc-panel" hidden>
+            <div id="bc-estado" class="mig-estado"></div>
+            <table class="tabla" id="bc-tabla">
+              <thead><tr><th>Nodo</th><th>Recibido</th><th>Faltan</th><th>Último mapa</th></tr></thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -407,6 +439,56 @@
           <div class="cfg-fila">
             <button id="r-guardar" class="btn-primario">Guardar</button>
             <span id="r-resultado" class="aviso"></span>
+          </div>
+        </div>
+
+        <!-- Panel del cambio coordinado (§17.8). Vive junto al formulario a
+             propósito: es el mismo cambio por el camino que no pierde nodos,
+             y separarlo en otra página invitaría a no encontrarlo. -->
+        <div class="card cfg-card" id="mig-card">
+          <h3>Cambio coordinado (red viva)</h3>
+          <p class="aviso">Guardar ahí arriba cambia los parámetros al momento y
+            deja incomunicado a todo nodo que siga con los viejos: es lo
+            correcto en un banco, no en una red desplegada. El cambio
+            coordinado hace lo mismo en cinco pasos sin perder a nadie: se fija
+            una hora de salto, se reparte la configuración nueva a cada nodo
+            (que la guarda sin aplicarla), se comprueba quién la tiene, a esa
+            hora saltan todos a la vez incluido el gateway, y después el
+            gateway vuelve cada pocos minutos a los parámetros viejos unos
+            segundos para recoger a los que se quedaran atrás. Hasta la hora
+            del salto no ha cambiado nada y la operación se puede abortar sin
+            consecuencias.</p>
+
+          <!-- Sin operación en curso: programarla -->
+          <div id="mig-nueva">
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Hora del salto</span><input id="mig-t" type="datetime-local"></label>
+              <label class="cfg-campo"><span>Recuperación: escucha (s)</span><input id="mig-win" type="number" min="5" max="120" value="15"></label>
+              <label class="cfg-campo"><span>Recuperación: cada (s)</span><input id="mig-per" type="number" min="60" max="3600" value="300"></label>
+              <label class="cfg-campo"><span>Recuperación: durante (h)</span><input id="mig-h" type="number" min="1" max="168" value="24"></label>
+            </div>
+            <p class="aviso">Los parámetros de destino son los del formulario de
+              arriba. La hora del salto necesita margen para repartir a todos
+              los nodos: cinco minutos es el mínimo que se acepta, y conviene
+              bastante más si la red es grande.</p>
+            <div class="cfg-fila">
+              <button id="mig-programar" class="btn-primario">Programar cambio coordinado</button>
+              <span id="mig-resultado" class="aviso"></span>
+            </div>
+          </div>
+
+          <!-- Con operación en curso: seguimiento -->
+          <div id="mig-panel" hidden>
+            <div id="mig-estado" class="mig-estado"></div>
+            <table class="tabla" id="mig-tabla">
+              <thead><tr><th>Nodo</th><th>Estado</th><th>Última señal</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="cfg-fila">
+              <button id="mig-abortar">Abortar</button>
+              <button id="mig-cerrar" class="btn-primario">Cerrar operación</button>
+              <span id="mig-resultado2" class="aviso"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -739,6 +821,7 @@
             <span id="f-busqueda-aviso" class="aviso"></span>
           </div>
           <p class="aviso" id="f-fw-estado" hidden></p>
+          <p class="aviso" id="f-schema-aviso" hidden></p>
           <div class="cfg-fila">
             <button id="f-enviar" class="btn-primario" disabled>Enviar al nodo</button>
             <span id="f-envio-aviso" class="aviso"></span>

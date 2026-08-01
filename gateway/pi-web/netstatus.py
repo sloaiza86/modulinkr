@@ -22,9 +22,24 @@ import time
 # fija /etc/modulinkr/gateway.env (GW_HOME/modulinkr_buffer.db).
 DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
 
-# Umbral de "conectado": sin trama en este tiempo, el nodo se considera
-# offline. Debe cubrir varios intervalos de muestreo (banco: 5 s).
+# Suelo del umbral de "conectado". Es un SUELO, no el umbral: el de verdad se
+# mide por nodo (ver _umbral_de).
+#
+# Fijarlo era correcto mientras todos los nodos hablaban cada cinco segundos,
+# que es el ritmo del banco. Con un despliegue real muestreando cada diez
+# minutos, treinta segundos convierten a un nodo perfectamente sano en uno "sin
+# señal" durante 570 de cada 600 segundos. Lo mismo le pasaba al indicador de
+# Modbus, que usa cinco veces este valor.
 ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "30"))
+
+# Cuántos intervalos de muestreo se toleran sin noticias antes de dar a un nodo
+# por desconectado. Tres deja margen para una entrega perdida y su reintento
+# sin declarar caído a quien solo va despacio.
+ONLINE_INTERVALOS = 3.0
+
+# Techo del umbral, por si la medida sale disparatada (un nodo que estuvo días
+# parado y vuelve tiene huecos enormes entre muestras consecutivas).
+ONLINE_MAX_S = 3600.0
 
 # Frescura del latido de estado del servicio (gateway_status). Más corto
 # que ONLINE_S: gobierna el veredicto de "servicio caído". Debe cubrir
@@ -45,6 +60,82 @@ MB_DEBUG_NAMES = {
 
 def _conn() -> sqlite3.Connection:
     return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+
+
+def _schemas_de(catalog_json) -> str:
+    """Saca la lista de schemas del catálogo guardado, tolerando su ausencia.
+
+    El campo llegó en v3.7 y el catálogo se guarda como JSON entero, así que
+    un nodo con firmware anterior deja una fila perfectamente válida sin él.
+    Devolver cadena vacía y no None deja al visor distinguir "no lo declara"
+    de "no soporta ninguno", que son cosas distintas.
+    """
+    if not catalog_json:
+        return ""
+    try:
+        return json.loads(catalog_json).get("schemas", "") or ""
+    except (ValueError, AttributeError):
+        return ""
+
+
+_INTERVALO_CACHE: dict = {}      # origin -> (calculado_en, intervalo_s)
+
+
+def _intervalo_de(conn, origin: int, ahora: float) -> float | None:
+    """Intervalo de muestreo observado de un nodo, en segundos.
+
+    Sale de las diferencias entre los `ts` de sus últimas muestras, con la
+    MEDIANA y no la media: un hueco por una entrega perdida inflaría el
+    promedio y haría creer que el nodo va más lento de lo que va. Es el mismo
+    criterio con el que el gateway dimensiona las ventanas de silencio.
+
+    Se cachea un minuto porque esta consulta corre en cada refresco de la
+    pantalla y el intervalo de un nodo no cambia de un segundo a otro.
+    """
+    hit = _INTERVALO_CACHE.get(origin)
+    if hit and ahora - hit[0] < 60.0:
+        return hit[1]
+    try:
+        filas = conn.execute(
+            """SELECT ts FROM buffer WHERE origin_id = ?
+                ORDER BY ts DESC LIMIT 8""", (origin,)).fetchall()
+    except sqlite3.Error:
+        return None
+    ts = [f[0] for f in filas if f[0]]
+    if len(ts) < 3:
+        return None
+    deltas = sorted(a - b for a, b in zip(ts, ts[1:]) if a > b)
+    if not deltas:
+        return None
+    mediana = deltas[len(deltas) // 2]
+    _INTERVALO_CACHE[origin] = (ahora, float(mediana))
+    return float(mediana)
+
+
+def _umbral_de(conn, origin: int, ahora: float) -> float:
+    """Segundos sin noticias tras los que un nodo se da por desconectado."""
+    intervalo = _intervalo_de(conn, origin, ahora)
+    if intervalo is None:
+        return ONLINE_S
+    return min(ONLINE_MAX_S, max(ONLINE_S, intervalo * ONLINE_INTERVALOS))
+
+
+def _clase_de(catalog_json: str) -> str:
+    """Clase del nodo (frame-format.md §21), 'A' o 'C'.
+
+    Aquí sí se devuelve un valor por defecto y no cadena vacía, al revés que
+    con los schemas, y la diferencia es deliberada. Con los schemas, no
+    declararlos y no soportar ninguno son cosas distintas y hay que poder
+    distinguirlas. Con la clase no: un nodo que no la declara es de firmware
+    anterior a v4.0, y todos esos son nodos alimentados que escuchan siempre.
+    Suponer 'C' ahí no es adivinar, es lo que eran.
+    """
+    if not catalog_json:
+        return "C"
+    try:
+        return json.loads(catalog_json).get("class", "C") or "C"
+    except (ValueError, AttributeError):
+        return "C"
 
 
 def duty_by_origin(window_s: float = 3600.0) -> dict:
@@ -121,7 +212,7 @@ def network_state() -> dict:
         rows = c.execute(
             """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
                       s.snr, s.parent_id, s.hop_count,
-                      k.node_name, k.fw_version,
+                      k.node_name, k.fw_version, k.catalog_json,
                       s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen,
                       s.mb_debug, s.mb_debug_updated
                FROM node_status s
@@ -132,9 +223,20 @@ def network_state() -> dict:
             "origin":     r[0],
             "name":       r[7],
             "fw_version": r[8],
+            # Schemas del config.json que el firmware del nodo sabe cargar
+            # (v3.7). Cadena vacía si el nodo no lo declara, que es el caso de
+            # un firmware anterior: el visor lo distingue de "ninguno".
+            "schemas":    _schemas_de(r[9]),
+            # Clase (v4.0, §21): 'C' escucha siempre, 'A' solo tras hablar.
+            # Decide la latencia de bajada y si la difusión le alcanza.
+            "class":      _clase_de(r[9]),
             "last_seen":  r[1],
             "ago_s":      round(now - r[1], 1),
-            "online":     (now - r[1]) <= ONLINE_S,
+            # El umbral es de ESTE nodo, medido sobre su propio ritmo. Viaja
+            # al visor para que la pantalla juzgue la frescura del dato con el
+            # mismo criterio y no con una constante suya.
+            "online_s":   round(_umbral_de(c, r[0], now), 1),
+            "online":     (now - r[1]) <= _umbral_de(c, r[0], now),
             "last_frame": r[2],
             "rssi":       r[3],
             "snr":        r[4],
@@ -144,19 +246,19 @@ def network_state() -> dict:
             # Estado NB-IoT/MQTT del supernodo (frame-format.md §6): None si
             # el nodo nunca lo reportó (no es supernodo o aún no se oyó su
             # heartbeat con estado). nbiot_ago_s da la frescura del dato.
-            "nbiot_flags": r[9],
-            "nbiot_csq":   r[10],
-            "nbiot_ago_s": None if r[11] is None else round(now - r[11], 1),
+            "nbiot_flags": r[10],
+            "nbiot_csq":   r[11],
+            "nbiot_ago_s": None if r[12] is None else round(now - r[12], 1),
             # Actividad del supernodo en el broker cloud (visto por la
             # suscripción del gateway): fuente primaria del chip NB-IoT/MQTT,
             # más veraz que el heartbeat y sobrevive a la caída del LoRa.
-            "mqtt_ago_s":  None if r[12] is None else round(now - r[12], 1),
+            "mqtt_ago_s":  None if r[13] is None else round(now - r[13], 1),
             # Modo de depuración Modbus vigente en el nodo (NODE_HEALTH, v3.4).
             # None si el nodo aún no ha reportado ninguna. Lo usa la pestaña de
             # tramas Modbus para decir qué modo está activo, incluido `off`.
-            "mb_debug":       r[13],
-            "mb_debug_name":  MB_DEBUG_NAMES.get(r[13]),
-            "mb_debug_ago_s": None if r[14] is None else round(now - r[14], 1),
+            "mb_debug":       r[14],
+            "mb_debug_name":  MB_DEBUG_NAMES.get(r[14]),
+            "mb_debug_ago_s": None if r[15] is None else round(now - r[15], 1),
         }
         for r in rows
     ]
@@ -360,11 +462,16 @@ def last_values(window_s: float = 3600.0) -> dict:
         nb_rows = c.execute(
             "SELECT origin, captured_ts, recv_ts, reads_json FROM nbiot_last"
         ).fetchall()
+        # El umbral es el del nodo, no una constante: con muestreo lento, un
+        # dato de hace dos minutos está fresco, y con muestreo rápido está
+        # viejo. Se resuelve dentro del `with` porque hace falta la conexión.
+        umbrales = {o: _umbral_de(c, o, now) for o, *_ in nb_rows}
     for origin, cap_ts, recv_ts, rj in nb_rows:
-        if rj is None or (now - recv_ts) > ONLINE_S:
+        umbral = umbrales.get(origin, ONLINE_S)
+        if rj is None or (now - recv_ts) > umbral:
             continue  # sin dato NB-IoT, o también vencido
         lora = nodes.get(origin)
-        if lora is not None and lora["ago_s"] <= ONLINE_S:
+        if lora is not None and lora["ago_s"] <= umbral:
             continue  # LoRa fresco: es primario, no se cambia
         vals, sts = _reads_row(rj)
         nodes[origin] = {"origin": origin, "t_last": recv_ts,
@@ -386,5 +493,6 @@ def catalogs() -> list[dict]:
         cat = json.loads(r[3])
         out.append({"origin": r[0], "name": r[1], "fw_version": r[2],
                     "reads": cat.get("reads", []),
-                    "writes": cat.get("writes", [])})
+                    "writes": cat.get("writes", []),
+                    "schemas": cat.get("schemas", "")})
     return out

@@ -37,6 +37,15 @@ bool failf(char* err, size_t err_len, const char* fmt, const char* a) {
     return false;
 }
 
+// Variante de dos cadenas. La usa el rechazo por schema, que necesita nombrar
+// la versión recibida y las que el firmware acepta: ese texto viaja en el
+// CONFIG_RESULT y es lo que se lee en el visor, así que con una sola no basta.
+bool failf2(char* err, size_t err_len, const char* fmt,
+            const char* a, const char* b) {
+    snprintf(err, err_len, fmt, a, b);
+    return false;
+}
+
 // function string a código Modbus. Devuelve 0 si no es de lectura.
 uint8_t readFunctionCode(const char* s) {
     if (strcmp(s, "read_holding_registers") == 0) return 0x03;
@@ -169,6 +178,23 @@ const char* valTypeName(ValType t) {
     return "?";
 }
 
+bool schemaSoportado(const char* schema) {
+    if (schema == nullptr || *schema == '\0') return false;
+    const size_t n = strlen(schema);
+    // Recorre la lista separada por comas comparando elemento a elemento, en
+    // vez de buscar la subcadena: "3.1" está dentro de "13.1x" y una búsqueda
+    // ingenua daría por bueno un schema inventado.
+    for (const char* p = kSchemasSoportados; *p != '\0'; ) {
+        const char* coma = strchr(p, ',');
+        const size_t len = (coma != nullptr) ? static_cast<size_t>(coma - p)
+                                             : strlen(p);
+        if (len == n && strncmp(p, schema, n) == 0) return true;
+        if (coma == nullptr) break;
+        p = coma + 1;
+    }
+    return false;
+}
+
 bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     if (json_text == nullptr || json_text[0] == '\0') {
         return fail(err, err_len, "config vacio");
@@ -180,14 +206,23 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     }
 
     // ----- schema_version (regla 1) -----
-    // 3.3 es la actual; 3.0 a 3.2 se aceptan porque los cambios de
-    // estructura del JSON son opcionales hacia atrás (node-config.md §1:
-    // 3.1 no cambió estructura, 3.2 añadió modbus.debug booleano, 3.3 lo
-    // amplía a un enum aceptando también el booleano).
+    // La lista vive en config.h y es la misma que el nodo anuncia en su
+    // identidad y en el catálogo del registro, para que quien envía un config
+    // pueda comprobarlo antes de gastar el aire.
+    //
+    // Se aceptan varias porque los cambios de estructura del JSON son
+    // opcionales hacia atrás (node-config.md §1: 3.1 no cambió estructura,
+    // 3.2 añadió modbus.debug booleano, 3.3 lo amplía a un enum aceptando
+    // también el booleano).
     const char* schema = doc["schema_version"] | "";
-    if (strcmp(schema, "3.3") != 0 && strcmp(schema, "3.2") != 0 &&
-        strcmp(schema, "3.1") != 0 && strcmp(schema, "3.0") != 0) {
-        return failf(err, err_len, "schema_version '%s' no soportado (se espera 3.x)", schema);
+    if (!schemaSoportado(schema)) {
+        // El mensaje dice las dos versiones porque viaja en el CONFIG_RESULT
+        // y es lo que el operador va a leer en el visor: sin ellas, "no
+        // soportado" obliga a ir a buscar qué firmware tiene el nodo.
+        return failf2(err, err_len,
+                      "schema_version '%s' no soportado; este firmware acepta %s",
+                      (*schema != '\0') ? schema : "(ausente)",
+                      kSchemasSoportados);
     }
 
     // ----- node (reglas 2 y 3) -----
@@ -205,6 +240,18 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
         return fail(err, err_len, "node.type invalido (regla 3)");
     }
     copyStr(c.node_name, sizeof(c.node_name), node["name"] | "(sin nombre)", 32);
+
+    // node.class es opcional y por defecto 'C', que es lo que son todos los
+    // nodos de este despliegue. Ausente no es un error: un config anterior a
+    // v4.0 describe un nodo alimentado igual que uno nuevo.
+    const char* nclass = node["class"] | "C";
+    if (strcmp(nclass, "C") == 0 || strcmp(nclass, "c") == 0) {
+        c.node_class = 'C';
+    } else if (strcmp(nclass, "A") == 0 || strcmp(nclass, "a") == 0) {
+        c.node_class = 'A';
+    } else {
+        return failf(err, err_len, "node.class invalido: '%s' (solo A o C)", nclass);
+    }
 
     // ----- transport.lora -----
     JsonObjectConst lora = doc["transport"]["lora"];

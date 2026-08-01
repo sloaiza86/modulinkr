@@ -118,6 +118,18 @@ bool verify();
 // quien llama. Devuelve el veredicto para el FW_RESULT.
 Result install(uint32_t xfer, const uint8_t sha[32]);
 
+// Adopta una imagen que YA está entera en la partición, escrita por otro
+// transporte (la difusión de §20). Deja este módulo en el mismo estado en que
+// lo dejaría haber recibido la imagen fragmento a fragmento, de modo que
+// verify(), ready(), install() y toda la ventana de prueba funcionan sin
+// cambios y sin duplicar una línea.
+//
+// Existe para que haya DOS caminos de traer los bytes y UNO SOLO de
+// instalarlos: la verificación del sha, el marcado de la partición de
+// arranque, la confirmación y la vuelta atrás son la parte delicada, y tener
+// dos copias de ella sería la forma más segura de que una se quedara vieja.
+bool adoptCompleted(uint32_t xfer, uint32_t total_len, const uint8_t sha[32]);
+
 // Abandona la transferencia en curso y borra el progreso persistente.
 void reset();
 

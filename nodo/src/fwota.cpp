@@ -307,6 +307,28 @@ bool statusDue() {
     return true;
 }
 
+bool adoptCompleted(uint32_t xfer, uint32_t total_len, const uint8_t sha[32]) {
+    if (part_ == nullptr || total_len == 0 || total_len > kMaxImageBytes) {
+        return false;
+    }
+    // Se suelta lo que hubiera a medias por el camino individual: la imagen
+    // que está en la partición es la de la difusión, y cualquier contabilidad
+    // anterior se refiere a bytes que ya no están.
+    free(buf_);
+    buf_ = nullptr;
+    staged_ = 0;
+
+    xfer_    = xfer;
+    total_   = total_len;
+    std::memcpy(sha_, sha, 32);
+    flushed_ = total_len;      // entera en flash, nada pendiente de volcar
+    failed_  = false;
+    ready_   = verify();       // la comprobación del sha decide, no la palabra
+    last_ms_ = millis();
+    saveProgress();
+    return ready_;
+}
+
 bool verify() {
     if (part_ == nullptr || total_ == 0) return false;
 

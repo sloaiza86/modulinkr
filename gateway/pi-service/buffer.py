@@ -171,7 +171,8 @@ class GatewayBuffer:
                 created_ts  REAL    NOT NULL,
                 state       TEXT    NOT NULL DEFAULT 'pending',
                 detail      TEXT,
-                updated_ts  REAL
+                updated_ts  REAL,
+                apply_at    INTEGER NOT NULL DEFAULT 0
             )
         """)
         # Cola de actualizaciones de firmware por LoRa (frame-format.md §18).
@@ -200,7 +201,104 @@ class GatewayBuffer:
                 updated_ts  REAL
             )
         """)
+        # Ventanas de silencio pedidas desde el visor (frame-format.md §19).
+        # Una fila por petición, que el servicio consume y marca. Es el mismo
+        # patrón de encuentro entre los dos procesos que usan config_push y
+        # fw_push: el visor no habla por radio, solo deja la intención.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS quiet_req (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                duration_s  INTEGER NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
+        # Cambio de parámetros de red (C3 del plan, frame-format.md §17.8).
+        #
+        # Una sola operación viva cada vez. La fila guarda los dos perfiles de
+        # radio, el viejo y el nuevo, porque durante la recuperación el gateway
+        # va y viene entre ellos y tiene que poder volver a los viejos aunque
+        # el servicio se haya reiniciado por medio. Por eso vive en la base y
+        # no en memoria: el salto es un instante acordado con toda la malla y
+        # perderlo por un reinicio dejaría al gateway en un mundo y a los nodos
+        # en otro, que es exactamente el desastre que la operación evita.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS net_migration (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                apply_at    INTEGER NOT NULL,   -- T, epoch del salto
+                old_profile TEXT    NOT NULL,   -- JSON, parámetros de partida
+                new_profile TEXT    NOT NULL,   -- JSON, parámetros de destino
+                state       TEXT    NOT NULL DEFAULT 'programada',
+                recov_win_s INTEGER NOT NULL,   -- segundos en los viejos
+                recov_per_s INTEGER NOT NULL,   -- cada cuánto se vuelve
+                recov_until INTEGER NOT NULL,   -- epoch en que deja de alternar
+                created_ts  REAL    NOT NULL,
+                updated_ts  REAL,
+                detail      TEXT
+            )
+        """)
+
+        # Pase de lista de la operación: en qué mundo se ha oído a cada nodo
+        # después del salto. Oído en los nuevos es que migró; oído en los
+        # viejos es un rezagado que hay que recoger; no oído en ninguno es la
+        # tercera respuesta, y es la que hace falta distinguir de las otras dos
+        # para no dar por perdido a un nodo que solo estaba callado.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS net_migration_seen (
+                migration_id INTEGER NOT NULL,
+                node_id      INTEGER NOT NULL,
+                profile      TEXT    NOT NULL,  -- 'nuevo' | 'viejo'
+                ts           REAL    NOT NULL,
+                PRIMARY KEY (migration_id, node_id, profile)
+            )
+        """)
+        # Difusión de firmware (spec §20). Una operación viva cada vez: la
+        # difusión ocupa el aire de toda la red durante horas, y dos a la vez
+        # no es que sea complicado de coordinar, es que no tiene sentido.
+        #
+        # `pass_no` cuenta las pasadas. La primera emite la imagen entera; las
+        # siguientes solo la unión de lo que falta, que es lo que hace que el
+        # coste no dependa del número de nodos.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS fw_bcast (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                xfer       INTEGER NOT NULL,
+                path       TEXT    NOT NULL,
+                version    TEXT    NOT NULL,
+                total_len  INTEGER NOT NULL,
+                sha256     TEXT    NOT NULL,
+                block_k    INTEGER NOT NULL,
+                block_r    INTEGER NOT NULL,
+                state      TEXT    NOT NULL DEFAULT 'offering',
+                pass_no    INTEGER NOT NULL DEFAULT 0,
+                created_ts REAL    NOT NULL,
+                updated_ts REAL,
+                detail     TEXT,
+                target     INTEGER,
+                sent       INTEGER NOT NULL DEFAULT 0,
+                hour_from  INTEGER,
+                hour_to    INTEGER
+            )
+        """)
+
+        # Mapa de cada nodo: qué originales dice tener. Se guarda en crudo
+        # porque es lo que llega por el aire y porque el visor quiere pintar el
+        # porcentaje sin que nadie lo interprete por el camino.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS fw_bcast_map (
+                bcast_id INTEGER NOT NULL,
+                node_id  INTEGER NOT NULL,
+                bits     BLOB    NOT NULL,
+                missing  INTEGER NOT NULL,
+                ts       REAL    NOT NULL,
+                PRIMARY KEY (bcast_id, node_id)
+            )
+        """)
+        self._migrate_fw_bcast_target()
         self._migrate_node_status_nbiot()
+        self._migrate_config_push_apply_at()
         self.conn.commit()
 
     def _migrate_v20_if_needed(self) -> None:
@@ -212,6 +310,31 @@ class GatewayBuffer:
             self.conn.execute(
                 "ALTER TABLE buffer RENAME TO buffer_v20_legacy")
             self.conn.commit()
+
+    def _migrate_fw_bcast_target(self) -> None:
+        """Añade `target` a fw_bcast si falta. NULL significa toda la red, que
+        era lo único que había antes de que el envío a un nodo pasara por este
+        mismo transporte (§20.12)."""
+        cur = self.conn.execute("PRAGMA table_info(fw_bcast)")
+        cols = [row[1] for row in cur.fetchall()]
+        if cols and "target" not in cols:
+            self.conn.execute("ALTER TABLE fw_bcast ADD COLUMN target INTEGER")
+        if cols and "sent" not in cols:
+            self.conn.execute(
+                "ALTER TABLE fw_bcast ADD COLUMN sent INTEGER NOT NULL DEFAULT 0")
+        for col in ("hour_from", "hour_to"):
+            if cols and col not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE fw_bcast ADD COLUMN {col} INTEGER")
+
+    def _migrate_config_push_apply_at(self) -> None:
+        """Añade apply_at a config_push si falta (base anterior a §17.8). El
+        cero por defecto es "ahora", que es el comportamiento de siempre."""
+        cur = self.conn.execute("PRAGMA table_info(config_push)")
+        cols = [row[1] for row in cur.fetchall()]
+        if cols and "apply_at" not in cols:
+            self.conn.execute(
+                "ALTER TABLE config_push ADD COLUMN apply_at INTEGER NOT NULL DEFAULT 0")
 
     def _migrate_node_status_nbiot(self) -> None:
         """Añade las columnas de estado NB-IoT/MQTT a node_status si faltan
@@ -273,12 +396,215 @@ class GatewayBuffer:
         """Siguiente petición pendiente, o None. La toma el servicio del
         gateway; el visor solo inserta y consulta el estado."""
         cur = self.conn.execute(
-            """SELECT id, origin, config FROM config_push
+            """SELECT id, origin, config, apply_at FROM config_push
                 WHERE state = 'pending' ORDER BY id LIMIT 1""")
         row = cur.fetchone()
         if row is None:
             return None
-        return {"id": row[0], "origin": row[1], "config": row[2]}
+        return {"id": row[0], "origin": row[1], "config": row[2],
+                "apply_at": row[3] or 0}
+
+    def telemetry_interval_s(self, muestras: int = 10) -> float | None:
+        """Intervalo de muestreo más corto que se observa en la red.
+
+        No se pregunta a nadie: se mide sobre los `ts` de captura que ya están
+        en el buffer, tomando la mediana de las diferencias de cada nodo y
+        quedándose con el mínimo. La mediana y no la media porque un hueco por
+        una entrega perdida inflaría el promedio y haría creer que hay más
+        margen del que hay.
+
+        Lo necesita la ventana de silencio: el gateway no puede pedir un
+        silencio más largo de lo que aguanta la outbox del nodo que muestrea
+        más deprisa, y el intervalo es el dato que lo determina. Devuelve None
+        si no hay historia suficiente, y entonces quien llame debe ser
+        conservador.
+        """
+        cur = self.conn.execute(
+            "SELECT DISTINCT origin_id FROM buffer")
+        origenes = [r[0] for r in cur.fetchall()]
+        mejor = None
+        for origen in origenes:
+            filas = self.conn.execute(
+                """SELECT ts FROM buffer WHERE origin_id = ?
+                    ORDER BY ts DESC LIMIT ?""", (origen, muestras + 1)
+            ).fetchall()
+            ts = [r[0] for r in filas]
+            if len(ts) < 3:
+                continue
+            deltas = sorted(ts[i] - ts[i + 1] for i in range(len(ts) - 1))
+            deltas = [d for d in deltas if d > 0]
+            if not deltas:
+                continue
+            mediana = deltas[len(deltas) // 2]
+            if mejor is None or mediana < mejor:
+                mejor = mediana
+        return float(mejor) if mejor else None
+
+    # ----- Ventanas de silencio pedidas desde el visor (spec §19) -----
+
+    def quiet_req_next(self) -> dict | None:
+        cur = self.conn.execute(
+            """SELECT id, duration_s FROM quiet_req
+                WHERE state = 'pending' ORDER BY id LIMIT 1""")
+        row = cur.fetchone()
+        return None if row is None else {"id": row[0], "duration_s": row[1]}
+
+    def quiet_req_state(self, req_id: int, state: str,
+                        detail: str | None = None) -> None:
+        self.conn.execute(
+            """UPDATE quiet_req SET state = ?, detail = ?, updated_ts = ?
+                WHERE id = ?""", (state, detail, time.time(), req_id))
+        self.conn.commit()
+
+    # ----- Difusión de firmware (spec §20) -----
+
+    def bcast_active(self) -> dict | None:
+        """La difusión que el emisor tiene que atender, o None.
+
+        `ready` cuenta como terminada aunque la imagen todavía no esté
+        instalada en nadie: significa que ya está entregada, y a partir de ahí
+        manda la orden de instalar, que va nodo a nodo. Sin excluirla aquí, el
+        emisor la recogía otra vez en la vuelta siguiente y reemitía la imagen
+        entera en bucle. Lo encontró la prueba de la máquina de estados.
+        """
+        cur = self.conn.execute(
+            """SELECT id, xfer, path, version, total_len, sha256, block_k,
+                      block_r, state, pass_no, detail, target,
+                      hour_from, hour_to
+                 FROM fw_bcast
+                WHERE state NOT IN ('ready', 'done', 'failed', 'cancelled')
+             ORDER BY id DESC LIMIT 1""")
+        row = cur.fetchone()
+        if row is None:
+            return None
+        campos = ("id", "xfer", "path", "version", "total_len", "sha256",
+                  "block_k", "block_r", "state", "pass_no", "detail", "target",
+                  "hour_from", "hour_to")
+        return dict(zip(campos, row))
+
+    def bcast_state(self, bcast_id: int, state: str,
+                    detail: str | None = None, pass_no: int | None = None) -> None:
+        if pass_no is None:
+            self.conn.execute(
+                """UPDATE fw_bcast SET state = ?, detail = ?, updated_ts = ?
+                    WHERE id = ?""", (state, detail, time.time(), bcast_id))
+        else:
+            self.conn.execute(
+                """UPDATE fw_bcast SET state = ?, detail = ?, pass_no = ?,
+                          updated_ts = ? WHERE id = ?""",
+                (state, detail, pass_no, time.time(), bcast_id))
+        self.conn.commit()
+
+    def bcast_progress(self, bcast_id: int, sent: int) -> None:
+        """Bytes ya emitidos, para que el visor pueda pintar una barra.
+
+        Es lo que el gateway sabe: cuánto ha EMITIDO. Lo que el nodo tiene de
+        verdad no se sabe hasta que se le pregunta al final de cada pasada, y
+        eso es propio de este transporte, no una carencia (§20.12)."""
+        self.conn.execute(
+            "UPDATE fw_bcast SET sent = ?, updated_ts = ? WHERE id = ?",
+            (int(sent), time.time(), int(bcast_id)))
+        self.conn.commit()
+
+    def bcast_map_set(self, bcast_id: int, node_id: int, bits: bytes,
+                      missing: int) -> None:
+        self.conn.execute(
+            """INSERT INTO fw_bcast_map (bcast_id, node_id, bits, missing, ts)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(bcast_id, node_id)
+               DO UPDATE SET bits = excluded.bits, missing = excluded.missing,
+                             ts = excluded.ts""",
+            (int(bcast_id), int(node_id), bits, int(missing), time.time()))
+        self.conn.commit()
+
+    def bcast_maps(self, bcast_id: int) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT node_id, bits, missing, ts FROM fw_bcast_map
+                WHERE bcast_id = ? ORDER BY node_id""", (int(bcast_id),))
+        return [{"node_id": r[0], "bits": r[1], "missing": r[2], "ts": r[3]}
+                for r in cur.fetchall()]
+
+    def bcast_maps_clear(self, bcast_id: int) -> None:
+        """Antes de cada pasada de reparación: los mapas viejos describen un
+        estado anterior, y mezclarlos con los nuevos reemitiría fragmentos que
+        ya han llegado."""
+        self.conn.execute("DELETE FROM fw_bcast_map WHERE bcast_id = ?",
+                          (int(bcast_id),))
+        self.conn.commit()
+
+    # ----- Cambio de parámetros de red (spec §17.8) -----
+
+    def migration_active(self) -> dict | None:
+        """La operación viva, o None. Viva es todo lo que no está cerrado ni
+        abortado: una operación pasada del salto sigue viva mientras dure su
+        ventana de recuperación."""
+        cur = self.conn.execute(
+            """SELECT id, apply_at, old_profile, new_profile, state,
+                      recov_win_s, recov_per_s, recov_until, detail
+                 FROM net_migration
+                WHERE state IN ('programada', 'saltada')
+             ORDER BY id DESC LIMIT 1""")
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0], "apply_at": row[1],
+            "old_profile": json.loads(row[2]), "new_profile": json.loads(row[3]),
+            "state": row[4], "recov_win_s": row[5], "recov_per_s": row[6],
+            "recov_until": row[7], "detail": row[8],
+        }
+
+    def migration_create(self, apply_at: int, old_profile: dict,
+                         new_profile: dict, recov_win_s: int,
+                         recov_per_s: int, recov_until: int) -> int:
+        """Programa una operación. Aborta cualquier otra viva: dos cambios de
+        parámetros solapados no tienen lectura posible, y el último es el que
+        el operador acaba de decidir."""
+        self.conn.execute(
+            """UPDATE net_migration SET state = 'abortada', updated_ts = ?,
+                      detail = 'sustituida por una operación posterior'
+                WHERE state IN ('programada', 'saltada')""", (time.time(),))
+        cur = self.conn.execute(
+            """INSERT INTO net_migration
+                   (apply_at, old_profile, new_profile, state, recov_win_s,
+                    recov_per_s, recov_until, created_ts)
+               VALUES (?, ?, ?, 'programada', ?, ?, ?, ?)""",
+            (int(apply_at), json.dumps(old_profile), json.dumps(new_profile),
+             int(recov_win_s), int(recov_per_s), int(recov_until), time.time()))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def migration_state(self, mig_id: int, state: str,
+                        detail: str | None = None) -> None:
+        self.conn.execute(
+            """UPDATE net_migration SET state = ?, detail = ?, updated_ts = ?
+                WHERE id = ?""", (state, detail, time.time(), mig_id))
+        self.conn.commit()
+
+    def migration_seen(self, mig_id: int, node_id: int, profile: str) -> None:
+        """Anota que se ha oído a un nodo en uno de los dos mundos. Se refresca
+        la marca de tiempo si ya estaba: interesa el último rastro."""
+        self.conn.execute(
+            """INSERT INTO net_migration_seen (migration_id, node_id, profile, ts)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(migration_id, node_id, profile)
+               DO UPDATE SET ts = excluded.ts""",
+            (int(mig_id), int(node_id), profile, time.time()))
+        self.conn.commit()
+
+    def migration_roll(self, mig_id: int) -> list[dict]:
+        """Pase de lista para el visor: por nodo, cuándo se le oyó en cada
+        mundo. Un nodo con rastro en los dos es uno que migró y luego revirtió,
+        o al revés, y esa historia importa tanto como el estado final."""
+        cur = self.conn.execute(
+            """SELECT node_id, profile, ts FROM net_migration_seen
+                WHERE migration_id = ? ORDER BY node_id""", (int(mig_id),))
+        out: dict[int, dict] = {}
+        for node_id, profile, ts in cur.fetchall():
+            e = out.setdefault(int(node_id), {"node_id": int(node_id),
+                                              "nuevo": None, "viejo": None})
+            e[profile] = ts
+        return list(out.values())
 
     # ----- Cola de firmware por LoRa (spec §18) -----
 

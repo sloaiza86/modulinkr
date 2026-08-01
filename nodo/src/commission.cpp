@@ -73,6 +73,10 @@ void handleHello() {
     doc["proto"]      = kProtoVersion;
     doc["fw"]         = g_id.fw_name;
     doc["version"]    = g_id.fw_version;
+    // Qué schemas del config.json sabe cargar este firmware. Lo usa el
+    // asistente del visor para no generar un config que el nodo va a
+    // rechazar, en vez de descubrirlo tras escribirlo y revertirlo.
+    doc["schemas"]    = cfg::kSchemasSoportados;
     doc["configured"] = g_id.configured;
     if (g_id.configured && g_id.config != nullptr) {
         doc["node_id"] = g_id.config->node_id;

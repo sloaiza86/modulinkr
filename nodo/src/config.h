@@ -34,6 +34,25 @@
 
 namespace cfg {
 
+// Versiones del schema del config.json que este firmware sabe cargar
+// (node-config.md §1), separadas por comas y de la más antigua a la más
+// nueva. Es la fuente única: la validación de `load` la recorre, y el nodo
+// la anuncia en su identidad por USB y en el catálogo del registro.
+//
+// Existe porque nadie podía responder "¿este firmware entiende este schema?".
+// El visor generaba un schema fijo y el firmware aceptaba un rango escrito a
+// mano en un `if` encadenado, de modo que funcionaba por coincidencia: al
+// añadir una versión nueva, un config generado por un visor actualizado se
+// enviaba a un nodo viejo, se rechazaba al cargar y la ventana de prueba lo
+// revertía minutos después. Seguro, pero caro y desconcertante. Declarándolo,
+// quien envía puede saberlo antes de gastar el aire.
+constexpr const char* kSchemasSoportados = "3.0,3.1,3.2,3.3";
+
+// true si `schema` está en la lista de arriba. Comparación exacta sobre la
+// cadena separada por comas, sin interpretar números: una versión se soporta
+// o no, y decidirlo por orden invitaría a aceptar futuras sin haberlas visto.
+bool schemaSoportado(const char* schema);
+
 // Capacidades del firmware (no del spec).
 constexpr size_t kMaxDevices     = 4;
 constexpr size_t kMaxReadsPerDev = 8;
@@ -135,6 +154,21 @@ struct Config {
     uint8_t  node_id    = 0;
     bool     super_node = false;
     char     node_name[33] = {0};
+
+    // Clase del nodo (v4.0, frame-format.md §21). Decide CUÁNDO puede
+    // hablarle el gateway, no si el nodo escucha: el receptor está en
+    // recepción continua en los dos casos.
+    //
+    //   'C' (por defecto): se le puede hablar en cualquier momento. Es lo que
+    //       son los nodos alimentados de red, y lo que permite que la bajada
+    //       tarde décimas de segundo y que la difusión le alcance.
+    //   'A': solo se le habla justo después de haberle oído. Reservado para
+    //       un futuro nodo a pilas. HOY NO AHORRA CONSUMO, porque el receptor
+    //       sigue encendido igual; solo cambia la cortesía del gateway.
+    //
+    // El valor viaja en el catálogo del registro para que el gateway no tenga
+    // que suponerlo, igual que la lista de schemas.
+    char     node_class = 'C';
 
     // transport.lora
     char     region[8]  = {0};

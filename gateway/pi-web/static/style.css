@@ -504,3 +504,32 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
   white-space: pre-wrap; word-break: break-all;
 }
+
+/* Panel del cambio coordinado de parámetros de red (§17.8). */
+.mig-estado {
+  display: grid; gap: 0.5rem 1.2rem; margin-bottom: 0.9rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.mig-dato { display: flex; flex-direction: column; gap: 0.15rem; }
+.mig-dato .k { color: var(--dim); font-size: 0.8rem; }
+.mig-dato .v { font-weight: 600; }
+.mig-cuenta { font-variant-numeric: tabular-nums; }
+.mig-perfiles {
+  grid-column: 1 / -1; margin: 0; padding: 0.6rem 0.8rem;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+}
+.tabla { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.tabla th, .tabla td {
+  padding: 0.45rem 0.6rem; text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.tabla th { color: var(--dim); font-weight: 600; }
+.mig-pill {
+  display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px;
+  font-size: 0.8rem; font-weight: 600;
+}
+.mig-pill.migrado  { color: #0a6b3d; background: rgba(10, 107, 61, 0.12); }
+.mig-pill.rezagado { color: #8a5300; background: rgba(138, 83, 0, 0.14); }
+.mig-pill.mudo     { color: var(--dim); background: rgba(127, 127, 127, 0.14); }

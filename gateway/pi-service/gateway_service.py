@@ -89,6 +89,59 @@ LOG = logging.getLogger("modulinkr.gateway")
 # se asume que el Pi arrancó sin NTP y se emite epoch=0 (los nodos lo ignoran).
 MIN_VALID_EPOCH = 1735689600
 
+
+# ----- Reloj de sistema: sincronizado, no solo plausible -----
+#
+# La plausibilidad no basta y costó una red caída el 1-ago-2026. El Pi no lleva
+# reloj de batería: al arrancar restaura la hora del último apagado, que son
+# horas atrás pero perfectamente posteriores a 2025. Con solo el umbral, el
+# gateway repartió esa hora falsa en su primer beacon, un nodo la adoptó, y
+# veinte segundos después el NTP corrigió el Pi doce horas de golpe. A partir
+# de ahí toda trama del gateway llegaba al nodo con un sello de tiempo doce
+# horas por delante y el nodo la descartaba por rancia, incluido el beacon, que
+# era lo único capaz de corregirle la hora. El nodo quedó encerrado hasta que
+# se reinició a mano, y la telemetría de ese rato se publicó fechada doce horas
+# antes.
+#
+# La pregunta correcta no es si la hora es creíble, sino si alguien la está
+# disciplinando. Eso lo responde el kernel: adjtimex(2) con modes=0 devuelve
+# TIME_ERROR mientras el bit STA_UNSYNC esté puesto, que es exactamente lo que
+# lee `timedatectl` en su línea "System clock synchronized". Vale igual con
+# systemd-timesyncd que con chrony, y no depende de ficheros de estado.
+#
+# Sin sincronizar se emite epoch=0 y el sec_ts cae al salt de sesión, que los
+# nodos ya eximen de la comprobación de frescura (§14.4): el mecanismo estaba,
+# solo no se estaba activando en este caso.
+
+_TIME_ERROR = 5      # sys/timex.h: el reloj no está sincronizado
+_libc = None
+
+
+def _clock_synced() -> bool:
+    """True si el kernel considera el reloj disciplinado por NTP.
+
+    Ante cualquier problema para preguntárselo se responde False: emitir
+    epoch=0 de más solo retrasa la hora de los nodos unos segundos, mientras
+    que repartir una hora falsa de menos deja la red encerrada.
+    """
+    global _libc
+    try:
+        if _libc is None:
+            import ctypes
+            import ctypes.util
+            _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
+                                use_errno=True)
+        # struct timex a ceros: modes=0 hace la llamada de solo lectura, que no
+        # exige privilegios. El buffer va holgado a propósito, porque el tamaño
+        # de la estructura cambia entre arquitecturas y el kernel solo escribe
+        # los bytes que le corresponden.
+        import ctypes
+        buf = ctypes.create_string_buffer(512)
+        rc = _libc.adjtimex(buf)
+        return rc >= 0 and rc != _TIME_ERROR
+    except Exception:
+        return False
+
 # Un registro fragmentado que no completa en este plazo se descarta (el nodo
 # reintentará la ronda completa de fragmentos, frame-format.md §13.2).
 REG_REASSEMBLY_TIMEOUT_S = 15.0
@@ -124,6 +177,12 @@ CFG_BURST_MAX = 4
 # principal, que despierta cada 100 ms por el timeout del puerto serie y que
 # solo puede retrasar un envío, nunca adelantarlo.
 CFG_BURST_GUARD_MIN_S = 0.15
+# Margen sobre el reenvío de un relay, cuando el nodo no es vecino directo.
+#
+# El hueco entre dos tramas tiene que cubrir lo que el relay tarda en oír una y
+# en volver a emitirla, que son dos tiempos de aire; esto es lo que se suma por
+# el procesado intermedio. Ver _ritmo_hacia.
+CFG_RELAY_GUARD_S = 0.05
 # Ancho de la ventana de escucha del nodo, contado desde que se le oye y ya
 # descontada la espera de CFG_QUIET_DELAY_S. Conservador frente al intervalo de
 # envío por defecto (5 s): si el despliegue lo bajara, un fragmento tardío
@@ -154,6 +213,71 @@ CFG_GET_MAX_TRIES = 5
 # ----- Actualización de firmware por LoRa (frame-format.md §18) -----
 # Mismo troceado que la configuración: lo que cambia es la escala.
 FW_FRAG_BYTES = 213
+
+# ----- Difusión de firmware (spec §20) -----
+#
+# El margen del anuncio sigue el mismo criterio que el de la ventana de
+# silencio: tiene que recorrer la malla entera antes de que empiece a salir
+# imagen, porque un nodo que se pierda el anuncio no participa en la pasada.
+BCAST_OFFER_LEAD_S  = 30.0
+BCAST_OFFER_EVERY_S = 5.0
+
+# Separación entre fragmentos de difusión. No hay confirmación que esperar, así
+# que el freno de verdad es el presupuesto de aire; este hueco solo evita
+# saturar la UART del Heltec y deja sitio a los ACK de la telemetría.
+BCAST_GAP_S = 0.6
+
+# Espera por el mapa de un nodo. Son dos tramas con su hueco, más el camino de
+# vuelta si va por un relay.
+BCAST_POLL_WAIT_S = 12.0
+
+# A quién se le pregunta: los nodos oídos en la última media hora. Preguntar a
+# uno que lleva días sin aparecer solo gasta el plazo de espera.
+BCAST_NODE_SEEN_S = 1800.0
+
+# Tope de pasadas. Si tras estas quedan huecos, lo que falta se entrega nodo a
+# nodo por el camino de §18: a esas alturas los que faltan son pocos y la
+# difusión ya no ahorra nada.
+BCAST_MAX_PASSES = 6
+
+# Ofertas sin respuesta antes de abandonar, solo cuando va dirigida a un nodo.
+# En difusión no se espera respuesta de nadie, así que no aplica.
+BCAST_OFFER_MAX_TRIES = 6
+
+# Rondas de preguntas antes de dar por perdida una entrega.
+#
+# Preguntar una sola vez y rendirse convierte una trama perdida en una entrega
+# fallida, y con la imagen ya emitida entera eso es tirar horas de aire por un
+# mapa que no llegó. Tres rondas cuestan segundos.
+BCAST_POLL_RONDAS = 3
+
+# Fragmentos que el emisor manda como mucho sin una sola noticia del nodo.
+#
+# El nodo confirma por su cuenta cada FW_STATUS_EVERY fragmentos, así que este
+# tope se pone por encima con margen: pasarlo significa que el nodo lleva rato
+# sin poder hablar, y seguir emitiendo es tirar aire.
+#
+# Medido el 1-ago-2026, y no es un caso raro: el nodo perdió el padre cuatro
+# veces durante una subida, y como el FW_STATUS necesita padre para salir, no
+# tenía forma de pedir el rebobinado. El emisor siguió a ciegas hasta ciento
+# treinta fragmentos, unos 28 kB de aire tirados de una sentada. La pérdida de
+# padre es solo UNA de las razones por las que un nodo puede callarse; este
+# tope protege de todas, incluidas las que todavía no se conocen.
+FW_SIN_NOTICIAS_MAX = 48
+
+# Hueco que se deja tras cada beacon antes de seguir emitiendo a granel.
+#
+# Los nodos repiten el beacon para extender la malla, y repetirlo es
+# transmitir, y transmitir es no oír. Medido el 1-ago-2026: cada racha de
+# huecos de la subida empezaba entre 0,76 y 0,92 s después de un beacon, sin
+# una sola excepción, y en medio estaba siempre el eco del nodo. Un fragmento
+# perdido por beacon, uno cada treinta segundos, y con él los seis o siete que
+# el emisor manda de más antes de enterarse.
+#
+# El gateway sabe exactamente cuándo emite un beacon, así que le basta con
+# apartarse. Medio segundo cada treinta es un 1,7 % del tiempo y evita
+# alrededor de un 10 % de reenvíos.
+BEACON_ECHO_HOLE_S = 0.6
 # Margen de aire que la subida de firmware NO puede tocar, en porcentaje del
 # presupuesto del gateway.
 #
@@ -170,6 +294,29 @@ FW_OFFER_MAX_TRIES = 5
 # generoso porque las pausas son normales: fuera de la ventana horaria o con el
 # presupuesto agotado pueden pasar horas sin mandar nada.
 FW_IDLE_TIMEOUT_S = 7200.0
+
+# ----- Ventana de silencio (frame-format.md §19) -----
+# Margen entre programar la ventana y su comienzo. Da tiempo a que el anuncio
+# recorra la malla, incluidos los nodos a más de un salto, antes de que a nadie
+# le toque callarse: si callaran los cercanos y los lejanos no, se tendría la
+# mitad del coste sin la mitad del beneficio.
+QUIET_LEAD_S = 20.0
+# Cada cuánto se repite el anuncio durante ese margen. No hay confirmación, así
+# que la única defensa contra un anuncio perdido es repetirlo; una trama de
+# 24 B cada pocos segundos es barata.
+QUIET_ANNOUNCE_S = 4.0
+# Tope de una ventana. El mismo criterio que el nodo aplica por su cuenta: ni
+# un error ni un gateway confundido pueden dejar la red muda mucho rato.
+QUIET_MAX_S = 900
+# Muestras que la outbox del nodo puede retener sin pisar ninguna, dejando el
+# margen con el que el propio nodo rompe el silencio (32 de capacidad menos 4
+# de colchón). Multiplicado por el intervalo de muestreo da lo que la red
+# aguanta callada.
+QUIET_OUTBOX_UTILES = 28
+# Intervalo que se supone cuando no hay historia con la que medirlo. Es el del
+# banco, el más rápido plausible: equivocarse por corto solo cuesta repetir la
+# ventana, mientras que equivocarse por largo tira medidas.
+QUIET_INTERVALO_SUPUESTO_S = 5.0
 
 # Formato de la línea de recepción que emite el Heltec.
 RX_RE = re.compile(
@@ -265,7 +412,21 @@ class GatewayService:
         self.cfg_tx: dict | None = None   # transferencia de config en curso
         self.cfg_rx: dict | None = None   # lectura de config en curso
         self.fw_tx: dict | None = None    # subida de firmware en curso
+        self.quiet: dict | None = None    # ventana de silencio programada
+        self.bcast: dict | None = None    # difusión de firmware en curso
+        self.bcast_img: bytes | None = None
         self.mqtt: MqttPublisher | None = None
+
+        # Cambio de parámetros de red (§17.8). `mig` es la operación viva y
+        # `mig_mundo` dice en cuál de los dos juegos de parámetros está la
+        # radio ahora mismo, que durante la recuperación va cambiando.
+        self.mig: dict | None = None
+        self.mig_mundo = "nuevo"
+        self._bcast_inst_chk = 0.0
+
+        # Instante hasta el que no se emite tráfico a granel, para dejar sitio
+        # al eco del beacon (ver BEACON_ECHO_HOLE_S).
+        self.eco_libre_ms = 0.0
 
         # Periodo del drenado del buffer hacia el broker cloud (segundos).
         self.drain_s = float(os.environ.get("MODULINKR_MQTT_DRAIN_S", "2.0"))
@@ -289,6 +450,23 @@ class GatewayService:
         # Salt de sesión para el sec_ts sin hora (spec §14.4): rango
         # [1, SEC_SALT_MAX), regenerado en cada arranque del servicio.
         self.sec_salt = random.randrange(1, protocol.SEC_SALT_MAX)
+
+        # Última respuesta del kernel sobre si el reloj está sincronizado, solo
+        # para anotar el cambio de estado una vez y no en cada beacon.
+        self._clock_synced_prev: bool | None = None
+
+        # Ventana de recuperación del cambio de parámetros de red (§17.8).
+        #
+        # Los quince segundos salen de lo que tarda un rezagado en volver: se
+        # emite un beacon al entrar en los viejos, el nodo lo oye, adopta padre
+        # y se registra, que son un par de segundos con margen de sobra. Los
+        # cinco minutos de periodo salen del otro lado de la balanza: mientras
+        # el gateway escucha en los viejos no oye a los que ya migraron, y un
+        # 5 % del tiempo es una fracción que los reintentos de esos nodos
+        # absorben sin que se pierda una sola medida.
+        self.mig_recov_win_s = int(os.environ.get("MODULINKR_MIG_RECOV_WIN_S", "15"))
+        self.mig_recov_per_s = int(os.environ.get("MODULINKR_MIG_RECOV_PER_S", "300"))
+        self.mig_recov_h     = float(os.environ.get("MODULINKR_MIG_RECOV_H", "24"))
 
         # Periodo del reporte de estadísticas de tráfico (segundos).
         self.stats_s = float(os.environ.get("MODULINKR_STATS_S", "60"))
@@ -356,18 +534,35 @@ class GatewayService:
         self.gw_seq = (self.gw_seq + 1) & 0xFFFF
         return self.gw_seq
 
+    def _clock_ok(self) -> bool:
+        """Reloj utilizable para repartir hora: sincronizado y plausible.
+
+        Las dos condiciones, no una. La sincronización es la que importa (ver
+        _clock_synced arriba); el umbral se conserva porque no cuesta nada y
+        cubre el caso de un NTP que sincronice contra una fuente absurda.
+        """
+        ok = _clock_synced() and int(time.time()) >= MIN_VALID_EPOCH
+        if ok != self._clock_synced_prev:
+            self._clock_synced_prev = ok
+            if ok:
+                LOG.info("reloj sincronizado: se reparte hora a la red (epoch=%d)",
+                         int(time.time()))
+            else:
+                LOG.warning("reloj SIN sincronizar: beacon y WELCOME van con "
+                            "epoch=0 y el sobre con salt, hasta que el NTP "
+                            "cuadre la hora")
+        return ok
+
     def _gw_epoch(self) -> int:
-        """Hora del gateway para beacon y WELCOME. 0 si el reloj de sistema
-        no parece sincronizado por NTP (frame-format.md §7.2 y §13.3)."""
-        now = int(time.time())
-        return now if now >= MIN_VALID_EPOCH else 0
+        """Hora del gateway para beacon y WELCOME. 0 mientras el reloj no esté
+        sincronizado por NTP (frame-format.md §7.2 y §13.3)."""
+        return int(time.time()) if self._clock_ok() else 0
 
     def _gw_sec_ts(self) -> int:
         """sec_ts del sobre v2.2 (spec §14.4): hora del gateway, o el salt
         de sesión si el reloj no está sincronizado (los nodos eximen de
         frescura los sec_ts en rango de salt)."""
-        now = int(time.time())
-        return now if now >= MIN_VALID_EPOCH else self.sec_salt
+        return int(time.time()) if self._clock_ok() else self.sec_salt
 
     def send_beacon(self) -> None:
         seq = self._next_gw_seq()
@@ -376,6 +571,8 @@ class GatewayService:
                                       self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_beacon += 1
+        # Se aparta para que quepa el eco de los nodos sin pisar un fragmento.
+        self.eco_libre_ms = time.monotonic() + BEACON_ECHO_HOLE_S
         LOG.info("beacon seq=%d ttl=%d epoch=%d (total=%d)",
                  seq, self.max_ttl, epoch, self.n_beacon)
 
@@ -394,7 +591,8 @@ class GatewayService:
 
     # ----- Envío de configuración por LoRa (frame-format.md §17) -----
 
-    def config_start(self, push_id: int, origin: int, text: str) -> None:
+    def config_start(self, push_id: int, origin: int, text: str,
+                     apply_at: int = 0) -> None:
         """Prepara una transferencia. El identificador son los 4 primeros
         bytes del sha256, así que dos envíos del mismo contenido comparten
         identificador y el nodo puede reanudar en vez de empezar de cero."""
@@ -416,12 +614,11 @@ class GatewayService:
                               self.sf, self.bw_khz)
         toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
         guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
-        gap_s = toa / 1000.0 + guarda
-        # Cuántos caben de verdad en la ventana de escucha del nodo. Con un
-        # factor de dispersión alto no cabe ni uno entero, y entonces se manda
-        # uno por ventana igualmente: es el único modo de avanzar, y la trama
-        # que se solape con la siguiente emisión del nodo la repara el mapa.
-        burst_max = max(1, min(CFG_BURST_MAX, int(CFG_WINDOW_S / gap_s)))
+        # Cuántos caben de verdad en la ventana de escucha del nodo, y con qué
+        # separación. Con un factor de dispersión alto no cabe ni uno entero, y
+        # entonces se manda uno por ventana igualmente: es el único modo de
+        # avanzar, y la trama que se solape la repara el mapa.
+        gap_s, burst_max, hay_relay = self._ritmo_hacia(origin, toa, guarda)
         self.cfg_tx = {
             "push_id": push_id, "origin": origin,
             "xfer": int.from_bytes(sha[:4], "little"),
@@ -432,13 +629,77 @@ class GatewayService:
             "gap_s": gap_s,
             "burst": 0, "burst_max": burst_max,
             "rounds": 0,
+            # Hora del salto (§17.7). Viaja hasta el COMMIT y no antes: los
+            # fragmentos son el texto y nada más, así que reintentarlos no
+            # arrastra la cita. Cero es "aplicar al recibir", el camino de
+            # siempre.
+            "apply_at": int(apply_at or 0),
         }
         self.buf.config_push_state(push_id, "sending",
                                    f"{len(chunks)} fragmentos, {len(data)} B")
         LOG.info("config-push origin=%d inicio: %d B en %d fragmentos, "
-                 "%.2f s por trama, hasta %d por ventana, xfer=%08X",
-                 origin, len(data), len(chunks), gap_s,
-                 burst_max, self.cfg_tx["xfer"])
+                 "%.2f s por trama, hasta %d por ventana%s, xfer=%08X",
+                 origin, len(data), len(chunks), gap_s, burst_max,
+                 f" (via relay {self._config_hop(origin)})" if hay_relay else "",
+                 self.cfg_tx["xfer"])
+
+    def _clase_de(self, origin: int) -> str:
+        """Clase del nodo (§21), 'A' o 'C'. La declara en su catálogo al
+        registrarse; ante la duda, 'C', que es lo que era todo nodo antes de
+        que el campo existiera y lo que son los nodos alimentados de red."""
+        try:
+            cat = self.buf.catalog_get(origin)
+            return (cat or {}).get("class", "C") or "C"
+        except Exception:                            # noqa: BLE001
+            return "C"
+
+    def _ventana_libre(self, t: dict, now: float) -> bool:
+        """Si se le puede hablar a este nodo AHORA MISMO.
+
+        Aquí está la corrección del 1-ago-2026, y conviene el porqué entero.
+
+        La regla anterior era una sola: transmitir solo dentro de una ventana
+        corta abierta tras oír al nodo. Parecía prudente ("una radio que
+        transmite no recibe") pero confundía dos cosas. El nodo NO deja de
+        escuchar entre sus tramas: su módulo está en recepción continua. Lo que
+        la ventana evitaba era chocar con la trama del propio nodo, y para eso
+        era una herramienta burda, porque restringía al 50 % del tiempo cuando
+        el nodo está libre el 92 %.
+
+        El efecto secundario era grave: convertía la cadencia de SUBIDA del
+        nodo en el techo de la de BAJADA. Con muestreo cada diez minutos, una
+        imagen de medio mega pasaba de horas a días, y un comando de escritura
+        a un Modbus remoto habría tardado diez minutos en salir.
+
+        Ahora la decisión sale de la clase declarada (§21):
+
+          clase C  se le habla cuando haga falta. La latencia de bajada es el
+                   vuelo de una trama.
+          clase A  se mantiene la ventana tras oírle, que es lo único posible
+                   si de verdad no escucha el resto del tiempo.
+        """
+        if self._clase_de(t["origin"]) != "A":
+            return True
+        oido = t.get("heard_ms", 0.0)
+        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+            return False
+        return now <= oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S
+
+    def _hueco_con_jitter(self, gap_s: float) -> float:
+        """Separación entre tramas, con un pequeño desorden.
+
+        El batimiento es real y está medido: el 31-jul-2026, con dos ritmos
+        periódicos enganchados, el MISMO fragmento se perdió tres veces
+        seguidas mientras los demás pasaban a la primera. Dos procesos
+        periódicos que baten producen colisiones repetidas, no aleatorias, y
+        reintentar no ayuda porque el siguiente intento cae en el mismo sitio.
+
+        La respuesta no es adivinar cuándo hablará el nodo sino desordenar el
+        ritmo propio lo justo para que no puedan engancharse. Es lo mismo que
+        hace Ethernet con su espera aleatoria y lo que LoRaWAN obliga en los
+        reintentos. Un 20 % basta: no cuesta apenas aire y rompe el ciclo.
+        """
+        return gap_s * (1.0 + random.random() * 0.2)
 
     def _config_hop(self, origin: int) -> int:
         """Vecino por el que bajar hacia el nodo. El gateway solo conoce el
@@ -449,6 +710,49 @@ class GatewayService:
         except Exception:                            # noqa: BLE001
             return origin
 
+    def _ritmo_hacia(self, origin: int, toa_ms: int,
+                     guarda_s: float) -> tuple[float, int, bool]:
+        """Separación entre tramas y cuántas caben, según haya relay o no.
+
+        Devuelve (separación en segundos, tramas por ventana, hay relay).
+
+        Un relay que está reenviando no puede recibir. Con la separación
+        pensada para un vecino directo, la segunda trama de la ráfaga cae
+        encima del reenvío de la primera:
+
+            gateway manda F1   t=0,00 a 0,38
+            relay reenvia F1   t=0,40 a 0,78
+            gateway manda F2   t=0,53 a 0,91   <- el relay esta transmitiendo
+
+        Se pierde una de cada dos, medido: el doble de tramas al aire para
+        entregar lo mismo.
+
+        La solución no es acortar la ráfaga sino ensanchar el hueco. Si el
+        gateway espera a que el relay termine de reenviar, no se pierde
+        ninguna, y como la ventana se aprovecha mejor sale además más rápido
+        que mandando de una en una. Sobre 2485 fragmentos, medido en
+        simulación con reloj entero:
+
+            burst 4, separación 0,53 s   4957 tramas   31,4 min de aire   1,7 h
+            burst 1, separación 0,53 s   2485 tramas   15,7 min de aire   3,4 h
+            burst 4, separación 0,83 s   2485 tramas   15,7 min de aire   0,9 h
+
+        Es decir, ir por un relay deja de costar nada: mismo aire y mismo
+        tiempo que un vecino directo.
+
+        El hueco que hace falta es el tiempo de aire dos veces, lo que el
+        relay tarda en oír la trama y en volver a emitirla, más un margen.
+
+        Se distingue por la ruta: `hop_for` devuelve el propio nodo cuando es
+        vecino directo del gateway, y el identificador del relay cuando no.
+        """
+        hay_relay = self._config_hop(origin) != origin
+        gap_s = toa_ms / 1000.0 + guarda_s
+        if hay_relay:
+            gap_s = max(gap_s, 2 * toa_ms / 1000.0 + CFG_RELAY_GUARD_S)
+        cabe = max(1, min(CFG_BURST_MAX, int(CFG_WINDOW_S / gap_s)))
+        return gap_s, cabe, hay_relay
+
     def config_tick(self, now: float) -> None:
         """Avanza la transferencia en curso, o arranca la siguiente de la
         cola. Se llama desde el bucle principal, con el puerto ya abierto."""
@@ -457,7 +761,8 @@ class GatewayService:
         if self.cfg_tx is None:
             pend = self.buf.config_push_next()
             if pend is not None:
-                self.config_start(pend["id"], pend["origin"], pend["config"])
+                self.config_start(pend["id"], pend["origin"], pend["config"],
+                                  pend.get("apply_at", 0))
             return
 
         t = self.cfg_tx
@@ -492,12 +797,9 @@ class GatewayService:
 
         if now < t["next_ms"]:
             return
-        # Ventana de silencio: solo se transmite poco después de haber oído
-        # al nodo, que es cuando se sabe que está escuchando. Sin haberlo
-        # oído aún, se espera: el nodo emite cada pocos segundos, así que la
-        # ocasión llega sola.
-        oido = t.get("heard_ms", 0.0)
-        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+        # Cuándo se le puede hablar: lo decide su clase (§21). Con clase C,
+        # siempre. Con clase A, solo en la ventana tras oírle.
+        if not self._ventana_libre(t, now):
             return
         if now > oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S:
             return   # la ventana ya pasó: se espera a la siguiente trama
@@ -552,7 +854,7 @@ class GatewayService:
                  t["burst"], t["burst_max"])
         # No se retira de pendientes al enviarlo: lo retira el mapa del
         # CONFIG_ACK, que es la única prueba de que llegó.
-        t["next_ms"] = now + t["gap_s"]
+        t["next_ms"] = now + self._hueco_con_jitter(t["gap_s"])
         t["sent_all"] = t.get("sent_all", set()) | {idx}
 
     # ----- Lectura del config de un nodo (spec §17.6) -----
@@ -653,6 +955,121 @@ class GatewayService:
                  self.cfg_rx["origin"], state, detail)
         self.cfg_rx = None
 
+    # ----- Ventana de silencio (frame-format.md §19) -----
+
+    def quiet_start(self, duration_s: int, aviso_s: float = QUIET_LEAD_S) -> dict:
+        """Programa una ventana de silencio y empieza a anunciarla.
+
+        La ventana no arranca en el acto: se da un margen para que el anuncio
+        llegue a toda la red, incluidos los nodos a más de un salto, antes de
+        que a nadie le toque callarse. Sin ese margen, los nodos cercanos
+        callarían y los lejanos no, que es la mitad del problema sin la mitad
+        del beneficio.
+        """
+        duration_s = int(duration_s)
+        if not 1 <= duration_s <= QUIET_MAX_S:
+            return {"error": f"duración fuera de 1-{QUIET_MAX_S} s"}
+        if not self._clock_ok():
+            return {"error": "el gateway no tiene hora sincronizada"}
+        ahora = int(time.time())
+
+        # Recorte por lo que aguanta la red, y no por lo que se pide.
+        #
+        # El nodo rompe el silencio si su outbox se llena, que es lo correcto
+        # porque una medida perdida no se recupera. Pero medido en simulación,
+        # esa ruptura no es un goteo: todos los nodos tienen la misma outbox y
+        # ritmos parecidos, así que rompen con diez segundos de diferencia
+        # entre el primero y el último. Una ventana pasada de larga no degrada,
+        # se derrumba (el peor nodo baja del 100 % al 45 % de recepción con
+        # veinte nodos).
+        #
+        # Así que el recorte tiene que estar aquí, en el origen. El intervalo
+        # no se pregunta: se mide sobre los ts que ya están en el buffer. Sin
+        # historia suficiente se asume el más rápido plausible, porque
+        # equivocarse por corto solo cuesta repetir la ventana.
+        intervalo = None
+        if self.buf is not None:
+            try:
+                intervalo = self.buf.telemetry_interval_s()
+            except Exception:                        # noqa: BLE001
+                intervalo = None
+        if intervalo is None:
+            intervalo = QUIET_INTERVALO_SUPUESTO_S
+        tope_red = int(QUIET_OUTBOX_UTILES * intervalo)
+        if duration_s > tope_red:
+            LOG.info("quiet: %d s recortados a %d s, que es lo que aguanta la "
+                     "outbox del nodo que muestrea cada %.0f s",
+                     duration_s, tope_red, intervalo)
+            duration_s = max(1, tope_red)
+
+        self.quiet = {
+            "desde": ahora + int(aviso_s),
+            "dur": duration_s,
+            "next_ms": 0.0,
+            "anuncios": 0,
+        }
+        LOG.info("quiet: ventana de %d s programada para dentro de %.0f s",
+                 duration_s, aviso_s)
+        return {"desde": self.quiet["desde"], "duracion_s": duration_s,
+                "empieza_en_s": int(aviso_s)}
+
+    def quiet_cancel(self) -> None:
+        if self.quiet is not None:
+            LOG.info("quiet: ventana cancelada")
+        self.quiet = None
+
+    def quiet_activa(self, now_epoch: int | None = None) -> bool:
+        """Si el silencio está en curso ahora mismo. Lo consulta el propio
+        gateway para no meter tráfico que no sea el de la difusión."""
+        if self.quiet is None:
+            return False
+        t = int(time.time()) if now_epoch is None else now_epoch
+        return self.quiet["desde"] <= t < self.quiet["desde"] + self.quiet["dur"]
+
+    def quiet_tick(self, now: float) -> None:
+        """Repite el anuncio hasta que la ventana empieza, y la retira al
+        terminar.
+
+        Se repite porque no hay confirmación: un nodo que no oyó el anuncio
+        transmitirá igual y estropeará la difusión para sus vecinos. Repetirlo
+        cada pocos segundos durante el margen previo es barato (una trama de
+        24 B) y sube mucho la probabilidad de que lleguen todos.
+        """
+        # Peticiones del visor. Solo se atienden sin ventana en curso: dos
+        # silencios solapados no significan nada, y encadenarlos sin querer
+        # dejaría la red muda más de lo pedido.
+        if self.quiet is None and self.buf is not None:
+            pend = self.buf.quiet_req_next()
+            if pend is not None:
+                r = self.quiet_start(pend["duration_s"])
+                if "error" in r:
+                    self.buf.quiet_req_state(pend["id"], "failed", r["error"])
+                else:
+                    self.buf.quiet_req_state(
+                        pend["id"], "running",
+                        f"{r['duracion_s']} s, empieza en {r['empieza_en_s']} s")
+
+        if self.quiet is None:
+            return
+        t = int(time.time())
+        fin = self.quiet["desde"] + self.quiet["dur"]
+        if t >= fin:
+            LOG.info("quiet: ventana terminada tras %d anuncios",
+                     self.quiet["anuncios"])
+            self.quiet = None
+            return
+        if t >= self.quiet["desde"]:
+            return                      # ya empezó: no se anuncia más
+        if now < self.quiet["next_ms"]:
+            return
+
+        frame = protocol.build_quiet(
+            self.quiet["desde"], self.quiet["dur"], self._next_gw_seq(),
+            self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts())
+        self._tx(frame)
+        self.quiet["anuncios"] += 1
+        self.quiet["next_ms"] = now + QUIET_ANNOUNCE_S
+
     # ----- Subida de firmware por LoRa (frame-format.md §18) -----
 
     def fw_start(self, row: dict) -> bool:
@@ -687,7 +1104,8 @@ class GatewayService:
                               self.sf, self.bw_khz)
         toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
         guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
-        gap_s = toa / 1000.0 + guarda
+        gap_s, burst_max, hay_relay = self._ritmo_hacia(
+            row["origin"], toa, guarda)
 
         self.fw_tx = {
             "push_id": row["id"], "origin": row["origin"],
@@ -711,7 +1129,7 @@ class GatewayService:
                       "ready": "ready", "install_req": "ready",
                       "installing": "installing"}[row["state"]],
             "toa_ms": toa, "gap_s": gap_s,
-            "burst_max": max(1, min(CFG_BURST_MAX, int(CFG_WINDOW_S / gap_s))),
+            "burst_max": burst_max,
             "burst": 0, "burst_at": -1e9,
             "next_ms": 0.0, "tries": 0, "last_news": time.monotonic(),
             "duty_avisado": False, "fuera_avisado": False,
@@ -724,9 +1142,11 @@ class GatewayService:
                                    f"{row['version']}, {row['total_len']} B, "
                                    f"desde {row['written']} B")
         LOG.info("fw-push origin=%d %s: %d B, retomando en %d B, "
-                 "%.2f s por trama, hasta %d por ventana, xfer=%08X",
+                 "%.2f s por trama, hasta %d por ventana%s, xfer=%08X",
                  row["origin"], row["version"], row["total_len"],
-                 row["written"], gap_s, self.fw_tx["burst_max"],
+                 row["written"], gap_s, burst_max,
+                 f" (via relay {self._config_hop(row['origin'])})"
+                 if hay_relay else "",
                  self.fw_tx["xfer"])
         return True
 
@@ -742,6 +1162,446 @@ class GatewayService:
             return True
         h = time.localtime().tm_hour
         return desde <= h < hasta if desde < hasta else (h >= desde or h < hasta)
+
+    # ----- Difusión de firmware (spec §20) -----
+    #
+    # La máquina tiene cuatro estados y el orden importa:
+    #
+    #   offering   se anuncia repetido durante un margen, para que el anuncio
+    #              recorra la malla antes de que empiece a salir imagen.
+    #   sending    se emite bloque a bloque: K originales y luego R mezclas.
+    #   polling    se pregunta a cada nodo, de uno en uno, qué le falta.
+    #   repairing  se reemite la unión de los huecos, y se vuelve a preguntar.
+    #
+    # De polling se sale a repairing si falta algo, o a done si no. El bucle
+    # entre los dos es lo que garantiza que la transferencia termina, porque
+    # ninguna cantidad de corrección lo garantiza por sí sola (§20.5).
+
+    def bcast_start(self, op: dict, now: float) -> None:
+        try:
+            with open(op["path"], "rb") as fh:
+                self.bcast_img = fh.read()
+        except OSError as e:
+            self.buf.bcast_state(op["id"], "failed", f"no se pudo leer: {e}")
+            return
+        if len(self.bcast_img) != op["total_len"]:
+            self.buf.bcast_state(op["id"], "failed", "el binario cambió de tamaño")
+            self.bcast_img = None
+            return
+
+        F = protocol.BCAST_FRAG_BYTES
+        n_orig = (op["total_len"] + F - 1) // F
+        destino = op.get("target")
+        self.bcast = {
+            "op": op,
+            # A quién va. None es toda la red; un identificador, a ese nodo.
+            "dest": destino if destino else protocol.ADDR_BROADCAST,
+            "hop":  self._config_hop(destino) if destino else protocol.ADDR_BROADCAST,
+            # Con destino concreto se espera su aceptación antes de emitir
+            # medio mega: es la misma cautela de §18.1, y ahora el nodo puede
+            # contestar porque todavía no ha empezado la avalancha.
+            "acept": destino is None,
+            "ofertas": 0,
+            "n_orig": n_orig,
+            "n_blocks": (n_orig + op["block_k"] - 1) // op["block_k"],
+            "toa_ms": protocol.toa_ms(protocol.OVERHEAD + 6 + F,
+                                      self.sf, self.bw_khz),
+            "cola": [],          # índices por emitir en esta pasada
+            "next_ms": 0.0,
+            "hasta": now + BCAST_OFFER_LEAD_S,
+            "poll": [],          # nodos por preguntar
+            "poll_hasta": 0.0,
+        }
+        # Primera pasada: la imagen entera, originales y mezclas, en el orden
+        # en que el nodo los espera (bloque a bloque, para que solo tenga que
+        # tener abierto uno cada vez).
+        self.bcast["cola"] = self._bcast_cola_completa()
+        self.buf.bcast_state(op["id"], "offering",
+                             f"anunciando durante {BCAST_OFFER_LEAD_S:.0f} s")
+        LOG.info("fw-bcast %d: %s, %d B, %d originales en %d bloques",
+                 op["id"], op["version"], op["total_len"], n_orig,
+                 self.bcast["n_blocks"])
+
+    def _bcast_cola_completa(self) -> list:
+        b = self.bcast
+        op, n = b["op"], b["n_orig"]
+        K, R = op["block_k"], op["block_r"]
+        cola = []
+        for blk in range(b["n_blocks"]):
+            for j in range(K):
+                i = blk * K + j
+                if i < n:
+                    cola.append(i)
+            for p in range(R):
+                cola.append(n + blk * R + p)
+        return cola
+
+    def _bcast_payload(self, index: int) -> bytes:
+        """Los bytes del fragmento `index`, original o mezcla."""
+        b = self.bcast
+        op, n, F = b["op"], b["n_orig"], protocol.BCAST_FRAG_BYTES
+        if index < n:
+            return self.bcast_img[index * F:(index + 1) * F]
+        p = index - n
+        blk, pi = p // op["block_r"], p % op["block_r"]
+        # Las mezclas de un bloque se calculan una vez y se guardan mientras
+        # ese bloque se emite: recalcularlas por fragmento serían 128 XOR de
+        # 212 bytes por trama, y el Pi Zero no va sobrado.
+        if b.get("par_blk") != blk:
+            b["par_blk"] = blk
+            b["par"] = protocol.bcast_parity(self.bcast_img, blk, op["xfer"],
+                                             op["block_k"], op["block_r"])
+        return b["par"][pi]
+
+    def bcast_tick(self, now: float) -> None:
+        if self.buf is None:
+            return
+        if self.bcast is None:
+            op = self.buf.bcast_active()
+            if op is not None:
+                self.bcast_start(op, now)
+            return
+
+        b   = self.bcast
+        op  = b["op"]
+
+        # Ventana horaria, lo primero: estar fuera de ella no es un fallo sino
+        # el estado normal durante el día. Es la misma regla y la misma función
+        # que usaba el transporte de §18, porque la decisión de CUÁNDO emitir
+        # no depende de CÓMO se emite.
+        if not self._fw_en_ventana(op):
+            if not b.get("fuera_avisado"):
+                b["fuera_avisado"] = True
+                LOG.info("fw-bcast %d en pausa: fuera de la ventana de "
+                         "%02d:00 a %02d:00", op["id"],
+                         op["hour_from"], op["hour_to"])
+                self.buf.bcast_state(
+                    op["id"], op["state"],
+                    f"esperando a la ventana de {op['hour_from']:02d}:00 "
+                    f"a {op['hour_to']:02d}:00")
+            return
+        if b.get("fuera_avisado"):
+            b["fuera_avisado"] = False
+            LOG.info("fw-bcast %d: dentro de la ventana, se reanuda", op["id"])
+
+        # Cancelación desde el visor. El visor no habla por radio: escribe el
+        # estado en la base, así que hay que ir a mirarlo. Cada pocos segundos
+        # basta, porque lo que se corta son horas de emisión.
+        if now - b.get("chk", 0.0) >= 5.0:
+            b["chk"] = now
+            try:
+                fila = self.buf.conn.execute(
+                    "SELECT state FROM fw_bcast WHERE id = ?",
+                    (op["id"],)).fetchone()
+            except sqlite3.Error:
+                fila = None
+            if fila is not None and fila[0] == "cancelled":
+                LOG.info("fw-bcast %d: cancelada desde el visor", op["id"])
+                self.bcast = None
+                self.bcast_img = None
+                return
+
+        est = op["state"]
+
+        if est == "offering":
+            # Dos formas de terminar el anuncio, según a quién vaya.
+            #
+            # A toda la red: se repite durante un margen y se empieza al
+            # vencer, porque nadie contesta y la única defensa contra un
+            # anuncio perdido es repetirlo mientras recorre la malla.
+            #
+            # A un nodo concreto: se repite hasta que ESE nodo acepta, y se
+            # empieza en cuanto lo hace. Esperar el margen no aportaría nada,
+            # porque ya se sabe que el destinatario está escuchando, y emitir
+            # antes de su respuesta podría ser medio mega a un nodo que la va
+            # a rechazar por tener ya esa versión.
+            dirigida = b["dest"] != protocol.ADDR_BROADCAST
+
+            if dirigida and b["acept"]:
+                listo = True
+            elif dirigida:
+                if b["ofertas"] >= BCAST_OFFER_MAX_TRIES:
+                    self.buf.bcast_state(op["id"], "failed",
+                                         f"el nodo {b['dest']} no respondió a "
+                                         f"{BCAST_OFFER_MAX_TRIES} ofertas")
+                    self.bcast = None
+                    self.bcast_img = None
+                    return
+                listo = False
+            else:
+                listo = now >= b["hasta"]
+
+            if listo:
+                op["state"] = "sending"
+                self.buf.bcast_state(op["id"], "sending",
+                                     f"pasada {op['pass_no'] + 1}")
+                return
+
+            if now < b["next_ms"]:
+                return
+            b["next_ms"] = now + BCAST_OFFER_EVERY_S
+            b["ofertas"] += 1
+            self._tx(protocol.build_fw_bcast_offer(
+                op["xfer"], op["total_len"], bytes.fromhex(op["sha256"]),
+                op["version"], self._next_gw_seq(), self.net_id, self.max_ttl,
+                self.sec_key, self._gw_sec_ts(),
+                op["block_k"], op["block_r"], b["dest"], b["hop"]))
+            return
+
+        if est in ("sending", "repairing"):
+            if not b["cola"]:
+                # Pasada terminada: toca preguntar. Se limpian los mapas de la
+                # pasada anterior, que describen un estado ya viejo.
+                self.buf.bcast_maps_clear(op["id"])
+                b["poll"] = ([op["target"]] if op.get("target")
+                             else self._bcast_nodos())
+                b["poll_hasta"] = 0.0
+                op["state"] = "polling"
+                self.buf.bcast_state(op["id"], "polling",
+                                     f"preguntando a {len(b['poll'])} nodo(s)")
+                return
+            if now < b["next_ms"]:
+                return
+            # Reserva de presupuesto igual que la subida individual: la
+            # difusión es tráfico a granel y cede ante beacon, ACK y WELCOME.
+            reserva = self.duty.limit_ms * FW_RESERVE_PCT
+            if not self.duty.fits(now, b["toa_ms"], headroom_ms=reserva):
+                b["next_ms"] = now + 1.0
+                return
+            if now < self.eco_libre_ms:
+                return      # hueco del eco del beacon
+            index = b["cola"].pop(0)
+            self._tx(protocol.build_fw_bcast_data(
+                op["xfer"], index, self._bcast_payload(index),
+                self._next_gw_seq(), self.net_id, self.max_ttl,
+                self.sec_key, self._gw_sec_ts(), b["dest"], b["hop"]))
+            # Separación mínima entre tramas de difusión. No espera confirmación
+            # de nadie, así que el único freno es el presupuesto de aire y este
+            # hueco, que existe para no saturar la UART del Heltec.
+            b["next_ms"] = now + BCAST_GAP_S
+            b["hechos"] = b.get("hechos", 0) + 1
+            if b["hechos"] % 32 == 0:
+                self.buf.bcast_progress(
+                    op["id"], min(op["total_len"],
+                                  b["hechos"] * protocol.BCAST_FRAG_BYTES))
+            return
+
+        if est == "polling":
+            if b["poll"] and now >= b["poll_hasta"]:
+                nodo = b["poll"].pop(0)
+                self._tx(protocol.build_fw_bcast_poll(
+                    nodo, self._config_hop(nodo), op["xfer"],
+                    self._next_gw_seq(), self.net_id, self.max_ttl,
+                    self.sec_key, self._gw_sec_ts()))
+                b["poll_hasta"] = now + BCAST_POLL_WAIT_S
+                return
+            if b["poll"] or now < b["poll_hasta"]:
+                return
+            self._bcast_cerrar_pasada(now)
+            return
+
+    def _bcast_nodos(self) -> list:
+        """A quién se le pregunta: los nodos vistos por radio últimamente."""
+        try:
+            filas = self.buf.conn.execute(
+                """SELECT origin FROM node_status
+                    WHERE origin BETWEEN 1 AND 254
+                      AND last_seen > ? ORDER BY origin""",
+                (time.time() - BCAST_NODE_SEEN_S,)).fetchall()
+            return [int(f[0]) for f in filas]
+        except sqlite3.Error:
+            return []
+
+    def _bcast_cerrar_pasada(self, now: float) -> None:
+        """Junta los mapas y decide: reemitir la unión, o dar por terminado."""
+        b, op = self.bcast, self.bcast["op"]
+        mapas = self.buf.bcast_maps(op["id"])
+        n = b["n_orig"]
+        union = set()
+        for m in mapas:
+            bits = m["bits"]
+            for i in range(n):
+                if i >> 3 >= len(bits) or not ((bits[i >> 3] >> (i & 7)) & 1):
+                    union.add(i)
+
+        pase = op["pass_no"] + 1
+        if not mapas:
+            # Nadie ha contestado. Antes de dar por perdida una imagen que ya
+            # está emitida entera, se vuelve a preguntar: lo que falta puede ser
+            # solo la trama del mapa, no la entrega.
+            b["rondas"] = b.get("rondas", 0) + 1
+            if b["rondas"] < BCAST_POLL_RONDAS:
+                LOG.info("fw-bcast %d: sin respuesta al mapa, ronda %d de %d",
+                         op["id"], b["rondas"] + 1, BCAST_POLL_RONDAS)
+                b["poll"] = ([op["target"]] if op.get("target")
+                             else self._bcast_nodos())
+                b["poll_hasta"] = 0.0
+                return
+            self.buf.bcast_state(op["id"], "failed",
+                                 f"ningún nodo respondió al mapa tras "
+                                 f"{BCAST_POLL_RONDAS} rondas")
+            self.bcast = None
+            self.bcast_img = None
+            LOG.warning("fw-bcast %d: nadie respondio, abandonada", op["id"])
+            return
+        b["rondas"] = 0
+        self.buf.bcast_progress(op["id"], op["total_len"])
+        if not union:
+            self.buf.bcast_state(op["id"], "ready",
+                                 f"{len(mapas)} nodo(s) con la imagen completa",
+                                 pass_no=pase)
+            self.bcast = None
+            self.bcast_img = None
+            LOG.info("fw-bcast %d: completa en %d nodo(s) tras %d pasada(s)",
+                     op["id"], len(mapas), pase)
+            return
+        if pase >= BCAST_MAX_PASSES:
+            self.buf.bcast_state(
+                op["id"], "ready",
+                f"{len(union)} fragmento(s) sin entregar tras {pase} pasadas; "
+                f"los nodos incompletos necesitan entrega individual",
+                pass_no=pase)
+            self.bcast = None
+            self.bcast_img = None
+            return
+
+        # Reparación: solo originales. Una mezcla perdida no se echa de menos,
+        # se sustituye por el original que iba a rellenar (§20.9).
+        b["cola"] = sorted(union)
+        b["next_ms"] = 0.0
+        op["pass_no"] = pase
+        op["state"] = "repairing"
+        self.buf.bcast_state(op["id"], "repairing",
+                             f"pasada {pase + 1}: {len(union)} fragmento(s)",
+                             pass_no=pase)
+        LOG.info("fw-bcast %d: faltan %d fragmentos entre %d nodo(s), se "
+                 "reemite la union", op["id"], len(union), len(mapas))
+
+    def bcast_install_tick(self, now: float) -> None:
+        """Atiende la orden de instalar de un envío dirigido (§20.12).
+
+        La orden viaja por la tabla, como en §18: el visor no habla por radio.
+        Y la trama es la misma FW_INSTALL, porque instalar es instalar venga la
+        imagen por donde venga: dos transportes, un solo camino de instalación.
+        """
+        if self.buf is None:
+            return
+        if now - self._bcast_inst_chk < 2.0:
+            return
+        self._bcast_inst_chk = now
+        try:
+            fila = self.buf.conn.execute(
+                """SELECT id, xfer, sha256, target FROM fw_bcast
+                    WHERE state = 'install_req' AND target IS NOT NULL
+                 ORDER BY id DESC LIMIT 1""").fetchone()
+        except sqlite3.Error:
+            return
+        if fila is None:
+            return
+        bid, xfer, sha_hex, destino = fila
+        self._tx(protocol.build_fw_install(
+            destino, self._config_hop(destino), xfer, bytes.fromhex(sha_hex),
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts()))
+        self.buf.bcast_state(bid, "installing", "orden enviada al nodo")
+        LOG.info("fw-bcast %d: orden de instalar al nodo %d (xfer=%08X)",
+                 bid, destino, xfer)
+
+    def bcast_on_result(self, parsed: dict) -> bool:
+        """Veredicto tras instalar una imagen entregada por este transporte."""
+        if self.buf is None:
+            return False
+        try:
+            fila = self.buf.conn.execute(
+                """SELECT id, target FROM fw_bcast
+                    WHERE state = 'installing' AND xfer = ? AND target = ?
+                 ORDER BY id DESC LIMIT 1""",
+                (parsed.get("fw_xfer"), parsed["origin_id"])).fetchone()
+        except sqlite3.Error:
+            return False
+        if fila is None:
+            return False
+        bid = fila[0]
+        detalle = parsed.get("fw_detail") or ""
+        if parsed.get("fw_status") == protocol.FW_INSTALLING:
+            # Aviso previo al reinicio, no veredicto: la operación sigue viva
+            # esperando lo que diga el nodo cuando vuelva a arrancar.
+            LOG.info("fw-bcast %d: el nodo %d va a reiniciar para instalar",
+                     bid, parsed["origin_id"])
+            return True
+        ok = parsed.get("fw_status") == protocol.FW_CONFIRMED
+        self.buf.bcast_state(bid, "done" if ok else "failed",
+                             f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
+        LOG.info("fw-bcast %d: veredicto del nodo %d: %s",
+                 bid, parsed["origin_id"], detalle or "sin detalle")
+        return True
+
+    def bcast_on_status(self, parsed: dict) -> bool:
+        """Respuesta del nodo a una oferta dirigida (§20.12).
+
+        Devuelve si la trama era para esta operación, para que el llamante
+        sepa si dársela también al transporte secuencial de §18.
+        """
+        b = self.bcast
+        if b is None or b["dest"] == protocol.ADDR_BROADCAST:
+            return False
+        if parsed.get("fw_xfer") != b["op"]["xfer"]:
+            return False
+        if parsed["origin_id"] != b["dest"]:
+            return False
+
+        estado = parsed["fw_state"]
+        if estado == protocol.FW_REJECTED:
+            self.buf.bcast_state(b["op"]["id"], "failed",
+                                 f"el nodo {b['dest']} rechazó la imagen")
+            LOG.info("fw-bcast %d: el nodo %d rechazo la oferta",
+                     b["op"]["id"], b["dest"])
+            self.bcast = None
+            self.bcast_img = None
+            return True
+        if estado == protocol.FW_ERROR:
+            self.buf.bcast_state(b["op"]["id"], "failed",
+                                 f"el nodo {b['dest']} no pudo prepararse")
+            self.bcast = None
+            self.bcast_img = None
+            return True
+
+        if not b["acept"]:
+            b["acept"] = True
+            LOG.info("fw-bcast %d: el nodo %d acepta, empezando",
+                     b["op"]["id"], b["dest"])
+        return True
+
+    def bcast_on_map(self, parsed: dict) -> None:
+        """Un trozo del mapa de un nodo (§20.9)."""
+        if self.bcast is None or self.buf is None:
+            return
+        p = parsed["payload"]
+        if len(p) < 7:
+            return
+        xfer = int.from_bytes(p[0:4], "little")
+        if xfer != self.bcast["op"]["xfer"]:
+            return
+        part, parts, bits = p[4], p[5], bytes(p[6:])
+        origen = parsed["origin_id"]
+
+        trozos = self.bcast.setdefault("mapa_rx", {}).setdefault(origen, {})
+        trozos[part] = bits
+        if len(trozos) < parts:
+            return
+
+        completo = b"".join(trozos[i] for i in sorted(trozos))
+        n = self.bcast["n_orig"]
+        faltan = sum(1 for i in range(n)
+                     if i >> 3 >= len(completo)
+                     or not ((completo[i >> 3] >> (i & 7)) & 1))
+        self.buf.bcast_map_set(self.bcast["op"]["id"], origen, completo, faltan)
+        del self.bcast["mapa_rx"][origen]
+        LOG.info("fw-bcast mapa de origen=%d: faltan %d de %d",
+                 origen, faltan, n)
+        # Contestó antes de que venciera su espera: se pasa al siguiente sin
+        # gastar el resto del plazo, que con veinte nodos son minutos.
+        self.bcast["poll_hasta"] = 0.0
 
     def fw_tick(self, now: float) -> None:
         """Avanza la subida en curso, o arranca la siguiente de la cola."""
@@ -760,6 +1620,19 @@ class GatewayService:
         if now - t["last_news"] > FW_IDLE_TIMEOUT_S:
             self.fw_finish("failed", "el nodo dejó de responder")
             return
+
+        # Cancelación desde el visor. Como la orden de instalar, viaja por la
+        # tabla y no por una llamada: los dos procesos no se hablan. Se mira
+        # cada pocos segundos y no en cada vuelta, porque lo que se corta son
+        # horas de emisión y un segundo de más no cambia nada.
+        if now - t.get("chk", 0.0) >= 5.0:
+            t["chk"] = now
+            if self.buf.fw_push_state_of(t["push_id"]) == "cancelled":
+                LOG.info("fw-push origin=%d cancelada desde el visor, "
+                         "%d B quedan escritos en el nodo",
+                         t["origin"], t["written"])
+                self.fw_tx = None
+                return
 
         # Imagen arriba: se espera a que el operador pida instalar desde el
         # visor, que lo deja anotado en la tabla. El sondeo es de un segundo
@@ -810,6 +1683,21 @@ class GatewayService:
             return
 
         # Envío de trozos.
+        # Emitir a ciegas es tirar aire. Si el nodo lleva demasiados fragmentos
+        # sin decir nada, se espera a que hable en vez de seguir llenando el
+        # aire de tramas que quizá esté descartando (ver FW_SIN_NOTICIAS_MAX).
+        if now < self.eco_libre_ms:
+            return          # hueco del eco del beacon
+
+        if t.get("mudos", 0) >= FW_SIN_NOTICIAS_MAX:
+            if not t.get("mudo_avisado"):
+                t["mudo_avisado"] = True
+                LOG.info("fw-push origin=%d en pausa: %d fragmentos sin "
+                         "noticias del nodo, se espera a que hable",
+                         t["origin"], t["mudos"])
+            t["next_ms"] = now + 2.0
+            return
+
         if not self._fw_ventana_nodo(t, now):
             return
 
@@ -848,16 +1736,26 @@ class GatewayService:
             self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         t["burst"] += 1
+        t["mudos"] = t.get("mudos", 0) + 1
         # El cursor avanza al enviar, no al confirmar: con entrega secuencial
         # una pérdida la delata el propio nodo con un FW_STATUS de hueco, y
         # esperar confirmación de cada trozo costaría 2485 esperas.
         t["written"] = off + len(trozo)
-        t["next_ms"] = now + t["gap_s"]
+        t["next_ms"] = now + self._hueco_con_jitter(t["gap_s"])
 
     def _fw_ventana_nodo(self, t: dict, now: float) -> bool:
-        """Ventana de escucha del nodo y cuenta de ráfaga, igual que en el
-        canal de configuración: solo se transmite poco después de haberlo
-        oído, que es cuando se sabe que está escuchando."""
+        """Si toca emitir un fragmento ahora, según la clase del nodo (§21).
+
+        Con clase C no hay ventana ni ráfaga que contar: se emite al ritmo del
+        hueco entre tramas, que es lo que ya frena el bucle. La cuenta de
+        ráfaga existía para no desbordar la ventana de escucha, y sin ventana
+        no tiene nada que limitar.
+
+        Con clase A se conserva la regla anterior entera, porque ahí sí es lo
+        único posible: fuera de su ventana el nodo no oye.
+        """
+        if self._clase_de(t["origin"]) != "A":
+            return True
         oido = t.get("heard_ms", 0.0)
         if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
             return False
@@ -878,6 +1776,10 @@ class GatewayService:
         estado = parsed["fw_state"]
         escritos = parsed["fw_written"]
         t["last_news"] = time.monotonic()
+        if t.get("mudo_avisado"):
+            LOG.info("fw-push origin=%d vuelve a hablar, se reanuda", t["origin"])
+        t["mudos"] = 0
+        t["mudo_avisado"] = False
 
         if estado == protocol.FW_REJECTED:
             self.fw_finish("failed", "el nodo rechazó la imagen "
@@ -974,12 +1876,16 @@ class GatewayService:
             frame = protocol.build_config_commit(
                 t["origin"], self._config_hop(t["origin"]), t["xfer"],
                 t["total_len"], t["sha"], self._next_gw_seq(),
-                self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts())
+                self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts(),
+                apply_at=t.get("apply_at", 0))
             self._tx(frame)
-            self.buf.config_push_state(t["push_id"], "committing",
-                                       "todos los fragmentos entregados")
-            LOG.info("config-commit origin=%d xfer=%08X len=%d",
-                     t["origin"], t["xfer"], t["total_len"])
+            detalle = "todos los fragmentos entregados"
+            if t.get("apply_at"):
+                detalle += f", a aplicar en epoch {t['apply_at']}"
+            self.buf.config_push_state(t["push_id"], "committing", detalle)
+            LOG.info("config-commit origin=%d xfer=%08X len=%d apply_at=%d",
+                     t["origin"], t["xfer"], t["total_len"],
+                     t.get("apply_at", 0))
 
     def config_on_result(self, parsed: dict) -> None:
         """Veredicto del nodo. Cierra la transferencia en los dos sentidos."""
@@ -1163,14 +2069,29 @@ class GatewayService:
         # canal que ya va justo de aire.
         if ft == protocol.FRAME_FW_STATUS:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                self.fw_on_status(parsed)
+                # La misma trama sirve a los dos transportes: al secuencial de
+                # §18 le informa del progreso, y al de §20 dirigido a un nodo
+                # le trae la aceptación de la oferta. Se mira primero el de
+                # §20 porque solo consume la trama si el identificador cuadra.
+                if not self.bcast_on_status(parsed):
+                    self.fw_on_status(parsed)
             else:
                 self.n_notconf += 1
             return
 
         if ft == protocol.FRAME_FW_RESULT:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                self.fw_on_result(parsed)
+                # Igual que con el estado: primero el transporte de §20, que
+                # solo consume la trama si la transferencia es suya.
+                if not self.bcast_on_result(parsed):
+                    self.fw_on_result(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
+        if ft == protocol.FRAME_FW_BCAST_MAP:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.bcast_on_map(parsed)
             else:
                 self.n_notconf += 1
             return
@@ -1294,6 +2215,14 @@ class GatewayService:
             # uplink es por el que hay que bajar hacia ese nodo. Lo usa el
             # canal de configuración para alcanzar nodos a más de un salto.
             self.buf.status_update(origin, ft, hop_src=hs)
+
+        # Pase de lista de la migración: se anota sobre el nodo que CAPTURÓ la
+        # trama, no sobre el vecino que la reenvió. Oírle vale como prueba de
+        # en qué mundo vive aunque venga por un relay, porque toda la cadena
+        # comparte el mismo network_id y la misma clave: si la trama ha llegado
+        # descifrable hasta aquí, su origen está en estos parámetros.
+        if 1 <= origin <= 254:
+            self.migration_note_rx(origin)
 
         # Marca de "acabo de oír a este nodo", que abre la ventana de silencio
         # en la que sí escucha (ver CFG_QUIET_DELAY_S).
@@ -1488,6 +2417,152 @@ class GatewayService:
             # vuelve a la fase de reapertura; aquí no se propaga.
             pass
 
+    # ----- Cambio de parámetros de red (§17.8, fase C3 del plan) -----
+
+    def radio_profile(self) -> dict:
+        """Los parámetros de radio vigentes, tal como se guardan y comparan."""
+        return {
+            "network_id": self.net_id,
+            "freq_hz":    self.freq_hz,
+            "sf":         self.sf,
+            "bw_khz":     self.bw_khz,
+            "max_ttl":    self.max_ttl,
+            "sec_key":    self.sec_key.hex() if self.sec_key else "",
+        }
+
+    def _apply_profile(self, prof: dict) -> None:
+        """Pone la radio en un juego de parámetros.
+
+        Se reasignan los atributos que ya usaba todo el servicio en vez de
+        introducir un objeto de perfil: el resto del código los lee por su
+        nombre y hereda el cambio sin tocar una línea. El bucle es de un solo
+        hilo, así que el cambio es atómico desde el punto de vista de cualquier
+        trama, que se construye entera dentro de una vuelta.
+
+        La clave entra aquí junto a la frecuencia a propósito. Cambiarla es
+        tan incomunicante como cambiar el canal, así que pertenece al mismo
+        salto y a la misma vuelta atrás: separarlas daría un estado en el que
+        el gateway escucha en el canal correcto y no entiende nada.
+        """
+        self.net_id   = int(prof["network_id"])
+        self.freq_hz  = int(prof["freq_hz"])
+        self.sf       = int(prof["sf"])
+        self.bw_khz   = int(prof["bw_khz"])
+        self.max_ttl  = int(prof["max_ttl"])
+        key_hex       = prof.get("sec_key") or ""
+        self.sec_key  = bytes.fromhex(key_hex) if key_hex else None
+        self.push_radio()
+
+    def migration_load(self) -> None:
+        """Recupera la operación viva al arrancar y coloca la radio donde toca.
+
+        Un reinicio del servicio no puede mover el salto: si ocurrió mientras
+        estaba parado, se ejecuta aquí antes de la primera trama. La radio
+        arranca siempre en el mundo nuevo, incluso dentro de una ventana de
+        recuperación, y es el tick quien la lleva a los viejos cuando toque.
+        """
+        self.mig = self.buf.migration_active()
+        if self.mig is None:
+            return
+        ahora = int(time.time())
+        if self.mig["state"] == "saltada" or ahora >= self.mig["apply_at"]:
+            if self.mig["state"] == "programada":
+                self.buf.migration_state(self.mig["id"], "saltada",
+                                         "salto ejecutado al arrancar el servicio")
+                self.mig["state"] = "saltada"
+            self._apply_profile(self.mig["new_profile"])
+            self.mig_mundo = "nuevo"
+            LOG.warning("migracion de red %d: reanudada YA SALTADA, radio en "
+                        "los parametros nuevos (recuperacion hasta epoch %d)",
+                        self.mig["id"], self.mig["recov_until"])
+        else:
+            LOG.warning("migracion de red %d: salto programado para epoch %d "
+                        "(faltan %d s)", self.mig["id"], self.mig["apply_at"],
+                        self.mig["apply_at"] - ahora)
+
+    def migration_tick(self, now_mono: float) -> None:
+        """Ejecuta el salto en T y luego alterna con los parámetros viejos.
+
+        La alternancia se deriva de la hora absoluta y no de un temporizador
+        propio: `(ahora - T) mod periodo`. Así un reinicio del servicio cae en
+        la fase que le corresponde en vez de reiniciar el ciclo, y el visor
+        puede predecir la próxima ventana sin preguntar.
+        """
+        if self.mig is None:
+            return
+
+        # Sin hora de confianza no se salta. El salto es un instante acordado
+        # con toda la malla, y ejecutarlo contra un reloj que no vale es la
+        # forma más directa de romper justo lo que se quiere proteger.
+        if not self._clock_ok():
+            return
+        ahora = int(time.time())
+
+        if self.mig["state"] == "programada":
+            if ahora < self.mig["apply_at"]:
+                return
+            self._apply_profile(self.mig["new_profile"])
+            self.mig_mundo = "nuevo"
+            self.buf.migration_state(self.mig["id"], "saltada",
+                                     f"salto ejecutado en epoch {ahora}")
+            self.mig["state"] = "saltada"
+            LOG.warning("migracion de red %d: SALTO ejecutado, radio en "
+                        "network_id=%d freq=%d sf=%d bw=%d",
+                        self.mig["id"], self.net_id, self.freq_hz,
+                        self.sf, self.bw_khz)
+            return
+
+        # Cierre por vencimiento del plazo de recuperación. Los que no hayan
+        # vuelto para entonces necesitan cable, y eso lo dice el visor con
+        # nombres; aquí solo se deja de gastar aire en esperarlos.
+        if ahora >= self.mig["recov_until"]:
+            if self.mig_mundo != "nuevo":
+                self._apply_profile(self.mig["new_profile"])
+                self.mig_mundo = "nuevo"
+            self.buf.migration_state(self.mig["id"], "cerrada",
+                                     "vencido el plazo de recuperación")
+            LOG.warning("migracion de red %d: recuperacion terminada",
+                        self.mig["id"])
+            self.mig = None
+            return
+
+        # El primer periodo entero después del salto es intocable.
+        #
+        # Sin esta guarda la primera ventana de recuperación caía un segundo
+        # después de T, que es el peor momento posible: los nodos que acaban de
+        # saltar están reiniciando y buscando al gateway en los parámetros
+        # NUEVOS, con su ventana de prueba ya corriendo, y encontrarse el aire
+        # vacío es justo lo que les hace revertir. Se les deja un periodo
+        # completo para reencontrarse antes de empezar a ausentarse a buscar
+        # rezagados. Lo encontró la prueba de la alternancia, no el diseño.
+        transcurrido = ahora - self.mig["apply_at"]
+        fase = transcurrido % self.mig["recov_per_s"]
+        toca = ("viejo"
+                if transcurrido >= self.mig["recov_per_s"]
+                and fase < self.mig["recov_win_s"]
+                else "nuevo")
+        if toca == self.mig_mundo:
+            return
+
+        self.mig_mundo = toca
+        self._apply_profile(self.mig["old_profile"] if toca == "viejo"
+                            else self.mig["new_profile"])
+        if toca == "viejo":
+            # Beacon inmediato al entrar: la ventana dura segundos y esperar al
+            # siguiente beacon periódico la desperdiciaría entera. El rezagado
+            # está escuchando sin padre, así que este beacon es exactamente lo
+            # que necesita para volver.
+            self.send_beacon()
+        LOG.info("migracion de red %d: radio en los parametros %ss",
+                 self.mig["id"], toca)
+
+    def migration_note_rx(self, origin: int) -> None:
+        """Anota en el pase de lista a quién se oye, y en qué mundo."""
+        if self.mig is None or self.mig["state"] != "saltada":
+            return
+        if 1 <= origin <= 254:
+            self.buf.migration_seen(self.mig["id"], origin, self.mig_mundo)
+
     def push_radio(self) -> None:
         """Empuja al Heltec sus parámetros de radio (comando RADIO,
         frame-format.md §12.6). El Heltec reconfigura la radio en caliente
@@ -1515,6 +2590,12 @@ class GatewayService:
         if self.mb_debug:
             LOG.info("modo de depuracion Modbus conocido de %d nodo(s)",
                      len(self.mb_debug))
+
+        # Operación de cambio de parámetros de red a medias, si la hay. Va
+        # antes del primer beacon: si el salto ya venció mientras el servicio
+        # estaba parado, la primera trama que salga tiene que ir con los
+        # parámetros nuevos y no con los de gateway.env.
+        self.migration_load()
         LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
                  self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
         LOG.info("seguridad interfaz aire (v2.2): %s",
@@ -1573,14 +2654,35 @@ class GatewayService:
                     if now - last_drain >= self.drain_s:
                         last_drain = now
                         self.mqtt.drain()
+                    # El salto de parámetros de red va antes que los envíos:
+                    # si esta vuelta toca cambiar de mundo, lo que se mande
+                    # después debe salir ya con los parámetros correctos.
+                    self.migration_tick(now)
+
                     # Envío de configuración por LoRa: solo con el puerto
                     # abierto, que es esta rama del bucle.
-                    self.config_tick(now)
-                    self.config_read_tick(now)
-                    # El firmware va después de la configuración a propósito:
-                    # con las dos en cola, la que se resuelve en segundos pasa
-                    # primero, en vez de esperar horas detrás de una imagen.
-                    self.fw_tick(now)
+                    #
+                    # Y solo en el mundo nuevo. Durante los segundos que el
+                    # gateway pasa en los parámetros viejos para recoger
+                    # rezagados, una transferencia en curso hablaría al mundo
+                    # equivocado: gastaría aire, no llegaría, y contaría los
+                    # reintentos como si el nodo no respondiera. Se pausa y
+                    # continúa sola al volver, porque estas máquinas ya saben
+                    # esperar a que el nodo esté a la escucha.
+                    if self.mig_mundo == "nuevo":
+                        self.quiet_tick(now)
+                        self.config_tick(now)
+                        self.config_read_tick(now)
+                        # El firmware va después de la configuración a
+                        # propósito: con las dos en cola, la que se resuelve en
+                        # segundos pasa primero, en vez de esperar horas detrás
+                        # de una imagen.
+                        self.fw_tick(now)
+                        # La difusión va la última de la cola de emisión: es
+                        # tráfico a granel de horas, y cualquier cosa que se
+                        # resuelva en segundos debe pasar antes que ella.
+                        self.bcast_tick(now)
+                        self.bcast_install_tick(now)
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)

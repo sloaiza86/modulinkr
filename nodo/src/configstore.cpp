@@ -14,6 +14,17 @@ constexpr const char* kPath      = "/config.json";
 constexpr const char* kTmpPath   = "/config.tmp";
 constexpr const char* kPrevPath  = "/config.prev.json";
 constexpr const char* kTrialPath = "/config.trial";
+// Escritura aplazada (v3.9): el texto y, en un archivo aparte, la hora a la
+// que aplicarlo. Separados a propósito: la hora se lee una vez al arrancar y
+// se guarda en RAM, así que preguntar si hay algo pendiente no cuesta ni un
+// acceso a flash, y eso se pregunta en cada tick de un segundo.
+constexpr const char* kPendPath  = "/config.next.json";
+constexpr const char* kPendTmp   = "/config.next.tmp";
+constexpr const char* kPendAtPath = "/config.next.at";
+
+// Hora del pendiente, en RAM. Se carga en begin() y solo cambia cuando lo
+// cambia este mismo archivo, así que consultarla no necesita tocar la flash.
+uint32_t g_pending_at = 0;
 
 // Copia byte a byte de un archivo a otro, con renombrado atómico sobre el
 // destino. Devuelve false si el origen no existe o la copia queda corta.
@@ -46,6 +57,11 @@ bool copyFile(const char* from, const char* to) {
 // Escribe el byte de estado de la marca de prueba. Declarada aquí porque
 // begin() la usa para crear el archivo la primera vez.
 bool writeTrial(char v);
+
+// Escribe y lee la hora del pendiente en flash. Declaradas aquí por lo mismo:
+// begin() crea el archivo si falta y carga la copia en RAM.
+bool     writePendingAt(uint32_t at);
+uint32_t leerPendingAt();
 }  // namespace
 
 bool begin() {
@@ -63,6 +79,13 @@ bool begin() {
         if (f) f.close();
         if (falta) writeTrial('0');
     }
+
+    // La hora del pendiente, igual: el archivo existe siempre a partir del
+    // primer arranque, con cero cuando no hay nada pendiente. Se lee una vez
+    // aquí y a partir de ahí se responde desde RAM.
+    if (!LittleFS.exists(kPendAtPath)) writePendingAt(0);
+    g_pending_at = leerPendingAt();
+
     return true;
 }
 
@@ -156,6 +179,98 @@ bool trialPending() {
     const int v = f.read();
     f.close();
     return v == '1';
+}
+
+
+// ----- Escritura aplazada (v3.9, spec §17.7) -----
+
+namespace {
+bool writePendingAt(uint32_t at) {
+    File h = LittleFS.open(kPendAtPath, "w");
+    if (!h) return false;
+    const size_t n = h.write(reinterpret_cast<const uint8_t*>(&at), sizeof(at));
+    h.close();
+    return n == sizeof(at);
+}
+
+// Lee la hora de la flash. Solo la llama begin(); el resto de las consultas
+// van contra la copia en RAM. Sin el texto no hay pendiente que valga, así
+// que una hora huérfana (corte entre las dos escrituras) se lee como cero.
+uint32_t leerPendingAt() {
+    File h = LittleFS.open(kPendAtPath, "r");
+    if (!h) return 0;
+    uint32_t at = 0;
+    const size_t n = h.read(reinterpret_cast<uint8_t*>(&at), sizeof(at));
+    h.close();
+    if (n != sizeof(at) || at == 0) return 0;
+    return LittleFS.exists(kPendPath) ? at : 0;
+}
+}  // namespace
+
+bool writePending(const char* text, size_t len, uint32_t apply_at) {
+    // Mismo temporal y renombrado que el config vigente: un corte a mitad no
+    // puede dejar un pendiente truncado que luego se aplique a medias.
+    File f = LittleFS.open(kPendTmp, "w");
+    if (!f) return false;
+    const size_t written = f.write(reinterpret_cast<const uint8_t*>(text), len);
+    f.close();
+    if (written != len) {
+        LittleFS.remove(kPendTmp);
+        return false;
+    }
+    if (!LittleFS.rename(kPendTmp, kPendPath)) return false;
+
+    // La hora se escribe DESPUÉS del texto. Si un corte cae entre las dos, la
+    // hora sigue en cero y el texto se ignora al arrancar. Al revés dejaría
+    // una hora apuntando a un texto que no está.
+    if (!writePendingAt(apply_at)) {
+        writePendingAt(0);
+        LittleFS.remove(kPendPath);
+        g_pending_at = 0;
+        return false;
+    }
+    g_pending_at = apply_at;
+    return true;
+}
+
+uint32_t pendingAt() {
+    // Se responde desde RAM y no se toca el sistema de archivos.
+    //
+    // La primera versión leía el archivo en cada llamada, y como esa llamada
+    // corre en el bucle principal, el VFS del core registraba un error de
+    // nivel E por cada comprobación cuando no había nada pendiente, que es lo
+    // normal: decenas de líneas por segundo en el log de todos los nodos.
+    //
+    // Es el mismo error que ya se cometió con la marca de prueba y que está
+    // explicado arriba: usar la ausencia de un archivo como estado sale caro
+    // y ruidoso. Allí se resolvió metiendo el estado dentro del archivo; aquí
+    // basta con recordarlo, porque solo cambia cuando lo cambiamos nosotros.
+    return g_pending_at;
+}
+
+char* readPending(size_t& len) {
+    len = 0;
+    File f = LittleFS.open(kPendPath, "r");
+    if (!f) return nullptr;
+    const size_t n = f.size();
+    if (n == 0) { f.close(); return nullptr; }
+    char* buf = static_cast<char*>(malloc(n + 1));
+    if (buf == nullptr) { f.close(); return nullptr; }
+    const size_t got = f.read(reinterpret_cast<uint8_t*>(buf), n);
+    f.close();
+    if (got != n) { free(buf); return nullptr; }
+    buf[n] = '\0';
+    len = n;
+    return buf;
+}
+
+void clearPending() {
+    g_pending_at = 0;
+    // La hora primero: mientras valga cero, el texto no se aplica, así que un
+    // corte entre las dos deja un archivo huérfano y nada más. El archivo de
+    // la hora no se borra nunca, solo se pone a cero (ver begin()).
+    writePendingAt(0);
+    if (LittleFS.exists(kPendPath)) LittleFS.remove(kPendPath);
 }
 
 }  // namespace configstore

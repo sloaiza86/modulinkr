@@ -326,6 +326,14 @@ public:
     Status sendFwStatus(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
                         uint32_t written, uint8_t state);
 
+    // FW_BCAST_MAP: qué originales de la difusión han llegado (§20.9). Aquí sí
+    // hay mapa de bits, al revés que en el FW_STATUS de arriba, porque en
+    // difusión los huecos están repartidos por toda la imagen y un número no
+    // los describe. Va troceado: 313 bytes no caben en una trama.
+    Status sendFwBcastMap(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
+                          uint8_t part, uint8_t parts,
+                          const uint8_t* bits, size_t len);
+
     // FW_RESULT: veredicto tras instalar. Lo emite la imagen nueva cuando se
     // confirma, o la anterior cuando la reversión la devuelve al mando.
     Status sendFwResult(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
@@ -398,6 +406,7 @@ public:
     uint32_t txErrors() const { return tx_errors_; }  // errores asíncronos del módulo
     uint32_t rxMicFail() const { return rx_mic_fail_; }  // MIC inválido (v2.2)
     uint32_t rxStale() const { return rx_stale_; }       // control fuera de frescura (v2.2)
+    uint32_t rxResync() const { return rx_resync_; }     // beacons admitidos para salir del encierro
 
     static const char* statusToString(Status s);
 
@@ -548,6 +557,12 @@ private:
     uint32_t tx_errors_    = 0;
     uint32_t rx_mic_fail_  = 0;   // sobres con MIC inválido (v2.2)
     uint32_t rx_stale_     = 0;   // control fuera de la ventana de frescura (v2.2)
+    uint32_t rx_resync_    = 0;   // veces que se levantó el veto a un beacon rancio
+
+    // Beacons rancios SEGUIDOS, sin ninguna trama admitida por medio. Al
+    // llegar a protocol::kStaleBeaconResync se deja pasar el siguiente para
+    // que ponga el reloj en hora (§14.5, razonamiento en protocol.h).
+    uint8_t  stale_beacons_ = 0;
 
     // ----- Seguridad v2.2 (frame-format.md §14) -----
     bool                sec_enabled_ = false;
