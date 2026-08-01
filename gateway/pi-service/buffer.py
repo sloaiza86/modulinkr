@@ -384,6 +384,34 @@ class GatewayBuffer:
             (origin, mode, time.time()))
         self.conn.commit()
 
+    def set_health(self, origin: int, fault: int, reset_reason: int,
+                   boots: int, probes: int, reinits: int, resets: int,
+                   reboots: int) -> None:
+        """Guarda los contadores del NODE_HEALTH de un nodo (§16.1).
+
+        Son acumulados desde la fabricación, no eventos, así que guardar el
+        último recibido es guardarlo todo. Upsert con last_seen a 0 por la
+        misma razón que en set_mb_debug: la salud puede llegar antes de que el
+        nodo tenga fila.
+        """
+        self.conn.execute(
+            """INSERT INTO node_status (origin, last_seen, hl_fault,
+                   hl_reset_reason, hl_boots, hl_probes, hl_reinits,
+                   hl_resets, hl_reboots, hl_updated)
+               VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(origin) DO UPDATE SET
+                   hl_fault = excluded.hl_fault,
+                   hl_reset_reason = excluded.hl_reset_reason,
+                   hl_boots = excluded.hl_boots,
+                   hl_probes = excluded.hl_probes,
+                   hl_reinits = excluded.hl_reinits,
+                   hl_resets = excluded.hl_resets,
+                   hl_reboots = excluded.hl_reboots,
+                   hl_updated = excluded.hl_updated""",
+            (origin, fault, reset_reason, boots, probes, reinits, resets,
+             reboots, time.time()))
+        self.conn.commit()
+
     def hop_for(self, origin: int) -> int:
         """Vecino por el que bajar hacia `origin`: el hop_src con el que
         llegó su último uplink, que es la ruta inversa (spec §2.4). Si no

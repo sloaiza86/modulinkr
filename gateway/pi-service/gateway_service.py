@@ -454,6 +454,7 @@ class GatewayService:
         self.gw_seq   = 0               # contador downlink (ACK + BEACON)
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
         self.aire_libre     = 0.0       # monotonic hasta el que el aire está ocupado
+        self._cfg_ver_chk   = 0.0       # freno del barrido de veredictos de config
         self.tx_ordenadas   = 0         # órdenes escritas al Heltec
         self.tx_ord_control = 0         # de ellas, tráfico de control
         self.heltec_emitidas = 0        # total que el Heltec dice haber emitido
@@ -902,21 +903,30 @@ class GatewayService:
         # siempre. Con clase A, solo en la ventana tras oírle.
         if not self._ventana_libre(t, now):
             return
-        if now > oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S:
-            return   # la ventana ya pasó: se espera a la siguiente trama
 
-        # Cada ciclo del nodo abre una ventana nueva, y con ella una cuenta de
-        # ráfaga nueva. La comparación no puede ser contra el instante exacto
-        # en que se le oyó, porque un ciclo del nodo emite varias tramas (la
-        # telemetría y la de depuración Modbus) y cada una movería la marca:
-        # la cuenta se reiniciaría dos o tres veces dentro de la misma ventana
-        # y el tope dejaría de tener efecto. Dos tramas separadas por menos de
-        # lo que dura una ventana pertenecen al mismo ciclo.
-        if oido - t.get("burst_at", -1e9) > CFG_WINDOW_S:
-            t["burst_at"] = oido
-            t["burst"] = 0
-        if t["burst"] >= t["burst_max"]:
-            return
+        # El tope de ráfaga es cosa de la clase A y solo de ella.
+        #
+        # A un nodo de clase A se le habla dentro de la ventana que abre cada
+        # una de sus tramas, y el tope evita llenarla entera. La comparación va
+        # contra CUÁNDO SE LE OYÓ y no contra el instante exacto de la última
+        # trama, porque un ciclo del nodo emite varias (la telemetría y la de
+        # depuración Modbus) y cada una movería la marca: la cuenta se
+        # reiniciaría dos o tres veces dentro de la misma ventana y el tope
+        # dejaría de tener efecto. Dos tramas separadas por menos de lo que
+        # dura una ventana pertenecen al mismo ciclo.
+        #
+        # A un nodo de clase C no se le aplica, y aplicárselo lo dejaba mudo:
+        # como no hay ventanas, su marca de "oído" no avanza, la cuenta no se
+        # reinicia nunca y la transferencia se paraba para siempre al llegar al
+        # tope. Su freno son el presupuesto de aire y la separación entre
+        # tramas, que ya están más abajo.
+        if self._clase_de(t["origin"]) == "A":
+            oido = t.get("heard_ms", 0.0)
+            if oido - t.get("burst_at", -1e9) > CFG_WINDOW_S:
+                t["burst_at"] = oido
+                t["burst"] = 0
+            if t["burst"] >= t["burst_max"]:
+                return
 
         # Presupuesto de aire. Aquí es donde se respeta el ciclo de trabajo,
         # que es un límite horario, en vez de frenando tras cada trama.
@@ -2144,7 +2154,17 @@ class GatewayService:
         mientras haya una viva, bloquea el canal de configuración de ese nodo.
         La misma regla que en el resto del sistema: ningún estado es terminal
         por silencio.
+
+        Con su freno: esto se llama desde el bucle principal, que gira cientos
+        de veces por segundo, y sin freno era una consulta a la base en cada
+        vuelta. El servicio se quedaba sin tiempo para lo que sí corre prisa, y
+        llegaba tarde al WELCOME de un registro y a las confirmaciones del
+        canal de configuración. Cada medio minuto sobra para algo que vence a
+        los quince.
         """
+        if now - self._cfg_ver_chk < 30.0:
+            return
+        self._cfg_ver_chk = now
         try:
             filas = self.buf.conn.execute(
                 """SELECT id, origin FROM config_push
@@ -2309,6 +2329,14 @@ class GatewayService:
                 if self.buf is not None:
                     self.buf.set_mb_debug(parsed["origin_id"],
                                           parsed["hl_mb_debug"])
+                    # Y el resto de la salud, que hasta ahora solo iba al log
+                    # y a MQTT: sin guardarla, el visor no podía decir por qué
+                    # se reinició un nodo ni cuántas veces se le cayó la radio.
+                    self.buf.set_health(
+                        parsed["origin_id"], parsed["hl_fault"],
+                        parsed["hl_reset_reason"], parsed["hl_boots"],
+                        parsed["hl_probes"], parsed["hl_reinits"],
+                        parsed["hl_resets"], parsed["hl_reboots"])
                 self._publish_node_health(parsed)
             else:
                 self.n_notconf += 1

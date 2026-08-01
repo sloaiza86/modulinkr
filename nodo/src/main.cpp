@@ -99,7 +99,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.54-padre-y-silencio";
+constexpr const char* kFirmwareVersion = "0.0.56-outbox-persistente";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -2556,6 +2556,14 @@ void setup() {
     // imagen exige que esta llegue a ejecutarse. Atender primero lo que puede
     // reiniciar deja lo demás sin tocar.
     if (fs_ready) {
+        // Las muestras que quedaron sin entregar, antes que nada: si algo de
+        // lo que viene detrás reinicia el nodo, ya están recuperadas.
+        outbox.begin(millis());
+        if (outbox.count() > 0) {
+            Serial.printf("[outbox] %u muestra(s) recuperadas del arranque "
+                          "anterior\n",
+                          static_cast<unsigned>(outbox.count()));
+        }
         fwota::begin(kFirmwareVersion);
         fwbcast::begin(kFirmwareVersion);
         if (fwota::pendingVerify()) {

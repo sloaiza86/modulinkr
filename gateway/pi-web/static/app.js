@@ -708,9 +708,37 @@ function pintarDetalle(origin) {
       ${filaDet("Duty cycle 1h", chipDuty(n.duty_1h))}
     </div>
     ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>${sensores}</div>` : ""}
+    ${bloqueSalud(n.health)}
     <div class="det-grupo">
       <a href="#/datos" onclick="document.getElementById('detalle-cerrar').click()">Ver histórico en Datos</a>
     </div>`;
+}
+
+// Salud del nodo, del NODE_HEALTH (§16.1). Los contadores llegaban al gateway
+// desde hace semanas y solo se escribían en el log y en MQTT, así que quien
+// miraba la pantalla no tenía forma de saber por qué se había reiniciado un
+// nodo ni cuántas veces se le había caído la radio.
+//
+// La escalera de recuperación se enseña entera y en orden, de menos a más
+// agresiva, porque lo que importa no es cada número suelto sino hasta qué
+// peldaño ha tenido que subir: sondeos y reinicializaciones son rutina, un
+// ATZ ya es serio, y un reinicio del nodo es el último recurso.
+function bloqueSalud(h) {
+  if (!h) {
+    return `<div class="det-grupo"><h3>Salud</h3>
+      ${filaDet("Sin datos", "el nodo aún no ha reportado su salud")}</div>`;
+  }
+  const escalera = `${h.probes} sondeo(s) · ${h.reinits} reinicializacion(es) `
+                 + `· ${h.resets} ATZ · ${h.reboots} reinicio(s)`;
+  return `<div class="det-grupo"><h3>Salud</h3>
+    ${filaDet("Último fallo", h.fault
+        ? `<span class="chip ambar">${h.fault_name}</span>`
+        : `<span class="chip on">${h.fault_name}</span>`)}
+    ${filaDet("Arranques", h.boots)}
+    ${filaDet("Causa del último", h.reset_name)}
+    ${filaDet("Recuperaciones", escalera)}
+    ${filaDet("Reportado", "hace " + fmtAgo(h.ago_s))}
+  </div>`;
 }
 
 function abrirDetalle(origin) {

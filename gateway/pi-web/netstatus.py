@@ -55,6 +55,18 @@ HEARTBEAT_S = float(os.environ.get("MODULINKR_WEB_HEARTBEAT_S", "15"))
 GATEWAY_ID = 255
 
 
+# Fallo que el nodo declara en su NODE_HEALTH (§16.1).
+HL_FAULT_NAMES = {0: "ninguno", 1: "transmisor mudo", 2: "receptor mudo"}
+
+# Causa del último arranque, con los códigos de esp_reset_reason_t. Los nombres
+# son los mismos que imprime el nodo por el puerto serie, para que quien mire
+# la pantalla y quien mire el log estén hablando de lo mismo.
+HL_RESET_NAMES = {
+    1: "encendido", 2: "reset externo", 3: "software", 4: "panico",
+    5: "watchdog de interrupcion", 6: "watchdog de tarea", 7: "watchdog",
+    9: "brownout", 10: "sdio", 8: "deep sleep",
+}
+
 MB_DEBUG_NAMES = {
     0: "off",
     1: "errors_last",
@@ -306,16 +318,30 @@ def network_state() -> dict:
     cycle de la última hora medido en cada transmisor."""
     now = time.time()
     duty = duty_by_origin()
-    with _conn() as c:
-        rows = c.execute(
-            """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
+    # Las columnas de salud las crea la migración del SERVICIO del gateway, que
+    # es otro proceso y se reinicia por separado. Pedirlas sin más hacía que
+    # toda la consulta fallara si el visor se reiniciaba primero, y el visor sin
+    # lista de nodos parece una red sin nodos: el 2-ago-2026 dio la impresión de
+    # que ninguno se registraba. Una pantalla no puede depender de en qué orden
+    # se reinicien dos servicios, así que si las columnas no están todavía se
+    # pide lo de siempre y la salud sale vacía.
+    COLS_SALUD = ("s.hl_fault, s.hl_reset_reason, s.hl_boots, s.hl_probes, "
+                  "s.hl_reinits, s.hl_resets, s.hl_reboots, s.hl_updated")
+    base = """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
                       s.snr, s.parent_id, s.hop_count,
                       k.node_name, k.fw_version, k.catalog_json,
                       s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen,
-                      s.mb_debug, s.mb_debug_updated
+                      s.mb_debug, s.mb_debug_updated{extra}
                FROM node_status s
                LEFT JOIN node_catalog k ON k.origin_id = s.origin
-               ORDER BY s.origin""").fetchall()
+               ORDER BY s.origin"""
+    with _conn() as c:
+        hay_salud = True
+        try:
+            rows = c.execute(base.format(extra=",\n" + COLS_SALUD)).fetchall()
+        except sqlite3.OperationalError:
+            hay_salud = False
+            rows = c.execute(base.format(extra="")).fetchall()
         sesiones = _sesiones_firmware(c)
     nodes = [
         {
@@ -365,6 +391,25 @@ def network_state() -> dict:
             # sobre este nodo, o None. Con sesión abierta el visor no da por
             # caído al nodo, dice que se está actualizando.
             "fw_session":     sesiones.get(r[0]) or sesiones.get(0),
+            # Salud del nodo (NODE_HEALTH, §16.1). None mientras no llegue el
+            # primero, que solo se emite al arrancar y tras una recuperación
+            # de radio: un nodo estable puede tardar en reportar, y eso no es
+            # lo mismo que reportar ceros.
+            "health": None if not hay_salud or r[23] is None else {
+                "fault":        r[16],
+                "fault_name":   HL_FAULT_NAMES.get(r[16], "desconocido"),
+                "reset_reason": r[17],
+                "reset_name":   HL_RESET_NAMES.get(r[17], "desconocida"),
+                "boots":        r[18],
+                # Sondeos, reinicializaciones de radio, ATZ y reinicios del
+                # nodo: los cuatro peldaños de la escalera de recuperación, de
+                # menos a más agresivo.
+                "probes":       r[19],
+                "reinits":      r[20],
+                "resets":       r[21],
+                "reboots":      r[22],
+                "ago_s":        round(now - r[23], 1),
+            },
         }
         for r in rows
     ]

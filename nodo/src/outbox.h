@@ -69,7 +69,19 @@ public:
 
     void drop(Entry& e);
 
+    // Carga lo que quedó guardado del arranque anterior. Se llama una vez, con
+    // LittleFS ya montado. `now_ms` es el millis() de ese momento: los millis
+    // de captura no sobreviven al reinicio y se reparten desde ahí para
+    // conservar el orden, que es lo único que ese campo decide.
+    void begin(uint32_t now_ms);
+
 private:
+    // Vuelca la bandeja entera al sistema de archivos. Se llama sola en cada
+    // cambio; nadie de fuera tiene que acordarse.
+    void save();
+
     Entry  entries_[kCapacity];
     size_t count_ = 0;
+    bool   cargando_ = false;   // true mientras begin() restaura, para no
+                                // reescribir el archivo en cada entrada
 };
