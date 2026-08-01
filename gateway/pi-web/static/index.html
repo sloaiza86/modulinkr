@@ -267,10 +267,12 @@
             <pre id="fw-local-log" class="dbg-consola" hidden></pre>
           </div>
           <div id="fw-lora" hidden>
-            <p class="aviso">Sube la imagen al nodo por radio, sin cable. Tarda
-              horas: son unos 2500 fragmentos y el gateway cede el aire a la
-              telemetría, así que va de fondo. La subida no toca el firmware que
-              está corriendo, se escribe en la partición dormida. Instalar es una
+            <p class="aviso">Sube la imagen al nodo por radio, sin cable. Son
+              unos 2500 fragmentos y el gateway cede el aire a la telemetría,
+              así que va de fondo. Lo que marca el reloj es el ciclo de trabajo:
+              medido en banco sin ese límite, media hora; con el 8 % que permite
+              la norma, unas dos. La subida no toca el firmware que está
+              corriendo, se escribe en la partición dormida. Instalar es una
               orden aparte, y solo aparece cuando el nodo tiene la imagen entera
               y verificada.</p>
             <div class="cfg-fila">
@@ -297,12 +299,14 @@
         <div class="card cfg-card" id="bc-card">
           <h3>Difundir a toda la red</h3>
           <p class="aviso">La subida de arriba manda la imagen a <b>un</b> nodo, y
-            cuesta lo mismo por cada uno: con veinte nodos son sesenta y cinco
-            horas de emisión. La difusión la emite <b>una sola vez para todos</b>,
-            algo más de tres horas, y ese tiempo no crece con el número de
+            hay que repetirla entera por cada uno. La difusión la emite <b>una
+            sola vez para todos</b>, y ese tiempo no crece con el número de
             nodos. Se emiten además unos fragmentos de repuesto que permiten
             rellenar huecos sin pedirlos, y al terminar cada pasada el gateway
-            pregunta a cada nodo qué le falta y reemite solo eso.
+            pregunta a cada nodo qué le falta y reemite solo eso. Medido en
+            banco con un nodo, una imagen de 541 kB llegó entera y verificada en
+            31 minutos, en una sola pasada y sin reemisiones: los fragmentos que
+            se perdieron los rellenó el propio nodo con los de repuesto.
             <br><br>
             Llega a los nodos que oyen al gateway <b>directamente</b>. Uno que
             esté a dos saltos no la recibe, y hay que subirle la imagen por el

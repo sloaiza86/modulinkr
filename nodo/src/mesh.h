@@ -53,6 +53,21 @@ public:
                   uint32_t sec_ts,
                   uint32_t now_ms);
 
+    // Prueba de vida de un vecino por una trama que NO es su beacon.
+    //
+    // El beacon es la señal de vida diseñada para esto, pero no es la única
+    // que existe: si de un vecino están llegando tramas, ese vecino se oye, y
+    // caducarlo por no haber recibido su beacon contradice lo que se acaba de
+    // recibir de él. Pasó el 1-ago-2026 durante una difusión de firmware: el
+    // nodo daba por perdido al gateway mientras recibía de él dos mil
+    // fragmentos, y al quedarse huérfano se ponía a buscar supernodo, que es
+    // una ráfaga de transmisiones propias justo cuando peor viene.
+    //
+    // Solo refresca la caducidad de un vecino que ya se conoce. No crea
+    // vecinos ni cambia de padre: para eso hace falta un beacon, que es el
+    // único que trae hop, padre anunciado y hora.
+    void notePeerAlive(uint8_t from_id, uint32_t now_ms);
+
     // Caducidades de vecinos y rutas. Llamar periódicamente (~1 s).
     void tick(uint32_t now_ms);
 

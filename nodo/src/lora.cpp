@@ -843,6 +843,9 @@ void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
     // TXP2P DONE hasta que el módulo responda (salud del TX, ver lora.h).
     tx_psend_++;
     last_psend_ms_ = millis();
+    // Momento de la PRIMERA escritura que quedó esperando: es contra ésta
+    // contra la que mide el criterio por espera de checkMute().
+    if (psend_no_done_ == 0) primera_pend_ms_ = last_psend_ms_;
     if (psend_no_done_ < 255) psend_no_done_++;
 
     uart_->print("AT+PSEND=");
@@ -1012,17 +1015,38 @@ void LoraP2P::checkMute() {
     if (psend_no_done_ >= kMuteThreshold) {
         mute_flagged_ = true;
         mute_events_++;
+        anotarMudo("acumulacion");
         return;
     }
 
-    // Criterio por silencio: cadencias bajas no llegan a acumular
-    // escrituras, y aun así el transmisor puede llevar mudo mucho rato. La
-    // resta con cast a int32_t es segura ante el desbordamiento de millis().
-    if (static_cast<int32_t>(millis() - last_done_ms_) >=
+    // Criterio por espera: una escritura concreta lleva demasiado tiempo sin
+    // su confirmación. Se mide desde que se hizo ESA escritura, no desde la
+    // última confirmación que hubo.
+    //
+    // La diferencia parece de matiz y no lo es. Medir desde la última
+    // confirmación convierte "llevo un rato sin hablar" en "mi transmisor está
+    // muerto", y desde que el nodo calla a propósito durante las subidas de
+    // firmware (main.cpp, bajandoFirmware) pasar medio minuto sin transmitir
+    // dejó de ser una anomalía y pasó a ser lo normal. Medido el 1-ago-2026:
+    // "mudo por silencio: pendientes=1, 72997 ms desde el ultimo DONE", con la
+    // radio perfecta, en mitad de una difusión. El detector se disparaba por
+    // el silencio que le habíamos pedido al propio nodo.
+    //
+    // La resta con cast a int32_t es segura ante el desbordamiento de millis().
+    if (static_cast<int32_t>(millis() - primera_pend_ms_) >=
         static_cast<int32_t>(kMuteTimeoutMs)) {
         mute_flagged_ = true;
         mute_events_++;
+        anotarMudo("espera");
     }
+}
+
+// Cuál de los dos criterios declaró mudo el transmisor, y con qué cuentas.
+// El driver no imprime: lo guarda, y lo cuenta quien registra (main.cpp).
+void LoraP2P::anotarMudo(const char* criterio) {
+    mute_reason_    = criterio;
+    mute_pend_      = psend_no_done_;
+    mute_since_done_ms_ = millis() - primera_pend_ms_;
 }
 
 void LoraP2P::handleLine(const char* line) {
@@ -1036,7 +1060,12 @@ void LoraP2P::handleLine(const char* line) {
         // La trama no llegó a salir: esa escritura ya no espera un DONE y no
         // debe contar como silencio del transmisor. El reintento rápido de
         // abajo vuelve a escribir y a contabilizarse.
-        if (psend_no_done_ > 0) psend_no_done_--;
+        if (psend_no_done_ > 0) {
+            psend_no_done_--;
+            // La que se resuelve es la más antigua, así que el reloj de la
+            // espera vuelve a empezar para las que queden.
+            primera_pend_ms_ = millis();
+        }
         // Y cuenta como prueba de vida del transmisor, igual que un DONE.
         //
         // Un BUSY significa que el módulo escuchó el canal, lo encontró
@@ -1085,7 +1114,10 @@ void LoraP2P::handleLine(const char* line) {
         tx_errors_++;
         // El módulo respondió: la escritura queda resuelta, aunque sea con
         // error, y deja de contar como pendiente de confirmación.
-        if (psend_no_done_ > 0) psend_no_done_--;
+        if (psend_no_done_ > 0) {
+            psend_no_done_--;
+            primera_pend_ms_ = millis();
+        }
         clearInFlight();
         return;
     }

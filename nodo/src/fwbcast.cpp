@@ -154,7 +154,14 @@ bool saveEmptyState() {
 
 void clearState() {
     saveEmptyState();
-    if (LittleFS.exists(kMapPath)) LittleFS.remove(kMapPath);
+    // El mapa se vacía en vez de borrarse, por lo mismo que el estado existe
+    // siempre. `exists()` del core está implementado abriendo el archivo, así
+    // que preguntar si está era exactamente igual de ruidoso que abrirlo: la
+    // línea [E] vfs_api del arranque salía de aquí, no de la lectura. Un mapa
+    // de cero bytes lo lee loadMap() y lo rechaza por tamaño, que es la misma
+    // respuesta que daba su ausencia y sin registrar un error que no lo es.
+    File f = LittleFS.open(kMapPath, "w");
+    if (f) f.close();
 }
 
 // Reserva el mapa y deja la contabilidad lista. No toca la flash.

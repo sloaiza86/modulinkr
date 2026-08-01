@@ -202,6 +202,38 @@ def gateway_link_state() -> dict:
     }
 
 
+FW_SESION_VIVA = ("offering", "sending", "polling", "repairing",
+                  "install_req", "installing", "pending", "committing")
+
+
+def _sesiones_firmware(conn) -> dict:
+    """Nodos con una sesión de firmware abierta, y en qué fase va cada uno.
+
+    Es una ventana de mantenimiento, en el sentido corriente del término en
+    supervisión: durante una intervención declarada sobre un equipo se sigue
+    midiendo y guardando todo, lo que se suspende es la alarma. Aquí hace
+    falta porque durante la sesión el nodo calla sus tramas de diagnóstico
+    para no perder fragmentos con su propia voz, de modo que la falta de
+    noticias es el comportamiento correcto y no un fallo que avisar.
+
+    Devuelve `{origen: fase}`. La clave 0 significa toda la red, que es el
+    caso de una difusión sin destinatario concreto.
+    """
+    sesiones: dict = {}
+    for tabla, col in (("fw_bcast", "target"), ("fw_push", "origin")):
+        try:
+            filas = conn.execute(
+                f"SELECT {col}, state FROM {tabla} "
+                f"WHERE state IN ({','.join('?' * len(FW_SESION_VIVA))}) "
+                f"ORDER BY id",
+                FW_SESION_VIVA).fetchall()
+        except sqlite3.OperationalError:
+            continue        # buffer anterior a esta tabla
+        for destino, estado in filas:
+            sesiones[0 if destino is None else int(destino)] = estado
+    return sesiones
+
+
 def network_state() -> dict:
     """Estado por nodo para /api/red: node_status enriquecido con el
     nombre y firmware del catálogo, el veredicto online/offline y el duty
@@ -218,6 +250,7 @@ def network_state() -> dict:
                FROM node_status s
                LEFT JOIN node_catalog k ON k.origin_id = s.origin
                ORDER BY s.origin""").fetchall()
+        sesiones = _sesiones_firmware(c)
     nodes = [
         {
             "origin":     r[0],
@@ -259,6 +292,10 @@ def network_state() -> dict:
             "mb_debug":       r[14],
             "mb_debug_name":  MB_DEBUG_NAMES.get(r[14]),
             "mb_debug_ago_s": None if r[15] is None else round(now - r[15], 1),
+            # Ventana de mantenimiento: fase de la sesión de firmware abierta
+            # sobre este nodo, o None. Con sesión abierta el visor no da por
+            # caído al nodo, dice que se está actualizando.
+            "fw_session":     sesiones.get(r[0]) or sesiones.get(0),
         }
         for r in rows
     ]

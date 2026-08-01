@@ -132,6 +132,13 @@ public:
     // real. Fase 1: solo informa, no actúa.
     bool muteSuspected() const { return mute_flagged_; }
 
+    // Qué criterio declaró mudo el transmisor la última vez ("acumulacion" o
+    // "silencio"), con las dos cuentas que lo decidieron. Vacío si nunca ha
+    // saltado. Lo imprime main.cpp: el driver no escribe en el puerto serie.
+    const char* muteWhy()      const { return mute_reason_; }
+    uint8_t     mutePending()  const { return mute_pend_; }
+    uint32_t    muteSinceDoneMs() const { return mute_since_done_ms_; }
+
     // Veces que la detección ha entrado en sospecha desde el boot.
     uint32_t muteEvents() const { return mute_events_; }
 
@@ -455,10 +462,15 @@ private:
     uint32_t last_done_ms_  = 0;   // millis() del último TXP2P DONE
     uint32_t last_psend_ms_ = 0;   // millis() de la última escritura
     bool     mute_flagged_  = false;
+    uint32_t primera_pend_ms_ = 0;   // millis() de la escritura más antigua sin confirmar
+    const char* mute_reason_ = "";   // criterio de la última vez que saltó
+    uint8_t  mute_pend_      = 0;    // psend_no_done_ en ese instante
+    uint32_t mute_since_done_ms_ = 0;
     uint32_t mute_events_   = 0;
 
     // Reevalúa la sospecha de radio muda. La llama poll() en cada vuelta.
     void checkMute();
+    void anotarMudo(const char* criterio);
 
     // ----- Detección de receptor mudo (fase 2) -----
     // Umbral al doble del beacon_timeout_ms por defecto (90 s): dos ventanas

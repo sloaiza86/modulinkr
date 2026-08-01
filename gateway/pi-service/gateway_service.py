@@ -258,6 +258,11 @@ BCAST_GAP_FORZADO_S = float(os.environ.get("MODULINKR_BCAST_GAP_S", "0"))
 # vuelta si va por un relay.
 BCAST_POLL_WAIT_S = 12.0
 
+# Plazo para que el nodo dé su veredicto tras la orden de instalar. La ventana
+# de prueba del nodo son cuatro minutos, así que a los diez está decidido de
+# una manera o de otra, y lo que quede en `installing` es un aviso perdido.
+BCAST_INSTALL_VEREDICTO_S = 600.0
+
 # A quién se le pregunta: los nodos oídos en la última media hora. Preguntar a
 # uno que lleva días sin aparecer solo gasta el plazo de espera.
 BCAST_NODE_SEEN_S = 1800.0
@@ -354,6 +359,21 @@ RX_RE = re.compile(
     r"hex=(?P<hex>[0-9A-Fa-f]+)"
 )
 
+# Acuse de emisión del Heltec, con longitud y total acumulado:
+# "[tx] ok len=31 total=842".
+HELTEC_TX_RE = re.compile(r"\[tx\]\s+ok\s+len=(\d+)\s+total=(\d+)")
+
+# Frontera entre tráfico de control y tráfico a granel, en bytes. Un fragmento
+# de difusión son 231 B; el beacon, el ACK y el WELCOME no llegan a 100.
+TX_CONTROL_MAX_B = 100
+
+# Guarda tras el aire de cada trama, antes de dejar salir la siguiente. Cubre
+# lo que el receptor del nodo tarda en volver a escuchar después de recibir:
+# una trama que salga pegada a la anterior cae dentro de ese instante y se
+# pierde entera, que es lo que le pasaba a todos los beacons emitidos durante
+# una difusión.
+TX_GUARDA_RX_S = 0.06
+
 
 class DutyBudget:
     """Aire consumido por el gateway en una ventana deslizante de una hora.
@@ -428,6 +448,12 @@ class GatewayService:
 
         self.gw_seq   = 0               # contador downlink (ACK + BEACON)
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
+        self.aire_libre     = 0.0       # monotonic hasta el que el aire está ocupado
+        self.tx_ordenadas   = 0         # órdenes escritas al Heltec
+        self.tx_ord_control = 0         # de ellas, tráfico de control
+        self.heltec_emitidas = 0        # total que el Heltec dice haber emitido
+        self.heltec_control  = 0        # de ellas, tráfico de control
+        self.heltec_err      = 0        # emisiones que el Heltec rechazó
         # Presupuesto de aire en ventana deslizante. El acumulado de arriba
         # sigue siendo el que se reporta (es monótono, y así lo espera el
         # visor); este es el que decide si se puede transmitir ahora.
@@ -545,7 +571,21 @@ class GatewayService:
     # ----- Emisión hacia el Heltec -----
 
     def _tx(self, frame: bytes) -> None:
-        """Ordena al Heltec transmitir una trama ya construida."""
+        """Ordena al Heltec transmitir una trama ya construida.
+
+        Espera aquí si el aire sigue ocupado por lo anterior. La espera es de
+        milisegundos y acotada por el tiempo de aire de una trama, y evita que
+        cada camino de emisión tenga que acordarse de espaciar lo suyo: el que
+        se olvide sale pegado a la trama anterior y se pierde entero.
+
+        Le pasaba al beacon, y arreglado el beacon le seguía pasando al ACK de
+        la telemetría, que es el que menos puede permitírselo: el 2-ago-2026,
+        durante una difusión, una muestra tardó tres minutos y seis ciclos de
+        reintentos en entregarse porque su ACK nunca llegaba.
+        """
+        espera = self.aire_libre - time.monotonic()
+        if espera > 0:
+            time.sleep(min(espera, 1.0))
         # Duty cycle propio del gateway (v3.1, EN 300 220-1: por
         # transmisor): todo lo que el Pi ordena emitir suma su ToA aquí,
         # el único punto de salida hacia el Heltec. Se anota en los dos
@@ -554,6 +594,34 @@ class GatewayService:
         toa = protocol.toa_ms(len(frame), self.sf, self.bw_khz)
         self.gw_tx_ms += toa
         self.duty.add(time.monotonic(), toa)
+        # Órdenes escritas al Heltec. Frente al total que el Heltec dice haber
+        # emitido de verdad, es la única forma de saber si el cuello de botella
+        # está en el enlace serie o en el aire: el ciclo de trabajo se apunta
+        # aquí, al escribir, y si el Heltec no da abasto lo que hay apuntado es
+        # ficción. Sin esta cuenta la pregunta solo se puede contestar
+        # adivinando, que es lo que pasó el 1-ago-2026 con 26 beacons escritos
+        # y ninguno recibido por el nodo.
+        self.tx_ordenadas += 1
+        # Hasta cuándo está ocupado el aire por esta trama. El espaciado tiene
+        # que vivir AQUÍ, en el único punto de salida, y no en uno de los que
+        # llaman: mientras solo lo aplicaba la difusión, el beacon, el ACK y el
+        # WELCOME se colaban en la cola del Heltec y salían pegados al
+        # fragmento anterior, sin hueco por delante.
+        #
+        # Medido el 2-ago-2026: 26 beacons escritos, 26 emitidos por el Heltec,
+        # y el nodo no oyó ninguno mientras recibía el 95 % de los fragmentos.
+        # La única diferencia entre unos y otros era esa, que los fragmentos
+        # iban espaciados y el beacon no.
+        self.aire_libre = (time.monotonic() + toa / 1000.0
+                           + TX_GUARDA_RX_S)
+        # Separadas por tamaño, que aquí distingue el tipo sin tener que
+        # mirarlo: un fragmento de difusión son 231 B y todo lo demás que
+        # emite el gateway (beacon, ACK, WELCOME, órdenes) no llega a 100.
+        # La distinción es la que hace falta: el 1-ago-2026 el gateway escribió
+        # 26 beacons y el nodo no recibió ninguno mientras recibía el 90 % de
+        # los fragmentos, y un contador único no puede decir si el beacon salió.
+        if len(frame) < TX_CONTROL_MAX_B:
+            self.tx_ord_control += 1
         line = "TX " + frame.hex().upper() + "\n"
         self.ser.write(line.encode("ascii"))
 
@@ -1240,6 +1308,14 @@ class GatewayService:
             "poll_hasta": 0.0,
         }
         self.bcast["gap_s"] = self._bcast_gap_s(self.bcast["toa_ms"])
+        # Marca para medir la pasada: órdenes escritas y emisiones confirmadas
+        # por el Heltec al empezar. La diferencia entre los dos incrementos al
+        # cerrar dice cuántas órdenes no llegaron a salir por antena.
+        self.bcast["marca_ord"] = self.tx_ordenadas
+        self.bcast["marca_air"] = self.heltec_emitidas
+        self.bcast["marca_ord_c"] = self.tx_ord_control
+        self.bcast["marca_air_c"] = self.heltec_control
+        self.bcast["t0"] = now
         # Primera pasada: la imagen entera, originales y mezclas, en el orden
         # en que el nodo los espera (bloque a bloque, para que solo tenga que
         # tener abierto uno cada vez).
@@ -1419,6 +1495,12 @@ class GatewayService:
                 return
             if now < b["next_ms"]:
                 return
+            # Y tampoco si el aire sigue ocupado por lo último que salió, que
+            # puede no ser un fragmento: si acaba de irse un beacon o un ACK,
+            # el fragmento que venga detrás se llevaría por delante el hueco
+            # que el receptor del nodo necesita para volver a escuchar.
+            if now < self.aire_libre:
+                return
             # Reserva de presupuesto igual que la subida individual: la
             # difusión es tráfico a granel y cede ante beacon, ACK y WELCOME.
             reserva = self.duty.limit_ms * FW_RESERVE_PCT
@@ -1481,9 +1563,42 @@ class GatewayService:
         except sqlite3.Error:
             return []
 
+    def _bcast_balance(self, now: float) -> None:
+        """Qué se ordenó, qué salió por antena y cuánto se tardó.
+
+        Las tres cifras juntas, porque por separado no dicen nada. Si las
+        órdenes y las emisiones cuadran, lo que se pierda se pierde en el aire
+        o en el nodo; si no cuadran, el enlace con el Heltec es el cuello de
+        botella y el hueco entre tramas está por debajo de lo que aguanta.
+        """
+        b = self.bcast
+        if b is None or "marca_ord" not in b:
+            return
+        ordenadas = self.tx_ordenadas - b["marca_ord"]
+        emitidas  = self.heltec_emitidas - b["marca_air"]
+        ord_c     = self.tx_ord_control - b["marca_ord_c"]
+        air_c     = self.heltec_control - b["marca_air_c"]
+        segundos  = now - b["t0"]
+        LOG.info("fw-bcast %d: %d ordenes escritas, %d emitidas por el Heltec "
+                 "(%d sin salir), %.0f s, %.0f ms/orden",
+                 b["op"]["id"], ordenadas, emitidas, ordenadas - emitidas,
+                 segundos, 1000.0 * segundos / max(ordenadas, 1))
+        # Y el desglose que decide el caso del beacon perdido: si el control se
+        # escribe y no sale, el problema es el enlace con el Heltec; si sale y
+        # el nodo no lo oye, el problema está en el aire o en el receptor.
+        LOG.info("fw-bcast %d: de ellas, control (beacon, ACK, WELCOME): "
+                 "%d escritas, %d emitidas, %d sin salir",
+                 b["op"]["id"], ord_c, air_c, ord_c - air_c)
+        b["marca_ord"] = self.tx_ordenadas
+        b["marca_air"] = self.heltec_emitidas
+        b["marca_ord_c"] = self.tx_ord_control
+        b["marca_air_c"] = self.heltec_control
+        b["t0"] = now
+
     def _bcast_cerrar_pasada(self, now: float) -> None:
         """Junta los mapas y decide: reemitir la unión, o dar por terminado."""
         b, op = self.bcast, self.bcast["op"]
+        self._bcast_balance(now)
         mapas = self.buf.bcast_maps(op["id"])
         n = b["n_orig"]
         union = set()
@@ -1565,6 +1680,7 @@ class GatewayService:
                  ORDER BY id DESC LIMIT 1""").fetchone()
         except sqlite3.Error:
             return
+        self._bcast_install_caducada(now)
         if fila is None:
             return
         bid, xfer, sha_hex, destino = fila
@@ -1576,16 +1692,62 @@ class GatewayService:
         LOG.info("fw-bcast %d: orden de instalar al nodo %d (xfer=%08X)",
                  bid, destino, xfer)
 
+    def _bcast_install_caducada(self, now: float) -> None:
+        """Cierra una instalación que se quedó sin veredicto.
+
+        Ningún estado puede ser terminal por silencio: si el FW_RESULT se
+        pierde, la fila se queda en `installing`, y una fila en `installing`
+        bloquea el canal entero porque el visor la sigue dando por viva. El
+        plazo es holgado respecto a la ventana de prueba del nodo, que son
+        cuatro minutos: pasado eso, o el nodo volvió con la imagen nueva, o el
+        gestor de arranque ya le devolvió la anterior.
+
+        Y el veredicto no se inventa: se lee la versión que el nodo anuncia en
+        su catálogo. Si es la que se le mandó, la instalación salió bien y lo
+        único que se perdió fue el aviso.
+        """
+        try:
+            filas = self.buf.conn.execute(
+                """SELECT b.id, b.target, b.version, k.fw_version
+                     FROM fw_bcast b
+                     LEFT JOIN node_catalog k ON k.origin_id = b.target
+                    WHERE b.state = 'installing'
+                      AND b.updated_ts < ?""",
+                (now - BCAST_INSTALL_VEREDICTO_S,)).fetchall()
+        except sqlite3.Error:
+            return
+        for bid, destino, pedida, corriendo in filas:
+            ok = bool(pedida) and pedida == corriendo
+            self.buf.bcast_state(
+                bid, "done" if ok else "failed",
+                "instalada (confirmada por la version que anuncia el nodo)"
+                if ok else
+                f"sin veredicto del nodo tras {BCAST_INSTALL_VEREDICTO_S:.0f} s")
+            LOG.warning("fw-bcast %d: el nodo %d no dio veredicto; version "
+                        "anunciada %s, se pidio %s", bid, destino,
+                        corriendo or "?", pedida or "?")
+
     def bcast_on_result(self, parsed: dict) -> bool:
-        """Veredicto tras instalar una imagen entregada por este transporte."""
+        """Veredicto tras instalar una imagen entregada por este transporte.
+
+        El identificador de transferencia se acepta a cero. El nodo lo pierde
+        al instalar, porque instalar borra su archivo de progreso, y el
+        veredicto de "imagen confirmada" lo emite después de reiniciar, cuando
+        ya no sabe de qué transferencia venía. Exigirlo dejaba la fila en
+        `installing` para siempre: el visor no soltaba la subida terminada, no
+        dejaba lanzar otra, y el nodo aparecía "actualizando" indefinidamente
+        estando ya actualizado. Medido el 1-ago-2026 tras instalar la 0.0.50.
+        """
         if self.buf is None:
             return False
         try:
             fila = self.buf.conn.execute(
                 """SELECT id, target FROM fw_bcast
-                    WHERE state = 'installing' AND xfer = ? AND target = ?
+                    WHERE state = 'installing' AND target = ?
+                      AND (xfer = ? OR ? = 0 OR ? IS NULL)
                  ORDER BY id DESC LIMIT 1""",
-                (parsed.get("fw_xfer"), parsed["origin_id"])).fetchone()
+                (parsed["origin_id"], parsed.get("fw_xfer"),
+                 parsed.get("fw_xfer"), parsed.get("fw_xfer"))).fetchone()
         except sqlite3.Error:
             return False
         if fila is None:
@@ -1995,8 +2157,21 @@ class GatewayService:
         if not m:
             # Líneas de banner/init/tx del Heltec: se muestran para depurar.
             s = line.strip()
-            if s:
-                LOG.debug("heltec: %s", s)
+            if not s:
+                return
+            # El acuse de emisión del Heltec lleva su propio total acumulado.
+            # Es lo que de verdad salió por antena, contado por quien lo emite,
+            # y comparado con las órdenes escritas dice si el Heltec sigue el
+            # ritmo o se queda atrás.
+            mt = HELTEC_TX_RE.search(s)
+            if mt:
+                self.heltec_emitidas = int(mt.group(2))
+                if int(mt.group(1)) < TX_CONTROL_MAX_B:
+                    self.heltec_control += 1
+            elif s.startswith("[tx] err"):
+                self.heltec_err += 1
+                LOG.warning("heltec rechazo una emision: %s", s)
+            LOG.debug("heltec: %s", s)
             return
 
         try:
@@ -2710,7 +2885,12 @@ class GatewayService:
                 try:
                     now = time.monotonic()
                     self.mqtt.drain_nbiot()
-                    if now - last_beacon >= self.beacon_s:
+                    # El beacon espera a que el aire quede libre. No se toca
+                    # `last_beacon`, así que se reintenta en la vuelta
+                    # siguiente y sale con unos milisegundos de retraso en vez
+                    # de salir pegado a un fragmento y perderse.
+                    if now - last_beacon >= self.beacon_s and \
+                            now >= self.aire_libre:
                         last_beacon = now
                         self.send_beacon()
                         # Reporte propio de aire (v3.1): el gateway se mide a

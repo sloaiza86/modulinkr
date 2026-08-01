@@ -101,7 +101,17 @@ bool saveProgress() {
 }
 
 void clearProgress() {
-    if (LittleFS.exists(kPath)) LittleFS.remove(kPath);
+    // "Sin transferencia" se escribe DENTRO del archivo, no en su ausencia.
+    // Es la cuarta vez que el proyecto se topa con lo mismo (la marca de
+    // prueba, la hora del config aplazado, el mapa de la difusión y esto):
+    // usar la ausencia como estado obliga a abrir un archivo que normalmente
+    // no está, y el VFS del core lo registra como error de nivel E en cada
+    // arranque, para el caso normal.
+    File f = LittleFS.open(kTmpPath, "w");
+    if (!f) return;
+    f.print("{\"xfer\":0}");
+    f.close();
+    LittleFS.rename(kTmpPath, kPath);
 }
 
 // Vuelca el búfer a flash, borrando antes los sectores que va a ocupar. El
@@ -169,9 +179,13 @@ void begin(const char* running_version) {
     Serial.printf("[fwota]  destino %s, %u kB\n",
                   part_->label, static_cast<unsigned>(part_->size / 1024));
 
-    if (!LittleFS.exists(kPath)) return;
+    // Se abre directamente, sin preguntar si está. `exists()` del core está
+    // implementado abriendo el archivo, así que preguntar costaba la misma
+    // línea [E] vfs_api que abrirlo, y era la que ensuciaba cada arranque sin
+    // transferencia a medias. El archivo existe siempre a partir del primer
+    // arranque (ver clearProgress), y "sin transferencia" se escribe dentro.
     File f = LittleFS.open(kPath, "r");
-    if (!f) return;
+    if (!f) { clearProgress(); return; }
     JsonDocument doc;
     const bool ok = deserializeJson(doc, f) == DeserializationError::Ok;
     f.close();

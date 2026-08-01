@@ -99,7 +99,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.50-prueba-final";
+constexpr const char* kFirmwareVersion = "0.0.54-padre-y-silencio";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -651,6 +651,11 @@ bool fireLora() {
     }
     return true;
 }
+
+// Declarada aquí porque la consultan manejadores que están por encima de su
+// definición: durante una transferencia de firmware el nodo calla todo lo que
+// no sea el producto (ver el comentario largo junto a la definición).
+bool bajandoFirmware();
 
 // Reenvío de una trama descendente dirigida a OTRO nodo, por la ruta inversa
 // aprendida del uplink (spec §2.4).
@@ -1637,6 +1642,13 @@ void handleFwInstall(const LoraP2P::RxFrame& f) {
     // arranca, el registro es lo único que quedará contándolo.
     g_health.fw_installs++;
     health::save(g_health);
+    // Y se suelta el mapa de la difusión, que a partir de este momento describe
+    // una imagen ya consumida. Sin esto sobrevivía al reinicio: el nodo
+    // arrancaba con la imagen nueva, reanudaba el mapa, intentaba adoptar la
+    // imagen en la partición destino, que ahora es la otra y lleva el firmware
+    // anterior, y anunciaba que el sha256 no cuadraba justo después de una
+    // instalación correcta (medido el 1-ago-2026 al instalar la 0.0.50).
+    fwbcast::reset();
     Serial.println(F("[fw]     instalando y reiniciando"));
     Serial.flush();
     delay(300);
@@ -1702,6 +1714,12 @@ void fwResultTick(uint32_t now) {
 void processLoraRx() {
     LoraP2P::RxFrame f;
     while (lora.readFrame(f)) {
+        // Toda trama válida es prueba de vida de quien la emitió en el último
+        // salto. Se anota antes de repartirla, para que valga igual el beacon
+        // que un fragmento de firmware: un vecino del que están llegando
+        // tramas no puede darse por perdido por no oír su beacon.
+        mesh.notePeerAlive(f.hop_src, millis());
+
         switch (f.frame_type) {
             case protocol::kFrameAck:
                 handleAck(f);
@@ -1859,6 +1877,18 @@ void processAckTimeouts() {
 void snClientTick(uint32_t now) {
     if (g_cfg.super_node) return;  // el supernodo no busca supernodos
 
+    // Y tampoco se busca supernodo con una imagen bajando. La búsqueda es una
+    // ráfaga de transmisiones propias, y cada una ensordece al nodo el tiempo
+    // que dura, justo mientras le están llegando fragmentos: el 1-ago-2026
+    // fueron trece en diez minutos, y las ventanas que las contienen recibieron
+    // un tercio menos que las limpias.
+    //
+    // No se pierde nada por esperar. El supernodo sirve para entregar muestras
+    // cuando no hay gateway, y las muestras aguantan en la outbox; la imagen,
+    // en cambio, viene del gateway y se está recibiendo ahora. Al terminar la
+    // transferencia la búsqueda arranca sola si sigue haciendo falta.
+    if (bajandoFirmware()) return;
+
     // v2.3: un nodo huérfano busca supernodo tanto para ENTREGAR muestras
     // (outbox) como para OBTENER LA HORA cuando no hay gateway (tras
     // gateway_wait_ms sin sincronizar). Con la política estricta, no
@@ -1992,12 +2022,41 @@ void ntpTick() {
     nbsvc.requestNtpSync();
 }
 
+// ¿Hay una imagen bajando ahora mismo? Mientras la hay, el nodo calla todo lo
+// que no sea el producto.
+//
+// Una radio que transmite no puede escuchar: es una sola antena y un solo
+// chip. Cada vez que el nodo abre la boca se pierde el fragmento que estuviera
+// pasando en ese momento. Medido el 1-ago-2026 sobre la imagen 0.0.50: 40
+// transmisiones propias durante la subida (31 heartbeats, 6 NODE_HEALTH y 3
+// telemetrías) y 18 fragmentos perdidos, casi uno de cada dos. Callar los dos
+// primeros deja tres transmisiones en media hora.
+//
+// Es además como resuelve el problema el estándar: en FUOTA de LoRaWAN el
+// dispositivo no emite durante la sesión de fragmentos, y por eso la entrega
+// lleva corrección de errores, que es la misma razón por la que aquí hay
+// mezclas de repuesto. La diferencia con callar por las bravas es que la
+// sesión está declarada en los dos extremos, así que el visor sabe por qué no
+// hay noticias y lo dice en vez de dar alarma (ventana de mantenimiento).
+//
+// El riesgo de quedarse mudo para siempre si una transferencia se cuelga lo
+// cubre fwbcast::expireIfIdle, que la caduca a los diez minutos sin recibir.
+bool bajandoFirmware() {
+    return fwbcast::xfer() != 0 && !fwbcast::complete();
+}
+
 // HEARTBEAT periódico con el contador de aire (v3.1). Solo con registro y
 // padre: sin ruta no llega y el contador sigue sumando; el primer delta
 // tras recuperar ruta totaliza el periodo oscuro (reintentos incluidos).
 void heartbeatTick(uint32_t now) {
     static uint32_t last_hb_ms = 0;
     if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
+    // Aplazado, no perdido: al salir sin tocar last_hb_ms el heartbeat sale en
+    // la primera vuelta después de la transferencia. Y no se pierde dato
+    // ninguno, porque el contador de aire que lleva dentro se totaliza por
+    // diferencias entre reportes (§13): el primer heartbeat de después cubre
+    // el periodo entero, reintentos incluidos.
+    if (bajandoFirmware()) return;
     if (now - last_hb_ms < kHeartbeatPeriodMs) return;
     last_hb_ms = now;
 
@@ -2088,6 +2147,18 @@ void radioHealthTick(uint32_t now) {
     const char* causa = (fault == health::Fault::RX_SILENT)
                             ? "sin recepciones validas, receptor mudo"
                             : "sin TXP2P DONE, transmisor mudo";
+
+    // Con transmisor mudo, cuál de los dos criterios lo declaró y con qué
+    // cuentas. El detector salta en falso con telemetría lenta y leyendo el
+    // código no se ha podido reproducir: esta línea es lo que falta para
+    // arreglarlo sobre lo que se vea y no sobre lo que se suponga.
+    if (fault == health::Fault::TX_MUTE && lora.muteWhy()[0] != '\0') {
+        Serial.printf("[radio]  mudo por %s: pendientes=%u, %lu ms esperando "
+                      "la mas antigua\n",
+                      lora.muteWhy(),
+                      static_cast<unsigned>(lora.mutePending()),
+                      static_cast<unsigned long>(lora.muteSinceDoneMs()));
+    }
 
     // Por qué no llega nada, antes de tocar la radio. "Receptor mudo" es un
     // síntoma con varias causas muy distintas, y la escalera solo sabe curar
@@ -2226,6 +2297,10 @@ void trialTick(uint32_t now) {
 void nodeHealthTick(uint32_t now) {
     if (g_health_tx_left == 0) return;
     if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
+    // Igual que el heartbeat: se sale antes de gastar ninguna repetición, así
+    // que las tres siguen pendientes y salen enteras al terminar la subida.
+    // Lo que llevan dentro son contadores acumulados, no eventos que caduquen.
+    if (bajandoFirmware()) return;
     if (g_health_tx_ms != 0 &&
         static_cast<int32_t>(now - g_health_tx_ms) < static_cast<int32_t>(kHealthRepeatMs)) {
         return;

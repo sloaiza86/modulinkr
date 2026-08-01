@@ -146,6 +146,12 @@ void Mesh::reselectParent(uint32_t now_ms) {
     }
 }
 
+void Mesh::notePeerAlive(uint8_t from_id, uint32_t now_ms) {
+    Neighbor* n = find(from_id);
+    if (n == nullptr || !n->in_use) return;
+    n->last_ms = now_ms;
+}
+
 void Mesh::tick(uint32_t now_ms) {
     for (auto& n : neighbors_) {
         if (n.in_use && expired(n, now_ms)) n.in_use = false;

@@ -39,6 +39,56 @@ APP_BIN = SERVICE_DIR / "nodo-app.bin"
 APP_VER = SERVICE_DIR / "nodo-app.bin.version"
 APP_SHA = SERVICE_DIR / "nodo-app.bin.sha256"
 
+# Tamaño del fragmento de difusión y lo que le añade el protocolo (cabecera de
+# 11 B, CRC de 2 B, y el identificador y el índice que van en el payload).
+FRAG_BYTES    = 212
+FRAG_OVERHEAD = 19
+# Ciclo de trabajo de la sub-banda de EN 300 220-1 en la que emite el gateway.
+DUTY_LEGAL = 0.08
+
+
+_radio_cache: dict = {"t": 0.0, "sf": 7, "bw": 125}
+
+
+def _radio() -> tuple:
+    """SF y ancho de banda con los que emite el gateway.
+
+    Salen de donde ya los lee el resto del visor, que es `get_net.sh` sobre la
+    configuración del servicio. Se cachean cinco minutos porque esa lectura
+    pasa por sudo y esta estimación se pide en cada visita a la página, no
+    porque el dato cambie a menudo.
+
+    Importa acertar: el ancho de banda dobla o divide por dos el tiempo de
+    aire, y con él las horas que se anuncian antes de lanzar una subida.
+    """
+    ahora = time.time()
+    if ahora - _radio_cache["t"] < 300.0:
+        return _radio_cache["sf"], _radio_cache["bw"]
+    try:
+        import configapi
+        p = configapi.red_params()
+        if p.get("sf") and p.get("bw_khz"):
+            _radio_cache.update(sf=int(p["sf"]), bw=int(p["bw_khz"]))
+    except Exception:                      # noqa: BLE001
+        pass                               # se conserva lo que hubiera
+    _radio_cache["t"] = ahora
+    return _radio_cache["sf"], _radio_cache["bw"]
+
+
+def _toa_ms(length: int) -> float:
+    """Time-on-Air de una trama, con la fórmula de Semtech.
+
+    La estimación anterior era un valor fijo de 380 ms por fragmento, que solo
+    vale para un ancho de banda y además contaba el fragmento sin lo que le
+    añade el protocolo.
+    """
+    sf, bw = _radio()
+    de = 1 if (sf >= 11 and bw == 125) else 0
+    num = 8 * length - 4 * sf + 28 + 16
+    den = 4 * (sf - 2 * de)
+    nsym = 8 + (((num + den - 1) // den) * 5 if num > 0 else 0)
+    return (8 + 4.25 + nsym) * (float(1 << sf) / bw)
+
 router = APIRouter(prefix="/api/config/lora")
 
 # Tope del config que se acepta enviar. El canal trocea en fragmentos de
@@ -204,9 +254,15 @@ def firmware():
     if len(sha) != 64:
         return {"disponible": False,
                 "error": "falta nodo-app.bin.sha256 o está mal formado"}
+    frags = -(-tam // FRAG_BYTES)
+    aire_s = frags * _toa_ms(FRAG_BYTES + FRAG_OVERHEAD) / 1000.0
     return {"disponible": True, "version": version, "bytes": tam,
-            "sha256": sha, "fragmentos": -(-tam // 213),
-            "aire_min": round(-(-tam // 213) * 0.380 / 60, 1)}
+            "sha256": sha, "fragmentos": frags,
+            "aire_min": round(aire_s / 60.0, 1),
+            # Reloj de pared con el ciclo de trabajo de la norma, que es lo que
+            # de verdad quiere saber quien va a lanzar la subida: el tiempo de
+            # aire solo dice cuánto ocupa el canal, no cuánto tarda.
+            "horas_8pct": round(aire_s / (3600.0 * DUTY_LEGAL) , 1)}
 
 
 @router.post("/firmware/enviar")

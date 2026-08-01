@@ -274,6 +274,28 @@ function tarjetaGateway(data) {
 // de la telemetría es más laxo que el de conexión (5x) porque el
 // muestreo puede ser más lento que los beacons. Único punto de verdad:
 // lo usan la tarjeta y el panel de detalle.
+// Ventana de mantenimiento. Con una sesión de firmware abierta sobre un nodo,
+// la falta de noticias es lo previsto y no un fallo: el nodo calla sus tramas
+// de diagnóstico mientras baja la imagen, para no perder fragmentos con su
+// propia voz. Se sigue midiendo y guardando todo igual, lo que se suspende es
+// la alarma, que es la regla de las ventanas de mantenimiento en supervisión.
+const FW_FASE_TXT = {
+  offering:    "anunciando",
+  pending:     "en cola",
+  sending:     "recibiendo imagen",
+  polling:     "comprobando",
+  repairing:   "reparando huecos",
+  committing:  "comprobando",
+  install_req: "instalando",
+  installing:  "instalando",
+};
+
+function chipMantenimiento(n) {
+  if (!n.fw_session) return null;
+  const fase = FW_FASE_TXT[n.fw_session] || n.fw_session;
+  return { cls: "ambar", txt: "Actualizando firmware · " + fase };
+}
+
 function chipEstado(n, ult, onlineS) {
   // Cada nodo trae su propio umbral, medido sobre su ritmo de muestreo. El
   // parámetro queda como respaldo para un nodo que no lo traiga (gateway
@@ -281,6 +303,9 @@ function chipEstado(n, ult, onlineS) {
   // "sin datos" durante 450 de cada 600 segundos, estando perfecto.
   onlineS = n.online_s || onlineS;
   let cls = "off", txt = "sin señal";
+  // Con sesión abierta, un nodo callado no es un nodo caído.
+  const mant = chipMantenimiento(n);
+  if (mant && !n.online) return mant;
   if (n.online) {
     if (ult && ult.ago_s <= onlineS * 5) {
       const canales = ult.channels ?? [];
@@ -306,8 +331,13 @@ function chipEstado(n, ult, onlineS) {
 // NB-IoT/MQTT del supernodo es fase 2 (requiere que el nodo lo reporte).
 function chipsNodo(n, ult, onlineS) {
   onlineS = n.online_s || onlineS;
+  const mant = chipMantenimiento(n);
+  // El chip de mantenimiento sustituye al de "sin señal" cuando el nodo calla,
+  // y acompaña al de "en línea" cuando sigue hablando: en los dos casos quien
+  // mire la pantalla sabe que hay una actualización en marcha sobre ese nodo.
   const chips = [n.online ? { cls: "on", txt: "En línea LoRa" }
-                          : { cls: "off", txt: "LoRa sin señal" }];
+                          : (mant || { cls: "off", txt: "LoRa sin señal" })];
+  if (mant && n.online) chips.push(mant);
   const viaNb = !!(ult && ult.via_nbiot);
   const mqttFresco = n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
 
@@ -2484,8 +2514,10 @@ async function bcLanzar() {
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
     cfgDialogo("Difundir a toda la red",
-      "<p>Se va a emitir la imagen a toda la red. Son unas <b>tres horas</b> de "
-      + "emisión de fondo, cediendo el aire a la telemetría.</p>"
+      "<p>Se va a emitir la imagen a toda la red, de fondo y cediendo el aire a "
+      + "la telemetría. Lo que marca el reloj es el ciclo de trabajo: con el "
+      + "8 % de la norma son <b>unas dos horas</b>, y ese tiempo es el mismo "
+      + "para un nodo que para veinte.</p>"
       + avisoClase
       + "<p>No se instala nada: al terminar, cada nodo que la haya completado "
       + "tiene la imagen guardada y verificada en su partición dormida, y la "
@@ -3000,8 +3032,14 @@ async function fwLoraAvisoImagen() {
     }
     el.className = "aviso";
     el.textContent = `Imagen ${d.version}: ${d.bytes} B en ${d.fragmentos} `
-      + `fragmentos, ${d.aire_min} min de tiempo de aire. Repartido en la `
-      + "ventana nocturna suele ser una noche.";
+      + `fragmentos, ${d.aire_min} min de tiempo de aire`
+      // El tiempo de aire dice cuánto ocupa el canal, no cuánto tarda. Lo
+      // segundo es lo que quiere saber quien va a lanzarla, y sale de repartir
+      // ese aire dentro del ciclo de trabajo que permite la norma.
+      + (d.horas_8pct != null
+           ? `, unas ${String(d.horas_8pct).replace(".", ",")} h con el 8 % de `
+             + "ciclo de trabajo de la norma."
+           : ".");
     document.getElementById("fw-lora-enviar").disabled = false;
   } catch (e) {
     el.className = "aviso mal";
