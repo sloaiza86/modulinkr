@@ -341,13 +341,19 @@ class GatewayBuffer:
         (DB anterior a la fase 2 del estado por nodo). No borra nada."""
         cur = self.conn.execute("PRAGMA table_info(node_status)")
         cols = [row[1] for row in cur.fetchall()]
+        reales = ("nbiot_updated", "mqtt_seen", "mb_debug_updated",
+                  "hl_updated")
         for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen",
-                    "mb_debug", "mb_debug_updated", "last_hop_src"):
+                    "mb_debug", "mb_debug_updated", "last_hop_src",
+                    # Salud del nodo (NODE_HEALTH, §16.1). Llegaba al gateway
+                    # y solo se escribía en el log y en MQTT, así que quien
+                    # miraba el visor no tenía forma de ver por qué un nodo se
+                    # había reiniciado ni cuántas veces le había fallado la
+                    # radio.
+                    "hl_fault", "hl_reset_reason", "hl_boots", "hl_probes",
+                    "hl_reinits", "hl_resets", "hl_reboots", "hl_updated"):
             if col not in cols:
-                col_type = ("INTEGER"
-                            if col in ("nbiot_flags", "nbiot_csq", "mb_debug",
-                                       "last_hop_src")
-                            else "REAL")
+                col_type = "REAL" if col in reales else "INTEGER"
                 self.conn.execute(
                     f"ALTER TABLE node_status ADD COLUMN {col} {col_type}")
 
@@ -393,11 +399,25 @@ class GatewayBuffer:
     # ----- Cola de envíos de configuración por LoRa (spec §17) -----
 
     def config_push_next(self) -> dict | None:
-        """Siguiente petición pendiente, o None. La toma el servicio del
-        gateway; el visor solo inserta y consulta el estado."""
+        """Siguiente petición que atender, o None. La toma el servicio del
+        gateway; el visor solo inserta y consulta el estado.
+
+        Incluye las que quedaron en `sending`, por el mismo motivo por el que
+        lo hace fw_push_next: el estado de una transferencia en vuelo vive en
+        la memoria del servicio, así que un reinicio la deja huérfana, ni en
+        memoria ni recogible. Y como el visor no deja encolar otra al mismo
+        nodo mientras haya una viva, esa fila bloqueaba el canal de ese nodo
+        para siempre. Medido el 2-ago-2026: un envío al supernodo se quedó en
+        `sending` en uno de los reinicios de la noche y no había forma de
+        mandar otro.
+
+        Repetirla es inocuo: son unos pocos fragmentos, y el nodo reconoce la
+        transferencia por el sha de su contenido, así que reanuda en vez de
+        empezar de cero.
+        """
         cur = self.conn.execute(
             """SELECT id, origin, config, apply_at FROM config_push
-                WHERE state = 'pending' ORDER BY id LIMIT 1""")
+                WHERE state IN ('pending', 'sending') ORDER BY id LIMIT 1""")
         row = cur.fetchone()
         if row is None:
             return None

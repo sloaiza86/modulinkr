@@ -302,12 +302,16 @@ function chipEstado(n, ult, onlineS) {
   // anterior). Sin esto, un nodo que muestrea cada diez minutos aparecía
   // "sin datos" durante 450 de cada 600 segundos, estando perfecto.
   onlineS = n.online_s || onlineS;
+  // La frescura del DATO tiene su propio umbral, calculado sobre el ritmo de
+  // muestreo. Antes salía de multiplicar por cinco el del enlace, y al pasar
+  // ese a medirse contra el latido las dos cosas dejaron de tener relación.
+  const datosS = n.datos_s || onlineS * 5;
   let cls = "off", txt = "sin señal";
   // Con sesión abierta, un nodo callado no es un nodo caído.
   const mant = chipMantenimiento(n);
   if (mant && !n.online) return mant;
   if (n.online) {
-    if (ult && ult.ago_s <= onlineS * 5) {
+    if (ult && ult.ago_s <= datosS) {
       const canales = ult.channels ?? [];
       const malos = canales.filter((c) => c.st_code);
       if (!malos.length) { cls = "on"; txt = "en línea"; }
@@ -331,6 +335,7 @@ function chipEstado(n, ult, onlineS) {
 // NB-IoT/MQTT del supernodo es fase 2 (requiere que el nodo lo reporte).
 function chipsNodo(n, ult, onlineS) {
   onlineS = n.online_s || onlineS;
+  const datosS = n.datos_s || onlineS * 5;
   const mant = chipMantenimiento(n);
   // El chip de mantenimiento sustituye al de "sin señal" cuando el nodo calla,
   // y acompaña al de "en línea" cuando sigue hablando: en los dos casos quien
@@ -343,7 +348,7 @@ function chipsNodo(n, ult, onlineS) {
 
   // Modbus: con datos frescos, sea por LoRa (en línea) o por NB-IoT (failover).
   if (n.online || viaNb) {
-    if (ult && ult.ago_s <= onlineS * 5) {
+    if (ult && ult.ago_s <= datosS) {
       const canales = ult.channels ?? [];
       const malos = canales.filter((c) => c.st_code);
       if (!canales.length) {

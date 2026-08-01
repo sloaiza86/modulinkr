@@ -32,10 +32,16 @@ DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
 # Modbus, que usa cinco veces este valor.
 ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "30"))
 
-# Cuántos intervalos de muestreo se toleran sin noticias antes de dar a un nodo
-# por desconectado. Tres deja margen para una entrega perdida y su reintento
-# sin declarar caído a quien solo va despacio.
+# Cuántos latidos se toleran sin noticias antes de dar a un nodo por
+# desconectado. Tres deja margen para una entrega perdida y su reintento sin
+# declarar caído a quien solo va despacio.
 ONLINE_INTERVALOS = 3.0
+
+# Y cuántos intervalos de MUESTREO antes de dar por vieja la última medida.
+# Dos: pasado el doble de lo que el nodo tarda en muestrear, o se perdió una
+# entrega o el sensor dejó de responder, y en los dos casos el dato de la
+# pantalla ya no representa lo que está pasando.
+DATOS_INTERVALOS = 2.0
 
 # Techo del umbral, por si la medida sale disparatada (un nodo que estuvo días
 # parado y vuelve tiene huecos enormes entre muestras consecutivas).
@@ -79,6 +85,7 @@ def _schemas_de(catalog_json) -> str:
 
 
 _INTERVALO_CACHE: dict = {}      # origin -> (calculado_en, intervalo_s)
+_LATIDO_CACHE: dict = {}         # origin -> (calculado_en, cadencia_latido_s)
 
 
 def _intervalo_de(conn, origin: int, ahora: float) -> float | None:
@@ -112,12 +119,71 @@ def _intervalo_de(conn, origin: int, ahora: float) -> float | None:
     return float(mediana)
 
 
+def _latido_de(conn, origin: int, ahora: float) -> float | None:
+    """Cadencia observada del heartbeat de un nodo, en segundos.
+
+    El heartbeat llega cada minuto pase lo que pase, y es independiente de cada
+    cuánto muestree el nodo. Es por tanto la señal buena para juzgar si el
+    ENLACE sigue vivo, que es una pregunta distinta de si los DATOS están
+    frescos. Se sacan de node_airtime, donde el gateway guarda un registro por
+    cada heartbeat recibido.
+    """
+    hit = _LATIDO_CACHE.get(origin)
+    if hit and ahora - hit[0] < 60.0:
+        return hit[1]
+    try:
+        filas = conn.execute(
+            """SELECT t_recv FROM node_airtime WHERE origin = ?
+                ORDER BY t_recv DESC LIMIT 8""", (origin,)).fetchall()
+    except sqlite3.Error:
+        return None
+    ts = [f[0] for f in filas if f[0]]
+    if len(ts) < 3:
+        return None
+    deltas = sorted(a - b for a, b in zip(ts, ts[1:]) if a > b)
+    if not deltas:
+        return None
+    mediana = float(deltas[len(deltas) // 2])
+    _LATIDO_CACHE[origin] = (ahora, mediana)
+    return mediana
+
+
 def _umbral_de(conn, origin: int, ahora: float) -> float:
-    """Segundos sin noticias tras los que un nodo se da por desconectado."""
-    intervalo = _intervalo_de(conn, origin, ahora)
+    """Segundos sin noticias tras los que un nodo se da por desconectado.
+
+    Se mide contra el heartbeat y no contra el muestreo. Medirlo contra el
+    muestreo daba media hora de gracia a un nodo que muestrea cada diez
+    minutos: el 2-ago-2026 uno desenchufado catorce minutos antes seguía
+    pintado en verde. El heartbeat va cada minuto, así que tres latidos son
+    tres minutos y un nodo caído se ve caído.
+
+    Apretarlo es seguro desde que existe la ventana de mantenimiento: durante
+    una subida de firmware el nodo calla sus diagnósticos a propósito, y esos
+    nodos ya no se juzgan por su silencio (ver _sesiones_firmware).
+
+    El respaldo sobre el muestreo se conserva para un nodo con firmware
+    anterior al heartbeat, que no tiene otra señal periódica.
+    """
+    intervalo = _latido_de(conn, origin, ahora)
+    if intervalo is None:
+        intervalo = _intervalo_de(conn, origin, ahora)
     if intervalo is None:
         return ONLINE_S
     return min(ONLINE_MAX_S, max(ONLINE_S, intervalo * ONLINE_INTERVALOS))
+
+
+def _umbral_datos_de(conn, origin: int, ahora: float) -> float:
+    """Segundos tras los que la última medida deja de considerarse fresca.
+
+    Esta sí va contra el ritmo de muestreo, que es lo que la determina. Es la
+    otra mitad de la separación: el enlace y los datos son dos preguntas
+    distintas con dos periodos distintos, y usar un umbral para las dos
+    obligaba a estirarlo hasta que dejaba de servir para ninguna.
+    """
+    intervalo = _intervalo_de(conn, origin, ahora)
+    if intervalo is None:
+        return ONLINE_S * 5
+    return min(ONLINE_MAX_S, max(ONLINE_S, intervalo * DATOS_INTERVALOS))
 
 
 def _clase_de(catalog_json: str) -> str:
@@ -270,6 +336,9 @@ def network_state() -> dict:
             # mismo criterio y no con una constante suya.
             "online_s":   round(_umbral_de(c, r[0], now), 1),
             "online":     (now - r[1]) <= _umbral_de(c, r[0], now),
+            # Umbral para la última medida, que va contra el ritmo de muestreo
+            # y no contra el del latido: son dos preguntas distintas.
+            "datos_s":    round(_umbral_datos_de(c, r[0], now), 1),
             "last_frame": r[2],
             "rssi":       r[3],
             "snr":        r[4],

@@ -192,6 +192,11 @@ CFG_WINDOW_S = 2.5
 # Rondas de reenvío antes de abandonar. Cada ronda reenvía solo lo que el
 # mapa del CONFIG_ACK marca como ausente, así que convergen rápido.
 CFG_MAX_ROUNDS = 3
+
+# Plazo para que el nodo mande el resultado de aplicar una configuración. Con
+# escritura aplazada el nodo puede tardar lo que diga apply_at, así que el
+# plazo es generoso; lo que no puede es no vencer nunca.
+CFG_VEREDICTO_S = 900.0
 # Espera tras oír una trama del nodo antes de mandarle un fragmento.
 #
 # Enviar a ciegas hacía que los fragmentos cayeran encima del ciclo de envío
@@ -854,6 +859,7 @@ class GatewayService:
         if self.buf is None:
             return
         if self.cfg_tx is None:
+            self._config_veredicto_caducado(now)
             pend = self.buf.config_push_next()
             if pend is not None:
                 self.config_start(pend["id"], pend["origin"], pend["config"],
@@ -2128,6 +2134,30 @@ class GatewayService:
                  protocol.addr_name(parsed["origin_id"]), detalle)
         self.config_finish("done" if parsed["cfg_status"] == 0 else "failed",
                            detalle)
+
+    def _config_veredicto_caducado(self, now: float) -> None:
+        """Cierra un envío de configuración que se quedó sin veredicto.
+
+        `committing` significa que los fragmentos llegaron y falta el resultado
+        que manda el nodo tras aplicarlos. Si ese resultado se pierde, la fila
+        se queda ahí, y como el visor no deja encolar otra al mismo nodo
+        mientras haya una viva, bloquea el canal de configuración de ese nodo.
+        La misma regla que en el resto del sistema: ningún estado es terminal
+        por silencio.
+        """
+        try:
+            filas = self.buf.conn.execute(
+                """SELECT id, origin FROM config_push
+                    WHERE state = 'committing' AND updated_ts < ?""",
+                (time.time() - CFG_VEREDICTO_S,)).fetchall()
+        except sqlite3.Error:
+            return
+        for pid, origen in filas:
+            self.buf.config_push_state(
+                pid, "failed",
+                f"sin resultado del nodo tras {CFG_VEREDICTO_S:.0f} s")
+            LOG.warning("config-push %d al nodo %d: sin resultado, se cierra",
+                        pid, origen)
 
     def config_finish(self, state: str, detail: str) -> None:
         if self.cfg_tx is None:
