@@ -466,13 +466,24 @@ class GatewayBuffer:
         manda la orden de instalar, que va nodo a nodo. Sin excluirla aquí, el
         emisor la recogía otra vez en la vuelta siguiente y reemitía la imagen
         entera en bucle. Lo encontró la prueba de la máquina de estados.
+
+        `install_req` e `installing` se excluyen por lo mismo, y se dejaron
+        fuera la primera vez: son los estados que vienen JUSTO DESPUÉS de
+        `ready`, así que la imagen está igual de entregada. Pulsar instalar
+        escribía `install_req`, esta consulta lo leía como trabajo pendiente y
+        el emisor relanzaba medio mega encima de una imagen ya verificada,
+        borrando de paso la orden que acababa de darse. Se midió en banco el
+        1-ago-2026: la operación volvió a arrancar catorce segundos después de
+        darse por completa. La regla es que aquí solo entra lo que todavía no
+        está en el nodo.
         """
         cur = self.conn.execute(
             """SELECT id, xfer, path, version, total_len, sha256, block_k,
                       block_r, state, pass_no, detail, target,
                       hour_from, hour_to
                  FROM fw_bcast
-                WHERE state NOT IN ('ready', 'done', 'failed', 'cancelled')
+                WHERE state NOT IN ('ready', 'install_req', 'installing',
+                                    'done', 'failed', 'cancelled')
              ORDER BY id DESC LIMIT 1""")
         row = cur.fetchone()
         if row is None:

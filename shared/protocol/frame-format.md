@@ -1392,6 +1392,14 @@ Se emite repetido durante el margen previo, como el anuncio de §19: no hay conf
 
 Dos bytes bastan (2498 originales más 200 mezclas) y ahorran dos frente al desplazamiento de 32 bits, que a 2698 fragmentos son 5,4 kB de aire.
 
+**Ritmo de emisión.** El hueco entre fragmentos se deriva del tiempo de aire y no es una constante, por el mismo motivo que en §17.6. Suma tres cosas: el tiempo de aire del propio fragmento, el de una subida típica del nodo y un margen de ocho símbolos para el CAD.
+
+El primer sumando es un suelo duro, y no por prudencia. El contador de ciclo de trabajo del gateway apunta el aire cuando escribe la orden al Heltec, no cuando la trama sale, así que emitir órdenes más deprisa de lo que la radio las convierte en aire falsearía la contabilidad sobre la que se sostiene el cumplimiento de EN 300 220-1. De paso es lo que impide que se llene la UART del Heltec, que era la única razón que se dio al fijar el valor a ojo.
+
+El segundo aplica el criterio que ya usan otros protocolos con el mismo problema: quien ocupa el medio de forma continuada deja un hueco explícito para que el otro extremo pueda hablar, como el SIFS de 802.11, las ventanas RX1 y RX2 de LoRaWAN o el silencio de 3,5 caracteres de Modbus RTU. Se dimensiona con una telemetría, que es la trama más larga que el nodo emite sin que se le pida.
+
+A SF7 y 250 kHz la cuenta da 243 ms (182 de fragmento, 57 de telemetría, 4 de margen), y a SF9 y 125 kHz, 1551 ms. Ninguna constante cubre los dos casos: los 0,6 s fijos que se usaron hasta el 1-ago-2026 sobraban en el primero, donde alargaban una imagen de 541 kB de 11 a 27 minutos, y se quedaban muy cortos en el segundo, donde el hueco ni siquiera cubría el tiempo de aire de la trama anterior. El recorte solo se nota mientras el ciclo de trabajo no sea la restricción: al 8 % legal el presupuesto de aire manda y la imagen tarda lo mismo se ponga el hueco como se ponga.
+
 ### 20.8 FW_BCAST_POLL (downlink, `frame_type = 0x21`)
 
 | Offset | Campo | Tamaño | Descripción |

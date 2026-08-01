@@ -223,9 +223,36 @@ BCAST_OFFER_LEAD_S  = 30.0
 BCAST_OFFER_EVERY_S = 5.0
 
 # Separación entre fragmentos de difusión. No hay confirmación que esperar, así
-# que el freno de verdad es el presupuesto de aire; este hueco solo evita
-# saturar la UART del Heltec y deja sitio a los ACK de la telemetría.
-BCAST_GAP_S = 0.6
+# que el freno de verdad es el presupuesto de aire; este hueco deja sitio a que
+# el nodo hable entre fragmento y fragmento.
+#
+# El hueco NO es una constante, se calcula a partir del tiempo de aire, porque
+# el tiempo de aire cambia con el factor de dispersión y el ancho de banda: los
+# 0,6 s fijos que había antes eran cómodos a SF7 y BW250 y se quedaban cortos a
+# SF9 o BW125, donde un fragmento tarda más de un segundo en salir. La cuenta
+# tiene dos sumandos, y ninguno es negociable:
+#
+#   1. El tiempo de aire del propio fragmento. Es un suelo duro, y no por
+#      prudencia: el contador de ciclo de trabajo apunta el aire cuando el Pi
+#      ESCRIBE la orden, no cuando la trama sale. Escribir más rápido de lo que
+#      la radio emite convierte esa contabilidad en ficción, y con ella el
+#      cumplimiento de la EN 300 220-1. De paso, es también lo que impide que
+#      la UART del Heltec se llene, que era el miedo original.
+#   2. Una subida del nodo. Es el mismo criterio que el SIFS de 802.11, las
+#      ventanas RX1 y RX2 de LoRaWAN o el silencio de 3,5 caracteres de Modbus
+#      RTU: quien monopoliza el medio deja un hueco explícito para que el otro
+#      extremo pueda hablar. Se dimensiona con una telemetría típica, que es la
+#      trama más larga que el nodo emite sin que se le pida.
+#
+# Y un margen en símbolos para el CAD y la decisión del nodo, en símbolos y no
+# en milisegundos para que escale solo con SF y BW como todo lo demás.
+BCAST_GAP_UPLINK_BYTES = protocol.SEC_OVERHEAD + 40   # telemetría típica
+BCAST_GAP_MARGIN_SYM   = 8                            # CAD + decisión
+
+# Anulación para banco: con un valor mayor que cero manda ese hueco en segundos
+# en vez del calculado. Sirve para medir la escalera (0,35 · 0,30 · 0,25 · 0,20)
+# y comprobar dónde empieza a perderse. En despliegue no se toca.
+BCAST_GAP_FORZADO_S = float(os.environ.get("MODULINKR_BCAST_GAP_S", "0"))
 
 # Espera por el mapa de un nodo. Son dos tramas con su hueco, más el camino de
 # vuelta si va por un relay.
@@ -1212,15 +1239,45 @@ class GatewayService:
             "poll": [],          # nodos por preguntar
             "poll_hasta": 0.0,
         }
+        self.bcast["gap_s"] = self._bcast_gap_s(self.bcast["toa_ms"])
         # Primera pasada: la imagen entera, originales y mezclas, en el orden
         # en que el nodo los espera (bloque a bloque, para que solo tenga que
         # tener abierto uno cada vez).
         self.bcast["cola"] = self._bcast_cola_completa()
+        # El estado se escribe en los DOS sitios. `op` es la fila tal como
+        # estaba en la base al recogerla, y `bcast_tick` decide qué hacer
+        # mirando `op["state"]`, no la base. Actualizar solo la base dejaba la
+        # memoria con el estado viejo, y si ese estado no era ninguna de las
+        # fases conocidas el tick no encontraba rama: ni emitía, ni contaba
+        # ofertas, ni llegaba nunca a rendirse, y la operación se quedaba
+        # ocupando el canal en silencio.
+        op["state"] = "offering"
         self.buf.bcast_state(op["id"], "offering",
                              f"anunciando durante {BCAST_OFFER_LEAD_S:.0f} s")
         LOG.info("fw-bcast %d: %s, %d B, %d originales en %d bloques",
                  op["id"], op["version"], op["total_len"], n_orig,
                  self.bcast["n_blocks"])
+        # El hueco se registra porque ahora es un valor calculado y no una
+        # constante: sin verlo en el log no hay forma de saber con qué separación
+        # corrió una tanda, que es justo el número que se está midiendo.
+        LOG.info("fw-bcast %d: aire %d ms/fragmento, hueco %.0f ms%s",
+                 op["id"], self.bcast["toa_ms"], self.bcast["gap_s"] * 1000.0,
+                 " (forzado)" if BCAST_GAP_FORZADO_S > 0 else "")
+
+    def _bcast_gap_s(self, toa_frag_ms: int) -> float:
+        """Hueco entre fragmentos, derivado del tiempo de aire.
+
+        Ver el comentario de BCAST_GAP_UPLINK_BYTES: el tiempo de aire del
+        fragmento más una subida del nodo más un margen en símbolos. A SF7 y
+        BW250 salen unos 245 ms, frente a los 600 fijos de antes.
+        """
+        if BCAST_GAP_FORZADO_S > 0:
+            return BCAST_GAP_FORZADO_S
+        subida_ms = protocol.toa_ms(BCAST_GAP_UPLINK_BYTES,
+                                    self.sf, self.bw_khz)
+        tsym_ms = float(1 << self.sf) / self.bw_khz
+        return (toa_frag_ms + subida_ms
+                + BCAST_GAP_MARGIN_SYM * tsym_ms) / 1000.0
 
     def _bcast_cola_completa(self) -> list:
         b = self.bcast
@@ -1377,8 +1434,8 @@ class GatewayService:
                 self.sec_key, self._gw_sec_ts(), b["dest"], b["hop"]))
             # Separación mínima entre tramas de difusión. No espera confirmación
             # de nadie, así que el único freno es el presupuesto de aire y este
-            # hueco, que existe para no saturar la UART del Heltec.
-            b["next_ms"] = now + BCAST_GAP_S
+            # hueco, calculado en bcast_start a partir del tiempo de aire.
+            b["next_ms"] = now + b["gap_s"]
             b["hechos"] = b.get("hechos", 0) + 1
             if b["hechos"] % 32 == 0:
                 self.buf.bcast_progress(
@@ -1399,6 +1456,18 @@ class GatewayService:
                 return
             self._bcast_cerrar_pasada(now)
             return
+
+        # Estado que no es ninguna de las fases de arriba. No debería ocurrir,
+        # pero cuando ocurrió el tick se limitó a no hacer nada, vuelta tras
+        # vuelta, con la operación ocupando el canal y sin una línea que lo
+        # contase. Se suelta y se dice: una operación que nadie sabe atender es
+        # una operación muerta, y muerta y ocupando sitio es lo peor de todo.
+        LOG.warning("fw-bcast %d: estado desconocido '%s', se suelta la "
+                    "operacion para no bloquear el canal", op["id"], est)
+        self.buf.bcast_state(op["id"], "failed",
+                             f"estado interno inesperado: {est}")
+        self.bcast = None
+        self.bcast_img = None
 
     def _bcast_nodos(self) -> list:
         """A quién se le pregunta: los nodos vistos por radio últimamente."""
@@ -2678,11 +2747,18 @@ class GatewayService:
                         # segundos pasa primero, en vez de esperar horas detrás
                         # de una imagen.
                         self.fw_tick(now)
+                        # La orden de instalar va ANTES que la emisión, y no
+                        # es un detalle de estilo: las dos leen la misma fila,
+                        # y la que corre primero decide. Con la emisión delante,
+                        # una imagen ya entregada podía volver a emitirse encima
+                        # de la orden de instalarla y borrarla. Instalar es una
+                        # trama de 36 bytes que cierra una transferencia de
+                        # horas: siempre va primero.
+                        self.bcast_install_tick(now)
                         # La difusión va la última de la cola de emisión: es
                         # tráfico a granel de horas, y cualquier cosa que se
                         # resuelva en segundos debe pasar antes que ella.
                         self.bcast_tick(now)
-                        self.bcast_install_tick(now)
                     if now - last_hb >= self.hb_s:
                         last_hb = now
                         self._heartbeat(lora_link=True)
