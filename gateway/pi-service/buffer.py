@@ -143,6 +143,40 @@ class GatewayBuffer:
                 mqtt_connected INTEGER NOT NULL
             )
         """)
+        # Instalación de una imagen difundida, nodo a nodo (§20.12).
+        #
+        # Una difusión no tiene destinatario, así que no puede llevar el estado
+        # de la instalación en su propia fila: son N instalaciones distintas
+        # sobre la misma imagen, cada una con su reinicio y su veredicto. Y
+        # siguen siendo de una en una a propósito: subir es inocuo y puede
+        # correr de noche, instalar reinicia el nodo y se decide mirando.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS fw_bcast_install (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                bcast_id    INTEGER NOT NULL,
+                origin      INTEGER NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
+        # Sondeo de disponibilidad (§22). El visor no habla por radio: deja
+        # aquí la pregunta, el servicio la emite y escribe la respuesta, y el
+        # visor la lee. Es el mismo patrón que el resto del canal.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_probe (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin      INTEGER NOT NULL,
+                para_que    INTEGER NOT NULL,
+                created_ts  REAL    NOT NULL,
+                state       TEXT    NOT NULL DEFAULT 'pending',
+                listo       INTEGER,
+                motivo      INTEGER,
+                detail      TEXT,
+                updated_ts  REAL
+            )
+        """)
         # Cola de LECTURAS de configuración por LoRa (spec §17.6). Separada
         # de config_push porque son operaciones distintas: una entrega un
         # config y la otra lo trae, y mezclarlas en una tabla obligaría a
@@ -254,6 +288,24 @@ class GatewayBuffer:
                 PRIMARY KEY (migration_id, node_id, profile)
             )
         """)
+        # Reparto de la configuración nueva a cada nodo, para el cambio
+        # coordinado (§17.8). El gateway sabe el perfil nuevo, sabe qué nodos
+        # hay y sabe la hora del salto: pedirle al operador que edite el JSON
+        # de cada nodo a mano era lo contrario de un cambio coordinado, y con
+        # veinte nodos, veinte ocasiones de equivocarse. Cada fila es un nodo
+        # y su avance: leer su config, parchearla, devolvérsela con la cita.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS net_migration_reparto (
+                migration_id INTEGER NOT NULL,
+                origin       INTEGER NOT NULL,
+                state        TEXT    NOT NULL DEFAULT 'pending',
+                read_id      INTEGER,
+                push_id      INTEGER,
+                detail       TEXT,
+                updated_ts   REAL,
+                PRIMARY KEY (migration_id, origin)
+            )
+        """)
         # Difusión de firmware (spec §20). Una operación viva cada vez: la
         # difusión ocupa el aire de toda la red durante horas, y dos a la vez
         # no es que sea complicado de coordinar, es que no tiene sentido.
@@ -299,6 +351,7 @@ class GatewayBuffer:
         self._migrate_fw_bcast_target()
         self._migrate_node_status_nbiot()
         self._migrate_config_push_apply_at()
+        self._migrate_net_migration_rescate()
         self.conn.commit()
 
     def _migrate_v20_if_needed(self) -> None:
@@ -335,6 +388,27 @@ class GatewayBuffer:
         if cols and "apply_at" not in cols:
             self.conn.execute(
                 "ALTER TABLE config_push ADD COLUMN apply_at INTEGER NOT NULL DEFAULT 0")
+
+    def _migrate_net_migration_rescate(self) -> None:
+        """Añade el rescate a petición a net_migration si falta.
+
+        La alternancia automática con los parámetros viejos se sustituye por
+        un rescate que se pide desde el visor: ausentarse del mundo nuevo cada
+        cinco minutos por si acaso deja sorda a la red buena el 5 % del tiempo
+        para atender a nadie, y la ventana de quince segundos ni siquiera daba
+        para volver a citar a un rezagado.
+        """
+        cur = self.conn.execute("PRAGMA table_info(net_migration)")
+        cols = [row[1] for row in cur.fetchall()]
+        if not cols:
+            return
+        if "rescate_hasta" not in cols:
+            self.conn.execute(
+                "ALTER TABLE net_migration ADD COLUMN rescate_hasta REAL")
+        if "saltar_igual" not in cols:
+            self.conn.execute(
+                "ALTER TABLE net_migration ADD COLUMN saltar_igual INTEGER "
+                "NOT NULL DEFAULT 0")
 
     def _migrate_node_status_nbiot(self) -> None:
         """Añade las columnas de estado NB-IoT/MQTT a node_status si faltan
@@ -425,6 +499,64 @@ class GatewayBuffer:
         return int(row[0])
 
     # ----- Cola de envíos de configuración por LoRa (spec §17) -----
+
+    def bcast_install_next(self) -> dict | None:
+        """Siguiente instalación de una imagen difundida, con los datos de su
+        difusión (§20.12)."""
+        row = self.conn.execute(
+            """SELECT i.id, i.origin, b.xfer, b.sha256, b.version
+                 FROM fw_bcast_install i
+                 JOIN fw_bcast b ON b.id = i.bcast_id
+                WHERE i.state = 'pending' ORDER BY i.id LIMIT 1""").fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "origin": row[1], "xfer": row[2],
+                "sha256": row[3], "version": row[4]}
+
+    def bcast_install_state(self, inst_id: int, state: str,
+                            detail: str | None = None) -> None:
+        self.conn.execute(
+            """UPDATE fw_bcast_install SET state = ?, detail = ?,
+                      updated_ts = ? WHERE id = ?""",
+            (state, detail, time.time(), inst_id))
+        self.conn.commit()
+
+    def bcast_install_esperando(self, origin: int) -> dict | None:
+        """La instalación de ese nodo que espera veredicto, si la hay."""
+        row = self.conn.execute(
+            """SELECT id, created_ts FROM fw_bcast_install
+                WHERE origin = ? AND state = 'installing'
+             ORDER BY id DESC LIMIT 1""", (int(origin),)).fetchone()
+        return None if row is None else {"id": row[0], "created_ts": row[1]}
+
+    # ----- Sondeo de disponibilidad (spec §22) -----
+
+    def probe_next(self) -> dict | None:
+        """Siguiente sondeo por emitir, o None."""
+        row = self.conn.execute(
+            """SELECT id, origin, para_que FROM node_probe
+                WHERE state = 'pending' ORDER BY id LIMIT 1""").fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "origin": row[1], "para_que": row[2]}
+
+    def probe_state(self, probe_id: int, state: str, listo: int | None = None,
+                    motivo: int | None = None, detail: str | None = None) -> None:
+        self.conn.execute(
+            """UPDATE node_probe SET state = ?, listo = ?, motivo = ?,
+                      detail = ?, updated_ts = ? WHERE id = ?""",
+            (state, listo, motivo, detail, time.time(), probe_id))
+        self.conn.commit()
+
+    def probe_caducar(self, plazo_s: float) -> None:
+        """Cierra los sondeos que se quedaron sin respuesta. Un sondeo dura
+        segundos; si a los `plazo_s` sigue abierto, el nodo no contestó."""
+        self.conn.execute(
+            """UPDATE node_probe SET state = 'timeout', listo = 0,
+                      detail = 'el nodo no contesto al sondeo', updated_ts = ?
+                WHERE state IN ('pending','asking') AND created_ts < ?""",
+            (time.time(), time.time() - plazo_s))
+        self.conn.commit()
 
     def config_push_next(self) -> dict | None:
         """Siguiente petición que atender, o None. La toma el servicio del
@@ -593,13 +725,49 @@ class GatewayBuffer:
 
     # ----- Cambio de parámetros de red (spec §17.8) -----
 
+    def reparto_sembrar(self, migration_id: int, origins: list) -> None:
+        """Apunta a quién hay que repartirle la configuración nueva."""
+        for o in origins:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO net_migration_reparto
+                       (migration_id, origin, state, updated_ts)
+                   VALUES (?, ?, 'pending', ?)""",
+                (int(migration_id), int(o), time.time()))
+        self.conn.commit()
+
+    def reparto_lista(self, migration_id: int) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT origin, state, read_id, push_id, detail
+                 FROM net_migration_reparto
+                WHERE migration_id = ? ORDER BY origin""", (int(migration_id),))
+        return [{"origin": r[0], "state": r[1], "read_id": r[2],
+                 "push_id": r[3], "detail": r[4]} for r in cur.fetchall()]
+
+    def reparto_state(self, migration_id: int, origin: int, state: str,
+                      read_id: int | None = None, push_id: int | None = None,
+                      detail: str | None = None) -> None:
+        campos = ["state = ?", "updated_ts = ?"]
+        vals: list = [state, time.time()]
+        if read_id is not None:
+            campos.append("read_id = ?"); vals.append(read_id)
+        if push_id is not None:
+            campos.append("push_id = ?"); vals.append(push_id)
+        if detail is not None:
+            campos.append("detail = ?"); vals.append(detail)
+        vals += [int(migration_id), int(origin)]
+        self.conn.execute(
+            f"UPDATE net_migration_reparto SET {', '.join(campos)} "
+            f"WHERE migration_id = ? AND origin = ?", vals)
+        self.conn.commit()
+
     def migration_active(self) -> dict | None:
         """La operación viva, o None. Viva es todo lo que no está cerrado ni
         abortado: una operación pasada del salto sigue viva mientras dure su
         ventana de recuperación."""
         cur = self.conn.execute(
             """SELECT id, apply_at, old_profile, new_profile, state,
-                      recov_win_s, recov_per_s, recov_until, detail
+                      recov_win_s, recov_per_s, recov_until, detail,
+                      rescate_hasta, saltar_igual
                  FROM net_migration
                 WHERE state IN ('programada', 'saltada')
              ORDER BY id DESC LIMIT 1""")
@@ -611,7 +779,19 @@ class GatewayBuffer:
             "old_profile": json.loads(row[2]), "new_profile": json.loads(row[3]),
             "state": row[4], "recov_win_s": row[5], "recov_per_s": row[6],
             "recov_until": row[7], "detail": row[8],
+            # Hasta cuándo hay que estar en los parámetros viejos buscando
+            # rezagados. Lo pone el botón del visor, no un temporizador.
+            "rescate_hasta": row[9] or 0,
+            # El operador ha dicho que se salte sin los que falten.
+            "saltar_igual": bool(row[10]),
         }
+
+    def migration_rescate(self, mig_id: int, hasta: float) -> None:
+        """Pide (o corta, con hasta=0) una estancia en los parámetros viejos."""
+        self.conn.execute(
+            "UPDATE net_migration SET rescate_hasta = ?, updated_ts = ? "
+            "WHERE id = ?", (float(hasta), time.time(), int(mig_id)))
+        self.conn.commit()
 
     def migration_create(self, apply_at: int, old_profile: dict,
                          new_profile: dict, recov_win_s: int,

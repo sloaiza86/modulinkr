@@ -1169,6 +1169,7 @@ function cfgBotones(bloquear) {
 
 const SPIN = '<span class="spin"></span> ';
 let cfgConfirmarCb = null;   // acción del botón de confirmar del diálogo
+let cfgOtroCb = null;        // acción del tercer botón, cuando lo hay
 let cfgCancelarCb = null;    // acción del botón de cancelar (opcional)
 
 function cfgDialogo(titulo, texto, botones = {}) {
@@ -1182,6 +1183,9 @@ function cfgDialogo(titulo, texto, botones = {}) {
   bx.hidden = !botones.cerrar;
   // Etiquetas y estilo por llamada (defaults: borrado en rojo). Un popup no
   // destructivo pide confirmarPeligro:false para el botón primario azul.
+  const bo = document.getElementById("cfg-dialogo-otro");
+  bo.hidden = !botones.otroText;
+  if (botones.otroText) bo.textContent = botones.otroText;
   bc.textContent = botones.cancelarText || "Cancelar";
   bf.textContent = botones.confirmarText || "Borrar";
   bx.textContent = botones.cerrarText || "Cerrar";
@@ -1196,6 +1200,7 @@ function cfgDialogoCerrar() {
   document.getElementById("cfg-dialogo").hidden = true;
   cfgConfirmarCb = null;
   cfgCancelarCb = null;
+  cfgOtroCb = null;
 }
 
 // Tras un CFG.PUT o CFG.DEL el nodo se reinicia (~2 s). Se re-detecta
@@ -1709,6 +1714,10 @@ document.getElementById("cfg-dialogo-confirmar").addEventListener("click", () =>
   if (cfgConfirmarCb) { const cb = cfgConfirmarCb; cfgConfirmarCb = null; cb(); }
 });
 
+document.getElementById("cfg-dialogo-otro").addEventListener("click", () => {
+  if (cfgOtroCb) { const cb = cfgOtroCb; cfgOtroCb = null; cb(); }
+});
+
 // ----- Vista Configuración: radio LoRa del gateway -----
 // Estado de la radio y dos acciones privilegiadas (cambiar el puerto del
 // Heltec y flashear su firmware) que el Pi ejecuta bajo la regla sudo
@@ -2105,6 +2114,10 @@ function redloraCambios(body, actual) {
     ["sf",               "SF",               actual.sf],
     ["bw_khz",           "ancho de banda",   actual.bw_khz],
     ["region",           "región",           actual.region],
+    // El TTL faltaba, y era el único parámetro que se puede cambiar sin
+    // partir la red: cambiarlo solo a él no contaba como cambio, así que el
+    // cambio coordinado respondía que no había nada que cambiar.
+    ["max_ttl",          "TTL",              actual.max_ttl],
   ];
   const out = [];
   campos.forEach(([k, etiqueta, antes]) => {
@@ -2154,17 +2167,35 @@ async function redloraConfirmar(cambios) {
         + (n.online ? "" : ", ya sin señal") + "</li>").join("") + "</ul>"
     : "<p>El gateway no conoce ningún nodo todavía.</p>";
 
+  // Con nodos en la red, guardar a secas es casi siempre el camino
+  // equivocado, así que el diálogo ofrece el bueno en vez de limitarse a
+  // avisar. Un aviso que solo dice "esto va a doler" y te deja seguir es una
+  // trampa con cartel; esto es una puerta.
+  const vivos = nodos.filter((n) => n.online);
   return new Promise((resolve) => {
     cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
+    cfgOtroCb = vivos.length ? () => {
+      cfgDialogoCerrar();
+      resolve(false);
+      migProgramar();
+    } : null;
     cfgDialogo("Cambiar los parámetros de red",
       "<p>Va a cambiar:</p><ul>"
       + cambios.map((c) => `<li>${c}</li>`).join("")
-      + "</ul><p><b>Estos nodos dejarán de comunicarse</b> hasta que se les "
-      + "reconfigure con los mismos valores:</p>" + lista
-      + "<p>Un nodo que no se pueda alcanzar por radio después del cambio "
-      + "necesitará cable. Reconfigúralos <b>antes</b> de confirmar si puedes, "
-      + "o ten a mano cómo llegar a ellos.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Cambiar de todos modos",
+      + "</ul>"
+      + (vivos.length
+          ? "<p>Hay <b>" + vivos.length + " nodo(s) en línea</b>. Guardar aquí "
+            + "cambia el gateway ahora mismo y esos nodos dejan de oírlo hasta "
+            + "que se les reconfigure uno a uno con cable o con el asistente."
+            + "</p>" + lista
+            + "<p><b>El cambio coordinado hace lo mismo sin perder a nadie</b>: "
+            + "avisa a cada nodo, espera a que todos confirmen y entonces salta "
+            + "todo el mundo a la vez. No tienes que hacer nada más.</p>"
+          : "<p>El gateway no conoce ningún nodo en línea, así que no hay nada "
+            + "que perder: guardar directamente es lo correcto aquí.</p>"),
+      { cancelar: true, confirmar: true,
+        confirmarText: "Cambiar solo el gateway",
+        otroText: vivos.length ? "Hacer el cambio coordinado" : null,
         onCancelar: () => resolve(false) });
   });
 }
@@ -2258,6 +2289,7 @@ function migPintar(d) {
   if (!d || !d.activa) {
     nueva.hidden = false;
     panel.hidden = true;
+    migEstimar();
     return;
   }
   nueva.hidden = true;
@@ -2267,17 +2299,36 @@ function migPintar(d) {
   const T = new Date(d.apply_at * 1000).toLocaleString();
   let html = "";
   if (d.state === "programada") {
-    html += migDato("Estado", "reparto en curso, nadie ha cambiado todavía");
-    html += migDato("Salto", T);
-    html += migDato("Falta", migDuracion(d.faltan_s), "mig-cuenta");
+    // No hay cuenta atrás: el gateway salta cuando todos han confirmado que
+    // saltan, no a una hora. Lo que hay que mirar es quién falta.
+    const rep = d.reparto || [];
+    html += migDato("Estado", rep.length && !d.por_citar
+      ? "todos han confirmado, saltando"
+      : "avisando a los nodos, nadie ha cambiado todavía");
+    if (rep.length) {
+      html += migDato("Confirmados", `${d.citados} de ${rep.length}`,
+                      d.por_citar ? "" : "mig-cuenta");
+      const pend = rep.filter((r) => r.state !== "done");
+      if (pend.length) {
+        html += migDato("Faltan", pend.map(
+          (r) => `${r.origin} (${r.detail || r.state})`).join(", "));
+      }
+    }
   } else {
-    html += migDato("Estado", "saltada, recogiendo rezagados");
+    html += migDato("Estado", "saltada");
     html += migDato("Salto", T);
     html += migDato("Gateway ahora en",
-                    d.mundo === "viejo" ? "los parámetros VIEJOS"
-                                        : "los parámetros nuevos");
-    html += migDato("Cambia en", migDuracion(d.proximo_cambio_s), "mig-cuenta");
-    html += migDato("Recuperación acaba en",
+                    d.mundo === "viejo"
+                      ? "los parámetros VIEJOS, buscando rezagados"
+                      : "los parámetros nuevos");
+    if (d.rescate_s > 0) {
+      html += migDato("Vuelve en", migDuracion(d.rescate_s), "mig-cuenta");
+    }
+    html += migDato("Rezagados",
+                    (d.rezagados && d.rezagados.length)
+                      ? d.rezagados.join(", ")
+                      : "ninguno");
+    html += migDato("Plazo de recuperación",
                     migDuracion(d.recuperacion_restante_s), "mig-cuenta");
   }
   html += `<pre class="mig-perfiles">viejos: ${migPerfilTexto(d.old_profile)}\n`
@@ -2304,6 +2355,34 @@ function migPintar(d) {
     }).join("");
   }
 
+  // El rescate solo se ofrece si hay a quién rescatar. Irse a los parámetros
+  // viejos deja sorda a la red buena mientras dura, así que hacerlo por si
+  // acaso es pagar por nada. Y si ya se está fuera, el botón sirve para
+  // volver antes de tiempo.
+  const resc = document.getElementById("mig-rescatar");
+  if (resc) {
+    const fuera = d.rescate_s > 0;
+    const hay = !!(d.rezagados && d.rezagados.length);
+    resc.hidden = d.state !== "saltada";
+    resc.disabled = !fuera && !hay;
+    resc.textContent = fuera ? "Volver ya" : "Buscar rezagados";
+    resc.title = fuera
+      ? "Vuelve a los parámetros nuevos sin esperar"
+      : (hay ? "El gateway se va a los parámetros viejos el tiempo justo "
+             + "para volver a citar al rezagado"
+             : "No hay ningún nodo rezagado que recoger");
+  }
+
+  // Saltar sin los que faltan: solo tiene sentido si falta alguien. Es una
+  // decisión del operador, porque el que se queda atrás sigue midiendo con
+  // los parámetros viejos y luego se le recoge.
+  const salt = document.getElementById("mig-saltar");
+  if (salt) {
+    salt.hidden = d.state !== "programada" || !d.por_citar;
+    salt.title = "Salta con los que han confirmado. Los que faltan se quedan "
+               + "con los parámetros viejos hasta que se les vaya a buscar.";
+  }
+
   // Abortar solo tiene sentido antes del salto: después ya cambió el mundo y
   // lo que queda es cerrar. Deshabilitarlo dice eso mejor que un error.
   document.getElementById("mig-abortar").disabled = d.state !== "programada";
@@ -2324,14 +2403,25 @@ function migSondeoParar() {
   if (migTimer !== null) { clearInterval(migTimer); migTimer = null; }
 }
 
+// Cuándo caería el salto si se programara ahora. Se enseña antes de pulsar
+// para que la cuenta atrás no aparezca de la nada, pero no es un campo: la
+// hora sale de lo que cuesta citar a los nodos que hay, y eso lo sabe el
+// gateway y no quien mira la pantalla.
+async function migEstimar() {
+  const el = document.getElementById("mig-estimacion");
+  if (!el) return;
+  try {
+    const r = await fetchApi("/api/net/migracion/estimacion");
+    const d = await r.json();
+    if (!r.ok) { el.textContent = ""; return; }
+    el.textContent = `Avisar a los nodos cuesta unos ${migDuracion(d.segundos)}`
+      + `. El salto no ocurre a una hora: ocurre cuando todos han contestado `
+      + `que saltan.`;
+  } catch (e) { el.textContent = ""; }
+}
+
 async function migProgramar() {
   const res = document.getElementById("mig-resultado");
-  const t = document.getElementById("mig-t").value;
-  if (!t) {
-    res.className = "aviso mal";
-    res.textContent = "falta la hora del salto";
-    return;
-  }
   const body = {
     region: document.getElementById("r-region").value,
     frequency_hz: Number(document.getElementById("r-freq").value),
@@ -2341,10 +2431,7 @@ async function migProgramar() {
     max_ttl: Number(document.getElementById("r-ttl").value),
     security_enabled: document.getElementById("r-sec").checked,
     security_key: document.getElementById("r-seckey").value.trim(),
-    apply_at: Math.floor(new Date(t).getTime() / 1000),
-    recov_win_s: Number(document.getElementById("mig-win").value),
-    recov_per_s: Number(document.getElementById("mig-per").value),
-    recov_h: Number(document.getElementById("mig-h").value),
+    // Sin apply_at: lo calcula el gateway con lo que cuesta citar a la red.
   };
 
   // La misma lista de lo que cambia que el camino directo, pero con otra
@@ -2357,16 +2444,24 @@ async function migProgramar() {
     res.textContent = "los parámetros de arriba son los que ya están vigentes";
     return;
   }
+  let est = null;
+  try {
+    est = await (await fetchApi("/api/net/migracion/estimacion")).json();
+  } catch (e) { /* si no se puede estimar, el diálogo lo dice sin hora */ }
+
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
     cfgDialogo("Programar cambio coordinado",
-      "<p>Se va a programar el salto de <b>" + cambios.join(", ")
-      + "</b> para el <b>" + new Date(t).toLocaleString() + "</b>.</p>"
-      + "<p>Ahora mismo no cambia nada. A partir de aquí, cada configuración "
-      + "que envíes a un nodo se le entrega con esa cita y el nodo la guarda "
-      + "sin aplicarla. Reparte a todos los nodos antes de esa hora y "
-      + "comprueba en esta misma página quién la tiene.</p>"
-      + "<p>Si falta alguno, aborta: hasta el salto no se ha cambiado nada.</p>",
+      "<p>Se va a programar el salto de <b>" + cambios.join(", ") + "</b>.</p>"
+      + "<p>El gateway le pedirá su configuración a cada nodo, le cambiará solo "
+      + "los parámetros de red y se la devolverá. Cada nodo contesta que salta "
+      + "y salta; cuando han contestado todos, salta el gateway."
+      + (est ? " Con los nodos que hay ahora eso son unos <b>"
+               + migDuracion(est.segundos) + "</b>." : "") + "</p>"
+      + "<p>No tienes que hacer nada más, y hasta que salte el primero no ha "
+      + "cambiado nada: se puede abortar sin consecuencias.</p>"
+      + "<p>Si alguno no contesta, no se salta y te aparece un botón para "
+      + "decidir si seguir sin él.</p>",
       { cancelar: true, confirmar: true, confirmarText: "Programar",
         onCancelar: () => resolve(false) });
   });
@@ -2386,7 +2481,8 @@ async function migProgramar() {
       return;
     }
     res.className = "aviso";
-    res.textContent = "Programada. Reparte ahora la configuración a los nodos.";
+    res.textContent = `Programada. El gateway está citando a ${
+      (d.reparto || []).length} nodo(s); no hace falta que hagas nada.`;
     migRefrescar();
   } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
 }
@@ -2507,17 +2603,59 @@ function bcPintar(d) {
   if (!d.nodos.length) {
     // El recuento no existe hasta la primera ronda de preguntas, y decirlo
     // evita leer la tabla vacía como "ningún nodo está recibiendo".
-    tb.innerHTML = `<tr><td colspan="4">Los nodos no dicen lo que llevan hasta `
+    tb.innerHTML = `<tr><td colspan="5">Los nodos no dicen lo que llevan hasta `
                  + `que termina la primera pasada y se les pregunta.</td></tr>`;
     return;
   }
+  // Instalar va por nodo y no de golpe, por lo mismo que en la subida
+  // individual: subir es inocuo y puede correr de noche, instalar reinicia el
+  // nodo y lo saca de la red mientras arranca. Que sean veinte no cambia eso,
+  // lo multiplica, así que se decide uno a uno mirando.
+  const puedeInstalar = d.state === "ready" || d.state === "done";
   tb.innerHTML = d.nodos.map((n) => {
     const clase = n.missing === 0 ? "migrado" : "rezagado";
+    const boton = (puedeInstalar && n.missing === 0)
+      ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar</button>`
+      : "";
     return `<tr><td>${n.node_id}</td>`
          + `<td><span class="mig-pill ${clase}">${n.pct} %</span></td>`
          + `<td>${n.missing}</td>`
-         + `<td>${new Date(n.ts * 1000).toLocaleTimeString()}</td></tr>`;
+         + `<td>${new Date(n.ts * 1000).toLocaleTimeString()}</td>`
+         + `<td>${boton}</td></tr>`;
   }).join("");
+  tb.querySelectorAll(".bc-instalar").forEach((b) => {
+    b.addEventListener("click", () => bcInstalar(Number(b.dataset.origin)));
+  });
+}
+
+async function bcInstalar(origin) {
+  const aviso = document.getElementById("bc-aviso");
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo(`Instalar en el nodo ${origin}`,
+      "<p>Ese nodo se reiniciará con la imagen nueva.</p>"
+      + "<p>Si no consigue registrarse en la red en <b>cuatro minutos</b>, el "
+      + "gestor de arranque vuelve solo a la versión anterior. Aun así, "
+      + "durante ese rato el nodo no mide.</p>"
+      + "<p>Los demás nodos no se tocan: se instalan de uno en uno.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Instalar",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+  try {
+    const r = await fetchApi("/api/config/lora/firmware/difusion/instalar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin }) });
+    const d = await r.json();
+    aviso.className = r.ok ? "aviso" : "aviso mal";
+    aviso.textContent = r.ok
+      ? `orden enviada al nodo ${origin}, se reinicia con ${d.version}`
+      : (d.error || "error");
+  } catch (e) {
+    aviso.className = "aviso mal";
+    aviso.textContent = "error: " + e.message;
+  }
 }
 
 async function bcRefrescar() {
@@ -2607,6 +2745,59 @@ document.getElementById("bc-lanzar").addEventListener("click", bcLanzar);
 document.getElementById("bc-cancelar").addEventListener("click", bcCancelar);
 
 document.getElementById("mig-programar").addEventListener("click", migProgramar);
+// Buscar rezagados: el gateway se va a los parámetros viejos el tiempo justo
+// para volver a citar al que se quedó, y vuelve solo. Pulsado mientras está
+// fuera, vuelve en el acto.
+async function migRescatar() {
+  const res = document.getElementById("mig-resultado2");
+  const d = await migLeer();
+  const cortar = !!(d && d.rescate_s > 0);
+  res.className = "aviso";
+  res.textContent = cortar ? "Volviendo..." : "Yendo a por los rezagados...";
+  try {
+    const r = await fetchApi("/api/net/migracion/rescatar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cortar }) });
+    const j = await r.json();
+    res.className = r.ok ? "aviso" : "aviso mal";
+    res.textContent = r.ok
+      ? (cortar ? "De vuelta en los parámetros nuevos."
+                : `Buscando rezagados durante ${j.segundos} s. Los nodos que `
+                  + "ya migraron retienen sus medidas mientras tanto.")
+      : ("Error: " + (j.error ?? "no se pudo"));
+    migRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+async function migSaltarIgual() {
+  const res = document.getElementById("mig-resultado2");
+  const d = await migLeer();
+  const faltan = (d && d.reparto || []).filter((r) => r.state !== "done")
+                 .map((r) => r.origin).join(", ");
+  const seguir = await new Promise((resolve) => {
+    cfgConfirmarCb = () => resolve(true);
+    cfgDialogo("Saltar sin los que faltan",
+      `<p>No han confirmado: <b>${faltan || "ninguno"}</b>.</p>`
+      + "<p>Se salta con los que sí lo han hecho. Los que faltan siguen "
+      + "midiendo con los parámetros viejos y dejan de oír al gateway hasta "
+      + "que se les vaya a buscar con el botón de rezagados.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Saltar igual",
+        onCancelar: () => resolve(false) });
+  });
+  if (!seguir) { cfgDialogoCerrar(); return; }
+  cfgDialogoCerrar();
+  try {
+    const r = await fetchApi("/api/net/migracion/saltar", { method: "POST" });
+    const j = await r.json();
+    res.className = r.ok ? "aviso" : "aviso mal";
+    res.textContent = r.ok ? "Saltando con los que confirmaron."
+                           : ("Error: " + (j.error ?? "no se pudo"));
+    migRefrescar();
+  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+}
+
+document.getElementById("mig-saltar").addEventListener("click", migSaltarIgual);
+document.getElementById("mig-rescatar").addEventListener("click", migRescatar);
 document.getElementById("mig-abortar").addEventListener("click", () => migTerminar(true));
 document.getElementById("mig-cerrar").addEventListener("click", () => migTerminar(false));
 
@@ -4440,11 +4631,41 @@ function formFuenteCtrls() {
 
 // El nodo elegido en la lista de radio ES el destino: no hace falta
 // confirmarlo con otro botón. Aquí se fija y se cuenta lo que se sabe de él.
+// Cómo acabó lo último que se lanzó sobre este nodo.
+//
+// Una operación por radio tarda más de lo que nadie mira una pantalla, así
+// que lo normal es lanzarla, irse, y volver más tarde. Antes, al volver, no
+// había nada: el resultado estaba en el gateway y el visor no lo enseñaba, de
+// modo que lo único visible era el canal ocupado, sin explicación.
+async function formUltimaOperacion(origin) {
+  const est = document.getElementById("f-lora-ultima");
+  if (!est) return;
+  if (!origin) { est.hidden = true; return; }
+  try {
+    const r = await fetchApi("/api/config/lora/ultima?origin=" + origin);
+    const d = await r.json();
+    if (!r.ok) { est.hidden = true; return; }
+    const partes = [];
+    for (const [que, op] of [["Envío", d.envio], ["Lectura", d.lectura]]) {
+      if (!op) continue;
+      const cuando = op.hace_s < 90 ? `hace ${Math.round(op.hace_s)} s`
+                   : op.hace_s < 5400 ? `hace ${Math.round(op.hace_s / 60)} min`
+                   : `hace ${(op.hace_s / 3600).toFixed(1)} h`;
+      partes.push(`${que}: ${op.viva ? "en curso" : op.state} ${cuando}`
+                  + (op.detail ? ` · ${op.detail}` : ""));
+    }
+    est.hidden = partes.length === 0;
+    est.className = "aviso";
+    est.textContent = partes.join(" — ");
+  } catch (e) { est.hidden = true; }
+}
+
 function formLoraDestino() {
   const sel = document.getElementById("f-lora-nodo");
   const origin = Number(sel && sel.value);
   const est = document.getElementById("f-fw-estado");
   formMode = "config";
+  formUltimaOperacion(origin);
   // Los schemas del destino se fijan ANTES de recalcular el botón, porque es
   // formDestino quien los consulta: al revés decidiría con los del nodo
   // anterior y el aviso iría siempre un nodo por detrás.

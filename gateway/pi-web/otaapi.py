@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -45,6 +46,135 @@ FRAG_BYTES    = 212
 FRAG_OVERHEAD = 19
 # Ciclo de trabajo de la sub-banda de EN 300 220-1 en la que emite el gateway.
 DUTY_LEGAL = 0.08
+
+
+PROBE_CONFIG_WRITE = 0x01
+PROBE_CONFIG_READ  = 0x02
+PROBE_FIRMWARE     = 0x03
+PROBE_ESPERA_S     = 7.0
+
+
+PROBE_DESDE = (0, 0, 57)      # primera versión del nodo que sabe contestar
+
+
+def _sabe_sondear(origin: int) -> bool:
+    """Si el firmware que corre ese nodo entiende el sondeo (§22).
+
+    Un nodo anterior no contesta, y sin este puente su silencio se leería como
+    "no disponible": el canal de configuración de ese nodo quedaría bloqueado
+    por haber añadido una comprobación pensada para protegerlo. Una red no se
+    actualiza entera de golpe, así que la que sí lo hace tiene que saber
+    convivir con la que todavía no.
+    """
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                "SELECT fw_version FROM node_catalog WHERE origin_id = ?",
+                (origin,)).fetchone()
+        if fila is None or not fila[0]:
+            return False
+        nums = re.findall(r"\d+", fila[0].split("-")[0])
+        return tuple(int(x) for x in nums[:3]) >= PROBE_DESDE
+    except Exception:                          # noqa: BLE001
+        return False
+
+
+def _disponible(origin: int, para_que: int) -> tuple:
+    """Si se puede lanzar ahora una operación sobre ese nodo, y por qué no.
+
+    Se le pregunta al nodo cuando su firmware sabe contestar. Cuando no, se
+    cae al criterio antiguo, que es mirar cuándo se le oyó por última vez:
+    peor, porque no distingue "vivo" de "disponible", pero mejor que nada.
+    """
+    if _sabe_sondear(origin):
+        return _sondear(origin, para_que)
+    callado = _callado_desde(origin)
+    if callado is None:
+        return True, ""
+    return False, (f"no da señales desde hace {_fmt_ago(callado)} "
+                   f"(su firmware es anterior al sondeo, así que solo se "
+                   f"puede mirar cuándo habló)")
+
+
+def _sondear(origin: int, para_que: int) -> tuple:
+    """Le pregunta al nodo si puede, y espera su respuesta.
+
+    Devuelve (puede, explicacion). Se le pregunta al nodo en vez de deducirlo
+    de cuándo se le oyó por última vez, que es adivinar con datos viejos y
+    además no distingue "vivo" de "disponible": un nodo puede estar
+    perfectamente vivo y no ser buen momento, porque está bajando una imagen o
+    porque tiene una configuración a medias. El que lo sabe es él.
+
+    Cuesta 16 bytes de ida y otros tantos de vuelta, unos 50 ms de aire. Es lo
+    bastante barato como para que no haya excusa para no preguntar antes de
+    comprometer una operación de minutos.
+
+    El visor no habla por radio: deja la pregunta en la tabla y el servicio la
+    emite, que es el mismo patrón que el resto del canal.
+    """
+    try:
+        with _conn() as c:
+            cur = c.execute(
+                """INSERT INTO node_probe (origin, para_que, created_ts, state)
+                   VALUES (?, ?, ?, 'pending')""",
+                (origin, para_que, time.time()))
+            c.commit()
+            probe_id = cur.lastrowid
+    except sqlite3.Error as e:
+        return True, f"no se pudo sondear ({e}), se sigue adelante"
+
+    limite = time.time() + PROBE_ESPERA_S
+    while time.time() < limite:
+        time.sleep(0.25)
+        try:
+            with _conn() as c:
+                fila = c.execute(
+                    "SELECT state, listo, detail FROM node_probe WHERE id = ?",
+                    (probe_id,)).fetchone()
+        except sqlite3.Error:
+            break
+        if fila is None:
+            break
+        if fila[0] == "done":
+            return bool(fila[1]), fila[2] or ""
+        if fila[0] == "timeout":
+            return False, fila[2] or "el nodo no contestó al sondeo"
+    return False, "el nodo no contestó al sondeo"
+
+
+def _fmt_ago(segundos: float) -> str:
+    if segundos < 90:
+        return f"{segundos:.0f} s"
+    if segundos < 5400:
+        return f"{segundos / 60:.0f} min"
+    return f"{segundos / 3600:.1f} h"
+
+
+def _callado_desde(origin: int) -> float | None:
+    """Segundos que lleva callado un nodo, o None si está dando señales.
+
+    Sirve para no aceptar una operación que no puede salir bien. Un timeout
+    tapa el síntoma: la petición se encola, se ejecuta cuando nadie la mira,
+    falla, y quien la pidió se encuentra el canal ocupado al volver. Es mejor
+    no aceptarla y decir por qué en el momento de pedirla.
+
+    El umbral es el mismo que usa la pantalla para pintar un nodo como caído,
+    para que no puedan contradecirse: si el visor lo da por vivo, aquí también.
+    """
+    try:
+        import netstatus
+        with _conn() as c:
+            fila = c.execute(
+                "SELECT last_seen FROM node_status WHERE origin = ?",
+                (origin,)).fetchone()
+            if fila is None or not fila[0]:
+                return None      # nodo desconocido: que decida el servicio
+            ahora = time.time()
+            callado = ahora - fila[0]
+            return callado if callado > netstatus._umbral_de(c, origin, ahora) \
+                else None
+    except Exception:                          # noqa: BLE001
+        return None              # ante la duda, no se estorba al operador
 
 
 _radio_cache: dict = {"t": 0.0, "sf": 7, "bw": 125}
@@ -141,6 +271,14 @@ def enviar(body: dict = Body(...)):
             status_code=400,
             content={"error": f"config de {len(data)} B, máximo {MAX_CONFIG_BYTES}"})
 
+    puede, porque = _disponible(origin, PROBE_CONFIG_WRITE)
+    if not puede:
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"el nodo {origin} no puede ahora mismo: "
+                              f"{porque}. No se encola un envío que no puede "
+                              f"salir bien."})
+
     try:
         with _conn() as c:
             # Una transferencia a la vez por nodo: encolar otra mientras hay
@@ -189,6 +327,13 @@ def leer(body: dict = Body(...)):
     if not isinstance(origin, int) or not 1 <= origin <= 254:
         return JSONResponse(status_code=400,
                             content={"error": "origin fuera de 1-254"})
+    puede, porque = _disponible(origin, PROBE_CONFIG_READ)
+    if not puede:
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"el nodo {origin} no puede ahora mismo: "
+                              f"{porque}. No se encola una lectura que no "
+                              f"puede salir bien."})
     try:
         with _conn() as c:
             fila = c.execute(
@@ -698,3 +843,96 @@ def estado(id: int):
     return {"id": id, "origin": origin, "state": state, "detail": detail,
             "created_ts": created, "updated_ts": updated,
             "elapsed_s": round(time.time() - created, 1)}
+
+
+@router.get("/ultima")
+def ultima(origin: int):
+    """Cómo acabó lo último que se lanzó sobre este nodo.
+
+    Una operación por radio tarda más de lo que nadie mira una pantalla. Quien
+    la lanzaba y cerraba la pestaña no volvía a saber nada: el resultado
+    quedaba en la base y el visor no lo enseñaba, así que al volver solo veía
+    el canal ocupado sin explicación. El estado real vive en el gateway, así
+    que basta con preguntarlo, que es lo mismo que ya hace la subida de
+    firmware con `/firmware/encurso`.
+    """
+    ahora = time.time()
+
+    def _ultima_de(tabla: str) -> dict | None:
+        try:
+            with _conn() as c:
+                fila = c.execute(
+                    f"""SELECT id, state, detail, created_ts, updated_ts
+                          FROM {tabla} WHERE origin = ?
+                      ORDER BY id DESC LIMIT 1""", (origin,)).fetchone()
+        except sqlite3.Error:
+            return None
+        if fila is None:
+            return None
+        return {"id": fila[0], "state": fila[1], "detail": fila[2],
+                "hace_s": round(ahora - (fila[4] or fila[3]), 1),
+                "viva": fila[1] in ("pending", "sending", "committing",
+                                    "reading")}
+
+    return {"origin": origin,
+            "envio":   _ultima_de("config_push"),
+            "lectura": _ultima_de("config_read")}
+
+
+@router.post("/firmware/difusion/instalar")
+def difusion_instalar(body: dict = Body(...)):
+    """Instala en UN nodo la imagen que le llegó por difusión.
+
+    Nodo a nodo y no de golpe, por el mismo motivo por el que la subida
+    individual también lo hace así: subir es inocuo y puede correr de noche,
+    instalar reinicia el nodo y deja la red sin él durante el arranque. Que
+    sean veinte nodos no cambia eso, lo multiplica.
+
+    Se exige que ese nodo haya confirmado la imagen entera. Instalar sobre un
+    mapa incompleto es pedirle al nodo que arranque algo que no tiene.
+    """
+    origin = body.get("origin")
+    if not isinstance(origin, int) or not 1 <= origin <= 254:
+        return JSONResponse(status_code=400,
+                            content={"error": "origin fuera de 1-254"})
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                """SELECT id, state, version FROM fw_bcast
+                    WHERE target IS NULL ORDER BY id DESC LIMIT 1""").fetchone()
+            if fila is None:
+                return JSONResponse(status_code=404,
+                                    content={"error": "no hay ninguna difusión"})
+            bcast_id, state, version = fila
+            if state not in ("ready", "done"):
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"la difusión no ha terminado "
+                                      f"(estado: {state})"})
+            mapa = c.execute(
+                """SELECT missing FROM fw_bcast_map
+                    WHERE bcast_id = ? AND node_id = ?""",
+                (bcast_id, origin)).fetchone()
+            if mapa is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"el nodo {origin} nunca dijo qué "
+                                      f"recibió, así que no se sabe si la "
+                                      f"tiene entera"})
+            if mapa[0]:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"al nodo {origin} le faltan {mapa[0]} "
+                                      f"fragmentos: no se instala una imagen "
+                                      f"incompleta"})
+            c.execute(
+                """INSERT INTO fw_bcast_install (bcast_id, origin, created_ts,
+                                                 state)
+                   VALUES (?, ?, ?, 'pending')""",
+                (bcast_id, origin, time.time()))
+            c.commit()
+    except sqlite3.Error as e:
+        return JSONResponse(status_code=503,
+                            content={"error": f"buffer no disponible: {e}"})
+    LOG.info("instalación de la difusión pedida para el nodo %d", origin)
+    return {"origin": origin, "version": version, "state": "pending"}

@@ -142,6 +142,27 @@ FRAME_FW_BCAST_OFFER = 0x1F
 FRAME_FW_BCAST_DATA  = 0x20
 FRAME_FW_BCAST_POLL  = 0x21
 FRAME_FW_BCAST_MAP   = 0x22
+# Sondeo de disponibilidad (v4.1, §22).
+FRAME_NODE_PING      = 0x23
+FRAME_NODE_PONG      = 0x24
+
+# Para qué se pregunta, y qué contesta el nodo.
+PROBE_CONFIG_WRITE = 0x01
+PROBE_CONFIG_READ  = 0x02
+PROBE_FIRMWARE     = 0x03
+PROBE_NOMBRES = {PROBE_CONFIG_WRITE: 'escribir config',
+                 PROBE_CONFIG_READ:  'leer config',
+                 PROBE_FIRMWARE:     'firmware'}
+
+PROBE_READY = 0x00
+PROBE_BUSY  = 0x01
+BUSY_NOMBRES = {
+    0x00: 'ninguno',
+    0x01: 'esta bajando una imagen',
+    0x02: 'tiene una configuracion a medias',
+    0x03: 'no tiene la hora sincronizada',
+    0x04: 'tiene una imagen o configuracion a prueba',
+}
 FRAME_BEACON        = 0x10
 FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
@@ -167,6 +188,8 @@ FRAME_TYPE_NAMES = {
     FRAME_FW_INSTALL:    'FW_INSTALL',
     FRAME_FW_RESULT:     'FW_RESULT',
     FRAME_QUIET:         'QUIET',
+    FRAME_NODE_PING:     'NODE_PING',
+    FRAME_NODE_PONG:     'NODE_PONG',
     FRAME_FW_BCAST_OFFER: 'FW_BCAST_OFFER',
     FRAME_FW_BCAST_DATA:  'FW_BCAST_DATA',
     FRAME_FW_BCAST_POLL:  'FW_BCAST_POLL',
@@ -606,6 +629,17 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['hl_mb_debug_name'] = MB_DEBUG_NAMES.get(
             payload[24], f'unknown(0x{payload[24]:02X})')
 
+    elif frame_type == FRAME_NODE_PONG:
+        if payload_length < 4:
+            out['error'] = (f'NODE_PONG payload_length={payload_length}, '
+                            f'esperado 4')
+            return out
+        out['probe_req']    = struct.unpack_from('<H', payload, 0)[0]
+        out['probe_ready']  = payload[2] == PROBE_READY
+        out['probe_motivo'] = payload[3]
+        out['probe_motivo_name'] = BUSY_NOMBRES.get(
+            payload[3], f'unknown(0x{payload[3]:02X})')
+
     return out
 
 
@@ -987,6 +1021,31 @@ def build_fw_bcast_poll(dest_id: int, hop_dst: int, xfer_id: int, gw_seq: int,
     frame[OFF_TTL]         = ttl
     frame[OFF_PAYLOAD_LEN] = 4
     struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    return _finalize(frame, key, sec_ts)
+
+
+def build_node_ping(dest_id: int, hop_dst: int, req_id: int, para_que: int,
+                    gw_seq: int, network_id: int, ttl: int,
+                    key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
+    """Pregunta a un nodo si puede con lo que se le va a pedir (§22.1).
+
+    Se manda ANTES de comprometer una operación. El que sabe si puede es el
+    nodo: deducirlo de cuándo se le oyó por última vez es adivinar con datos
+    viejos, y además no distingue "vivo" de "disponible".
+    """
+    frame = bytearray(HEADER_BYTES + 3)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_NODE_PING
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 3
+    struct.pack_into('<H', frame, OFF_PAYLOAD, req_id & 0xFFFF)
+    frame[OFF_PAYLOAD + 2] = para_que & 0xFF
     return _finalize(frame, key, sec_ts)
 
 

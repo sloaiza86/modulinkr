@@ -320,7 +320,7 @@
           <div id="bc-panel" hidden>
             <div id="bc-estado" class="mig-estado"></div>
             <table class="tabla" id="bc-tabla">
-              <thead><tr><th>Nodo</th><th>Recibido</th><th>Faltan</th><th>Último mapa</th></tr></thead>
+              <thead><tr><th>Nodo</th><th>Recibido</th><th>Faltan</th><th>Último mapa</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -454,27 +454,20 @@
           <p class="aviso">Guardar ahí arriba cambia los parámetros al momento y
             deja incomunicado a todo nodo que siga con los viejos: es lo
             correcto en un banco, no en una red desplegada. El cambio
-            coordinado hace lo mismo en cinco pasos sin perder a nadie: se fija
-            una hora de salto, se reparte la configuración nueva a cada nodo
-            (que la guarda sin aplicarla), se comprueba quién la tiene, a esa
-            hora saltan todos a la vez incluido el gateway, y después el
-            gateway vuelve cada pocos minutos a los parámetros viejos unos
-            segundos para recoger a los que se quedaran atrás. Hasta la hora
-            del salto no ha cambiado nada y la operación se puede abortar sin
+            coordinado hace lo mismo sin perder a nadie y sin que tengas que
+            hacer nada más: el gateway le pide su configuración a cada nodo, le
+            cambia solo los parámetros de red y se la devuelve citada a una
+            hora; llegada esa hora saltan todos a la vez, el gateway incluido.
+            Hasta entonces no ha cambiado nada y se puede abortar sin
             consecuencias.</p>
+          <p class="aviso">La hora la calcula el sistema con lo que cuesta
+            citar a los nodos que hay, que depende de cuántos son y de su
+            clase. Si al terminar alguno se quedó atrás, aparece un botón para
+            ir a buscarlo.</p>
 
           <!-- Sin operación en curso: programarla -->
           <div id="mig-nueva">
-            <div class="cfg-form">
-              <label class="cfg-campo"><span>Hora del salto</span><input id="mig-t" type="datetime-local"></label>
-              <label class="cfg-campo"><span>Recuperación: escucha (s)</span><input id="mig-win" type="number" min="5" max="120" value="15"></label>
-              <label class="cfg-campo"><span>Recuperación: cada (s)</span><input id="mig-per" type="number" min="60" max="3600" value="300"></label>
-              <label class="cfg-campo"><span>Recuperación: durante (h)</span><input id="mig-h" type="number" min="1" max="168" value="24"></label>
-            </div>
-            <p class="aviso">Los parámetros de destino son los del formulario de
-              arriba. La hora del salto necesita margen para repartir a todos
-              los nodos: cinco minutos es el mínimo que se acepta, y conviene
-              bastante más si la red es grande.</p>
+            <p class="aviso" id="mig-estimacion"></p>
             <div class="cfg-fila">
               <button id="mig-programar" class="btn-primario">Programar cambio coordinado</button>
               <span id="mig-resultado" class="aviso"></span>
@@ -489,6 +482,8 @@
               <tbody></tbody>
             </table>
             <div class="cfg-fila">
+              <button id="mig-saltar" hidden>Saltar sin los que faltan</button>
+              <button id="mig-rescatar" hidden>Buscar rezagados</button>
               <button id="mig-abortar">Abortar</button>
               <button id="mig-cerrar" class="btn-primario">Cerrar operación</button>
               <span id="mig-resultado2" class="aviso"></span>
@@ -691,6 +686,9 @@
             <select id="f-leer-puertos" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>
           </div>
+          <!-- Cómo acabó lo último que se lanzó sobre este nodo. Una operación
+               por radio dura más de lo que nadie mira la pantalla. -->
+          <p class="aviso" id="f-lora-ultima" hidden></p>
         </div>
 
         <div class="card cfg-card">
@@ -871,6 +869,10 @@
   <p id="cfg-dialogo-texto"></p>
   <div class="cfg-fila dialogo-botones">
     <button id="cfg-dialogo-cancelar" hidden>Cancelar</button>
+    <!-- Tercera vía: cuando el camino correcto no es ni seguir ni cancelar,
+         sino otro distinto. Lo usa el guardado de parámetros de red para
+         ofrecer el cambio coordinado en vez de limitarse a avisar. -->
+    <button id="cfg-dialogo-otro" class="btn-primario" hidden></button>
     <button id="cfg-dialogo-confirmar" class="peligro" hidden>Borrar</button>
     <button id="cfg-dialogo-cerrar" class="btn-primario" hidden>Cerrar</button>
   </div>

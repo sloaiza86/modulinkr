@@ -337,6 +337,11 @@ public:
     // hay mapa de bits, al revés que en el FW_STATUS de arriba, porque en
     // difusión los huecos están repartidos por toda la imagen y un número no
     // los describe. Va troceado: 313 bytes no caben en una trama.
+    // Respuesta al sondeo de disponibilidad (§22.2): la petición que se
+    // contesta, si se puede o no, y por qué no cuando no.
+    Status sendNodePong(uint16_t seq, uint8_t hop_dst, uint16_t req_id,
+                        uint8_t veredicto, uint8_t motivo);
+
     Status sendFwBcastMap(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
                           uint8_t part, uint8_t parts,
                           const uint8_t* bits, size_t len);

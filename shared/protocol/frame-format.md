@@ -1096,29 +1096,33 @@ Reglas de convivencia, que son lo que evita el desorden:
 4. **Sin hora válida no hay aplazamiento.** El nodo rechaza en vez de aplicar en el acto, porque aplicar a destiempo un config de red es justo lo que el aplazamiento existe para evitar.
 5. **Por cable no existe.** El comisionamiento por USB escribe en el acto: con el cable delante no hay razón para programar nada, y añadirlo daría una segunda forma de hacer lo mismo.
 
-### 17.8 Cambio coordinado de parámetros de red (v3.9)
+### 17.8 Cambio coordinado de parámetros de red (v4.1)
 
-La escritura aplazada de §17.7 resuelve el lado de los nodos. Falta el del gateway, que también tiene que saltar, y el de los que se queden atrás. El procedimiento completo tiene cinco pasos y ninguno cambia el formato de las tramas: se construye entero sobre el `apply_at` que ya existe.
+La escritura de §17 resuelve el lado de los nodos. Falta el del gateway, que también tiene que cambiar, y el de los que se queden atrás.
 
-1. **Programación.** El operador fija los parámetros de destino y una hora de salto T. Se guarda la operación con los dos juegos de parámetros, el de partida y el de destino, pero **no se cambia nada todavía**. T sale de un único sitio y se reparte desde ahí, porque nodos citados a una hora y gateway a otra es el fallo más tonto que esta operación admite.
-2. **Reparto.** El config nuevo se envía a cada nodo con ese `apply_at`. Cada uno lo guarda como pendiente y sigue operando con el suyo.
-3. **Recuento.** Antes de T se ve quién tiene el pendiente y quién no. Si faltan nodos, T se corre o la operación se tira a la basura: hasta el salto no ha cambiado nada, y esa es la propiedad que hace segura toda esta forma de trabajar.
-4. **Salto.** En T cada nodo aplica y reinicia, y el gateway cambia su radio en el mismo instante. Los que llegaron al reparto se reencuentran en los parámetros nuevos.
-5. **Recuperación.** Durante las horas siguientes el gateway vuelve periódicamente a los parámetros viejos, unos segundos cada pocos minutos, y emite un beacon nada más llegar. Un rezagado (uno que no recibió el config, o cuya ventana de prueba venció y revirtió) se registra ahí, y se le puede repartir de nuevo con un T nuevo.
+**No hay hora de salto.** La primera versión citaba a todos a un instante acordado, y el motivo parecía sólido: si el disparo es un mensaje, hay un último mensaje, y quien no lo reciba se queda fuera. Lo que ese razonamiento no contaba es que **el nodo ya sabe volverse atrás solo**. Un nodo que aplica una configuración y no consigue registrarse en cuatro minutos revierte a la anterior sin que nadie intervenga (§17.6). El fallo que la cita evitaba no deja huérfanos: se cura solo.
 
-**Los parámetros van juntos o no van.** El juego que se cambia incluye `network_id`, frecuencia, SF, ancho de banda, TTL máximo y la clave de red. La clave viaja con el resto a propósito: cambiarla incomunica igual que cambiar el canal, así que pertenece al mismo salto y a la misma vuelta atrás. Separarlas daría un estado en el que el gateway escucha en el canal correcto y no entiende nada de lo que oye.
+Quitada la cita, el procedimiento se reduce a esto, y no cambia el formato de ninguna trama.
 
-**La alternancia se deriva de la hora absoluta**, como `(ahora − T) mód periodo`, y no de un temporizador propio. Así un reinicio del servicio cae en la fase que le toca en vez de reiniciar el ciclo, y el panel puede predecir la próxima ventana sin preguntarle a nadie.
+1. **Aviso.** El gateway le pide su configuración a cada nodo, le cambia solo los parámetros de red y se la devuelve. Cada uno se parchea sobre la SUYA: el gateway no sabe qué lee un nodo ni con qué función Modbus, y un config fabricado con lo poco que sabe sería válido, el nodo lo aplicaría y quedaría vivo, en línea y midiendo nada.
+2. **Confirmación.** El nodo valida, guarda, **contesta y luego reinicia**, con segundo y medio de margen para que su respuesta salga por aire antes de que su radio cambie de parámetros. Ese "ok, salto" viaja por los parámetros viejos, que es donde el gateway sigue escuchando.
+3. **Salto del gateway.** Cuando todos han contestado, el gateway cambia su radio. Medido en banco el 2-ago-2026: un segundo después de la última confirmación.
+4. **Los que falten.** Si alguno no contesta, no se salta. Seguir sin él es una decisión del operador y no del programa, porque el que se queda atrás sigue midiendo con los parámetros viejos y deja de oír al gateway hasta que se le vaya a buscar.
+5. **Rescate.** El gateway vuelve a los parámetros viejos **solo cuando se le pide**, y se queda el tiempo que el rescate necesita.
 
-**El primer periodo entero después del salto no se toca.** La primera ventana de recuperación empieza un periodo completo después de T, no antes. Justo después del salto los nodos están reiniciando y buscando al gateway en los parámetros nuevos, con su ventana de prueba ya corriendo, y encontrarse el aire vacío es precisamente lo que les hace revertir. La recuperación no puede fabricar los rezagados que viene a recoger.
+**El rescate no es automático, y ese fue el segundo error de la primera versión.** Alternaba sola, quince segundos cada cinco minutos durante veinticuatro horas. Dos cosas estaban mal. Mientras el gateway escucha en los viejos **no oye a los que sí saltaron**, así que la red buena se quedaba sorda el 5 % del tiempo para atender a nadie. Y quince segundos daban para VER al rezagado, no para rescatarlo: verlo es un beacon y su registro, un segundo; volver a citarlo es escribirle su configuración entera.
 
-**Durante las ventanas en los viejos no se envía nada más.** Las transferencias de configuración y de firmware se pausan: hablarían al mundo equivocado, gastarían aire, no llegarían, y contarían los reintentos como si el nodo no respondiera. Continúan solas al volver.
+**La duración del rescate tiene suelo y techo, y los dos están medidos.** Por debajo de unos 25 s no da tiempo a citar al rezagado: la escritura de un config de 1,5 kB con una ronda de reparación fueron 8 s en banco, más el commit y el veredicto. Por encima de 90 s rompe a los que ya estaban bien: ese es el `beacon_timeout` de los nodos, y pasado ese plazo dan al padre por perdido y se ponen a buscar supernodo. El valor por defecto, 45 s, cae en medio.
 
-**El coste, que conviene tener a la vista.** Mientras el gateway escucha en los viejos no oye a los que ya migraron. Los valores por defecto son 15 s cada 300, un 5 % del tiempo, fracción que los reintentos de esos nodos absorben sin perder una sola medida. Los 15 s salen de lo que tarda un rezagado en volver: beacon al entrar, el nodo lo oye, adopta padre y se registra, un par de segundos con margen de sobra.
+**Los parámetros van juntos o no van.** El juego que se cambia incluye `network_id`, frecuencia, SF, ancho de banda, TTL máximo y la clave de red. La clave viaja con el resto a propósito: cambiarla incomunica igual que cambiar el canal, así que pertenece al mismo cambio y a la misma vuelta atrás. Separarlas daría un estado en el que el gateway escucha en el canal correcto y no entiende nada de lo que oye.
 
-**El pase de lista tiene tres respuestas, no dos.** Oído en los nuevos es que migró; oído en los viejos es un rezagado; no oído en ninguno es la tercera, y hay que poder distinguirla para no dar por perdido a un nodo que solo llevaba un rato callado. Un nodo con rastro en los dos mundos migró y luego revirtió, o al revés: manda el más reciente.
+**Las rutas del parcheo son las que lee el nodo, y solo esas.** `transport.lora` para frecuencia, SF, ancho de banda, `network_id` y la clave; `transport.mesh` para el TTL. Escribir en un bloque de primer nivel produce el peor fallo posible de esta operación: el nodo acepta la configuración, contesta que la aplica, reinicia, y arranca con la radio de antes. Todo parece ir bien y el cambio no ocurre. Pasó el 2-ago-2026 con el ancho de banda, mientras el TTL sí cambiaba porque ese sí iba a su ruta correcta.
 
-**Cierre.** Al cerrar la operación, los parámetros nuevos se escriben en la configuración del gateway y pasan a ser el estado normal de la instalación. Si tras el plazo de recuperación quedan nodos sin migrar, la respuesta honesta es que ahí hace falta cable, y el panel debe decirlo con nombres.
+**Durante el aviso no se envía nada más pesado.** Las transferencias de firmware ceden: los canales de lectura y escritura de configuración son de uno en uno, y el aviso tiene prioridad porque de él depende que la red entera siga junta.
+
+**El pase de lista tiene tres respuestas, no dos.** Oído en los nuevos es que migró; oído en los viejos es un rezagado; no oído en ninguno es la tercera, y hay que poder distinguirla para no dar por perdido a un nodo que solo llevaba un rato callado.
+
+**Cierre.** Al cerrar la operación, los parámetros nuevos se escriben en la configuración del gateway y pasan a ser el estado normal de la instalación. Si quedan nodos sin migrar, la respuesta honesta es que ahí hace falta cable, y el panel debe decirlo con nombres.
 
 ## 18. Actualización de firmware por LoRa (v3.7)
 
@@ -1525,7 +1529,44 @@ En un nodo a pilas la cuenta sale a favor incluso en consumo: quince minutos con
 
 Queda apuntada y no se construye. Todo lo que necesita ya existe: el beacon da un reloj común a la red, el periodo es conocido y cada nodo tiene identificador, así que las ranuras de escucha se derivan sin negociar nada. Es la respuesta cuando aparezca un nodo a pilas que necesite latencia de bajada acotada, y conviene que esté escrito para que ese día no se resuelva improvisando.
 
-## 22. Cambios respecto a v1.0
+## 22. Sondeo de disponibilidad (v4.1)
+
+Antes de comprometer una operación sobre un nodo se le pregunta si puede con ella. Dos tramas de 16 bytes, unos 50 ms de ida y vuelta a SF7 y 250 kHz.
+
+La alternativa que había era deducirlo del último momento en que se le oyó, y es adivinar con datos viejos: un nodo oído hace veinte segundos puede estar ya sin alimentación, y uno oído hace tres minutos puede estar perfectamente. Sobre todo, **no distingue "vivo" de "disponible"**. Un nodo puede estar sano y no ser buen momento, porque está recibiendo una imagen, porque tiene una configuración a medias o porque está en la ventana de prueba de algo. El único que sabe eso es él.
+
+El patrón no es nuevo en el proyecto: la difusión de firmware (§20.6) ya anuncia la imagen y espera la aceptación del nodo antes de emitir medio mega. Lo que hace esta sección es sacar esa cautela del canal de firmware y ponerla donde puede usarla cualquiera.
+
+### 22.1 NODE_PING (downlink, `frame_type = 0x23`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `req_id` | 2 | Identificador de la pregunta, para casar la respuesta. |
+| 2 | `para_que` | 1 | `0x01` escribir config, `0x02` leer config, `0x03` firmware. |
+
+El `para_que` es lo que convierte un ping en una pregunta útil. "¿Estás vivo?" se contesta igual siempre; "¿puedes recibir una configuración ahora?" no.
+
+### 22.2 NODE_PONG (uplink, `frame_type = 0x24`)
+
+| Offset | Campo | Tamaño | Descripción |
+| --- | --- | --- | --- |
+| 0 | `req_id` | 2 | El de la pregunta que se contesta. |
+| 2 | `veredicto` | 1 | `0x00` puede, `0x01` ocupado. |
+| 3 | `motivo` | 1 | Por qué no, cuando no. Ver abajo. |
+
+Motivos: `0x00` ninguno, `0x01` está bajando una imagen, `0x02` tiene una configuración a medias, `0x03` no tiene la hora sincronizada, `0x04` tiene una imagen o configuración a prueba.
+
+El nodo contesta **siempre**, también cuando la respuesta es que no. Un silencio no distingue entre un nodo ocupado y un nodo que no está, y esa diferencia es justo la que se quería averiguar.
+
+### 22.3 Quién pregunta y qué hace con la respuesta
+
+El visor no habla por radio: deja la pregunta en la tabla `node_probe` y el servicio la emite, igual que con todo lo demás. La petición del operador se queda esperando la respuesta unos segundos, y solo si el nodo dice que puede se encola la operación de verdad.
+
+Sin respuesta en seis segundos se da por no disponible. Es holgado: la ida y vuelta son 50 ms, y el margen cubre un relay por medio y que el nodo termine lo que estuviera haciendo.
+
+Esto no sustituye a los plazos de caducidad de las operaciones, los complementa. El sondeo evita empezar lo que no puede acabar bien; el plazo cubre el caso de que el nodo desaparezca justo después de haber dicho que sí.
+
+## 23. Cambios respecto a v1.0
 
 Resumen para trazabilidad del TFM:
 

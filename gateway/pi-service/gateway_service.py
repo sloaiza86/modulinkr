@@ -193,6 +193,26 @@ CFG_WINDOW_S = 2.5
 # mapa del CONFIG_ACK marca como ausente, así que convergen rápido.
 CFG_MAX_ROUNDS = 3
 
+# Margen sobre el tiempo que una operación necesita en el mejor de los casos.
+#
+# Toda operación nace con fecha de caducidad, porque los topes por intentos no
+# bastan: una operación que no llega a intentar nada tampoco llega a agotarlos,
+# y se queda viva ocupando su canal. Pero el plazo NO es una constante, se
+# deriva de lo que esa operación tarda de verdad (ver _plazo_de).
+#
+# Una lectura de configuración a un nodo de clase C son cinco peticiones
+# separadas 20 s, o sea menos de dos minutos. Darle quince, como si fuera una
+# imagen de medio mega, no es prudencia: es no haber hecho la cuenta.
+OP_MARGEN = 2.0
+
+# Suelo, para que un cálculo pequeño no deje un plazo ridículo.
+OP_PLAZO_MIN_S = 60.0
+
+# Cuánto se espera la respuesta a un sondeo (§22). La ida y vuelta son unos
+# 50 ms a SF7 y 250 kHz; el resto es margen para un relay por medio y para que
+# el nodo termine lo que estuviera haciendo.
+PROBE_PLAZO_S = 6.0
+
 # Plazo para que el nodo mande el resultado de aplicar una configuración. Con
 # escritura aplazada el nodo puede tardar lo que diga apply_at, así que el
 # plazo es generoso; lo que no puede es no vencer nunca.
@@ -455,6 +475,13 @@ class GatewayService:
         self.gw_tx_ms = 0               # aire propio acumulado (ms, v3.1)
         self.aire_libre     = 0.0       # monotonic hasta el que el aire está ocupado
         self._cfg_ver_chk   = 0.0       # freno del barrido de veredictos de config
+        self._mig_rep_chk   = 0.0       # freno del reparto de la migración
+        self._mig_releer    = 0         # última relectura de la fila de migración
+        self._mig_buscar    = 0         # última búsqueda de una migración nueva
+        self._bcast_inst2_chk = 0.0     # freno de la instalación de difusión
+        self._probe_chk     = 0.0       # freno del sondeo de disponibilidad
+        self._probe_req     = 0         # identificador de la última pregunta
+        self._probe_vivo    = None      # sondeo emitido esperando respuesta
         self.tx_ordenadas   = 0         # órdenes escritas al Heltec
         self.tx_ord_control = 0         # de ellas, tráfico de control
         self.heltec_emitidas = 0        # total que el Heltec dice haber emitido
@@ -735,6 +762,13 @@ class GatewayService:
             # arrastra la cita. Cero es "aplicar al recibir", el camino de
             # siempre.
             "apply_at": int(apply_at or 0),
+            # Fecha de caducidad, derivada del trabajo: emitir todos los
+            # fragmentos con su hueco, y hasta tres rondas de reparación
+            # esperando confirmación (ver _plazo_de).
+            "vence": time.monotonic() + self._plazo_de(
+                origin,
+                len(chunks) * gap_s * (1 + CFG_MAX_ROUNDS)
+                + CFG_MAX_ROUNDS * CFG_ACK_WAIT_S),
         }
         self.buf.config_push_state(push_id, "sending",
                                    f"{len(chunks)} fragmentos, {len(data)} B")
@@ -743,6 +777,82 @@ class GatewayService:
                  origin, len(data), len(chunks), gap_s, burst_max,
                  f" (via relay {self._config_hop(origin)})" if hay_relay else "",
                  self.cfg_tx["xfer"])
+
+    def probe_tick(self, now: float) -> None:
+        """Emite los sondeos que el visor haya dejado en la tabla (§22).
+
+        Un sondeo son 16 bytes de ida y otros tantos de vuelta, unos 50 ms en
+        total a SF7 y 250 kHz. Preguntar es tan barato que no hay excusa para
+        comprometer una operación sin haberlo hecho.
+        """
+        if self.buf is None:
+            return
+        if now - self._probe_chk < 0.5:
+            return
+        self._probe_chk = now
+        try:
+            self.buf.probe_caducar(PROBE_PLAZO_S)
+            pend = self.buf.probe_next()
+        except sqlite3.Error:
+            return
+        if pend is None:
+            return
+        self._probe_req = (self._probe_req + 1) & 0xFFFF
+        self._probe_vivo = {"id": pend["id"], "origin": pend["origin"],
+                            "req": self._probe_req}
+        self.buf.probe_state(pend["id"], "asking")
+        self._tx(protocol.build_node_ping(
+            pend["origin"], self._config_hop(pend["origin"]),
+            self._probe_req, pend["para_que"],
+            self._next_gw_seq(), self.net_id, self.max_ttl,
+            self.sec_key, self._gw_sec_ts()))
+        LOG.info("sondeo al nodo %d para %s (req=%d)", pend["origin"],
+                 protocol.PROBE_NOMBRES.get(pend["para_que"], pend["para_que"]),
+                 self._probe_req)
+
+    def probe_on_pong(self, parsed: dict) -> None:
+        """Respuesta del nodo al sondeo."""
+        v = self._probe_vivo
+        if v is None or self.buf is None:
+            return
+        if parsed["origin_id"] != v["origin"] or parsed.get("probe_req") != v["req"]:
+            return
+        listo = bool(parsed.get("probe_ready"))
+        motivo = parsed.get("probe_motivo", 0)
+        self.buf.probe_state(
+            v["id"], "done", 1 if listo else 0, motivo,
+            "puede" if listo else parsed.get("probe_motivo_name", "ocupado"))
+        LOG.info("sondeo al nodo %d: %s%s", v["origin"],
+                 "puede" if listo else "ocupado",
+                 "" if listo else f" ({parsed.get('probe_motivo_name')})")
+        self._probe_vivo = None
+
+    def _plazo_de(self, origin: int, trabajo_s: float) -> float:
+        """Fecha de caducidad de una operación, derivada de lo que tarda.
+
+        `trabajo_s` es lo que costaría en el mejor de los casos, contando sus
+        reintentos: para una lectura, las peticiones por su espera; para una
+        escritura, los fragmentos por su hueco más las rondas de reparación.
+
+        A eso se le aplica un margen, y para un nodo de clase A se le suma su
+        propio ritmo. La diferencia entre las dos clases no es un detalle: a un
+        nodo de clase C se le habla cuando haga falta, así que su plazo lo fija
+        la propia operación; a uno de clase A solo se le puede hablar en la
+        ventana que abre cada una de sus tramas, de modo que cada reintento
+        puede costar un ciclo entero de muestreo. Con muestreo cada diez
+        minutos, la misma operación pasa de dos minutos a casi una hora, y las
+        dos cifras son correctas para su caso.
+        """
+        plazo = trabajo_s * OP_MARGEN
+        if self._clase_de(origin) == "A":
+            intervalo = None
+            if self.buf is not None:
+                try:
+                    intervalo = self.buf.telemetry_interval_s()
+                except Exception:              # noqa: BLE001
+                    intervalo = None
+            plazo += (intervalo or 600.0) * OP_MARGEN
+        return max(OP_PLAZO_MIN_S, plazo)
 
     def _clase_de(self, origin: int) -> str:
         """Clase del nodo (§21), 'A' o 'C'. La declara en su catálogo al
@@ -869,6 +979,13 @@ class GatewayService:
 
         t = self.cfg_tx
 
+        # Plazo absoluto, antes que nada (ver _plazo_de). Las rondas y los
+        # reintentos solo cuentan lo que se llega a intentar; esto cuenta el
+        # tiempo, que corre igual aunque no se intente nada.
+        if now > t.get("vence", now + OP_PLAZO_MIN_S):
+            self.config_finish("failed", "sin completar dentro de su plazo")
+            return
+
         # Espera de las confirmaciones que falten. No transmite nada, así que
         # no depende de la ventana de escucha del nodo y se mide con el reloj
         # real en vez de acumulando el espaciado, que con ráfaga ya no guarda
@@ -978,6 +1095,10 @@ class GatewayService:
             "read_id": read_id, "origin": origin,
             "req": int(time.time()) & 0xFFFFFFFF,
             "frags": {}, "total": 0, "tries": 0, "next_ms": 0.0,
+            # Cinco peticiones separadas por su espera es lo que cuesta en el
+            # peor caso normal; el plazo sale de ahí (ver _plazo_de).
+            "vence": time.monotonic() + self._plazo_de(
+                origin, CFG_GET_MAX_TRIES * CFG_GET_RETRY_S),
         }
         self.buf.config_read_state(read_id, "reading", detail="pidiendo al nodo")
         LOG.info("config-read origin=%d inicio, req=%08X",
@@ -995,13 +1116,27 @@ class GatewayService:
             return
 
         r = self.cfg_rx
+        # Plazo absoluto, lo primero. Los topes por intentos no bastan: si la
+        # operación nunca llega a intentar nada, tampoco llega nunca a
+        # agotarlos. Aquí pasaba con un nodo al que todavía no se había oído,
+        # que dejaba la lectura viva para siempre y el visor contestando "ya
+        # hay una lectura en curso" a cualquier intento posterior.
+        if now > r.get("vence", now + OP_PLAZO_MIN_S):
+            self.config_read_finish("failed",
+                                    "sin completar dentro de su plazo")
+            return
         if now < r["next_ms"]:
             return
-        oido = r.get("heard_ms", 0.0)
-        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
+        # Cuándo se le puede hablar lo decide su clase, igual que en la
+        # escritura. La ventana solo existe para la clase A; aplicársela a un
+        # nodo de clase C, cuya marca de "oído" puede no existir todavía,
+        # bloqueaba la lectura entera antes de empezar.
+        if not self._ventana_libre(r, now):
             return
-        if now > oido + CFG_QUIET_DELAY_S + CFG_GET_RETRY_S:
-            return
+        if self._clase_de(r["origin"]) == "A":
+            oido = r.get("heard_ms", 0.0)
+            if now > oido + CFG_QUIET_DELAY_S + CFG_GET_RETRY_S:
+                return
 
         if r["tries"] >= CFG_GET_MAX_TRIES:
             self.config_read_finish("failed",
@@ -1504,6 +1639,11 @@ class GatewayService:
                 self.buf.bcast_maps_clear(op["id"])
                 b["poll"] = ([op["target"]] if op.get("target")
                              else self._bcast_nodos())
+                # A quién se preguntó, para poder echar en falta al que no
+                # conteste. Sin esta lista, un nodo silencioso no cuenta como
+                # incompleto: desaparece de la cuenta, y la difusión se declara
+                # un éxito ignorando que a alguien no le llegó.
+                b["preguntados"] = list(b["poll"])
                 b["poll_hasta"] = 0.0
                 op["state"] = "polling"
                 self.buf.bcast_state(op["id"], "polling",
@@ -1646,7 +1786,22 @@ class GatewayService:
             return
         b["rondas"] = 0
         self.buf.bcast_progress(op["id"], op["total_len"])
-        if not union:
+
+        # Quién fue preguntado y no dijo nada. No es lo mismo que un nodo con
+        # huecos, y no se puede tratar igual: de uno que contesta se sabe qué
+        # le falta y se le reemite; de uno callado no se sabe nada, ni siquiera
+        # si llegó a enterarse del anuncio.
+        #
+        # Antes ni se miraba. La unión de lo que falta se calculaba solo sobre
+        # los mapas recibidos, así que un nodo silencioso no contaba como
+        # incompleto: desaparecía de la cuenta y la difusión se declaraba un
+        # éxito. Con un solo nodo era invisible; se vio el 2-ago-2026 a la
+        # primera difusión con dos, cuando el supernodo no contestó y la
+        # operación se cerró como "completa en 1 nodo(s)".
+        respondieron = {m["node_id"] for m in mapas}
+        mudos = [x for x in b.get("preguntados", []) if x not in respondieron]
+
+        if not union and not mudos:
             self.buf.bcast_state(op["id"], "ready",
                                  f"{len(mapas)} nodo(s) con la imagen completa",
                                  pass_no=pase)
@@ -1654,6 +1809,22 @@ class GatewayService:
             self.bcast_img = None
             LOG.info("fw-bcast %d: completa en %d nodo(s) tras %d pasada(s)",
                      op["id"], len(mapas), pase)
+            return
+
+        if not union and mudos:
+            # Los que contestaron la tienen entera, así que reemitir no
+            # arreglaría nada: lo que falta no es imagen, es respuesta. Se
+            # cierra diciendo a quién hay que mirar, en vez de callarlo.
+            lista = ", ".join(str(x) for x in mudos)
+            self.buf.bcast_state(
+                op["id"], "ready",
+                f"{len(mapas)} nodo(s) con la imagen completa; "
+                f"sin respuesta de: {lista}", pass_no=pase)
+            self.bcast = None
+            self.bcast_img = None
+            LOG.warning("fw-bcast %d: completa en %d nodo(s), pero %d no "
+                        "contestaron al mapa (%s): hay que mirarlos uno a uno",
+                        op["id"], len(mapas), len(mudos), lista)
             return
         if pase >= BCAST_MAX_PASSES:
             self.buf.bcast_state(
@@ -1742,6 +1913,53 @@ class GatewayService:
             LOG.warning("fw-bcast %d: el nodo %d no dio veredicto; version "
                         "anunciada %s, se pidio %s", bid, destino,
                         corriendo or "?", pedida or "?")
+
+    def bcast_difusion_install_tick(self, now: float) -> None:
+        """Manda la orden de instalar una imagen difundida, nodo a nodo.
+
+        La difusión no tiene destinatario, así que su instalación no cabe en su
+        propia fila: son N instalaciones sobre la misma imagen, cada una con su
+        reinicio y su veredicto. La trama es la misma FW_INSTALL de siempre,
+        porque instalar es instalar venga la imagen por donde venga.
+        """
+        if self.buf is None or now - self._bcast_inst2_chk < 2.0:
+            return
+        self._bcast_inst2_chk = now
+        try:
+            fila = self.buf.bcast_install_next()
+        except sqlite3.Error:
+            return
+        if fila is None:
+            return
+        self._tx(protocol.build_fw_install(
+            fila["origin"], self._config_hop(fila["origin"]), fila["xfer"],
+            bytes.fromhex(fila["sha256"]), self._next_gw_seq(), self.net_id,
+            self.max_ttl, self.sec_key, self._gw_sec_ts()))
+        self.buf.bcast_install_state(fila["id"], "installing",
+                                     "orden enviada al nodo")
+        LOG.info("fw-bcast: orden de instalar %s al nodo %d (xfer=%08X)",
+                 fila["version"], fila["origin"], fila["xfer"])
+
+    def bcast_difusion_result(self, parsed: dict) -> bool:
+        """Veredicto de una instalación de imagen difundida."""
+        if self.buf is None:
+            return False
+        try:
+            fila = self.buf.bcast_install_esperando(parsed["origin_id"])
+        except sqlite3.Error:
+            return False
+        if fila is None:
+            return False
+        if parsed.get("fw_status") == protocol.FW_INSTALLING:
+            return True     # aviso previo al reinicio, no veredicto
+        ok = parsed.get("fw_status") == protocol.FW_CONFIRMED
+        detalle = parsed.get("fw_detail") or ""
+        self.buf.bcast_install_state(
+            fila["id"], "done" if ok else "failed",
+            f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
+        LOG.info("fw-bcast: veredicto del nodo %d tras instalar: %s",
+                 parsed["origin_id"], detalle or "sin detalle")
+        return True
 
     def bcast_on_result(self, parsed: dict) -> bool:
         """Veredicto tras instalar una imagen entregada por este transporte.
@@ -2385,7 +2603,8 @@ class GatewayService:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 # Igual que con el estado: primero el transporte de §20, que
                 # solo consume la trama si la transferencia es suya.
-                if not self.bcast_on_result(parsed):
+                if not self.bcast_difusion_result(parsed) and \
+                        not self.bcast_on_result(parsed):
                     self.fw_on_result(parsed)
             else:
                 self.n_notconf += 1
@@ -2394,6 +2613,13 @@ class GatewayService:
         if ft == protocol.FRAME_FW_BCAST_MAP:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 self.bcast_on_map(parsed)
+            else:
+                self.n_notconf += 1
+            return
+
+        if ft == protocol.FRAME_NODE_PONG:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.probe_on_pong(parsed)
             else:
                 self.n_notconf += 1
             return
@@ -2782,6 +3008,148 @@ class GatewayService:
                         "(faltan %d s)", self.mig["id"], self.mig["apply_at"],
                         self.mig["apply_at"] - ahora)
 
+    @staticmethod
+    def _parchear_red(texto: str, perfil: dict) -> str:
+        """Mete los parámetros de red nuevos en el config de un nodo.
+
+        Se parchea SU config, campo a campo, en vez de mandarle uno fabricado
+        aquí. El gateway no sabe lo que lleva dentro un nodo (qué lee, con qué
+        función Modbus, con qué escala), y un config inventado con lo poco que
+        sabe sería válido, el nodo lo aplicaría y se quedaría vivo, en línea y
+        midiendo nada.
+        """
+        cfg = json.loads(texto)
+        # Las rutas son las que lee el nodo, ni una más: `transport.lora` y
+        # `transport.mesh` (node-config.md, y config.cpp que es quien manda).
+        #
+        # La primera versión escribía en un `lora` de primer nivel, que el nodo
+        # ignora por completo. El resultado fue el peor posible: el nodo
+        # aceptaba la configuración, contestaba que la aplicaba, reiniciaba, y
+        # arrancaba con la radio de antes. Todo parecía ir bien y el cambio no
+        # ocurría. El TTL sí funcionaba, porque ese sí iba a `transport.mesh`.
+        tr = cfg.setdefault("transport", {})
+        lora = tr.setdefault("lora", {})
+        lora["frequency_hz"] = int(perfil["freq_hz"])
+        lora["sf"]           = int(perfil["sf"])
+        lora["bw_khz"]       = int(perfil["bw_khz"])
+        lora["network_id"]   = int(perfil["network_id"])
+        # La seguridad cuelga de transport.lora, no de mesh.
+        clave = perfil.get("sec_key") or ""
+        seg = lora.setdefault("security", {})
+        seg["enabled"] = bool(clave)
+        if clave:
+            seg["key"] = clave
+        tr.setdefault("mesh", {})["max_ttl"] = int(perfil["max_ttl"])
+        # Y se limpia el bloque de primer nivel que dejó aquella versión: es
+        # basura que el nodo arrastra en su config y que solo confunde a quien
+        # lo lea.
+        cfg.pop("lora", None)
+        cfg.pop("mesh", None)
+        return json.dumps(cfg, ensure_ascii=False, indent=2)
+
+    def migration_reparto_tick(self, now: float) -> None:
+        """Reparte la configuración nueva a cada nodo, sin intervención.
+
+        Encadena tres piezas que ya existían sueltas: leer el config del nodo,
+        parchearle los parámetros de red y devolvérselo con la hora del salto.
+        Antes esto era trabajo del operador, nodo por nodo, que en una red de
+        veinte son veinte ocasiones de teclear mal un número y perder un nodo
+        hasta la siguiente visita.
+
+        Va de uno en uno porque los canales de lectura y de escritura son de
+        uno en uno: no es una limitación de aquí, es la del medio.
+        """
+        if self.buf is None or self.mig is None:
+            return
+        if self.mig["state"] != "programada":
+            return
+        if now - self._mig_rep_chk < 3.0:
+            return
+        self._mig_rep_chk = now
+
+        try:
+            filas = self.buf.reparto_lista(self.mig["id"])
+        except sqlite3.Error:
+            return
+
+        for f in filas:
+            if f["state"] in ("done", "failed"):
+                continue
+
+            if f["state"] == "leyendo":
+                fila = self.buf.conn.execute(
+                    "SELECT state, config, detail FROM config_read WHERE id = ?",
+                    (f["read_id"],)).fetchone()
+                if fila is None or fila[0] in ("pending", "reading"):
+                    return            # se espera, y no se toca a nadie más
+                if fila[0] != "done" or not fila[1]:
+                    self.buf.reparto_state(
+                        self.mig["id"], f["origin"], "failed",
+                        detail=f"no se pudo leer su config: {fila[2] or fila[0]}")
+                    continue
+                try:
+                    nuevo = self._parchear_red(fila[1], self.mig["new_profile"])
+                except (ValueError, KeyError, TypeError) as e:
+                    self.buf.reparto_state(self.mig["id"], f["origin"], "failed",
+                                           detail=f"config ilegible: {e}")
+                    continue
+                # Sin cita: `apply_at` a cero es "aplícalo ya". El nodo valida,
+                # guarda, CONTESTA y entonces reinicia, con un segundo y medio
+                # de margen para que su respuesta salga por aire antes de que
+                # su radio cambie de parámetros. Eso es lo que permite prescindir
+                # de una hora acordada: el "ok, salto" llega por los parámetros
+                # viejos, que es donde el gateway sigue escuchando.
+                cur = self.buf.conn.execute(
+                    """INSERT INTO config_push (origin, config, created_ts,
+                                                state, apply_at)
+                       VALUES (?, ?, ?, 'pending', 0)""",
+                    (f["origin"], nuevo, time.time()))
+                self.buf.conn.commit()
+                self.buf.reparto_state(self.mig["id"], f["origin"], "enviando",
+                                       push_id=cur.lastrowid,
+                                       detail="config parcheada, enviando")
+                return
+
+            if f["state"] == "enviando":
+                fila = self.buf.conn.execute(
+                    "SELECT state, detail FROM config_push WHERE id = ?",
+                    (f["push_id"],)).fetchone()
+                if fila is None or fila[0] in ("pending", "sending",
+                                               "committing"):
+                    return
+                ok = fila[0] == "done"
+                self.buf.reparto_state(
+                    self.mig["id"], f["origin"], "done" if ok else "failed",
+                    detail=("citado para el salto" if ok
+                            else f"no se pudo enviar: {fila[1] or fila[0]}"))
+                continue
+
+            # pendiente: se le pide su config, si los canales están libres
+            if self.cfg_rx is not None or self.cfg_tx is not None:
+                return
+            cur = self.buf.conn.execute(
+                """INSERT INTO config_read (origin, created_ts, state)
+                   VALUES (?, ?, 'pending')""", (f["origin"], time.time()))
+            self.buf.conn.commit()
+            self.buf.reparto_state(self.mig["id"], f["origin"], "leyendo",
+                                   read_id=cur.lastrowid,
+                                   detail="leyendo su config")
+            LOG.info("migracion %d: repartiendo al nodo %d", self.mig["id"],
+                     f["origin"])
+            return
+
+    def _reparto_cuenta(self) -> tuple:
+        """Cuántos nodos han confirmado el salto y cuántos faltan."""
+        if self.buf is None or self.mig is None:
+            return 0, 0
+        try:
+            filas = self.buf.reparto_lista(self.mig["id"])
+        except sqlite3.Error:
+            return 0, 0
+        listos = sum(1 for f in filas if f["state"] == "done")
+        faltan = sum(1 for f in filas if f["state"] != "done")
+        return listos, faltan
+
     def migration_tick(self, now_mono: float) -> None:
         """Ejecuta el salto en T y luego alterna con los parámetros viejos.
 
@@ -2791,7 +3159,20 @@ class GatewayService:
         puede predecir la próxima ventana sin preguntar.
         """
         if self.mig is None:
-            return
+            # Una operación programada con el servicio ya en marcha hay que
+            # verla. Antes solo se leía al arrancar, así que programarla desde
+            # el visor no hacía nada: ni reparto, ni salto, y el panel se
+            # quedaba en "citados 0 de N" sin que nada lo explicara. Se mira
+            # cada pocos segundos, que para algo que se programa con minutos
+            # de antelación sobra.
+            if int(time.time()) - self._mig_buscar < 5:
+                return
+            self._mig_buscar = int(time.time())
+            self.mig = self.buf.migration_active() if self.buf else None
+            if self.mig is None:
+                return
+            LOG.warning("migracion de red %d recogida en caliente: salto en "
+                        "epoch %d", self.mig["id"], self.mig["apply_at"])
 
         # Sin hora de confianza no se salta. El salto es un instante acordado
         # con toda la malla, y ejecutarlo contra un reloj que no vale es la
@@ -2800,9 +3181,33 @@ class GatewayService:
             return
         ahora = int(time.time())
 
+        # Se relee la fila cada pocos segundos porque el botón de rescate lo
+        # pulsa el visor, que no habla por radio: deja la petición en la base.
+        if ahora - self._mig_releer >= 3:
+            self._mig_releer = ahora
+            fresca = self.buf.migration_active()
+            if fresca is not None and fresca["id"] == self.mig["id"]:
+                self.mig["rescate_hasta"] = fresca.get("rescate_hasta") or 0
+                # "Saltar sin los que faltan" también lo pide el visor por la
+                # tabla: es una decisión del operador, no del programa.
+                self.mig["saltar_igual"] = bool(fresca.get("saltar_igual"))
+
         if self.mig["state"] == "programada":
-            if ahora < self.mig["apply_at"]:
+            # El gateway salta cuando TODOS han dicho que saltan, no a una hora.
+            #
+            # Se defendió mucho la cita a hora fija, contra este caso: que el
+            # "ok, salto" de un nodo se pierda, el nodo salte y el gateway no,
+            # y queden en mundos distintos sin poder oírse. Pero ese nodo no se
+            # queda huérfano: aplicar un config y no conseguir registrarse en
+            # cuatro minutos lo revierte SOLO, y vuelve a los parámetros viejos
+            # donde el gateway sigue estando. La red de seguridad ya existía y
+            # es mejor que la cita, porque no depende de que nadie acierte una
+            # hora por adelantado.
+            listos, faltan = self._reparto_cuenta()
+            if faltan and not self.mig.get("saltar_igual"):
                 return
+            if not listos:
+                return          # nadie ha confirmado: no hay a qué saltar
             self._apply_profile(self.mig["new_profile"])
             self.mig_mundo = "nuevo"
             self.buf.migration_state(self.mig["id"], "saltada",
@@ -2828,21 +3233,24 @@ class GatewayService:
             self.mig = None
             return
 
-        # El primer periodo entero después del salto es intocable.
+        # Ir a buscar rezagados solo cuando alguien lo pide, y quedarse el
+        # tiempo que el rescate necesita.
         #
-        # Sin esta guarda la primera ventana de recuperación caía un segundo
-        # después de T, que es el peor momento posible: los nodos que acaban de
-        # saltar están reiniciando y buscando al gateway en los parámetros
-        # NUEVOS, con su ventana de prueba ya corriendo, y encontrarse el aire
-        # vacío es justo lo que les hace revertir. Se les deja un periodo
-        # completo para reencontrarse antes de empezar a ausentarse a buscar
-        # rezagados. Lo encontró la prueba de la alternancia, no el diseño.
-        transcurrido = ahora - self.mig["apply_at"]
-        fase = transcurrido % self.mig["recov_per_s"]
-        toca = ("viejo"
-                if transcurrido >= self.mig["recov_per_s"]
-                and fase < self.mig["recov_win_s"]
-                else "nuevo")
+        # Antes esto era una alternancia automática: quince segundos en los
+        # parámetros viejos cada cinco minutos durante 24 horas. Dos cosas
+        # estaban mal. Mientras el gateway está en los viejos NO OYE a los
+        # nodos que sí saltaron, así que la red buena se quedaba sorda el 5 %
+        # del tiempo para atender a nadie. Y quince segundos daban para VER al
+        # rezagado, no para rescatarlo: verlo es un beacon y un registro, un
+        # segundo; volver a citarlo es escribirle su configuración, veinte.
+        #
+        # El plazo de arriba lo pone quien pulsa el botón, con la duración
+        # calculada en _plazo_rescate. Y tiene techo: pasados noventa segundos
+        # sin beacon, los nodos que ya migraron dan al padre por perdido y se
+        # ponen a buscar supernodo, o sea que un rescate largo rompe a los que
+        # estaban bien para atender al que no.
+        rescate = self.mig.get("rescate_hasta") or 0
+        toca = "viejo" if rescate and ahora < rescate else "nuevo"
         if toca == self.mig_mundo:
             return
 
@@ -2850,13 +3258,14 @@ class GatewayService:
         self._apply_profile(self.mig["old_profile"] if toca == "viejo"
                             else self.mig["new_profile"])
         if toca == "viejo":
-            # Beacon inmediato al entrar: la ventana dura segundos y esperar al
-            # siguiente beacon periódico la desperdiciaría entera. El rezagado
-            # está escuchando sin padre, así que este beacon es exactamente lo
-            # que necesita para volver.
+            # Beacon inmediato al entrar: esperar al periódico desperdiciaría
+            # media ventana. El rezagado está escuchando sin padre, así que
+            # este beacon es exactamente lo que necesita para volver.
             self.send_beacon()
-        LOG.info("migracion de red %d: radio en los parametros %ss",
-                 self.mig["id"], toca)
+        LOG.info("migracion de red %d: radio en los parametros %ss%s",
+                 self.mig["id"], toca,
+                 f" (rescate hasta epoch {int(rescate)})" if toca == "viejo"
+                 else "")
 
     def migration_note_rx(self, origin: int) -> None:
         """Anota en el pase de lista a quién se oye, y en qué mundo."""
@@ -2965,6 +3374,10 @@ class GatewayService:
                     # si esta vuelta toca cambiar de mundo, lo que se mande
                     # después debe salir ya con los parámetros correctos.
                     self.migration_tick(now)
+                    # El reparto va detrás del salto y delante de todo lo
+                    # demás: mientras hay una migración programada, citar a los
+                    # nodos es lo más urgente que hay, porque tiene fecha.
+                    self.migration_reparto_tick(now)
 
                     # Envío de configuración por LoRa: solo con el puerto
                     # abierto, que es esta rama del bucle.
@@ -2977,6 +3390,10 @@ class GatewayService:
                     # continúa sola al volver, porque estas máquinas ya saben
                     # esperar a que el nodo esté a la escucha.
                     if self.mig_mundo == "nuevo":
+                        # El sondeo va el primero de todos: son 16 bytes, se
+                        # resuelve en medio segundo, y de él depende que las
+                        # operaciones largas lleguen a encolarse o no.
+                        self.probe_tick(now)
                         self.quiet_tick(now)
                         self.config_tick(now)
                         self.config_read_tick(now)
@@ -2993,6 +3410,7 @@ class GatewayService:
                         # trama de 36 bytes que cierra una transferencia de
                         # horas: siempre va primero.
                         self.bcast_install_tick(now)
+                        self.bcast_difusion_install_tick(now)
                         # La difusión va la última de la cola de emisión: es
                         # tráfico a granel de horas, y cualquier cosa que se
                         # resuelva en segundos debe pasar antes que ella.

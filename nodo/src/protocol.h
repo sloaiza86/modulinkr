@@ -60,6 +60,30 @@ constexpr uint8_t kFrameFwBcastData  = 0x20;  // difusión: original o mezcla
 constexpr uint8_t kFrameFwBcastPoll  = 0x21;  // downlink: dime qué te falta
 constexpr uint8_t kFrameFwBcastMap   = 0x22;  // uplink: mapa de recibidos
 
+// Sondeo de disponibilidad (v4.1, §22). Se pregunta ANTES de comprometer una
+// operación, en vez de deducirlo de cuándo se le oyó por última vez: un nodo
+// oído hace veinte segundos puede estar ya muerto, y uno oído hace tres
+// minutos puede estar perfectamente. Y no pregunta solo si está vivo, sino si
+// puede con LO QUE SE LE VA A PEDIR, que no es lo mismo.
+constexpr uint8_t kFrameNodePing     = 0x23;  // downlink: ¿puedes con esto?
+constexpr uint8_t kFrameNodePong     = 0x24;  // uplink: sí, o no y por qué
+
+// Para qué se pregunta (payload del PING).
+constexpr uint8_t kProbeConfigWrite  = 0x01;
+constexpr uint8_t kProbeConfigRead   = 0x02;
+constexpr uint8_t kProbeFirmware     = 0x03;
+
+// Veredicto del nodo (payload del PONG).
+constexpr uint8_t kProbeReady        = 0x00;
+constexpr uint8_t kProbeBusy         = 0x01;
+
+// Y por qué no puede, cuando no puede.
+constexpr uint8_t kBusyNone          = 0x00;
+constexpr uint8_t kBusyFirmware      = 0x01;  // bajando una imagen
+constexpr uint8_t kBusyConfigPending = 0x02;  // con un config a medias
+constexpr uint8_t kBusyNoClock       = 0x03;  // sin hora sincronizada
+constexpr uint8_t kBusyTrial         = 0x04;  // imagen o config a prueba
+
 constexpr uint8_t kFrameBeacon       = 0x10;
 constexpr uint8_t kFrameSnRequest    = 0x11;
 constexpr uint8_t kFrameSnOffer      = 0x12;

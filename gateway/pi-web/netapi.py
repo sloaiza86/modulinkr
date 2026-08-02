@@ -203,6 +203,56 @@ def _perfil_vigente() -> tuple[dict, str | None]:
         return {}, f"gateway.env incompleto o ilegible ({e})"
 
 
+# Lo que cuesta citar a UN nodo de clase C, en segundos: pedirle su
+# configuración y devolvérsela parcheada. Medido en banco el 2-ago-2026: la
+# escritura de 1506 B en ocho fragmentos con una ronda de reparación fueron
+# ocho segundos, y la lectura una petición y su subida.
+REPARTO_POR_NODO_S = 40
+REPARTO_MARGEN     = 2.0
+
+
+def _coste_reparto() -> int:
+    """Cuánto tarda en citarse a toda la red, en segundos.
+
+    Se calcula y no se supone. A un nodo de clase C se le habla cuando haga
+    falta, así que su cita cuesta lo que cueste leer y escribir. A uno de clase
+    A solo se le puede hablar en la ventana que abre cada trama suya, de modo
+    que cada paso puede costar un ciclo entero de muestreo: la misma operación
+    pasa de medio minuto a diez.
+
+    Nunca por debajo del mínimo de antelación, que además da margen a quien
+    acaba de pulsar para arrepentirse.
+    """
+    total = 0.0
+    try:
+        import netstatus
+        with _conn() as c:
+            ahora = time.time()
+            filas = c.execute(
+                """SELECT origin FROM node_status
+                    WHERE origin BETWEEN 1 AND 254 AND last_seen > ?""",
+                (ahora - 3600,)).fetchall()
+            for (origin,) in filas:
+                coste = REPARTO_POR_NODO_S
+                cat = c.execute(
+                    "SELECT catalog_json FROM node_catalog WHERE origin_id = ?",
+                    (origin,)).fetchone()
+                if cat and netstatus._clase_de(cat[0]) == "A":
+                    intervalo = netstatus._intervalo_de(c, origin, ahora) or 600
+                    coste += 2 * intervalo      # una lectura y una escritura
+                total += coste
+    except Exception:                           # noqa: BLE001
+        return MIG_MIN_ADELANTO_S
+    return max(MIG_MIN_ADELANTO_S, int(total * REPARTO_MARGEN))
+
+
+@router.get("/migracion/estimacion")
+def migracion_estimacion():
+    """Cuándo caería el salto si se programara ahora, para enseñarlo antes."""
+    coste = _coste_reparto()
+    return {"segundos": coste, "apply_at": int(time.time()) + coste}
+
+
 @router.post("/migracion")
 async def migracion_crear(request: Request):
     """Programa el cambio coordinado de parámetros de red.
@@ -225,17 +275,27 @@ async def migracion_crear(request: Request):
     if err:
         return _err(400, err)
 
-    try:
-        apply_at = int(body.get("apply_at"))
-    except (TypeError, ValueError):
-        return _err(400, "apply_at inválido")
+    # La hora del salto la calcula el sistema, no la teclea nadie.
+    #
+    # Que el operador eligiera un instante obligaba a que supiera cuánto tarda
+    # repartir la configuración a cada nodo, que depende de cuántos hay, de su
+    # clase y de su ritmo de muestreo. Eso no lo sabe, y no tiene por qué: lo
+    # sabe el gateway. Sigue admitiéndose un `apply_at` explícito por si algún
+    # día hace falta citar a una hora concreta.
     ahora = int(time.time())
-    if apply_at - ahora < MIG_MIN_ADELANTO_S:
-        return _err(400, f"el salto debe programarse con al menos "
-                         f"{MIG_MIN_ADELANTO_S // 60} minutos de antelación, "
-                         f"que es lo que tarda el reparto")
-    if apply_at - ahora > MIG_MAX_ADELANTO_S:
-        return _err(400, "el salto no puede programarse a más de una semana")
+    if body.get("apply_at"):
+        try:
+            apply_at = int(body["apply_at"])
+        except (TypeError, ValueError):
+            return _err(400, "apply_at inválido")
+        if apply_at - ahora < MIG_MIN_ADELANTO_S:
+            return _err(400, f"el salto debe programarse con al menos "
+                             f"{MIG_MIN_ADELANTO_S // 60} minutos de "
+                             f"antelación, que es lo que tarda el reparto")
+        if apply_at - ahora > MIG_MAX_ADELANTO_S:
+            return _err(400, "el salto no puede programarse a más de una semana")
+    else:
+        apply_at = ahora + _coste_reparto()
 
     viejo, err = _perfil_vigente()
     if err:
@@ -294,10 +354,31 @@ async def migracion_crear(request: Request):
     except sqlite3.Error as e:
         return _err(503, f"buffer no disponible: {e}")
 
-    LOG.info("migracion de red %d programada para epoch %d (%s)",
-             mig_id, apply_at, nuevo)
+    # A quién hay que citar. Se apunta aquí, al programar, para que el reparto
+    # sea del servicio y no del operador: el gateway sabe el perfil nuevo, sabe
+    # qué nodos hay y sabe la hora, así que pedirle a nadie que edite veinte
+    # JSON a mano era lo contrario de un cambio coordinado.
+    try:
+        with _conn() as c:
+            nodos = [int(r[0]) for r in c.execute(
+                """SELECT origin FROM node_status
+                    WHERE origin BETWEEN 1 AND 254 AND last_seen > ?
+                 ORDER BY origin""", (time.time() - 3600,)).fetchall()]
+            for o in nodos:
+                c.execute(
+                    """INSERT OR IGNORE INTO net_migration_reparto
+                           (migration_id, origin, state, updated_ts)
+                       VALUES (?, ?, 'pending', ?)""",
+                    (mig_id, o, time.time()))
+            c.commit()
+    except sqlite3.Error as e:
+        LOG.warning("migracion %d: no se pudo sembrar el reparto: %s", mig_id, e)
+        nodos = []
+
+    LOG.info("migracion de red %d programada para epoch %d (%s), reparto a %s",
+             mig_id, apply_at, nuevo, nodos or "nadie")
     return {"id": mig_id, "apply_at": apply_at, "recov_until": recov_until,
-            "old_profile": viejo, "new_profile": nuevo}
+            "old_profile": viejo, "new_profile": nuevo, "reparto": nodos}
 
 
 @router.get("/migracion")
@@ -313,7 +394,8 @@ def migracion_estado():
         with _conn() as c:
             fila = c.execute(
                 """SELECT id, apply_at, old_profile, new_profile, state,
-                          recov_win_s, recov_per_s, recov_until, detail
+                          recov_win_s, recov_per_s, recov_until, detail,
+                          rescate_hasta
                      FROM net_migration
                     WHERE state IN ('programada', 'saltada')
                  ORDER BY id DESC LIMIT 1""").fetchone()
@@ -324,6 +406,15 @@ def migracion_estado():
                 """SELECT node_id, profile, ts FROM net_migration_seen
                     WHERE migration_id = ? ORDER BY node_id""",
                 (mig_id,)).fetchall()
+            try:
+                reparto = [{"origin": r[0], "state": r[1], "detail": r[2]}
+                           for r in c.execute(
+                               """SELECT origin, state, detail
+                                    FROM net_migration_reparto
+                                   WHERE migration_id = ? ORDER BY origin""",
+                               (mig_id,)).fetchall()]
+            except sqlite3.OperationalError:
+                reparto = []      # buffer anterior a la tabla
     except sqlite3.Error as e:
         return _err(503, f"buffer no disponible: {e}")
 
@@ -355,13 +446,107 @@ def migracion_estado():
         "recov_win_s": win_s, "recov_per_s": per_s,
         "recov_until": recov_until, "detail": fila[8],
         "nodos": nodos,
+        # Cómo va el reparto de la cita, nodo a nodo. Es lo que hay que mirar
+        # ANTES del salto: el pase de lista de abajo no dice nada hasta que la
+        # hora llega, y para entonces ya no hay nada que corregir.
+        "reparto": reparto,
+        "citados": sum(1 for r in reparto if r["state"] == "done"),
+        "por_citar": sum(1 for r in reparto
+                         if r["state"] not in ("done", "failed")),
+        # Rezagados: los que se han oído en los parámetros viejos después del
+        # salto. El botón de rescate se activa solo si hay alguno, porque irse
+        # a buscar a nadie es dejar sorda a la red buena a cambio de nada.
+        "rezagados": [e["node_id"] for e in nodos if e["estado"] == "rezagado"],
+        "rescate_hasta": fila[9] or 0,
+        "rescate_s": max(0, int((fila[9] or 0) - ahora)),
     }
     if state == "saltada":
-        fase = (ahora - apply_at) % per_s
-        out["mundo"] = "viejo" if fase < win_s else "nuevo"
-        out["proximo_cambio_s"] = (win_s - fase) if fase < win_s else (per_s - fase)
+        # En qué parámetros está la radio AHORA. Ya no se deduce de una fase
+        # periódica, porque ya no hay alternancia automática: el gateway está
+        # en los nuevos salvo mientras dure un rescate pedido a mano.
+        out["mundo"] = "viejo" if out["rescate_s"] > 0 else "nuevo"
         out["recuperacion_restante_s"] = max(0, recov_until - ahora)
     return out
+
+
+# Cuánto se queda el gateway en los parámetros viejos al ir a por un rezagado.
+#
+# Tiene suelo y techo, y los dos están medidos. Por debajo no rescata: ver al
+# rezagado es un beacon y su registro, un segundo, pero volver a citarlo es
+# escribirle su configuración, que con ocho fragmentos y una ronda de
+# reparación fueron veinte segundos en banco. Por encima rompe a los que ya
+# estaban bien: a los noventa segundos sin beacon, un nodo migrado da al padre
+# por perdido y se pone a buscar supernodo.
+RESCATE_S     = 45
+RESCATE_MAX_S = 60
+
+
+@router.post("/migracion/saltar")
+def migracion_saltar(body: dict = Body(default={})):
+    """Salta sin esperar a los nodos que falten por confirmar.
+
+    El salto normal ocurre solo cuando todos han contestado "ok, salto". Si
+    alguno está desenchufado, esperar indefinidamente deja al resto en el
+    limbo, y seguir sin él es una decisión del operador y no del programa: el
+    que se queda atrás sigue midiendo con los parámetros viejos, y luego se le
+    recoge con el botón de buscar rezagados.
+    """
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                """SELECT id FROM net_migration
+                    WHERE state = 'programada' ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+            if fila is None:
+                return _err(409, "no hay ninguna operación esperando")
+            c.execute("UPDATE net_migration SET saltar_igual = 1, "
+                      "updated_ts = ? WHERE id = ?", (time.time(), fila[0]))
+            c.commit()
+    except sqlite3.Error as e:
+        return _err(503, f"buffer no disponible: {e}")
+    LOG.warning("migracion %d: el operador ordena saltar sin los que faltan",
+                fila[0])
+    return {"id": fila[0], "saltar_igual": True}
+
+
+@router.post("/migracion/rescatar")
+def migracion_rescatar(body: dict = Body(default={})):
+    """Va a buscar rezagados a los parámetros viejos, y vuelve.
+
+    Sustituye a la alternancia automática que había: ausentarse cada cinco
+    minutos por si acaso dejaba sorda a la red buena el 5 % del tiempo para
+    atender a nadie. Ahora se va solo cuando alguien lo pide, y se queda el
+    tiempo que el rescate necesita en vez de quince segundos.
+
+    Con `cortar` se vuelve al mundo nuevo en el acto.
+    """
+    try:
+        segundos = int(body.get("segundos") or RESCATE_S)
+    except (TypeError, ValueError):
+        return _err(400, "segundos inválido")
+    if not 10 <= segundos <= RESCATE_MAX_S:
+        return _err(400, f"segundos fuera de 10-{RESCATE_MAX_S}: por debajo no "
+                         f"da tiempo a citar al rezagado, y por encima los "
+                         f"nodos que ya migraron dan al gateway por perdido")
+    cortar = bool(body.get("cortar"))
+    try:
+        with _conn() as c:
+            fila = c.execute(
+                """SELECT id, state FROM net_migration
+                    WHERE state = 'saltada' ORDER BY id DESC LIMIT 1""").fetchone()
+            if fila is None:
+                return _err(409, "no hay ninguna operación ya saltada")
+            hasta = 0.0 if cortar else time.time() + segundos
+            c.execute("UPDATE net_migration SET rescate_hasta = ?, "
+                      "updated_ts = ? WHERE id = ?",
+                      (hasta, time.time(), fila[0]))
+            c.commit()
+    except sqlite3.Error as e:
+        return _err(503, f"buffer no disponible: {e}")
+    LOG.info("migracion %d: rescate %s", fila[0],
+             "cortado" if cortar else f"durante {segundos} s")
+    return {"id": fila[0], "rescate_hasta": hasta,
+            "segundos": 0 if cortar else segundos}
 
 
 @router.post("/migracion/cerrar")

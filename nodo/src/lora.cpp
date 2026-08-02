@@ -505,6 +505,23 @@ LoraP2P::Status LoraP2P::sendFwBcastMap(uint16_t seq, uint8_t hop_dst,
                         payload, 6 + len);
 }
 
+LoraP2P::Status LoraP2P::sendNodePong(uint16_t seq, uint8_t hop_dst,
+                                      uint16_t req_id, uint8_t veredicto,
+                                      uint8_t motivo) {
+    if (!initialized_) return Status::NOT_INITIALIZED;
+
+    // Payload v4.1 (spec §22.2): la petición que se contesta, el veredicto y,
+    // si es que no, por qué.
+    uint8_t payload[4];
+    std::memcpy(&payload[0], &req_id, sizeof(req_id));
+    payload[2] = veredicto;
+    payload[3] = motivo;
+
+    return buildAndSend(hop_dst, node_id_, protocol::kAddrGateway, seq,
+                        protocol::kFrameNodePong, ttl_,
+                        payload, sizeof(payload));
+}
+
 LoraP2P::Status LoraP2P::sendFwResult(uint16_t seq, uint8_t hop_dst,
                                       uint32_t xfer_id, uint8_t status,
                                       const char* detail) {

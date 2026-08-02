@@ -99,7 +99,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 namespace {
 
 constexpr const char* kFirmwareName    = "ModuLinkr/nodo";
-constexpr const char* kFirmwareVersion = "0.0.56-outbox-persistente";
+constexpr const char* kFirmwareVersion = "0.0.58-difusion-red";
 
 // Pines fijos del hardware (no son configuración del despliegue).
 constexpr int8_t kRs485RxPin = 33;   // Modbus (SoftwareSerial)
@@ -1618,6 +1618,60 @@ void handleFwData(const LoraP2P::RxFrame& f) {
     }
 }
 
+// NODE_PING: el gateway pregunta si el nodo puede con lo que le va a pedir,
+// antes de comprometer la operación.
+//
+// El que sabe si puede es el nodo, no el gateway. Antes esto se deducía de
+// cuándo se le había oído por última vez, que es adivinar con datos viejos:
+// falla en las dos direcciones, y sobre todo no distingue "vivo" de
+// "disponible". Un nodo puede estar perfectamente vivo y no ser buen momento,
+// porque está bajando una imagen o porque tiene un config a medias.
+//
+// Se contesta SIEMPRE, también con un "no puedo": un silencio no distingue
+// entre un nodo ocupado y uno que no está.
+void handleNodePing(const LoraP2P::RxFrame& f) {
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "node-ping"); return; }
+    if (f.payload_length < 3) {
+        Serial.println(F("[ping]   sondeo con payload corto, descartado"));
+        return;
+    }
+
+    uint16_t req_id;
+    std::memcpy(&req_id, &f.payload[0], sizeof(req_id));
+    const uint8_t para_que = f.payload[2];
+
+    uint8_t veredicto = protocol::kProbeReady;
+    uint8_t motivo    = protocol::kBusyNone;
+
+    // Lo que impide cualquier cosa: una imagen bajando ocupa la radio y la
+    // atención, y meterle encima una configuración es pedir que se pierdan
+    // fragmentos.
+    if (bajandoFirmware()) {
+        veredicto = protocol::kProbeBusy;
+        motivo    = protocol::kBusyFirmware;
+    } else if (g_trial_active || g_fw_trial_active) {
+        // Con algo a prueba, lo que toca es esperar el veredicto: aceptar un
+        // cambio ahora enturbiaría cuál de los dos se está juzgando.
+        veredicto = protocol::kProbeBusy;
+        motivo    = protocol::kBusyTrial;
+    } else if (para_que == protocol::kProbeConfigWrite && cfgota::active()) {
+        veredicto = protocol::kProbeBusy;
+        motivo    = protocol::kBusyConfigPending;
+    } else if (para_que == protocol::kProbeFirmware && !nodeclock::synced()) {
+        // Sin hora no se instala nada: la ventana de prueba de la imagen
+        // nueva se mide con el reloj.
+        veredicto = protocol::kProbeBusy;
+        motivo    = protocol::kBusyNoClock;
+    }
+
+    nextSeq();
+    lora.sendNodePong(g_lora_seq, mesh.parentId(), req_id, veredicto, motivo);
+    Serial.printf("[ping]   sondeo para=%u req=%u: %s (motivo %u)\n",
+                  para_que, req_id,
+                  veredicto == protocol::kProbeReady ? "puedo" : "ocupado",
+                  motivo);
+}
+
 // FW_INSTALL: orden de instalar. Separada del transporte a propósito, porque
 // subir es inocuo y se puede hacer de noche sin vigilancia, mientras que
 // instalar reinicia el nodo y se decide cuando alguien mira.
@@ -1771,12 +1825,16 @@ void processLoraRx() {
             case protocol::kFrameFwBcastPoll:
                 handleFwBcastPoll(f);
                 break;
+            case protocol::kFrameNodePing:
+                handleNodePing(f);
+                break;
             case protocol::kFrameConfigAck:
             case protocol::kFrameConfigResult:
             case protocol::kFrameConfigData:
             case protocol::kFrameFwStatus:
             case protocol::kFrameFwResult:
             case protocol::kFrameFwBcastMap:
+            case protocol::kFrameNodePong:
                 // Subida de otro nodo con este como salto: relay normal.
                 handleUplinkRelay(f);
                 break;
