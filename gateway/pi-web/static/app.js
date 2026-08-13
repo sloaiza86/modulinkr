@@ -115,23 +115,172 @@ function valorFallo(c) {
     (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
 }
 
-// fetch con sesión: un 401 significa sesión caducada, se vuelve al login.
+class ErrorInterfaz extends Error {}
+
+function mensajeApi(status, detalle = "") {
+  const d = String(detalle).toLowerCase();
+  if (status === 400) {
+    if (d.includes("puerto")) return "El puerto indicado no es válido. Revisa el valor e inténtalo de nuevo.";
+    if (d.includes("host")) return "Indica una dirección válida antes de continuar.";
+    if (d.includes("json") || d.includes("config")) return "La configuración no es válida. Revisa los datos e inténtalo de nuevo.";
+    if (d.includes("rango") || d.includes("fuera")) return "Hay un valor fuera del intervalo permitido. Revísalo e inténtalo de nuevo.";
+    return "Revisa los datos e inténtalo de nuevo.";
+  }
+  if (status === 404) return "No se ha encontrado la información solicitada. Actualiza la página e inténtalo de nuevo.";
+  if (status === 409) return "La acción no está disponible mientras haya otra operación en curso.";
+  if (status === 501 || status === 503) return "Esta función no está disponible en este momento.";
+  if (status >= 500) return "No se pudo completar la operación. Inténtalo de nuevo.";
+  return "No se pudo completar la operación. Revisa los datos e inténtalo de nuevo.";
+}
+
+function textoCliente(texto) {
+  const original = String(texto ?? "").trim();
+  if (!original) return "";
+  const t = original.toLowerCase();
+
+  if (/unexpected token|traceback|typeerror|syntaxerror|failed to fetch|networkerror|<!doctype|errno|sudoers|\.sh\b/.test(t)) {
+    return "No se pudo completar la operación. Inténtalo de nuevo.";
+  }
+  if (t.includes("no es json válido") || t.includes("json inválido")) {
+    return "La configuración no tiene un formato válido. Revisa el contenido e inténtalo de nuevo.";
+  }
+  if (t.includes("buscar primero el nodo") || t === "elegir nodo" || t.includes("elegir primero el nodo")) {
+    return "Busca y selecciona un nodo antes de continuar.";
+  }
+  if (t.includes("sin puertos candidatos") || t.includes("sin puertos usb")) {
+    return "No se ha encontrado ningún nodo conectado. Revisa la conexión e inténtalo de nuevo.";
+  }
+  if (t.includes("el editor está vacío") || t.includes("no hay config que")) {
+    return "Añade una configuración antes de continuar.";
+  }
+
+  const procesos = [
+    [/^abriendo el puerto.*$/i, "Buscando el nodo..."],
+    [/^buscando nodo.*$/i, "Buscando el nodo..."],
+    [/^leyendo config.*$/i, "Cargando la configuración..."],
+    [/^enviando y validando.*$/i, "Guardando la configuración..."],
+    [/^config aceptado;.*$/i, "Configuración guardada. Esperando a que el nodo vuelva a estar disponible..."],
+    [/^borrando (el )?config.*$/i, "Eliminando la configuración..."],
+    [/^flasheando.*$/i, "Instalando la actualización..."],
+    [/^encolando.*$/i, "Guardando los cambios..."],
+    [/^guardando y reiniciando.*$/i, "Guardando los cambios..."],
+    [/^aplicando el puerto y reiniciando.*$/i, "Aplicando el cambio..."],
+    [/^reiniciando.*$/i, "Aplicando los cambios..."],
+  ];
+  for (const [patron, reemplazo] of procesos) {
+    if (patron.test(original)) return reemplazo;
+  }
+
+  const limpio = original.replace(/^error:\s*/i, "")
+    .replace(/\bconfig\b/gi, "configuración")
+    .replace(/\bflasheo\b/gi, "actualización")
+    .replace(/\bflashear\b/gi, "actualizar");
+  return limpio.charAt(0).toUpperCase() + limpio.slice(1);
+}
+
+function textoError(error, alternativo = "No se pudo completar la operación. Inténtalo de nuevo.") {
+  if (error instanceof ErrorInterfaz) return error.message;
+  console.error("Error de interfaz", error);
+  const texto = textoCliente(error && error.message ? error.message : "");
+  return texto && !/^no se pudo completar/i.test(texto) ? texto : alternativo;
+}
+
+// Un error de transporte no se presenta como detalle interno del producto.
 async function fetchApi(url, opts) {
-  const r = await fetch(url, opts);
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (error) {
+    console.error("No se pudo acceder a la API", url, error);
+    throw new ErrorInterfaz("No se pudo conectar con el gateway. Comprueba la conexión e inténtalo de nuevo.");
+  }
   if (r.status === 401) {
     window.location.href = "/login";
-    throw new Error("sesión caducada");
+    throw new ErrorInterfaz("La sesión ha finalizado. Vuelve a iniciar sesión.");
   }
+  const jsonOriginal = r.json.bind(r);
+  r.json = async () => {
+    let data;
+    try {
+      data = await jsonOriginal();
+    } catch (error) {
+      console.error("Respuesta no válida", url, r.status, error);
+      throw new ErrorInterfaz("No se recibió una respuesta válida. Actualiza la página e inténtalo de nuevo.");
+    }
+    if (data && typeof data.error === "string") {
+      console.error("Operación rechazada", url, r.status);
+      data.error = mensajeApi(r.status, data.error);
+    }
+    if (data && typeof data.detail === "string" && !r.ok) {
+      console.error("Operación rechazada", url, r.status);
+      data.detail = mensajeApi(r.status, data.detail);
+    }
+    return data;
+  };
   return r;
 }
 
-function toast(msg) {
+function toast(msg, tipo = "exito") {
   const cont = document.getElementById("toasts");
   const el = document.createElement("div");
-  el.className = "toast";
-  el.textContent = msg;
+  el.className = "toast " + tipo;
+  el.textContent = textoCliente(msg);
   cont.appendChild(el);
   setTimeout(() => el.remove(), 4000);
+}
+
+function tipoMensaje(el, texto) {
+  const t = texto.toLowerCase();
+  if (el.classList.contains("mal") || /^(error|no se pudo|no se ha podido)|rechaz|interrump|inválid/.test(t)) return "error";
+  if (el.classList.contains("ambar") || /^(corrige|revisa|selecciona|elige|indica|completa)|advert|puede desconect/.test(t)) return "advertencia";
+  if (/\.\.\.$/.test(texto) || /^(cargando|buscando|comprobando|consultando|probando|preparando|instalando|aplicando|esperando|enviando|leyendo|conectando|programando|lanzando)/.test(t)) return "progreso";
+  if (/estado no disponible|sin respuesta|no está disponible/.test(t)) return "desconocido";
+  if (/guardad[oa]s?|conectad[oa]|completad[oa]|aplicad[oa]|aceptad[oa]|copiad[oa]|programad[oa]|cerrad[oa]|cancelad[oa]|instalad[oa]|actualizad[oa]|disponible|correcta/.test(t)) return "exito";
+  return "info";
+}
+
+function actualizarMensaje(el) {
+  const original = el.textContent.trim();
+  const clases = ["mensaje", "mensaje-info", "mensaje-progreso", "mensaje-exito",
+                   "mensaje-advertencia", "mensaje-error", "mensaje-desconocido"];
+  if (!original) {
+    if (el.dataset.mensajeTipo) el.classList.remove(...clases);
+    delete el.dataset.mensajeTipo;
+    el.removeAttribute("role");
+    return;
+  }
+  const visible = textoCliente(original);
+  if (visible !== original) el.textContent = visible;
+  const tipo = tipoMensaje(el, visible);
+  if (el.dataset.mensajeTipo !== tipo || !el.classList.contains("mensaje")) {
+    el.classList.remove(...clases);
+    el.classList.add("mensaje", "mensaje-" + tipo);
+    el.dataset.mensajeTipo = tipo;
+  }
+  el.setAttribute("role", tipo === "error" ? "alert" : "status");
+}
+
+function iniciarMensajes() {
+  const preparar = (el) => {
+    if (el.dataset.mensajePreparado) return;
+    el.dataset.mensajePreparado = "true";
+    el.classList.add("mensaje-slot");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
+    actualizarMensaje(el);
+    new MutationObserver(() => actualizarMensaje(el)).observe(el, {
+      attributes: true, attributeFilter: ["class"], childList: true,
+      characterData: true, subtree: true,
+    });
+  };
+  document.querySelectorAll(".aviso").forEach(preparar);
+  new MutationObserver((cambios) => {
+    cambios.forEach((cambio) => cambio.addedNodes.forEach((nodo) => {
+      if (!(nodo instanceof Element)) return;
+      if (nodo.matches(".aviso")) preparar(nodo);
+      nodo.querySelectorAll(".aviso").forEach(preparar);
+    }));
+  }).observe(document.body, { childList: true, subtree: true });
 }
 
 // Chip de duty cycle: verde lejos del límite del 10 % del g3, ámbar
@@ -213,8 +362,8 @@ function estadoGateway(data) {
     const caido = data.gateway_online === false;
     return {
       caido,
-      sub: caido ? `radio sin reportar hace ${fmtAgo(data.gateway_ago_s)}`
-                 : "coordinador de la red",
+      sub: caido ? `Sin actividad desde hace ${fmtAgo(data.gateway_ago_s)}`
+                 : "Coordinador de la red",
       chips: [caido ? { cls: "off", txt: "sin señal" }
                     : { cls: "on", txt: "en línea" }],
     };
@@ -227,11 +376,11 @@ function estadoGateway(data) {
     chips.push(data.mqtt_connected ? { cls: "on", txt: "MQTT" }
                                    : { cls: "off", txt: "MQTT sin conexión" });
   } else if (data.mqtt_enabled === false) {
-    chips.push({ cls: "neutro", txt: "MQTT off" });
+    chips.push({ cls: "neutro", txt: "MQTT desactivado" });
   }
   const sub = servDown
-    ? `servicio sin responder hace ${fmtAgo(data.status_ago_s)}`
-    : (loraUp ? "coordinador de la red" : "radio del gateway desconectada");
+    ? `Sin actividad desde hace ${fmtAgo(data.status_ago_s)}`
+    : (loraUp ? "Coordinador de la red" : "Radio LoRa sin conexión");
   return { caido: !loraUp, sub, chips };
 }
 
@@ -254,12 +403,12 @@ function tarjetaGateway(data) {
     <div class="tn-sensores">
       <div class="sensor fila-info">
         ${svg(ICONO.nodos)}
-        <span class="s-nombre">nodos en línea</span>
+        <span class="s-nombre">Nodos disponibles</span>
         <span class="s-valor">${online}/${total}</span>
       </div>
       <div class="sensor fila-info">
         ${svg(ICONO.actividad)}
-        <span class="s-nombre">duty cycle 1h</span>
+        <span class="s-nombre">Uso de radio, última hora</span>
         <span class="s-valor">${chipDuty(data.gateway_duty_1h)}</span>
       </div>
     </div>
@@ -280,20 +429,20 @@ function tarjetaGateway(data) {
 // propia voz. Se sigue midiendo y guardando todo igual, lo que se suspende es
 // la alarma, que es la regla de las ventanas de mantenimiento en supervisión.
 const FW_FASE_TXT = {
-  offering:    "anunciando",
-  pending:     "en cola",
-  sending:     "recibiendo imagen",
-  polling:     "comprobando",
-  repairing:   "reparando huecos",
-  committing:  "comprobando",
-  install_req: "instalando",
-  installing:  "instalando",
+  offering:    "Preparando",
+  pending:     "En espera",
+  sending:     "Actualizando",
+  polling:     "Comprobando",
+  repairing:   "Completando",
+  committing:  "Comprobando",
+  install_req: "Instalando",
+  installing:  "Instalando",
 };
 
 function chipMantenimiento(n) {
   if (!n.fw_session) return null;
   const fase = FW_FASE_TXT[n.fw_session] || n.fw_session;
-  return { cls: "ambar", txt: "Actualizando firmware · " + fase };
+  return { cls: "ambar", txt: "Actualización · " + fase };
 }
 
 function chipEstado(n, ult, onlineS) {
@@ -406,9 +555,9 @@ function tarjetaNodo(n, ult, onlineS) {
     </div>`).join("");
   // Dos tiempos distintos: la última trama oída por LoRa (de
   // node_status, incluye beacons) y la última telemetría con valores.
-  const visto = `última vez visto hace ${fmtAgo(n.ago_s)}`;
+  const visto = `Última actividad hace ${fmtAgo(n.ago_s)}`;
   const medida = ult
-    ? `última medida recibida hace ${fmtAgo(ult.ago_s)}` : "sin telemetría";
+    ? `Última medida hace ${fmtAgo(ult.ago_s)}` : "Sin medidas recibidas";
   return `
   <div class="card tarjeta-nodo" data-origin="${n.origin}">
     <div class="tn-cabecera">
@@ -422,7 +571,7 @@ function tarjetaNodo(n, ult, onlineS) {
         .map((c) => `<span class="chip ${c.cls}">${c.txt}</span>`).join("")}</div>
     </div>
     <div class="tn-sensores">
-      ${filas || '<div class="tn-vacio">Sin telemetría todavía.</div>'}
+      ${filas || '<div class="tn-vacio">Aún no hay medidas.</div>'}
     </div>
   </div>`;
 }
@@ -447,14 +596,13 @@ async function refrescarRed() {
       fetchApi("/api/red/estado"), fetchApi("/api/red/ultimos"),
     ]);
     if (!r1.ok) {
-      aviso.textContent = "Estado no disponible (" + r1.status +
-        "): ¿servicio del gateway arrancado?";
+      aviso.textContent = "No se pudo cargar el estado de la red. Actualiza la página.";
       return;
     }
     estado = await r1.json();
     ultimos = r2.ok ? await r2.json() : { nodes: [] };
   } catch (e) {
-    aviso.textContent = "Sin conexión con el visor.";
+    aviso.textContent = "No se pudo conectar con el gateway.";
     return;
   }
 
@@ -464,7 +612,7 @@ async function refrescarRed() {
   pintarBadge(estado);
 
   aviso.textContent = estado.nodes.length
-    ? "" : "Sin nodos vistos todavía. Las tarjetas aparecen con la primera trama oída.";
+    ? "" : "Aún no hay nodos registrados.";
 
   const porOrigen = new Map(ultimos.nodes.map((u) => [u.origin, u]));
   cont.innerHTML = tarjetaGateway(estado) +
@@ -589,7 +737,7 @@ async function cargarModalGrafica() {
   const cont = document.getElementById("modal-grafico");
   if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
   if (typeof echarts === "undefined") {
-    cont.innerHTML = '<p class="modal-vacio">Gráficos no disponibles (assets vendor sin descargar).</p>';
+    cont.innerHTML = '<p class="modal-vacio">Los gráficos no están disponibles.</p>';
     return;
   }
   cont.innerHTML = '<p class="modal-vacio">Cargando histórico...</p>';
@@ -622,12 +770,12 @@ async function cargarModalGrafica() {
                 ((await r.json()).detail ?? r.status);
       }
     } else if (catalogo !== null) {
-      error = "Esta medida aún no está en el catálogo cloud.";
+      error = "Esta medida aún no está disponible en el histórico.";
     } else {
-      error = "Histórico no disponible (¿sin Internet?).";
+      error = "No se pudo cargar el histórico.";
     }
   } catch (e) {
-    error = "Histórico no disponible (¿sin Internet?).";
+    error = "No se pudo cargar el histórico.";
   }
 
   // El modal pudo cerrarse o cambiar de medida mientras se consultaba.
@@ -672,11 +820,10 @@ function pintarDetalle(origin) {
   if (origin === 255) {
     titulo.textContent = "Gateway";
     cuerpo.innerHTML = `<div class="det-grupo"><h3>Radio</h3>
-      ${filaDet("Duty cycle 1h", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
-      ${filaDet("Límite normativo", "10 % (EN 300 220-1, banda g3)")}
+      ${filaDet("Uso de radio, última hora", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
+      ${filaDet("Límite permitido", "10 %")}
     </div>
-    <p class="leyenda">El duty se mide en cada transmisor con el contador
-    de aire acumulado de los heartbeats.</p>`;
+    <p class="leyenda">Límite aplicable a la banda de radio configurada.</p>`;
     return;
   }
 
@@ -692,25 +839,25 @@ function pintarDetalle(origin) {
 
   cuerpo.innerHTML = `
     <div class="det-grupo"><h3>Estado</h3>
-      ${filaDet("Dirección", n.origin)}
+      ${filaDet("Identificador", n.origin)}
       ${filaDet("Estado", (() => {
         const e = chipEstado(n, u, cacheEstado?.online_s ?? 60);
         return `<span class="chip ${e.cls}">${e.txt}</span>`;
       })())}
-      ${filaDet("Última trama", (n.last_frame ?? "") + " · hace " + fmtAgo(n.ago_s))}
-      ${filaDet("Firmware", n.fw_version ?? "")}
+      ${filaDet("Última actividad", "Hace " + fmtAgo(n.ago_s))}
+      ${filaDet("Versión", n.fw_version ?? "")}
     </div>
     <div class="det-grupo"><h3>Radio</h3>
       ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
       ${filaDet("SNR", fmtNum(n.snr) + " dB")}
       ${filaDet("Padre", nombrePadre(n.parent_id))}
       ${filaDet("Saltos", n.hop_count ?? "")}
-      ${filaDet("Duty cycle 1h", chipDuty(n.duty_1h))}
+      ${filaDet("Uso de radio, última hora", chipDuty(n.duty_1h))}
     </div>
     ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>${sensores}</div>` : ""}
     ${bloqueSalud(n.health)}
     <div class="det-grupo">
-      <a href="#/datos" onclick="document.getElementById('detalle-cerrar').click()">Ver histórico en Datos</a>
+      <a href="#/datos" onclick="document.getElementById('detalle-cerrar').click()">Ver histórico</a>
     </div>`;
 }
 
@@ -725,12 +872,12 @@ function pintarDetalle(origin) {
 // ATZ ya es serio, y un reinicio del nodo es el último recurso.
 function bloqueSalud(h) {
   if (!h) {
-    return `<div class="det-grupo"><h3>Salud</h3>
-      ${filaDet("Sin datos", "el nodo aún no ha reportado su salud")}</div>`;
+    return `<div class="det-grupo"><h3>Diagnóstico</h3>
+      ${filaDet("Estado", "Sin información disponible")}</div>`;
   }
-  const escalera = `${h.probes} sondeo(s) · ${h.reinits} reinicializacion(es) `
-                 + `· ${h.resets} ATZ · ${h.reboots} reinicio(s)`;
-  return `<div class="det-grupo"><h3>Salud</h3>
+  const escalera = `${h.probes} comprobaciones · ${h.reinits} recuperaciones `
+                 + `· ${h.resets} restablecimientos · ${h.reboots} reinicios`;
+  return `<div class="det-grupo"><h3>Diagnóstico</h3>
     ${filaDet("Último fallo", h.fault
         ? `<span class="chip ambar">${h.fault_name}</span>`
         : `<span class="chip on">${h.fault_name}</span>`)}
@@ -834,7 +981,7 @@ async function cargarCatalogo() {
   try {
     r = await fetchApi("/api/datos/nodos");
   } catch (e) {
-    cont.innerHTML = '<p class="aviso">Sin conexión con el visor.</p>';
+    cont.innerHTML = '<p class="aviso">No se pudo conectar con el gateway.</p>';
     return;
   }
   if (!r.ok) {
@@ -921,7 +1068,7 @@ function renderSelector() {
       renderSelector();
     });
     todos.appendChild(cbTodos);
-    todos.appendChild(document.createTextNode(" todos"));
+    todos.appendChild(document.createTextNode(" Seleccionar todos"));
     det.appendChild(todos);
 
     for (const c of canales) {
@@ -940,7 +1087,7 @@ function renderSelector() {
     cont.appendChild(det);
   }
   if (!cont.children.length) {
-    cont.innerHTML = '<p class="aviso">Nada coincide con el filtro.</p>';
+    cont.innerHTML = '<p class="aviso">No hay resultados.</p>';
   }
 }
 
@@ -962,7 +1109,7 @@ function renderVistas() {
   }
 }
 function vistaGuardar() {
-  const nombre = prompt("Nombre de la vista:");
+  const nombre = prompt("Nombre de la vista");
   if (!nombre) return;
   const vistas = vistasLeer();
   vistas[nombre] = {
@@ -1065,15 +1212,16 @@ async function graficar() {
   const rg = rango();
   if (!seleccion.size) { aviso.textContent = "Selecciona al menos una medida."; return; }
   if (!rg) { aviso.textContent = "Completa el rango de fechas."; return; }
-  aviso.textContent = "Consultando...";
+  aviso.textContent = "Cargando datos...";
 
   const q = new URLSearchParams({ channels: [...seleccion].join(","), ...rg });
   let r;
   try {
     r = await fetchApi("/api/datos/series?" + q);
-  } catch (e) { aviso.textContent = "Sin conexión con el visor."; return; }
+  } catch (e) { aviso.textContent = "No se pudo conectar con el gateway."; return; }
   if (!r.ok) {
-    aviso.textContent = "Error: " + ((await r.json()).detail ?? r.status);
+    const d = await r.json();
+    aviso.textContent = d.detail ?? "No se pudieron cargar los datos seleccionados.";
     return;
   }
   const data = await r.json();
@@ -1171,10 +1319,23 @@ const SPIN = '<span class="spin"></span> ';
 let cfgConfirmarCb = null;   // acción del botón de confirmar del diálogo
 let cfgOtroCb = null;        // acción del tercer botón, cuando lo hay
 let cfgCancelarCb = null;    // acción del botón de cancelar (opcional)
+let cfgDialogoFoco = null;
+
+function normalizarTextoDialogo(contenedor) {
+  contenedor.querySelectorAll("pre").forEach((pre) => pre.remove());
+  const walker = document.createTreeWalker(contenedor, NodeFilter.SHOW_TEXT);
+  let nodo;
+  while ((nodo = walker.nextNode())) {
+    const texto = nodo.nodeValue.trim();
+    if (texto) nodo.nodeValue = nodo.nodeValue.replace(texto, textoCliente(texto));
+  }
+}
 
 function cfgDialogo(titulo, texto, botones = {}) {
   document.getElementById("cfg-dialogo-titulo").textContent = titulo;
-  document.getElementById("cfg-dialogo-texto").innerHTML = texto;
+  const cuerpo = document.getElementById("cfg-dialogo-texto");
+  cuerpo.innerHTML = texto;
+  normalizarTextoDialogo(cuerpo);
   const bc = document.getElementById("cfg-dialogo-cancelar");
   const bf = document.getElementById("cfg-dialogo-confirmar");
   const bx = document.getElementById("cfg-dialogo-cerrar");
@@ -1187,12 +1348,24 @@ function cfgDialogo(titulo, texto, botones = {}) {
   bo.hidden = !botones.otroText;
   if (botones.otroText) bo.textContent = botones.otroText;
   bc.textContent = botones.cancelarText || "Cancelar";
-  bf.textContent = botones.confirmarText || "Borrar";
+  bf.textContent = botones.confirmarText || "Confirmar";
   bx.textContent = botones.cerrarText || "Cerrar";
   bf.className = botones.confirmarPeligro === false ? "btn-primario" : "peligro";
   cfgCancelarCb = botones.onCancelar || null;
+  const dialogo = document.getElementById("cfg-dialogo");
+  const peligro = botones.confirmar && botones.confirmarPeligro !== false;
+  dialogo.classList.toggle("dialogo-peligro", peligro);
+  document.getElementById("cfg-dialogo-icono").textContent = peligro ? "!" : "i";
+  dialogo.setAttribute("aria-busy", botones.cancelar || botones.confirmar ||
+    botones.cerrar || botones.otroText ? "false" : "true");
+  if (dialogo.hidden) cfgDialogoFoco = document.activeElement;
+  ["sidebar", "contenido", "detalle"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.setAttribute("inert", "");
+  });
   document.getElementById("cfg-dialogo-fondo").hidden = false;
-  document.getElementById("cfg-dialogo").hidden = false;
+  dialogo.hidden = false;
+  requestAnimationFrame(() => dialogo.focus());
 }
 
 function cfgDialogoCerrar() {
@@ -1201,6 +1374,12 @@ function cfgDialogoCerrar() {
   cfgConfirmarCb = null;
   cfgCancelarCb = null;
   cfgOtroCb = null;
+  ["sidebar", "contenido", "detalle"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.removeAttribute("inert");
+  });
+  if (cfgDialogoFoco && document.contains(cfgDialogoFoco)) cfgDialogoFoco.focus();
+  cfgDialogoFoco = null;
 }
 
 // Tras un CFG.PUT o CFG.DEL el nodo se reinicia (~2 s). Se re-detecta
@@ -1230,12 +1409,12 @@ function cfgPintarNodo(port, n) {
     ? (n.name || "nodo " + n.node_id) : "nodo sin configurar";
   const filas = [];
   if (n.configured) {
-    filas.push(["nodo", `${n.node_id} · ${n.type === "super_node" ? "supernodo" : "nodo"}`]);
+    filas.push(["Nodo", `${n.node_id} · ${n.type === "super_node" ? "Supernodo" : "Nodo"}`]);
   } else {
-    filas.push(["motivo", n.error ?? "sin config"]);
+    filas.push(["Estado", n.error ?? "Sin configurar"]);
   }
-  filas.push(["firmware", `${n.fw} v${n.version}`]);
-  filas.push(["puerto", port.split("/").pop()]);
+  filas.push(["Versión", `${n.fw} v${n.version}`]);
+  filas.push(["Conexión", port.split("/").pop()]);
   const el = document.getElementById("cfg-nodo");
   el.innerHTML = `
     <div class="sensor fila-info">
@@ -1373,7 +1552,7 @@ async function cfgLocalCerrar() {
 async function cfgLocalBuscar() {
   const aviso = document.getElementById("cfg-busqueda-aviso");
   cfgBotones(true);
-  aviso.textContent = "abriendo el puerto y detectando el nodo...";
+  aviso.textContent = "Buscando el nodo...";
   try {
     // Cada búsqueda parte de cero: cierra la sesión anterior y vuelve a pedir
     // el puerto. Evita el reúso de un puerto que quedó en mal estado (el
@@ -1384,7 +1563,7 @@ async function cfgLocalBuscar() {
     aviso.textContent = "";
     cfgPintarNodo("este equipo", ident);
   } catch (e) {
-    aviso.textContent = "error: " + (e.message || e);
+    aviso.textContent = textoError(e, "No se pudo acceder al nodo. Revisa la conexión e inténtalo de nuevo.");
     await cfgLocalCerrar();
   } finally {
     cfgBotones(false);
@@ -1393,15 +1572,15 @@ async function cfgLocalBuscar() {
 
 async function cfgLocalLeer() {
   const res = document.getElementById("cfg-resultado");
-  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
+  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo."; return; }
   cfgBotones(true);
-  res.className = "aviso"; res.textContent = "leyendo config del nodo...";
+  res.className = "aviso"; res.textContent = "Cargando la configuración...";
   try {
     await cfgLocalSes.hello();
     document.getElementById("cfg-texto").value = await cfgLocalSes.get();
     res.textContent = "";
   } catch (e) {
-    res.className = "aviso mal"; res.textContent = "error: " + (e.message || e);
+    res.className = "aviso mal"; res.textContent = textoError(e, "No se pudo cargar la configuración. Inténtalo de nuevo.");
   } finally {
     cfgBotones(false);
   }
@@ -1410,57 +1589,58 @@ async function cfgLocalLeer() {
 async function cfgLocalEnviar() {
   const res = document.getElementById("cfg-resultado");
   const texto = document.getElementById("cfg-texto").value.trim();
-  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return; }
-  if (!texto) { res.className = "aviso mal"; res.textContent = "el editor está vacío"; return; }
+  if (!cfgLocalSes) { res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo."; return; }
+  if (!texto) { res.className = "aviso mal"; res.textContent = "Importa o pega una configuración."; return; }
   try { JSON.parse(texto); } catch (e) {
-    res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
+    res.className = "aviso mal"; res.textContent = "La configuración no tiene un formato válido. Revisa el contenido e inténtalo de nuevo."; return;
   }
   if (!await schemaPuerta(cfgSchemaVersion(texto), cfgSchemas)) return;
   res.className = "aviso"; res.textContent = "";
   cfgBotones(true);
-  const T = "Enviar config al nodo";
-  cfgDialogo(T, SPIN + "enviando y validando en el nodo...");
+  const T = "Guardar configuración";
+  cfgDialogo(T, SPIN + "Guardando la configuración...");
   try {
     await cfgLocalSes.hello();
     const detail = await cfgLocalSes.put(texto);
-    cfgDialogo(T, SPIN + "config aceptado; el nodo se está reiniciando...");
+    cfgDialogo(T, SPIN + "Comprobando el nodo...");
     let ident = null;
     try { ident = await cfgLocalSes.hello(); } catch (e) { /* */ }
     if (ident) {
       cfgPintarNodo("este equipo", ident);
-      cfgDialogo(T, "Reinicio completo, config aplicado.<pre>" + (detail || "") + "</pre>", { cerrar: true });
+      cfgDialogo(T, "Configuración aplicada. El nodo está disponible.", { cerrar: true });
     } else {
-      cfgDialogo(T, "Config aceptado, pero el nodo no respondió tras el reinicio.", { cerrar: true });
+      cfgDialogo(T, "Configuración guardada. El nodo aún no está disponible.", { cerrar: true });
     }
   } catch (e) {
-    cfgDialogo(T, "El nodo rechazó el config: <b>" + (e.message || e) + "</b>", { cerrar: true });
+    cfgDialogo(T, textoError(e, "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo."), { cerrar: true });
   } finally {
     cfgBotones(false);
   }
 }
 
 function cfgLocalBorrar() {
-  const T = "Borrar config del nodo";
+  const T = "Eliminar configuración";
   cfgConfirmarCb = async () => {
-    if (!cfgLocalSes) { cfgDialogo(T, "buscar primero el nodo", { cerrar: true }); return; }
+    if (!cfgLocalSes) { cfgDialogo(T, "Busca y selecciona un nodo.", { cerrar: true }); return; }
     cfgBotones(true);
-    cfgDialogo(T, SPIN + "borrando el config...");
+    cfgDialogo(T, SPIN + "Eliminando la configuración...");
     try {
       await cfgLocalSes.hello();
       await cfgLocalSes.del();
-      cfgDialogo(T, SPIN + "config borrado; el nodo se está reiniciando...");
+      cfgDialogo(T, SPIN + "Comprobando el nodo...");
       let ident = null;
       try { ident = await cfgLocalSes.hello(); } catch (e) { /* */ }
       if (ident) cfgPintarNodo("este equipo", ident);
-      cfgDialogo(T, "El nodo quedó <b>sin configurar</b>.", { cerrar: true });
+      cfgDialogo(T, "Configuración eliminada. El nodo está sin configurar.", { cerrar: true });
     } catch (e) {
-      cfgDialogo(T, "Error: <b>" + (e.message || e) + "</b>", { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo eliminar la configuración. Inténtalo de nuevo."), { cerrar: true });
     } finally {
       cfgBotones(false);
     }
   };
-  cfgDialogo(T, "¿Borrar el config.json del nodo? Quedará sin configurar hasta "
-    + "cargar uno nuevo.", { confirmar: true, cancelar: true });
+  cfgDialogo(T, "El nodo dejará de estar disponible hasta que reciba una nueva configuración.",
+    { confirmar: true, confirmarText: "Eliminar configuración", cancelar: true,
+      cancelarText: "Conservar configuración" });
 }
 
 async function cfgDetectar() {
@@ -1470,7 +1650,7 @@ async function cfgDetectar() {
   const body = {};
   if (!sel.hidden && sel.value) body.port = sel.value;
   cfgBotones(true);
-  aviso.textContent = "buscando nodo (se reinicia al abrir el puerto)...";
+  aviso.textContent = "Buscando el nodo...";
   try {
     const r = await fetchApi("/api/config/detectar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1480,14 +1660,14 @@ async function cfgDetectar() {
       sel.innerHTML = data.ports.map((p) =>
         `<option value="${p}">${p.split("/").pop()}</option>`).join("");
       sel.hidden = false;
-      aviso.textContent = "varios puertos candidatos: elegir y volver a buscar";
+      aviso.textContent = "Selecciona uno de los nodos encontrados.";
       return;
     }
-    if (!r.ok) { aviso.textContent = data.error ?? "error"; return; }
+    if (!r.ok) { aviso.textContent = data.error ?? "No se pudo buscar el nodo."; return; }
     aviso.textContent = "";
     cfgPintarNodo(data.port, data.node);
   } catch (e) {
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo buscar el nodo. Revisa la conexión e inténtalo de nuevo.");
   } finally {
     cfgBotones(false);
   }
@@ -1497,23 +1677,23 @@ async function cfgLeer() {
   if (cfgFuenteLocal()) { cfgLocalLeer(); return; }
   const res = document.getElementById("cfg-resultado");
   if (!cfgPuerto) {
-    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo.";
     return;
   }
   cfgBotones(true);
-  res.className = "aviso"; res.textContent = "leyendo config del nodo...";
+  res.className = "aviso"; res.textContent = "Cargando la configuración...";
   try {
     const r = await fetchApi("/api/config/nodo?port=" +
                              encodeURIComponent(cfgPuerto));
     const data = await r.json();
     if (!r.ok) {
-      res.className = "aviso mal"; res.textContent = data.error ?? "error";
+      res.className = "aviso mal"; res.textContent = data.error ?? "No se pudo cargar la configuración.";
       return;
     }
     document.getElementById("cfg-texto").value = data.config;
     res.textContent = "";
   } catch (e) {
-    res.className = "aviso mal"; res.textContent = "error: " + e.message;
+    res.className = "aviso mal"; res.textContent = textoError(e, "No se pudo cargar la configuración. Inténtalo de nuevo.");
   } finally {
     cfgBotones(false);
   }
@@ -1537,7 +1717,7 @@ async function cfgLeer() {
 //
 // Devuelve una promesa: true si se puede seguir.
 function schemaPuerta(versionTexto, declarados) {
-  const T = "Compatibilidad del config";
+  const T = "Compatibilidad de la configuración";
   const lista = (declarados || "").split(",").map((x) => x.trim()).filter(Boolean);
 
   if (!versionTexto) return Promise.resolve(true);
@@ -1546,12 +1726,8 @@ function schemaPuerta(versionTexto, declarados) {
     return new Promise((resolve) => {
       cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
       cfgDialogo(T,
-        "<p>Este nodo <b>no declara</b> qué versiones del config entiende, "
-        + "porque lleva un firmware anterior.</p>"
-        + `<p>El config que se va a enviar es de la versión <b>${versionTexto}</b>. `
-        + "Si el nodo no la soporta, la rechazará al aplicarla y volverá sola "
-        + "a la anterior en unos minutos.</p>",
-        { cancelar: true, confirmar: true, confirmarText: "Enviar igualmente",
+        "<p>No se puede confirmar si esta configuración es compatible con el nodo. Si continúas, el nodo podría rechazarla.</p>",
+        { cancelar: true, confirmar: true, confirmarText: "Continuar",
           confirmarPeligro: false,
           onCancelar: () => { cfgDialogoCerrar(); resolve(false); } });
     });
@@ -1561,10 +1737,7 @@ function schemaPuerta(versionTexto, declarados) {
 
   return new Promise((resolve) => {
     cfgDialogo(T,
-      `<p>Este config declara la versión <b>${versionTexto}</b> y el nodo solo `
-      + `entiende <b>${lista.join(", ")}</b>.</p>`
-      + "<p>El nodo lo rechazaría al aplicarlo, así que no se envía. Corrige la "
-      + "versión del archivo, o actualiza antes el firmware del nodo.</p>",
+      "<p>Esta configuración no es compatible con el nodo. Actualiza el nodo o selecciona otro archivo.</p>",
       { cerrar: true });
     // Sin botón de seguir: el único camino es cerrar y arreglarlo. El cierre
     // del diálogo ya lo hace su listener permanente; aquí solo hace falta
@@ -1599,48 +1772,46 @@ async function cfgEnviar() {
   const res = document.getElementById("cfg-resultado");
   const texto = document.getElementById("cfg-texto").value.trim();
   if (!cfgPuerto) {
-    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo.";
     return;
   }
   if (!texto) {
-    res.className = "aviso mal"; res.textContent = "el editor está vacío";
+    res.className = "aviso mal"; res.textContent = "Importa o pega una configuración.";
     return;
   }
   // Criba local: JSON parseable antes de molestar al Pi y al nodo. La
   // validación de reglas la hace el firmware (única fuente de verdad).
   try { JSON.parse(texto); } catch (e) {
     res.className = "aviso mal";
-    res.textContent = "no es JSON válido: " + e.message;
+    res.textContent = "La configuración no tiene un formato válido. Revisa el contenido e inténtalo de nuevo.";
     return;
   }
   if (!await schemaPuerta(cfgSchemaVersion(texto), cfgSchemas)) return;
   res.className = "aviso"; res.textContent = "";
   cfgBotones(true);
-  const T = "Enviar config al nodo";
-  cfgDialogo(T, SPIN + "enviando y validando en el nodo...");
+  const T = "Guardar configuración";
+  cfgDialogo(T, SPIN + "Guardando la configuración...");
   try {
     const r = await fetchApi("/api/config/subir", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ port: cfgPuerto, config: texto }) });
     const data = await r.json();
     if (!r.ok) {
-      cfgDialogo(T, "El nodo rechazó el config: <b>" +
-                    (data.error ?? "error") + "</b>", { cerrar: true });
+      cfgDialogo(T, data.error ?? "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo.", { cerrar: true });
       return;
     }
-    cfgDialogo(T, SPIN + "config aceptado; el nodo se está reiniciando...");
+    cfgDialogo(T, SPIN + "Comprobando el nodo...");
     const nodo = await cfgEsperarReinicio();
     if (nodo) {
       cfgPintarNodo(cfgPuerto, nodo);
-      cfgDialogo(T, "Reinicio completo: <b>" +
+      cfgDialogo(T, "Configuración aplicada. <b>" +
                     (nodo.name ?? "nodo " + nodo.node_id) +
-                    "</b> operando con el config nuevo.", { cerrar: true });
+                    "</b> está disponible.", { cerrar: true });
     } else {
-      cfgDialogo(T, "Config guardado, pero el nodo no respondió tras el " +
-                    "reinicio. Probar con Buscar nodo.", { cerrar: true });
+      cfgDialogo(T, "Configuración guardada. El nodo aún no está disponible.", { cerrar: true });
     }
   } catch (e) {
-    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true });
   } finally {
     cfgBotones(false);
   }
@@ -1650,44 +1821,41 @@ async function cfgBorrar() {
   if (cfgFuenteLocal()) { cfgLocalBorrar(); return; }
   const res = document.getElementById("cfg-resultado");
   if (!cfgPuerto) {
-    res.className = "aviso mal"; res.textContent = "buscar primero el nodo";
+    res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo.";
     return;
   }
   res.className = "aviso"; res.textContent = "";
-  const T = "Borrar config del nodo";
+  const T = "Eliminar configuración";
   cfgConfirmarCb = async () => {
     cfgBotones(true);
-    cfgDialogo(T, SPIN + "borrando el config...");
+    cfgDialogo(T, SPIN + "Eliminando la configuración...");
     try {
       const r = await fetchApi("/api/config/borrar", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port: cfgPuerto }) });
       const data = await r.json();
       if (!r.ok) {
-        cfgDialogo(T, "Error: <b>" + (data.error ?? "error") + "</b>",
+        cfgDialogo(T, data.error ?? "No se pudo eliminar la configuración. Inténtalo de nuevo.",
                    { cerrar: true });
         return;
       }
-      cfgDialogo(T, SPIN + "config borrado; el nodo se está reiniciando...");
+      cfgDialogo(T, SPIN + "Comprobando el nodo...");
       const nodo = await cfgEsperarReinicio();
       if (nodo) {
         cfgPintarNodo(cfgPuerto, nodo);
-        cfgDialogo(T, "Reinicio completo: el nodo quedó <b>sin " +
-                      "configurar</b> (LED rojo), a la espera de un " +
-                      "config nuevo.", { cerrar: true });
+        cfgDialogo(T, "Configuración eliminada. El nodo espera una nueva configuración.", { cerrar: true });
       } else {
-        cfgDialogo(T, "Config borrado, pero el nodo no respondió tras el " +
-                      "reinicio. Probar con Buscar nodo.", { cerrar: true });
+        cfgDialogo(T, "Configuración eliminada. El nodo aún no está disponible.", { cerrar: true });
       }
     } catch (e) {
-      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo eliminar la configuración. Inténtalo de nuevo."), { cerrar: true });
     } finally {
       cfgBotones(false);
     }
   };
-  cfgDialogo(T, "¿Borrar el config.json del nodo? Quedará sin configurar " +
-                "(LED rojo parpadeando) hasta subirle uno nuevo.",
-             { cancelar: true, confirmar: true });
+  cfgDialogo(T, "El nodo dejará de estar disponible hasta que reciba una nueva configuración.",
+             { cancelar: true, cancelarText: "Conservar configuración",
+               confirmar: true, confirmarText: "Eliminar configuración" });
 }
 
 document.getElementById("cfg-buscar").addEventListener("click", cfgDetectar);
@@ -1717,6 +1885,26 @@ document.getElementById("cfg-dialogo-confirmar").addEventListener("click", () =>
 document.getElementById("cfg-dialogo-otro").addEventListener("click", () => {
   if (cfgOtroCb) { const cb = cfgOtroCb; cfgOtroCb = null; cb(); }
 });
+document.addEventListener("keydown", (event) => {
+  const dialogo = document.getElementById("cfg-dialogo");
+  if (dialogo.hidden) return;
+  if (event.key === "Escape") {
+    const cancelar = document.getElementById("cfg-dialogo-cancelar");
+    const cerrar = document.getElementById("cfg-dialogo-cerrar");
+    if (!cancelar.hidden) cancelar.click();
+    else if (!cerrar.hidden) cerrar.click();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focos = [...dialogo.querySelectorAll("button:not([hidden]):not(:disabled)")];
+  if (!focos.length) { event.preventDefault(); dialogo.focus(); return; }
+  const primero = focos[0], ultimo = focos[focos.length - 1];
+  if (event.shiftKey && (document.activeElement === primero || document.activeElement === dialogo)) {
+    event.preventDefault(); ultimo.focus();
+  } else if (!event.shiftKey && document.activeElement === ultimo) {
+    event.preventDefault(); primero.focus();
+  }
+});
 
 // ----- Vista Configuración: radio LoRa del gateway -----
 // Estado de la radio y dos acciones privilegiadas (cambiar el puerto del
@@ -1737,20 +1925,20 @@ async function radioCargar() {
     if (!r.ok) { cont.innerHTML = `<p class="aviso">${d.error}</p>`; return; }
 
     const svcChip = d.service_active
-      ? '<span class="chip on">activo</span>'
-      : '<span class="chip rojo">caído</span>';
+      ? '<span class="chip on">disponible</span>'
+      : '<span class="chip rojo">no disponible</span>';
     const portChip = d.port
-      ? (d.port_present ? '<span class="chip on">presente</span>'
-                        : '<span class="chip rojo">no presente</span>')
-      : '<span class="chip off">sin fijar</span>';
+      ? (d.port_present ? '<span class="chip on">disponible</span>'
+                        : '<span class="chip rojo">no disponible</span>')
+      : '<span class="chip off">sin configurar</span>';
     cont.innerHTML = `
       <div class="sensor fila-info">
-        <span class="s-nombre">servicio del gateway</span>
+        <span class="s-nombre">Gateway</span>
         <span class="s-valor">${svcChip}</span>
       </div>
       <div class="sensor fila-info">
-        <span class="s-nombre">puerto configurado</span>
-        <span class="s-valor" title="${d.port ?? ""}">${d.port ? d.port.split("/").pop() : "(ninguno)"} ${portChip}</span>
+        <span class="s-nombre">Conexión de radio</span>
+        <span class="s-valor" title="${d.port ?? ""}">${d.port ? d.port.split("/").pop() : "Sin conexión"} ${portChip}</span>
       </div>`;
 
     const sel = document.getElementById("radio-puertos");
@@ -1758,60 +1946,57 @@ async function radioCargar() {
       ? d.ports.map((p) =>
           `<option value="${p.port}"${p.gateway ? " selected" : ""}>` +
           `${p.port.split("/").pop()}${p.gateway ? " (actual)" : ""}</option>`).join("")
-      : '<option value="">(sin puertos detectados)</option>';
+      : '<option value="">No se han encontrado conexiones</option>';
 
     document.getElementById("radio-bin-info").textContent = d.bin
-      ? `Binario disponible: heltec-radio.bin, ${(d.bin.size / 1024).toFixed(0)} kB, del ${d.bin.mtime}.`
-      : "Sin heltec-radio.bin en el Pi: generarlo con make_dist.sh y copiarlo a pi-service.";
+      ? "Actualización disponible."
+      : "No hay una actualización disponible para la radio.";
     document.getElementById("radio-flash").disabled = !d.bin;
   } catch (e) {
-    cont.innerHTML = `<p class="aviso">error: ${e.message}</p>`;
+    cont.innerHTML = `<p class="aviso mal">${textoError(e, "No se pudo cargar el estado de la radio. Actualiza la página e inténtalo de nuevo.")}</p>`;
   }
 }
 
 async function radioAplicarPuerto() {
   const sel = document.getElementById("radio-puertos");
   if (!sel.value) return;
-  const T = "Cambiar puerto de la radio";
+  const T = "Guardar conexión de radio";
   radioBotones(true);
-  cfgDialogo(T, SPIN + "aplicando el puerto y reiniciando el gateway...");
+  cfgDialogo(T, SPIN + "Guardando la conexión...");
   try {
     const r = await fetchApi("/api/radio/puerto", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ port: sel.value }) });
     const d = await r.json();
-    if (!r.ok) { cfgDialogo(T, "Error: <b>" + (d.error ?? "error") + "</b>", { cerrar: true }); return; }
-    cfgDialogo(T, "Puerto aplicado y servicio del gateway reiniciado.<br>" +
-                  `<b>${d.port}</b>`, { cerrar: true });
+    if (!r.ok) { cfgDialogo(T, d.error ?? "No se pudo aplicar el cambio. Inténtalo de nuevo.", { cerrar: true }); return; }
+    cfgDialogo(T, "Conexión guardada. La radio estará disponible en unos segundos.", { cerrar: true });
     radioCargar();
   } catch (e) {
-    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    cfgDialogo(T, textoError(e, "No se pudo aplicar el cambio. Inténtalo de nuevo."), { cerrar: true });
   } finally {
     radioBotones(false);
   }
 }
 
 async function radioFlash() {
-  const T = "Actualizar firmware de la radio";
+  const T = "Actualizar la radio";
   cfgConfirmarCb = async () => {
     radioBotones(true);
-    cfgDialogo(T, SPIN + "flasheando la radio (para el servicio, escribe " +
-                  "la imagen y lo rearranca; alrededor de un minuto)...");
+    cfgDialogo(T, SPIN + "Instalando la actualización...");
     try {
       const r = await fetchApi("/api/radio/flash", { method: "POST" });
       const d = await r.json();
-      if (!r.ok) { cfgDialogo(T, "Error:<pre>" + (d.error ?? "error") + "</pre>", { cerrar: true }); return; }
-      cfgDialogo(T, "Flasheo completado, radio operando.<pre>" + d.output + "</pre>", { cerrar: true });
+      if (!r.ok) { cfgDialogo(T, d.error ?? "No se pudo actualizar la radio. Inténtalo de nuevo.", { cerrar: true }); return; }
+      cfgDialogo(T, "Actualización instalada. La radio está disponible.", { cerrar: true });
       radioCargar();
     } catch (e) {
-      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo actualizar la radio. Inténtalo de nuevo."), { cerrar: true });
     } finally {
       radioBotones(false);
     }
   };
-  cfgDialogo(T, "¿Flashear heltec-radio.bin en la radio? El servicio del " +
-                "gateway se detiene durante el flasheo y la red LoRa queda " +
-                "fuera ese tiempo.", { cancelar: true, confirmar: true });
+  cfgDialogo(T, "La red LoRa dejará de estar disponible durante aproximadamente un minuto.",
+    { cancelar: true, confirmar: true, confirmarText: "Actualizar la radio" });
 }
 
 // ----- Ajustes: zona horaria de visualización -----
@@ -1873,26 +2058,26 @@ function tzDetectar() {
   }
   sel.value = z;
   document.getElementById("tz-resultado").textContent =
-    "Zona del navegador: " + z + ". Pulsar Guardar para aplicarla.";
+    "Zona detectada: " + z + ". Guarda los cambios para aplicarla.";
 }
 
 async function tzGuardar() {
   const sel = document.getElementById("tz-select");
   const res = document.getElementById("tz-resultado");
   const tz = sel.value;
-  res.textContent = "Guardando...";
+  res.textContent = "Guardando la zona horaria...";
   try {
     const r = await fetchApi("/api/ajustes", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ timezone: tz }) });
     const d = await r.json();
-    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    if (!r.ok) { res.textContent = d.error ?? "No se pudo guardar la zona horaria."; return; }
     ZONA_HORARIA = (tz && tz !== "auto") ? tz : null;
-    res.textContent = "Zona guardada.";
+    res.textContent = "Zona horaria actualizada.";
     // Repinta las tarjetas con la zona nueva sin esperar al sondeo.
     refrescarRed();
   } catch (e) {
-    res.textContent = "Error: " + e.message;
+    res.textContent = textoError(e);
   }
 }
 
@@ -1904,7 +2089,7 @@ async function bdCargar() {
   try {
     const r = await fetchApi("/api/db/estado");
     const d = await r.json();
-    if (!r.ok) { res.textContent = d.error ?? "estado no disponible"; return; }
+    if (!r.ok) { res.textContent = d.error ?? "Estado no disponible."; return; }
     const c = d.config;
     document.getElementById("bd-host").value = c.host ?? "";
     document.getElementById("bd-port").value = c.port ?? 5432;
@@ -1913,8 +2098,8 @@ async function bdCargar() {
     const pass = document.getElementById("bd-pass");
     pass.value = "";
     pass.placeholder = d.password_set
-      ? "dejar en blanco para no cambiar" : "sin contraseña configurada";
-  } catch (e) { res.textContent = "Error: " + e.message; }
+    ? "Sin cambios" : "Contraseña necesaria";
+  } catch (e) { res.textContent = textoError(e); }
 }
 
 function bdBody() {
@@ -1929,46 +2114,46 @@ function bdBody() {
 
 async function bdProbar() {
   const res = document.getElementById("bd-resultado");
-  res.textContent = "Probando conexión...";
+  res.textContent = "Comprobando la conexión...";
   try {
     const r = await fetchApi("/api/db/probar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(bdBody()) });
     const d = await r.json();
-    res.textContent = r.ok ? ("Conexión correcta. " + (d.detail ?? ""))
-                           : ("Error: " + (d.error ?? "falló"));
-  } catch (e) { res.textContent = "Error: " + e.message; }
+    res.textContent = r.ok ? "Conexión disponible." : d.error;
+  } catch (e) { res.textContent = textoError(e); }
 }
 
 async function bdGuardar() {
   const res = document.getElementById("bd-resultado");
-  res.textContent = "Guardando...";
+  res.textContent = "Guardando los cambios...";
   try {
     const r = await fetchApi("/api/db/guardar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(bdBody()) });
     const d = await r.json();
-    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
-    res.textContent = "Guardado y aplicado.";
+    if (!r.ok) { res.textContent = d.error ?? "No se pudieron guardar los cambios. Inténtalo de nuevo."; return; }
+    res.textContent = "Cambios guardados.";
     bdCargar();
-  } catch (e) { res.textContent = "Error: " + e.message; }
+  } catch (e) { res.textContent = textoError(e); }
 }
 
 // ----- Configuración: broker MQTT cloud -----
 
 function mqttEstadoHtml(d) {
   if (d.enabled == null) {
-    return '<p class="aviso">Estado del servicio no disponible.</p>';
+    return '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">Estado no disponible</span>'
+         + '<span class="mensaje-detalle">Actualiza la página para volver a comprobar la conexión.</span></div>';
   }
   if (!d.enabled) {
-    return '<p class="aviso">MQTT sin configurar en el gateway (sin host). '
-         + 'La telemetría se acumula en el buffer local.</p>';
+    return '<div class="mensaje mensaje-info"><span class="mensaje-titulo">Destino de datos no configurado</span>'
+         + '<span class="mensaje-detalle">Los datos seguirán guardándose en el gateway.</span></div>';
   }
   const chip = d.connected
     ? '<span class="chip on">conectado</span>'
     : '<span class="chip off">sin conexión</span>';
   return `<div class="sensor fila-info">
-    <span class="s-nombre">Conexión al broker</span>${chip}</div>`;
+    <span class="s-nombre">Conexión de datos</span>${chip}</div>`;
 }
 
 async function mqttCargar() {
@@ -1979,7 +2164,7 @@ async function mqttCargar() {
   try {
     const r = await fetchApi("/api/mqtt/estado");
     const d = await r.json();
-    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "estado no disponible"}</p>`; return; }
+    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "Estado no disponible."}</p>`; return; }
     est.innerHTML = mqttEstadoHtml(d);
     const c = d.config;
     document.getElementById("mqtt-host").value = c.host ?? "";
@@ -1991,8 +2176,8 @@ async function mqttCargar() {
     const pass = document.getElementById("mqtt-pass");
     pass.value = "";
     pass.placeholder = d.password_set
-      ? "dejar en blanco para no cambiar" : "contraseña del broker";
-  } catch (e) { est.innerHTML = `<p class="aviso">Error: ${e.message}</p>`; }
+      ? "Sin cambios" : "Contraseña necesaria";
+  } catch (e) { est.innerHTML = `<p class="aviso mal">${textoError(e)}</p>`; }
 }
 
 function mqttBody() {
@@ -2009,31 +2194,29 @@ function mqttBody() {
 
 async function mqttProbar() {
   const res = document.getElementById("mqtt-resultado");
-  res.textContent = "Probando conexión (hasta unos segundos)...";
+  res.textContent = "Comprobando la conexión...";
   try {
     const r = await fetchApi("/api/mqtt/probar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(mqttBody()) });
     const d = await r.json();
-    res.textContent = r.ok ? ("Conexión correcta: " + (d.detail ?? ""))
-                           : ("Error: " + (d.error ?? "falló"));
-  } catch (e) { res.textContent = "Error: " + e.message; }
+    res.textContent = r.ok ? "Conexión disponible." : d.error;
+  } catch (e) { res.textContent = textoError(e); }
 }
 
 async function mqttGuardar() {
   const res = document.getElementById("mqtt-resultado");
-  res.textContent = "Guardando y reiniciando el servicio del gateway...";
+  res.textContent = "Guardando los cambios...";
   try {
     const r = await fetchApi("/api/mqtt/guardar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(mqttBody()) });
     const d = await r.json();
-    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
-    res.textContent = "Guardado. El gateway se está reiniciando; el estado se "
-                    + "actualiza en unos segundos.";
+    if (!r.ok) { res.textContent = d.error ?? "No se pudieron guardar los cambios. Inténtalo de nuevo."; return; }
+    res.textContent = "Cambios guardados. La conexión se actualizará en unos segundos.";
     // Tras el reinicio del gateway, el latido tarda en reflejar la conexión.
     setTimeout(mqttCargar, 5000);
-  } catch (e) { res.textContent = "Error: " + e.message; }
+  } catch (e) { res.textContent = textoError(e); }
 }
 
 // ----- Página: parámetros de red LoRa (gateway.env, camino B) -----
@@ -2045,6 +2228,8 @@ async function mqttGuardar() {
 // pero la frecuencia queda editable por si se usa un canal concreto.
 const REGION_FREQ = { EU868: 869525000, US915: 903900000,
                       CN470: 470300000, AS923: 923200000 };
+let redLoraActual = null;
+let redLoraDisponible = false;
 
 async function redloraCargar() {
   const res = document.getElementById("r-resultado");
@@ -2052,12 +2237,18 @@ async function redloraCargar() {
   try {
     const r = await fetchApi("/api/config/red");
     const d = await r.json();
-    if (!r.ok) { res.className = "aviso mal"; res.textContent = "Estado no disponible."; return; }
+    if (!r.ok) {
+      redLoraDisponible = false;
+      res.className = "aviso mal";
+      res.textContent = "No se han podido cargar los ajustes actuales. Actualiza la página e inténtalo de nuevo.";
+      return;
+    }
     // Se guardan también como referencia: al guardar hay que saber qué
     // cambia de verdad para avisar solo entonces, y hasta ahora esta variable
     // solo la rellenaba el asistente, de modo que entrando directo a esta
     // pantalla no había con qué comparar.
-    redActual = d;
+    redLoraDisponible = d.source === "gateway";
+    redLoraActual = redLoraDisponible ? d : null;
     const sV = (id, v) => { if (v != null && v !== "") document.getElementById(id).value = v; };
     sV("r-region", d.region); sV("r-freq", d.frequency_hz); sV("r-netid", d.network_id);
     sV("r-sf", d.sf); sV("r-bw", d.bw_khz); sV("r-ttl", d.max_ttl);
@@ -2065,11 +2256,17 @@ async function redloraCargar() {
     document.getElementById("r-sec").checked = !!sec.enabled;
     document.getElementById("r-seckey").value = sec.key || "";
     redloraLive();
-    if (d.source !== "gateway") {
-      res.className = "aviso ambar";
-      res.textContent = "No se pudo leer la config del gateway; se muestran valores por defecto.";
+    if (!redLoraDisponible) {
+      document.getElementById("r-guardar").disabled = true;
+      res.className = "aviso mal";
+      res.textContent = "No se han podido comprobar los ajustes actuales. Actualiza la página antes de hacer cambios.";
     }
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) {
+    redLoraDisponible = false;
+    document.getElementById("r-guardar").disabled = true;
+    res.className = "aviso mal";
+    res.textContent = textoError(e, "No se han podido cargar los ajustes actuales. Actualiza la página e inténtalo de nuevo.");
+  }
 }
 
 // Validación en vivo del formulario de red: marca los campos fuera de rango
@@ -2081,22 +2278,24 @@ function redloraLive() {
   const key = document.getElementById("r-seckey").value.trim();
   const bad = [];
   const mark = (id, ok, msg) => {
-    document.getElementById(id).classList.toggle("campo-mal", !ok);
+    const campo = document.getElementById(id);
+    campo.classList.toggle("campo-mal", !ok);
+    campo.setAttribute("aria-invalid", ok ? "false" : "true");
     if (!ok) bad.push(msg);
   };
-  mark("r-netid", num("r-netid") >= 1 && num("r-netid") <= 254, "ID de red 1-254");
+  mark("r-netid", num("r-netid") >= 1 && num("r-netid") <= 254, "identificador de red entre 1 y 254");
   mark("r-freq", num("r-freq") >= 100000000 && num("r-freq") <= 1000000000,
        "frecuencia 100-1000 MHz");
-  mark("r-sf", num("r-sf") >= 7 && num("r-sf") <= 12, "SF 7-12");
-  mark("r-ttl", num("r-ttl") >= 1 && num("r-ttl") <= 15, "Max TTL 1-15");
+  mark("r-sf", num("r-sf") >= 7 && num("r-sf") <= 12, "factor de dispersión entre 7 y 12");
+  mark("r-ttl", num("r-ttl") >= 1 && num("r-ttl") <= 15, "TTL entre 1 y 15");
   mark("r-seckey", !secOn || /^[0-9a-fA-F]{32}$/.test(key),
-       "clave de red de 32 hex con seguridad activa");
+       "clave de red de 32 caracteres hexadecimales");
   const res = document.getElementById("r-resultado");
-  document.getElementById("r-guardar").disabled = bad.length > 0;
+  document.getElementById("r-guardar").disabled = bad.length > 0 || !redLoraDisponible;
   if (bad.length) {
     res.className = "aviso mal";
-    res.textContent = "Corrige: " + bad.join("; ");
-  } else if (res.textContent.startsWith("Corrige")) {
+    res.textContent = "Revisa estos campos: " + bad.join("; ") + ".";
+  } else if (res.textContent.startsWith("Revisa estos campos")) {
     res.className = "aviso"; res.textContent = "";
   }
 }
@@ -2109,7 +2308,7 @@ function redloraLive() {
 function redloraCambios(body, actual) {
   if (!actual) return null;          // sin referencia no se puede comparar
   const campos = [
-    ["network_id",       "ID de red",        actual.network_id],
+    ["network_id",       "identificador de red", actual.network_id],
     ["frequency_hz",     "frecuencia",       actual.frequency_hz],
     ["sf",               "SF",               actual.sf],
     ["bw_khz",           "ancho de banda",   actual.bw_khz],
@@ -2153,25 +2352,42 @@ function redloraCambios(body, actual) {
 // impide a un nodo hablar con el gateway, así que no deja a nadie fuera.
 async function redloraConfirmar(cambios) {
   let nodos = [];
+  let censoDisponible = false;
   try {
     const r = await fetchApi("/api/red/estado");
     if (r.ok) {
       nodos = ((await r.json()).nodes || [])
         .filter((n) => n.origin >= 1 && n.origin <= 254);
+      censoDisponible = true;
     }
-  } catch (e) { /* sin lista: se avisa igual, sin nombres */ }
+  } catch (e) { /* La confirmación se bloquea hasta disponer del censo. */ }
+
+  if (!censoDisponible) {
+    return new Promise((resolve) => {
+      cfgOtroCb = () => {
+        cfgDialogoCerrar();
+        redloraConfirmar(cambios).then(resolve);
+      };
+      cfgDialogo("Estado de la red no disponible",
+        "No se ha podido confirmar qué nodos están conectados.",
+        { cancelar: true, otroText: "Reintentar",
+          onCancelar: () => resolve(false) });
+    });
+  }
 
   const lista = nodos.length
     ? "<ul>" + nodos.map((n) =>
         `<li>${n.name || "nodo"} (${n.origin})`
         + (n.online ? "" : ", ya sin señal") + "</li>").join("") + "</ul>"
-    : "<p>El gateway no conoce ningún nodo todavía.</p>";
+    : "<p>No hay nodos conectados.</p>";
 
   // Con nodos en la red, guardar a secas es casi siempre el camino
   // equivocado, así que el diálogo ofrece el bueno en vez de limitarse a
   // avisar. Un aviso que solo dice "esto va a doler" y te deja seguir es una
   // trampa con cartel; esto es una puerta.
   const vivos = nodos.filter((n) => n.online);
+  const resumenVivos = vivos.length === 1 ? "1 nodo conectado"
+                                          : `${vivos.length} nodos conectados`;
   return new Promise((resolve) => {
     cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
     cfgOtroCb = vivos.length ? () => {
@@ -2179,23 +2395,17 @@ async function redloraConfirmar(cambios) {
       resolve(false);
       migProgramar();
     } : null;
-    cfgDialogo("Cambiar los parámetros de red",
-      "<p>Va a cambiar:</p><ul>"
+    cfgDialogo("Aplicar cambios",
+      "<p>Se aplicarán estos cambios:</p><ul>"
       + cambios.map((c) => `<li>${c}</li>`).join("")
       + "</ul>"
       + (vivos.length
-          ? "<p>Hay <b>" + vivos.length + " nodo(s) en línea</b>. Guardar aquí "
-            + "cambia el gateway ahora mismo y esos nodos dejan de oírlo hasta "
-            + "que se les reconfigure uno a uno con cable o con el asistente."
+          ? "<p>Hay <b>" + resumenVivos + "</b>. Si los cambios se guardan solo en el gateway, estos nodos dejarán de estar disponibles."
             + "</p>" + lista
-            + "<p><b>El cambio coordinado hace lo mismo sin perder a nadie</b>: "
-            + "avisa a cada nodo, espera a que todos confirmen y entonces salta "
-            + "todo el mundo a la vez. No tienes que hacer nada más.</p>"
-          : "<p>El gateway no conoce ningún nodo en línea, así que no hay nada "
-            + "que perder: guardar directamente es lo correcto aquí.</p>"),
+          : "<p>No hay nodos conectados.</p>"),
       { cancelar: true, confirmar: true,
-        confirmarText: "Cambiar solo el gateway",
-        otroText: vivos.length ? "Hacer el cambio coordinado" : null,
+        confirmarText: "Guardar solo en el gateway",
+        otroText: vivos.length ? "Aplicar a toda la red" : null,
         onCancelar: () => resolve(false) });
   });
 }
@@ -2216,31 +2426,32 @@ async function redloraGuardar() {
   // Solo se pregunta si de verdad cambia algo que rompa la red. Guardar sin
   // tocar nada relevante (o tocando solo el TTL) no debe pedir confirmación:
   // un aviso que salta siempre se aprende a ignorar.
-  const cambios = redloraCambios(body, redActual);
-  if (cambios === null || cambios.length > 0) {
-    const seguir = await redloraConfirmar(
-      cambios === null
-        ? ["no se pudieron leer los parámetros vigentes para compararlos"]
-        : cambios);
+  const cambios = redloraCambios(body, redLoraActual);
+  if (cambios === null) {
+    res.className = "aviso mal";
+    res.textContent = "No se han podido comprobar los ajustes actuales. Actualiza la página antes de guardar cambios.";
+    return;
+  }
+  if (cambios.length > 0) {
+    const seguir = await redloraConfirmar(cambios);
     if (!seguir) {
       res.className = "aviso";
-      res.textContent = "Cancelado. No se ha cambiado nada.";
+      res.textContent = "No se realizaron cambios.";
       return;
     }
   }
 
   res.className = "aviso";
-  res.textContent = "Guardando y reiniciando el servicio del gateway...";
+  res.textContent = "Guardando los cambios...";
   try {
     const r = await fetchApi("/api/net/guardar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) });
     const d = await r.json();
-    if (!r.ok) { res.className = "aviso mal"; res.textContent = "Error: " + (d.error ?? "no guardado"); return; }
+    if (!r.ok) { res.className = "aviso mal"; res.textContent = d.error ?? "No se pudieron guardar los cambios. Inténtalo de nuevo."; return; }
     res.className = "aviso";
-    res.textContent = "Guardado. El gateway se reinicia y reaplica la radio al "
-      + "Heltec. Recuerda reconfigurar los nodos con estos parámetros.";
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+    res.textContent = "Cambios guardados. La red volverá a estar disponible en unos segundos.";
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 // ----- Cambio coordinado de parámetros de red (§17.8, fase C4) -----
@@ -2303,47 +2514,46 @@ function migPintar(d) {
     // saltan, no a una hora. Lo que hay que mirar es quién falta.
     const rep = d.reparto || [];
     html += migDato("Estado", rep.length && !d.por_citar
-      ? "todos han confirmado, saltando"
-      : "avisando a los nodos, nadie ha cambiado todavía");
+      ? "Todos los nodos han confirmado. Aplicando cambios."
+      : "Preparando el cambio en los nodos.");
     if (rep.length) {
       html += migDato("Confirmados", `${d.citados} de ${rep.length}`,
                       d.por_citar ? "" : "mig-cuenta");
       const pend = rep.filter((r) => r.state !== "done");
       if (pend.length) {
-        html += migDato("Faltan", pend.map(
-          (r) => `${r.origin} (${r.detail || r.state})`).join(", "));
+        html += migDato("Nodos pendientes", pend.map((r) => r.origin).join(", "));
       }
     }
   } else {
-    html += migDato("Estado", "saltada");
-    html += migDato("Salto", T);
-    html += migDato("Gateway ahora en",
+    html += migDato("Estado", "Cambio aplicado");
+    html += migDato("Aplicado", T);
+    html += migDato("Configuración activa",
                     d.mundo === "viejo"
-                      ? "los parámetros VIEJOS, buscando rezagados"
-                      : "los parámetros nuevos");
+                      ? "Buscando nodos pendientes"
+                      : "Nueva configuración");
     if (d.rescate_s > 0) {
-      html += migDato("Vuelve en", migDuracion(d.rescate_s), "mig-cuenta");
+      html += migDato("Tiempo restante", migDuracion(d.rescate_s), "mig-cuenta");
     }
-    html += migDato("Rezagados",
+    html += migDato("Nodos pendientes",
                     (d.rezagados && d.rezagados.length)
                       ? d.rezagados.join(", ")
                       : "ninguno");
-    html += migDato("Plazo de recuperación",
+    html += migDato("Tiempo de recuperación",
                     migDuracion(d.recuperacion_restante_s), "mig-cuenta");
   }
-  html += `<pre class="mig-perfiles">viejos: ${migPerfilTexto(d.old_profile)}\n`
-        + `nuevos: ${migPerfilTexto(d.new_profile)}</pre>`;
+  html += `<pre class="mig-perfiles">Anterior: ${migPerfilTexto(d.old_profile)}\n`
+        + `Nueva: ${migPerfilTexto(d.new_profile)}</pre>`;
   est.innerHTML = html;
 
   const tb = document.querySelector("#mig-tabla tbody");
-  const ETIQ = { migrado: ["migrado", "migrado"],
-                 rezagado: ["rezagado", "rezagado"],
-                 "sin noticias": ["mudo", "sin noticias"] };
+  const ETIQ = { migrado: ["migrado", "actualizado"],
+                 rezagado: ["rezagado", "pendiente"],
+                 "sin noticias": ["mudo", "sin respuesta"] };
   if (!d.nodos.length) {
     tb.innerHTML = `<tr><td colspan="3">${
       d.state === "programada"
-        ? "El pase de lista empieza en el salto."
-        : "Todavía no se ha oído a ningún nodo desde el salto."
+        ? "El estado de los nodos aparecerá al aplicar el cambio."
+        : "Todavía no se ha recibido respuesta de ningún nodo."
     }</td></tr>`;
   } else {
     tb.innerHTML = d.nodos.map((n) => {
@@ -2365,12 +2575,11 @@ function migPintar(d) {
     const hay = !!(d.rezagados && d.rezagados.length);
     resc.hidden = d.state !== "saltada";
     resc.disabled = !fuera && !hay;
-    resc.textContent = fuera ? "Volver ya" : "Buscar rezagados";
+    resc.textContent = fuera ? "Finalizar búsqueda" : "Buscar nodos pendientes";
     resc.title = fuera
-      ? "Vuelve a los parámetros nuevos sin esperar"
-      : (hay ? "El gateway se va a los parámetros viejos el tiempo justo "
-             + "para volver a citar al rezagado"
-             : "No hay ningún nodo rezagado que recoger");
+      ? "Finaliza la búsqueda y recupera la configuración actual"
+      : (hay ? "Busca los nodos que aún no se han actualizado"
+             : "No hay nodos pendientes");
   }
 
   // Saltar sin los que faltan: solo tiene sentido si falta alguien. Es una
@@ -2379,15 +2588,14 @@ function migPintar(d) {
   const salt = document.getElementById("mig-saltar");
   if (salt) {
     salt.hidden = d.state !== "programada" || !d.por_citar;
-    salt.title = "Salta con los que han confirmado. Los que faltan se quedan "
-               + "con los parámetros viejos hasta que se les vaya a buscar.";
+    salt.title = "Aplica el cambio a los nodos preparados";
   }
 
   // Abortar solo tiene sentido antes del salto: después ya cambió el mundo y
   // lo que queda es cerrar. Deshabilitarlo dice eso mejor que un error.
   document.getElementById("mig-abortar").disabled = d.state !== "programada";
   document.getElementById("mig-cerrar").textContent =
-    d.state === "programada" ? "Cerrar sin saltar" : "Cerrar operación";
+    d.state === "programada" ? "Finalizar sin aplicar" : "Finalizar";
 }
 
 async function migRefrescar() {
@@ -2414,9 +2622,8 @@ async function migEstimar() {
     const r = await fetchApi("/api/net/migracion/estimacion");
     const d = await r.json();
     if (!r.ok) { el.textContent = ""; return; }
-    el.textContent = `Avisar a los nodos cuesta unos ${migDuracion(d.segundos)}`
-      + `. El salto no ocurre a una hora: ocurre cuando todos han contestado `
-      + `que saltan.`;
+    el.textContent = `Tiempo estimado: ${migDuracion(d.segundos)}. `
+      + "El cambio se aplicará cuando todos los nodos estén preparados.";
   } catch (e) { el.textContent = ""; }
 }
 
@@ -2438,10 +2645,10 @@ async function migProgramar() {
   // pregunta detrás: aquí no se avisa de que se van a perder nodos, porque el
   // procedimiento existe justamente para no perderlos. Se avisa de que a
   // partir de ahora todo envío de configuración lleva la cita.
-  const cambios = redloraCambios(body, redActual);
+  const cambios = redloraCambios(body, redLoraActual);
   if (!cambios || !cambios.length) {
     res.className = "aviso mal";
-    res.textContent = "los parámetros de arriba son los que ya están vigentes";
+    res.textContent = "No hay cambios pendientes.";
     return;
   }
   let est = null;
@@ -2451,18 +2658,12 @@ async function migProgramar() {
 
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Programar cambio coordinado",
-      "<p>Se va a programar el salto de <b>" + cambios.join(", ") + "</b>.</p>"
-      + "<p>El gateway le pedirá su configuración a cada nodo, le cambiará solo "
-      + "los parámetros de red y se la devolverá. Cada nodo contesta que salta "
-      + "y salta; cuando han contestado todos, salta el gateway."
-      + (est ? " Con los nodos que hay ahora eso son unos <b>"
-               + migDuracion(est.segundos) + "</b>." : "") + "</p>"
-      + "<p>No tienes que hacer nada más, y hasta que salte el primero no ha "
-      + "cambiado nada: se puede abortar sin consecuencias.</p>"
-      + "<p>Si alguno no contesta, no se salta y te aparece un botón para "
-      + "decidir si seguir sin él.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Programar",
+    cfgDialogo("Programar cambios",
+      "<p>Se cambiará <b>" + cambios.join(", ") + "</b> en toda la red.</p>"
+      + (est ? "<p>Tiempo estimado: <b>" + migDuracion(est.segundos)
+               + "</b>.</p>" : "")
+      + "<p>Se aplicarán cuando todos los nodos estén preparados.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Programar cambios",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
@@ -2477,14 +2678,15 @@ async function migProgramar() {
     const d = await r.json();
     if (!r.ok) {
       res.className = "aviso mal";
-      res.textContent = "Error: " + (d.error ?? "no programada");
+      res.textContent = d.error ?? "No se pudieron programar los cambios.";
       return;
     }
     res.className = "aviso";
-    res.textContent = `Programada. El gateway está citando a ${
-      (d.reparto || []).length} nodo(s); no hace falta que hagas nada.`;
+    const total = (d.reparto || []).length;
+    res.textContent = total === 1 ? "Cambios programados para 1 nodo."
+                                  : `Cambios programados para ${total} nodos.`;
     migRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 async function migTerminar(abortar) {
@@ -2493,29 +2695,22 @@ async function migTerminar(abortar) {
   const saltada = d0 && d0.state === "saltada";
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo(abortar ? "Abortar la operación" : "Cerrar la operación",
+    cfgDialogo(abortar ? "Cancelar cambios" : "Finalizar cambios",
       abortar
-        ? "<p>La operación se descarta y no habrá salto. Nada ha cambiado "
-          + "todavía, así que no hay nada que deshacer.</p><p>Los nodos que ya "
-          + "tengan la configuración citada la conservarán guardada y llegada "
-          + "la hora la aplicarán igualmente: si eso no es lo que quieres, "
-          + "envíales cualquier otra configuración, que sustituye a la "
-          + "pendiente.</p>"
+        ? "<p>Se cancelará el cambio pendiente. La configuración actual se mantendrá.</p>"
         : (saltada
-            ? "<p>Los parámetros nuevos pasan a ser los de la instalación y el "
-              + "gateway deja de volver a los viejos.</p><p>Cualquier nodo que "
-              + "siga en los viejos dejará de ser alcanzable por radio y "
-              + "necesitará cable.</p>"
-            : "<p>La operación termina sin haber saltado.</p>"),
+            ? "<p>La nueva configuración quedará establecida como configuración principal.</p>"
+              + "<p>Los nodos pendientes podrían requerir una actualización individual.</p>"
+            : "<p>Se cerrará la operación sin aplicar cambios.</p>"),
       { cancelar: true, confirmar: true,
-        confirmarText: abortar ? "Abortar" : "Cerrar",
+        confirmarText: abortar ? "Cancelar cambios" : "Finalizar",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
   cfgDialogoCerrar();
 
   res.className = "aviso";
-  res.textContent = abortar ? "Abortando..." : "Cerrando...";
+  res.textContent = abortar ? "Cancelando cambios..." : "Finalizando...";
   try {
     const r = await fetchApi("/api/net/migracion/cerrar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2523,14 +2718,14 @@ async function migTerminar(abortar) {
     const d = await r.json();
     if (!r.ok) {
       res.className = "aviso mal";
-      res.textContent = "Error: " + (d.error ?? "no cerrada");
+      res.textContent = d.error ?? "No se pudo finalizar la operación.";
       migRefrescar();
       return;
     }
     res.className = "aviso";
-    res.textContent = abortar ? "Abortada." : "Cerrada y fijada en el gateway.";
+    res.textContent = abortar ? "Cambios cancelados." : "Cambios finalizados.";
     migRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 // ----- Difusión de firmware a toda la red (§20) -----
@@ -2561,12 +2756,12 @@ function bcFueraDeAlcance() {
 }
 
 const BC_FASE = {
-  offering:  "anunciando a la red",
-  sending:   "emitiendo la imagen",
-  polling:   "preguntando a los nodos qué les falta",
-  repairing: "reemitiendo lo que falta",
-  ready:     "entregada",
-  failed:    "fallida",
+  offering:  "preparando",
+  sending:   "actualizando",
+  polling:   "comprobando",
+  repairing: "completando",
+  ready:     "lista para instalar",
+  failed:    "no completada",
   cancelled: "cancelada",
 };
 
@@ -2582,8 +2777,8 @@ function bcPintar(d) {
     // la vez (§20.12).
     lanzar.disabled = !!(d && d.otra_en_curso);
     document.getElementById("bc-aviso").textContent = d && d.otra_en_curso
-      ? `Hay una subida en curso al nodo ${d.otra_en_curso.nodo}. `
-        + "La difusión ocupa el mismo aire, así que espera a que termine."
+      ? `El nodo ${d.otra_en_curso.nodo} se está actualizando. `
+        + "Espera a que termine para iniciar otra actualización."
       : "";
     return;
   }
@@ -2592,19 +2787,16 @@ function bcPintar(d) {
   lanzar.disabled = !!d.activa;
 
   const est = document.getElementById("bc-estado");
-  let html = migDato("Fase", BC_FASE[d.state] || d.state);
+  let html = migDato("Estado", BC_FASE[d.state] || "En curso");
   html += migDato("Versión", d.version || "?");
-  html += migDato("Pasada", String((d.pass_no || 0) + 1));
   html += migDato("En marcha desde hace", migDuracion(d.elapsed_s), "mig-cuenta");
-  if (d.detail) html += migDato("Detalle", d.detail);
   est.innerHTML = html;
 
   const tb = document.querySelector("#bc-tabla tbody");
   if (!d.nodos.length) {
     // El recuento no existe hasta la primera ronda de preguntas, y decirlo
     // evita leer la tabla vacía como "ningún nodo está recibiendo".
-    tb.innerHTML = `<tr><td colspan="5">Los nodos no dicen lo que llevan hasta `
-                 + `que termina la primera pasada y se les pregunta.</td></tr>`;
+    tb.innerHTML = '<tr><td colspan="5">Preparando el estado de los nodos.</td></tr>';
     return;
   }
   // Instalar va por nodo y no de golpe, por lo mismo que en la subida
@@ -2615,7 +2807,7 @@ function bcPintar(d) {
   tb.innerHTML = d.nodos.map((n) => {
     const clase = n.missing === 0 ? "migrado" : "rezagado";
     const boton = (puedeInstalar && n.missing === 0)
-      ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar</button>`
+      ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar actualización</button>`
       : "";
     return `<tr><td>${n.node_id}</td>`
          + `<td><span class="mig-pill ${clase}">${n.pct} %</span></td>`
@@ -2632,13 +2824,11 @@ async function bcInstalar(origin) {
   const aviso = document.getElementById("bc-aviso");
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo(`Instalar en el nodo ${origin}`,
-      "<p>Ese nodo se reiniciará con la imagen nueva.</p>"
-      + "<p>Si no consigue registrarse en la red en <b>cuatro minutos</b>, el "
-      + "gestor de arranque vuelve solo a la versión anterior. Aun así, "
-      + "durante ese rato el nodo no mide.</p>"
-      + "<p>Los demás nodos no se tocan: se instalan de uno en uno.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Instalar",
+    cfgDialogo(`Actualizar nodo ${origin}`,
+      "<p>El nodo no estará disponible durante unos minutos.</p>"
+      + "<p>Si la actualización no puede completarse, conservará la versión anterior. "
+      + "Los demás nodos no se verán afectados.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Instalar actualización",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
@@ -2650,11 +2840,11 @@ async function bcInstalar(origin) {
     const d = await r.json();
     aviso.className = r.ok ? "aviso" : "aviso mal";
     aviso.textContent = r.ok
-      ? `orden enviada al nodo ${origin}, se reinicia con ${d.version}`
-      : (d.error || "error");
+      ? `Actualización iniciada en el nodo ${origin}.`
+      : textoError(new Error(d.error || "No se ha podido iniciar la actualización."));
   } catch (e) {
     aviso.className = "aviso mal";
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e);
   }
 }
 
@@ -2678,55 +2868,46 @@ async function bcLanzar() {
   const res = document.getElementById("bc-aviso");
   const fuera = bcFueraDeAlcance();
   const avisoClase = fuera.length
-    ? "<p><b>Estos nodos no la van a recibir</b>, porque están en clase A y "
-      + "solo escuchan justo después de haber hablado: <b>" + fuera.join(", ")
-      + "</b>. A esos hay que subirles la imagen una a una.</p>"
+    ? "<p>Estos nodos deberán actualizarse individualmente: <b>"
+      + fuera.join(", ") + "</b>.</p>"
     : "";
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Difundir a toda la red",
-      "<p>Se va a emitir la imagen a toda la red, de fondo y cediendo el aire a "
-      + "la telemetría. Lo que marca el reloj es el ciclo de trabajo: con el "
-      + "8 % de la norma son <b>unas dos horas</b>, y ese tiempo es el mismo "
-      + "para un nodo que para veinte.</p>"
+    cfgDialogo("Actualizar toda la red",
+      "<p>La actualización se enviará a los nodos conectados directamente y "
+      + "tardará aproximadamente <b>dos horas</b>.</p>"
       + avisoClase
-      + "<p>No se instala nada: al terminar, cada nodo que la haya completado "
-      + "tiene la imagen guardada y verificada en su partición dormida, y la "
-      + "orden de instalar sigue siendo aparte y nodo a nodo.</p>"
-      + "<p>Llega a los nodos que oyen al gateway directamente. A los que estén "
-      + "a dos saltos habrá que subírsela por el camino individual.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Difundir",
+      + "<p>La instalación se confirmará después en cada nodo.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Iniciar actualización",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
   cfgDialogoCerrar();
 
   res.className = "aviso";
-  res.textContent = "Lanzando...";
+  res.textContent = "Iniciando actualización...";
   try {
     const r = await fetchApi("/api/config/lora/firmware/difundir",
                              { method: "POST" });
     const d = await r.json();
     if (!r.ok) {
       res.className = "aviso mal";
-      res.textContent = "Error: " + (d.error ?? "no lanzada");
+      res.textContent = d.error ?? "No se pudo iniciar la actualización.";
       return;
     }
     res.className = "aviso";
-    res.textContent = `Difundiendo ${d.version} (${d.bytes} B).`;
+    res.textContent = `Actualización ${d.version} en curso.`;
     bcRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 async function bcCancelar() {
   const res = document.getElementById("bc-aviso");
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Cancelar la difusión",
-      "<p>Se corta la emisión. Lo que cada nodo ya haya recibido sigue escrito "
-      + "en su partición dormida, así que una difusión posterior de la misma "
-      + "imagen continúa donde esta lo dejó en vez de empezar de cero.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Cancelar difusión",
+    cfgDialogo("Cancelar la actualización",
+      "<p>Se detendrá la actualización de la red. Podrá reanudarse más adelante.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Cancelar actualización",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
@@ -2736,9 +2917,10 @@ async function bcCancelar() {
                              { method: "POST" });
     const d = await r.json();
     res.className = r.ok ? "aviso" : "aviso mal";
-    res.textContent = r.ok ? "Difusión cancelada." : ("Error: " + (d.error ?? ""));
+    res.textContent = r.ok ? "Actualización cancelada."
+                           : textoError(new Error(d.error));
     bcRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 document.getElementById("bc-lanzar").addEventListener("click", bcLanzar);
@@ -2753,7 +2935,7 @@ async function migRescatar() {
   const d = await migLeer();
   const cortar = !!(d && d.rescate_s > 0);
   res.className = "aviso";
-  res.textContent = cortar ? "Volviendo..." : "Yendo a por los rezagados...";
+  res.textContent = cortar ? "Finalizando búsqueda..." : "Buscando nodos pendientes...";
   try {
     const r = await fetchApi("/api/net/migracion/rescatar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2761,12 +2943,11 @@ async function migRescatar() {
     const j = await r.json();
     res.className = r.ok ? "aviso" : "aviso mal";
     res.textContent = r.ok
-      ? (cortar ? "De vuelta en los parámetros nuevos."
-                : `Buscando rezagados durante ${j.segundos} s. Los nodos que `
-                  + "ya migraron retienen sus medidas mientras tanto.")
-      : ("Error: " + (j.error ?? "no se pudo"));
+      ? (cortar ? "Búsqueda finalizada."
+                : `Buscando nodos pendientes durante ${j.segundos} s.`)
+      : (j.error ?? "No se pudo completar la búsqueda.");
     migRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 async function migSaltarIgual() {
@@ -2776,12 +2957,10 @@ async function migSaltarIgual() {
                  .map((r) => r.origin).join(", ");
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Saltar sin los que faltan",
-      `<p>No han confirmado: <b>${faltan || "ninguno"}</b>.</p>`
-      + "<p>Se salta con los que sí lo han hecho. Los que faltan siguen "
-      + "midiendo con los parámetros viejos y dejan de oír al gateway hasta "
-      + "que se les vaya a buscar con el botón de rezagados.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Saltar igual",
+    cfgDialogo("Continuar con nodos pendientes",
+      `<p>Nodos pendientes: <b>${faltan || "ninguno"}</b>.</p>`
+      + "<p>El cambio se aplicará al resto. Los nodos pendientes requerirán atención posterior.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Continuar",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
@@ -2790,10 +2969,10 @@ async function migSaltarIgual() {
     const r = await fetchApi("/api/net/migracion/saltar", { method: "POST" });
     const j = await r.json();
     res.className = r.ok ? "aviso" : "aviso mal";
-    res.textContent = r.ok ? "Saltando con los que confirmaron."
-                           : ("Error: " + (j.error ?? "no se pudo"));
+    res.textContent = r.ok ? "Aplicando el cambio a los nodos preparados."
+                           : (j.error ?? "No se pudieron aplicar los cambios.");
     migRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = "Error: " + e.message; }
+  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
 }
 
 document.getElementById("mig-saltar").addEventListener("click", migSaltarIgual);
@@ -2827,7 +3006,7 @@ async function wifiCargar() {
   try {
     const r = await fetchApi("/api/wifi/estado");
     const d = await r.json();
-    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "estado no disponible"}</p>`; return; }
+    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "Estado no disponible."}</p>`; return; }
     // SSID e IP por textContent: el SSID viene del entorno, no se interpola.
     est.innerHTML = "";
     const fila = document.createElement("div");
@@ -2837,7 +3016,7 @@ async function wifiCargar() {
     nombre.textContent = d.ssid || "No conectado";
     const chip = document.createElement("span");
     chip.className = "chip " + (d.ssid ? "on" : "off");
-    chip.textContent = d.ssid ? "conectado" : "sin WiFi";
+    chip.textContent = d.ssid ? "conectado" : "sin conexión";
     fila.append(nombre, chip);
     const filaIp = document.createElement("div");
     filaIp.className = "sensor fila-info";
@@ -2848,19 +3027,19 @@ async function wifiCargar() {
     val.textContent = d.ip || "0.0.0.0";
     filaIp.append(etq, val);
     est.append(fila, filaIp);
-  } catch (e) { est.innerHTML = `<p class="aviso">Error: ${e.message}</p>`; }
+  } catch (e) { est.innerHTML = `<p class="aviso mal">${textoError(e)}</p>`; }
 }
 
 async function wifiBuscar() {
   const info = document.getElementById("wifi-buscar-info");
   const lista = document.getElementById("wifi-lista");
-  info.textContent = "Buscando redes (unos segundos)...";
+  info.textContent = "Actualizando la lista...";
   lista.innerHTML = "";
   try {
     const r = await fetchApi("/api/wifi/escanear");
     const d = await r.json();
-    if (!r.ok) { info.textContent = "Error: " + (d.error ?? "falló el escaneo"); return; }
-    if (!d.redes.length) { info.textContent = "No se encontraron redes."; return; }
+    if (!r.ok) { info.textContent = d.error ?? "No se pudieron buscar redes. Inténtalo de nuevo."; return; }
+    if (!d.redes.length) { info.textContent = "No se han encontrado redes disponibles."; return; }
     info.textContent = "";
     d.redes.forEach((red) => {
       const abierta = !red.security || red.security === "abierta";
@@ -2883,28 +3062,27 @@ async function wifiBuscar() {
       });
       lista.appendChild(row);
     });
-  } catch (e) { info.textContent = "Error: " + e.message; }
+  } catch (e) { info.textContent = textoError(e, "No se pudieron buscar redes. Inténtalo de nuevo."); }
 }
 
 async function wifiConectar() {
   const res = document.getElementById("wifi-resultado");
   const ssid = document.getElementById("wifi-ssid").value.trim();
-  if (!ssid) { res.textContent = "Elige una red de la lista o escribe el SSID."; return; }
-  res.textContent = "Conectando (hasta unos segundos)...";
+  if (!ssid) { res.textContent = "Selecciona una red o escribe su nombre."; return; }
+  res.textContent = "Conectando...";
   try {
     const r = await fetchApi("/api/wifi/conectar", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ssid, password: document.getElementById("wifi-pass").value }) });
     const d = await r.json();
-    if (!r.ok) { res.textContent = "Error: " + (d.error ?? "no conectó"); return; }
-    res.textContent = "Conectado a " + ssid + (d.ip ? " (IP " + d.ip + ")" : "") + ".";
+    if (!r.ok) { res.textContent = d.error ?? "No se pudo conectar a la red. Revisa la contraseña e inténtalo de nuevo."; return; }
+    res.textContent = "Conectado a " + ssid + ".";
     document.getElementById("wifi-pass").value = "";
     setTimeout(wifiCargar, 1500);
   } catch (e) {
     // Al cambiar de red la respuesta puede no llegar: la IP del gateway
     // cambia y la sesión por el WiFi anterior cae.
-    res.textContent = "Sin respuesta. Si cambiaste de red, la IP del gateway "
-                    + "cambió; vuelve a entrar por gateway.local.";
+    res.textContent = "Conexión interrumpida. Abre gateway.local para volver a entrar.";
   }
 }
 
@@ -2922,15 +3100,9 @@ let dbgKeep = false;   // bandera del bucle de lectura
 let dbgLoopDone = null;// promesa del bucle de lectura, para cerrar sin carrera
 
 const DBG_AYUDA = {
-  gateway: "Salida del servicio del gateway en vivo (journalctl).",
-  serial:  "Salida serie de un nodo por USB. Elige la fuente: conectado al "
-         + "gateway (lo lee la Pi) o a este equipo (lo lee el navegador por "
-         + "Web Serial, solo Chrome o Edge de escritorio). En el gateway, el "
-         + "puerto del Heltec queda excluido y no se puede comisionar a la vez.",
-  modbus:  "Cada línea lleva el modo de depuración del nodo que la emitió "
-         + "(modo=off / errors_* solo fallidas / all_* también correctas; "
-         + "_last una por ciclo, _each cada transacción). Un nodo en off no "
-         + "emite ninguna. Sin nodo seleccionado, muestra las de todos.",
+  gateway: "Actividad del gateway.",
+  serial:  "Actividad del nodo conectado por USB.",
+  modbus:  "Actividad de las lecturas Modbus.",
 };
 
 async function debugInit() {
@@ -2950,7 +3122,7 @@ async function debugInit() {
     });
     if (!sel.options.length) {
       const o = document.createElement("option");
-      o.value = ""; o.textContent = "sin puertos USB";
+      o.value = ""; o.textContent = "No hay dispositivos USB";
       sel.appendChild(o);
     }
   } catch (e) { /* la lista queda vacía */ }
@@ -3018,13 +3190,11 @@ async function dbgModoModbus() {
     if (n.mb_debug_name === "off") {
       el.hidden = false;
       el.className = "aviso";
-      el.textContent = `${nombre}: depuración Modbus en OFF, por eso no `
-        + "aparece ninguna trama. Se cambia en la configuración del nodo.";
+      el.textContent = `El diagnóstico Modbus está desactivado para ${nombre}.`;
     } else if (n.mb_debug_name == null) {
       el.hidden = false;
       el.className = "aviso";
-      el.textContent = `${nombre}: modo de depuración aún desconocido. El nodo `
-        + "lo reporta al arrancar, así que aparecerá tras su próximo arranque.";
+      el.textContent = `El estado del diagnóstico Modbus no está disponible para ${nombre}.`;
     }
   } catch (e) { /* sin aviso: las líneas siguen llevando su modo */ }
 }
@@ -3062,9 +3232,9 @@ function debugToggle() {
   dbgEs = new EventSource(url);
   dbgEs.onmessage = (ev) => debugAppend(ev.data);
   dbgEs.onerror = () => {
-    document.getElementById("dbg-info").textContent = "conexión interrumpida";
+    document.getElementById("dbg-info").textContent = "Conexión interrumpida";
   };
-  document.getElementById("dbg-info").textContent = "en vivo";
+  document.getElementById("dbg-info").textContent = "En curso";
   document.getElementById("dbg-toggle").textContent = "Detener";
 }
 
@@ -3072,10 +3242,10 @@ function debugStop() {
   if (dbgEs) { dbgEs.close(); dbgEs = null; }
   if (dbgPort || dbgReader) { debugLocalStop(); }   // async, sin await
   const t = document.getElementById("dbg-toggle");
-  if (t) t.textContent = "Iniciar";
+  if (t) t.textContent = "Iniciar diagnóstico";
   const i = document.getElementById("dbg-info");
-  if (i && (i.textContent === "en vivo" ||
-            i.textContent === "en vivo (este equipo)")) i.textContent = "";
+  if (i && (i.textContent === "En curso" ||
+            i.textContent === "En curso en este ordenador")) i.textContent = "";
 }
 
 // ----- Monitor serie por Web Serial (nodo en el USB de este ordenador) -----
@@ -3091,12 +3261,12 @@ async function debugLocalStart() {
     port = await navigator.serial.requestPort();   // popup de elección de puerto
     await port.open({ baudRate: 115200 });
   } catch (e) {
-    info.textContent = "No se abrió el puerto: " + (e.message || e);
+    info.textContent = textoError(e, "No se pudo acceder al dispositivo USB. Revisa la conexión e inténtalo de nuevo.");
     return;
   }
   dbgPort = port;
   dbgKeep = true;
-  info.textContent = "en vivo (este equipo)";
+  info.textContent = "En curso en este ordenador";
   document.getElementById("dbg-toggle").textContent = "Detener";
   dbgLoopDone = debugLocalLoop();   // se guarda para cerrar sin carrera
 }
@@ -3177,12 +3347,11 @@ async function fwCargar() {
     const r = await fetchApi("/api/config/firmware");
     const d = await r.json();
     if (d.bin) {
-      info.textContent = `Binario nodo.bin presente (${Math.round(d.bin.size / 1024)} kB, ${d.bin.mtime}).`;
+      info.textContent = "Actualización disponible.";
     } else {
-      info.textContent = "No hay nodo.bin en el gateway. Generarlo con "
-        + "nodo/make_dist.sh en el Mac y copiarlo con el resto del pi-service.";
+      info.textContent = "No hay una actualización disponible para el nodo.";
     }
-  } catch (e) { info.textContent = "Error consultando el binario: " + e.message; }
+  } catch (e) { info.textContent = textoError(e, "No se pudo comprobar si hay una actualización disponible."); }
   fwFuenteCtrls();
 }
 
@@ -3230,12 +3399,12 @@ async function fwLoraNodos() {
     });
     if (!sel.options.length) {
       const o = document.createElement("option");
-      o.value = ""; o.textContent = "sin nodos conocidos";
+      o.value = ""; o.textContent = "No hay nodos disponibles";
       sel.appendChild(o);
     }
   } catch (e) {
     const o = document.createElement("option");
-    o.value = ""; o.textContent = "error consultando la red";
+    o.value = ""; o.textContent = "No se pudo cargar la lista de nodos";
     sel.appendChild(o);
   }
   fwLoraAvisoImagen();
@@ -3250,37 +3419,32 @@ async function fwLoraAvisoImagen() {
     const d = await r.json();
     if (!d.disponible) {
       el.className = "aviso mal";
-      el.textContent = d.error || "no hay imagen disponible";
+      el.textContent = d.error || "No hay una actualización disponible.";
       document.getElementById("fw-lora-enviar").disabled = true;
       return;
     }
     el.className = "aviso";
-    el.textContent = `Imagen ${d.version}: ${d.bytes} B en ${d.fragmentos} `
-      + `fragmentos, ${d.aire_min} min de tiempo de aire`
-      // El tiempo de aire dice cuánto ocupa el canal, no cuánto tarda. Lo
-      // segundo es lo que quiere saber quien va a lanzarla, y sale de repartir
-      // ese aire dentro del ciclo de trabajo que permite la norma.
+    el.textContent = `Actualización ${d.version} disponible.`
       + (d.horas_8pct != null
-           ? `, unas ${String(d.horas_8pct).replace(".", ",")} h con el 8 % de `
-             + "ciclo de trabajo de la norma."
-           : ".");
+           ? ` Tiempo estimado: ${String(d.horas_8pct).replace(".", ",")} h.`
+           : "");
     document.getElementById("fw-lora-enviar").disabled = false;
   } catch (e) {
     el.className = "aviso mal";
-    el.textContent = "no se pudo consultar la imagen: " + e.message;
+    el.textContent = textoError(e, "No se pudo comprobar la actualización disponible. Inténtalo de nuevo.");
   }
 }
 
 async function fwLoraEnviar() {
   const aviso = document.getElementById("fw-lora-aviso");
   const origin = Number(document.getElementById("fw-lora-nodo").value);
-  if (!origin) { aviso.className = "aviso mal"; aviso.textContent = "elegir nodo"; return; }
+  if (!origin) { aviso.className = "aviso mal"; aviso.textContent = "Selecciona un nodo."; return; }
   const cuerpo = {
     origin,
     hour_from: Number(document.getElementById("fw-lora-desde").value),
     hour_to:   Number(document.getElementById("fw-lora-hasta").value),
   };
-  aviso.className = "aviso"; aviso.textContent = "encolando...";
+  aviso.className = "aviso"; aviso.textContent = "Preparando la actualización...";
   try {
     const r = await fetchApi("/api/config/lora/firmware/enviar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -3288,7 +3452,7 @@ async function fwLoraEnviar() {
     const d = await r.json();
     if (!r.ok) {
       aviso.className = "aviso mal";
-      aviso.textContent = d.error || "error";
+      aviso.textContent = d.error || "No se pudo iniciar la actualización.";
       // Con una ya en curso se ofrece seguirla en vez de dejar al usuario
       // atascado: casi siempre es lo que quería.
       if (d.id) fwLoraSeguir(d.id);
@@ -3297,7 +3461,7 @@ async function fwLoraEnviar() {
     fwLoraSeguir(d.id);
   } catch (e) {
     aviso.className = "aviso mal";
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo iniciar la actualización. Inténtalo de nuevo.");
   }
 }
 
@@ -3339,7 +3503,7 @@ function fwLoraSeguir(id) {
     try {
       const r = await fetchApi("/api/config/lora/firmware/estado?id=" + id);
       const d = await r.json();
-      if (!r.ok) { aviso.textContent = d.error || "error"; return; }
+      if (!r.ok) { aviso.textContent = d.error || "No se pudo consultar la actualización."; return; }
       barra.value = d.pct;
       // Los campos vuelven a la ventana con la que se LANZÓ esta subida, no a
       // la que tuviera el formulario. Al recargar la página aparecían los
@@ -3363,20 +3527,13 @@ function fwLoraSeguir(id) {
       aviso.className = d.state === "failed" ? "aviso mal" : "aviso";
       aviso.textContent =
         d.state === "ready"
-          ? `Imagen ${d.version} entera y verificada en el nodo. `
-            + "Instalar reinicia el nodo; si no vuelve a la red en cuatro "
-            + "minutos, el gestor de arranque restaura la anterior solo."
-          : `${d.state}: ${d.pct} % (${d.written}/${d.total_len} B)`
-            // La ventana horaria de la subida EN CURSO, que puede no ser la
-            // que muestren los campos de arriba: quien vuelve a la página se
-            // encuentra los valores por defecto y no los que se usaron al
-            // lanzarla, y sin esto no hay forma de saber por qué está parada.
+          ? `Actualización ${d.version} lista para instalar.`
+          : `Actualización en curso: ${d.pct} %`
             + (d.hour_from != null && d.hour_to != null
                  && d.hour_from !== d.hour_to
-                 ? ` · ventana ${String(d.hour_from).padStart(2, "0")}:00 a `
+                 ? ` · horario ${String(d.hour_from).padStart(2, "0")}:00 a `
                    + `${String(d.hour_to).padStart(2, "0")}:00`
-                 : " · sin ventana horaria")
-            + (d.detail ? ` · ${d.detail}` : "");
+                 : "");
       if (cerrado) {
         clearInterval(fwLoraTimer);
         fwLoraTimer = null;
@@ -3395,14 +3552,10 @@ async function fwLoraCancelar() {
   if (!fwLoraId) return;
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Cancelar la subida",
-      "<p>Se corta la emisión. <b>Lo que el nodo ya ha recibido no se pierde</b>: "
-      + "sigue escrito en su partición dormida, y una subida posterior de la "
-      + "misma imagen continúa donde esta lo deje en vez de empezar de cero.</p>"
-      + "<p>El firmware que el nodo está ejecutando no se toca en ningún "
-      + "momento, ni ahora ni durante la subida.</p>",
-      { cancelar: true, cancelarText: "Seguir subiendo",
-        confirmar: true, confirmarText: "Cancelar subida",
+    cfgDialogo("Cancelar la actualización",
+      "<p>La actualización se detendrá. El nodo seguirá disponible.</p>",
+      { cancelar: true, cancelarText: "Continuar actualización",
+        confirmar: true, confirmarText: "Cancelar actualización",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }
@@ -3414,9 +3567,9 @@ async function fwLoraCancelar() {
     const d = await r.json();
     aviso.className = r.ok ? "aviso" : "aviso mal";
     aviso.textContent = r.ok
-      ? "Subida cancelada. Lo recibido sigue en el nodo."
-      : "Error: " + (d.error ?? "no cancelada");
-  } catch (e) { aviso.className = "aviso mal"; aviso.textContent = "Error: " + e.message; }
+      ? "Actualización cancelada."
+      : (d.error ?? "No se pudo cancelar la actualización.");
+  } catch (e) { aviso.className = "aviso mal"; aviso.textContent = textoError(e); }
 }
 
 async function fwLoraInstalar() {
@@ -3428,12 +3581,9 @@ async function fwLoraInstalar() {
   // operador se entere, justo en la confirmación que reinicia un nodo.
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Instalar en el nodo",
-      "<p>El nodo se reiniciará con la imagen nueva.</p>"
-      + "<p>Si no consigue registrarse en la red en <b>cuatro minutos</b>, el "
-      + "gestor de arranque vuelve solo a la versión anterior. Aun así, "
-      + "durante ese rato el nodo no mide.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Instalar",
+    cfgDialogo("Instalar actualización",
+      "<p>El nodo dejará de estar disponible durante unos minutos. Si la actualización no se inicia correctamente, recuperará la versión anterior.</p>",
+      { cancelar: true, confirmar: true, confirmarText: "Instalar actualización",
         confirmarPeligro: false,
         onCancelar: () => resolve(false) });
   });
@@ -3445,11 +3595,11 @@ async function fwLoraInstalar() {
       body: JSON.stringify({ id: fwLoraId }) });
     const d = await r.json();
     aviso.className = r.ok ? "aviso" : "aviso mal";
-    aviso.textContent = r.ok ? "orden enviada, el nodo reinicia"
-                             : (d.error || "error");
+    aviso.textContent = r.ok ? "Instalación iniciada. El nodo volverá a estar disponible en unos minutos."
+                             : (d.error || "No se pudo iniciar la instalación. Inténtalo de nuevo.");
   } catch (e) {
     aviso.className = "aviso mal";
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo iniciar la instalación. Inténtalo de nuevo.");
   }
 }
 
@@ -3459,12 +3609,12 @@ async function fwLocalFlash() {
   const btn = document.getElementById("fw-local-flash");
   if (!("serial" in navigator)) {
     aviso.className = "aviso mal";
-    aviso.textContent = "Web Serial no disponible: usa Chrome o Edge de escritorio.";
+    aviso.textContent = "Esta opción requiere Chrome o Edge en un ordenador.";
     return;
   }
   if (!window.ESPLoader || !window.Transport) {
     aviso.className = "aviso mal";
-    aviso.textContent = "El flasheador no cargó (falta el vendor esptool-js; correr get_vendor.sh).";
+    aviso.textContent = "Esta opción no está disponible. Selecciona Gateway como método de actualización.";
     return;
   }
   btn.disabled = true;
@@ -3477,20 +3627,20 @@ async function fwLocalFlash() {
   };
   let transport = null;
   try {
-    aviso.textContent = "elige el puerto del nodo...";
+    aviso.textContent = "Selecciona el nodo...";
     const port = await navigator.serial.requestPort();
     transport = new window.Transport(port, false);
     // 115200 fijo (sin subir a 460800): el puente USB del Atom no sostiene la
     // escritura sostenida a mayor velocidad y da timeout, igual que en la Pi.
     const loader = new window.ESPLoader({ transport, baudrate: 115200,
                                           romBaudrate: 115200, terminal: term });
-    aviso.textContent = "conectando con el nodo...";
+    aviso.textContent = "Conectando con el nodo...";
     await loader.main();
-    aviso.textContent = "descargando el firmware...";
+    aviso.textContent = "Preparando la actualización...";
     const r = await fetchApi("/api/config/nodo-bin");
     if (!r.ok) {
       aviso.className = "aviso mal";
-      aviso.textContent = "no hay nodo.bin en el gateway.";
+      aviso.textContent = "No hay una actualización disponible para el nodo.";
       return;
     }
     const bytes = new Uint8Array(await r.arrayBuffer());
@@ -3500,16 +3650,16 @@ async function fwLocalFlash() {
     for (let i = 0; i < bytes.length; i += CH) {
       data += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
     }
-    aviso.textContent = "flasheando (conserva el config)...";
+    aviso.textContent = "Instalando la actualización...";
     await loader.writeFlash({
       fileArray: [{ data, address: 0 }],
       flashSize: "keep", flashMode: "keep", flashFreq: "keep",
       eraseAll: false, compress: true,
       reportProgress: (idx, written, total) => {
-        aviso.textContent = "flasheando " + Math.round(100 * written / total) + "%";
+        aviso.textContent = "Instalando la actualización: " + Math.round(100 * written / total) + " %";
       },
     });
-    aviso.textContent = "reiniciando el nodo...";
+    aviso.textContent = "Finalizando la actualización...";
     try {
       if (typeof loader.hardReset === "function") {
         await loader.hardReset();
@@ -3521,11 +3671,10 @@ async function fwLocalFlash() {
         await transport.setRTS(false);
       }
     } catch (e) { /* si falla, un power-cycle arranca el firmware nuevo */ }
-    aviso.textContent = "Firmware escrito. El nodo arranca con el binario nuevo; "
-      + "el config.json se conservó.";
+    aviso.textContent = "Actualización instalada. La configuración del nodo se ha conservado.";
   } catch (e) {
     aviso.className = "aviso mal";
-    aviso.textContent = "error: " + (e.message || e);
+    aviso.textContent = textoError(e, "No se pudo actualizar el nodo. Revisa la conexión e inténtalo de nuevo.");
   } finally {
     try { if (transport) await transport.disconnect(); } catch (e) { /* */ }
     btn.disabled = false;
@@ -3537,13 +3686,13 @@ async function fwLocalFlash() {
 async function fwBuscar() {
   const aviso = document.getElementById("fw-busqueda-aviso");
   const sel = document.getElementById("fw-puertos");
-  aviso.textContent = "buscando puertos...";
+  aviso.textContent = "Buscando el nodo...";
   try {
     const r = await fetchApi("/api/config/puertos");
     const d = await r.json();
     const cands = (d.ports || []).filter((p) => !p.gateway);
     if (!cands.length) {
-      aviso.textContent = "sin puertos candidatos: ¿Atom conectado por USB?";
+      aviso.textContent = "No se ha encontrado ningún nodo conectado. Revisa la conexión e inténtalo de nuevo.";
       document.getElementById("fw-flash").disabled = true;
       sel.hidden = true;
       return;
@@ -3551,46 +3700,44 @@ async function fwBuscar() {
     if (cands.length === 1) {
       fwPuerto = cands[0].port;
       sel.hidden = true;
-      aviso.textContent = "puerto: " + fwPuerto.split("/").pop();
+      aviso.textContent = "Nodo encontrado.";
     } else {
       sel.innerHTML = cands.map((p) =>
         `<option value="${p.port}">${p.port.split("/").pop()}</option>`).join("");
       sel.hidden = false;
       fwPuerto = sel.value;
-      aviso.textContent = "varios puertos: elegir cuál flashear";
+      aviso.textContent = "Selecciona uno de los nodos encontrados.";
     }
     document.getElementById("fw-flash").disabled = false;
-  } catch (e) { aviso.textContent = "error: " + e.message; }
+  } catch (e) { aviso.textContent = textoError(e, "No se pudo buscar el nodo. Revisa la conexión e inténtalo de nuevo."); }
 }
 
 function fwFlash() {
   const sel = document.getElementById("fw-puertos");
   const port = (!sel.hidden && sel.value) ? sel.value : fwPuerto;
   if (!port) {
-    document.getElementById("fw-resultado").textContent = "buscar primero el puerto";
+    document.getElementById("fw-resultado").textContent = "Busca y selecciona un nodo antes de continuar.";
     return;
   }
-  const T = "Flashear firmware del nodo";
+  const T = "Actualizar el nodo";
   cfgConfirmarCb = async () => {
     document.getElementById("fw-flash").disabled = true;
-    cfgDialogo(T, SPIN + "flasheando el nodo por USB (esptool, cerca de un minuto)...");
+    cfgDialogo(T, SPIN + "Instalando la actualización...");
     try {
       const r = await fetchApi("/api/config/flash", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port }) });
       const d = await r.json();
-      if (!r.ok) { cfgDialogo(T, "Error:<pre>" + (d.error ?? "error") + "</pre>", { cerrar: true }); return; }
-      cfgDialogo(T, "Firmware escrito. El Atom arranca con el binario nuevo.<pre>"
-                    + (d.output || "") + "</pre>", { cerrar: true });
+      if (!r.ok) { cfgDialogo(T, d.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true }); return; }
+      cfgDialogo(T, "Actualización instalada. La configuración del nodo se ha conservado.", { cerrar: true });
     } catch (e) {
-      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo actualizar el nodo. Inténtalo de nuevo."), { cerrar: true });
     } finally {
       document.getElementById("fw-flash").disabled = false;
     }
   };
-  cfgDialogo(T, "¿Flashear el firmware del nodo en el puerto " + port.split("/").pop()
-              + "? Se borra el firmware anterior del Atom (su config.json en flash "
-              + "se conserva).", { cancelar: true, confirmar: true });
+  cfgDialogo(T, "La actualización tardará aproximadamente un minuto. La configuración actual del nodo se conservará.",
+    { cancelar: true, confirmar: true, confirmarText: "Actualizar el nodo" });
 }
 
 document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
@@ -3655,13 +3802,13 @@ function readRowHtml(bits) {
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
-    <input data-f="scale" class="fin-n" type="number" step="any" placeholder="escala">
-    <input data-f="offset" class="fin-n" type="number" step="any" placeholder="offset">`;
+    <input data-f="scale" class="fin-n" type="number" step="any" placeholder="Escala">
+    <input data-f="offset" class="fin-n" type="number" step="any" placeholder="Desplazamiento">`;
   return `<div class="frow">
-    <input data-f="id" class="fin-id" placeholder="id *" maxlength="8">
-    <input data-f="name" class="fin" placeholder="nombre *">
-    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
-    <input data-f="count" class="fin-n" type="number" min="1" max="125" value="1" title="cantidad">
+    <input data-f="id" class="fin-id" placeholder="ID *" maxlength="8" aria-label="Identificador de la medida">
+    <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la medida">
+    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
+    <input data-f="count" class="fin-n" type="number" min="1" max="125" value="1" title="Cantidad" aria-label="Cantidad de registros">
     ${reg}
     <input data-f="unit" class="fin-u" placeholder="unidad">
     <button type="button" class="frow-del" title="Quitar">−</button>
@@ -3671,17 +3818,17 @@ function readRowHtml(bits) {
 function writeRowHtml() {
   return `<div class="frow">
     <select data-f="function" class="fin-s">
-      <option value="write_single_coil">bobina</option>
-      <option value="write_single_register">registro</option>
-      <option value="write_multiple_coils">bobinas múlt.</option>
-      <option value="write_multiple_registers">registros múlt.</option>
+      <option value="write_single_coil">Bobina</option>
+      <option value="write_single_register">Registro</option>
+      <option value="write_multiple_coils">Varias bobinas</option>
+      <option value="write_multiple_registers">Varios registros</option>
     </select>
-    <input data-f="id" class="fin-id" placeholder="id *" maxlength="8">
-    <input data-f="name" class="fin" placeholder="nombre *">
-    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="dir">
-    <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1">
+    <input data-f="id" class="fin-id" placeholder="ID *" maxlength="8" aria-label="Identificador de la salida">
+    <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la salida">
+    <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
+    <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1" aria-label="Cantidad de registros">
     <select data-f="type" class="fin-s freg">
-      <option value="">tipo</option>
+      <option value="">Tipo</option>
       <option value="uint16">uint16</option><option value="int16">int16</option>
       <option value="uint32">uint32</option><option value="int32">int32</option>
       <option value="float32">float32</option>
@@ -3690,9 +3837,9 @@ function writeRowHtml() {
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
-    <input data-f="scale" class="fin-n freg" type="number" step="any" placeholder="escala">
-    <input data-f="offset" class="fin-n freg" type="number" step="any" placeholder="offset">
-    <input data-f="unit" class="fin-u" placeholder="unidad">
+    <input data-f="scale" class="fin-n freg" type="number" step="any" placeholder="Escala">
+    <input data-f="offset" class="fin-n freg" type="number" step="any" placeholder="Desplazamiento">
+    <input data-f="unit" class="fin-u" placeholder="Unidad">
     <button type="button" class="frow-del" title="Quitar">−</button>
   </div>`;
 }
@@ -3701,7 +3848,7 @@ function deviceHtml(idx) {
   const reads = MB_READS.map((c) => `
     <div class="fread" data-fn="${c.key}">
       <div class="fread-head"><span>${c.label}</span>
-        <button type="button" class="fread-add" data-bits="${c.bits ? 1 : 0}">+ añadir</button>
+        <button type="button" class="fread-add" data-bits="${c.bits ? 1 : 0}">Añadir medida</button>
       </div>
       <div class="frows"></div>
     </div>`).join("");
@@ -3710,30 +3857,30 @@ function deviceHtml(idx) {
       <button type="button" class="fdev-del" title="Quitar dispositivo">Quitar</button>
     </div>
     <div class="cfg-form">
-      <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input data-fd="name" placeholder="amb"></label>
-      <label class="cfg-campo"><span>Descripción</span><input data-fd="description" placeholder="opcional"></label>
-      <label class="cfg-campo"><span>Slave ID (fábrica)</span><input data-fd="default_slave_id" type="number" min="1" max="247" value="1"></label>
-      <label class="cfg-campo"><span>Slave ID (deseado)</span><input data-fd="desired_slave_id" type="number" min="1" max="247" value="1"></label>
+      <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input data-fd="name" placeholder="Sensor ambiental"></label>
+      <label class="cfg-campo"><span>Descripción</span><input data-fd="description" placeholder="Opcional"></label>
+      <label class="cfg-campo"><span>Dirección Modbus actual</span><input data-fd="default_slave_id" type="number" min="1" max="247" value="1"></label>
+      <label class="cfg-campo"><span>Nueva dirección Modbus</span><input data-fd="desired_slave_id" type="number" min="1" max="247" value="1"></label>
     </div>
     <details class="form-avz">
       <summary>Avanzado del dispositivo</summary>
       <div class="cfg-form">
         <div class="fchange" hidden>
-          <label class="cfg-campo"><span>Cambio slave: función</span>
-            <select data-fd="change_function"><option value="">(ninguna)</option><option value="write_single_register">write_single_register</option><option value="write_single_coil">write_single_coil</option></select>
+          <label class="cfg-campo"><span>Función para cambiar la dirección</span>
+            <select data-fd="change_function"><option value="">Seleccionar</option><option value="write_single_register">Escribir un registro</option><option value="write_single_coil">Escribir una bobina</option></select>
           </label>
-          <label class="cfg-campo"><span>Cambio slave: dirección</span><input data-fd="change_address" type="number" min="0" max="65535" placeholder="opcional"></label>
+          <label class="cfg-campo"><span>Registro de cambio</span><input data-fd="change_address" type="number" min="0" max="65535" placeholder="Opcional"></label>
         </div>
         <label class="cfg-campo"><span>Modo lectura</span>
           <select data-fd="read_mode"><option value="grouped">agrupada</option><option value="individual">individual</option></select>
         </label>
-        <label class="cfg-campo"><span>Respiro lecturas (ms)</span><input data-fd="inter_read_ms" type="number" min="0" max="5000" value="250"></label>
+        <label class="cfg-campo"><span>Pausa entre lecturas (ms)</span><input data-fd="inter_read_ms" type="number" min="0" max="5000" value="250"></label>
       </div>
     </details>
     <div class="freads">${reads}</div>
     <div class="fwrite-block">
-      <div class="fread-head"><span>Salidas / escrituras <em class="fin-note">(declarativas por ahora)</em></span>
-        <button type="button" class="fwrite-add">+ añadir</button>
+      <div class="fread-head"><span>Salidas</span>
+        <button type="button" class="fwrite-add">Añadir salida</button>
       </div>
       <div class="fwrites"></div>
     </div>
@@ -3780,15 +3927,19 @@ function formSetModo(modo) {
   document.querySelectorAll("#cfg-form .cfg-card").forEach((c) => {
     if (c.id !== "f-modo-card") c.hidden = (modo === null);
   });
-  document.getElementById("f-modo-nuevo").classList.toggle("btn-primario", modo !== "existente");
-  document.getElementById("f-modo-existente").classList.toggle("btn-primario", modo !== "nuevo");
+  const nuevoBtn = document.getElementById("f-modo-nuevo");
+  const existenteBtn = document.getElementById("f-modo-existente");
+  nuevoBtn.classList.toggle("seleccionada", modo === "nuevo");
+  existenteBtn.classList.toggle("seleccionada", modo === "existente");
+  nuevoBtn.setAttribute("aria-pressed", String(modo === "nuevo"));
+  existenteBtn.setAttribute("aria-pressed", String(modo === "existente"));
   if (modo === null) {
     aviso.textContent = "";
     return;
   }
 
   const nuevo = modo === "nuevo";
-  aviso.textContent = nuevo ? "Nodo nuevo" : "Reconfigurar un nodo de la red";
+  aviso.textContent = "";
 
   // Un nodo sin configurar no está en la red, así que por radio no se le llega:
   // la opción de LoRa desaparece del selector en vez de quedarse ahí para
@@ -3802,12 +3953,11 @@ function formSetModo(modo) {
   document.getElementById("f-leer").hidden = nuevo;
   document.getElementById("f-leer-aviso").textContent = "";
   nota.textContent = nuevo
-    ? "Elige por dónde se carga el nodo. Los parámetros de red vienen ya "
-      + "puestos con los del gateway y el ID es el primero libre."
-    : "Elige por dónde hablar con el nodo y léelo: lo leído rellena el "
-      + "formulario y ese mismo nodo queda como destino del envío.";
+    ? "Selecciona dónde está conectado el nodo."
+    : "Selecciona el nodo e importa su configuración.";
 
   if (nuevo) formNodoNuevo();
+  formNbiotVis();
   formFuenteCtrls();
   formLive();
 }
@@ -3879,22 +4029,23 @@ async function formCargarNodos() {
 function schemaCompat(declarados) {
   if (!declarados) {
     return { bloquea: false, texto:
-      `Este nodo no declara qué versiones del config entiende (firmware `
-      + `anterior). El visor genera la ${SCHEMA_GENERADO}; si el nodo no la `
-      + `soporta, la rechazará al aplicarla y revertirá sola en unos minutos.` };
+      "No se puede confirmar la compatibilidad con este nodo. Si la configuración no es compatible, el nodo conservará la actual." };
   }
   const lista = declarados.split(",").map((x) => x.trim()).filter(Boolean);
   if (lista.includes(SCHEMA_GENERADO)) return null;
   return { bloquea: true, texto:
-    `El visor genera el config con schema ${SCHEMA_GENERADO} y este nodo solo `
-    + `entiende ${lista.join(", ")}. Lo rechazaría al aplicarlo. Actualiza `
-    + `antes el firmware del nodo.` };
+    "Esta configuración no es compatible con el nodo. Actualiza el nodo antes de continuar." };
 }
 
 // Pinta el veredicto donde toca y devuelve si bloquea. El aviso va en la caja
 // del estado de firmware, que es donde el operador ya mira antes de enviar.
 function schemaAviso(declarados) {
   const est = document.getElementById("f-schema-aviso");
+  if (est && !formDestinoListo) {
+    est.hidden = true;
+    est.textContent = "";
+    return false;
+  }
   const r = schemaCompat(declarados);
   if (!est) return false;
   if (r === null) {
@@ -3987,8 +4138,8 @@ function formLive() {
   if (id >= 1 && id <= 254 && nodosConocidos.has(id) && id !== idLeido) {
     idEnUso = true;
     idAviso.className = "aviso ambar";
-    idAviso.textContent = `ID ${id} ya en uso por «${nodosConocidos.get(id)}». `
-      + "Si reconfiguras ese nodo usa «Leer del nodo» primero; si no, elige otro ID.";
+    idAviso.textContent = `El identificador ${id} ya pertenece a «${nodosConocidos.get(id)}». `
+      + "Importa la configuración de ese nodo o utiliza otro identificador.";
   } else {
     idAviso.className = "aviso";
     idAviso.textContent = "";
@@ -4007,12 +4158,13 @@ function formLive() {
   const pend = document.getElementById("f-pendientes");
   if (errs.length) {
     pend.className = "aviso mal";
-    pend.textContent = `Pendiente (${errs.length}): ` + errs.join("; ");
+    pend.textContent = `Revisa ${errs.length} `
+      + (errs.length === 1 ? "campo" : "campos") + ": " + errs.join("; ");
   } else {
     pend.className = "aviso";
     pend.textContent = idEnUso
-      ? "Sin errores de formato; revisa el aviso del ID antes de enviar."
-      : "Sin errores.";
+      ? "Revisa el identificador del nodo antes de continuar."
+      : "Configuración lista para enviar.";
   }
 
   // La caja refleja el formulario en todo momento, con errores o sin ellos:
@@ -4024,7 +4176,7 @@ function formLive() {
   } catch (e) {
     caja.value = "";
     pend.className = "aviso mal";
-    pend.textContent = "no se puede generar el config: " + e.message;
+    pend.textContent = "No se pudo preparar la configuración. Revisa los campos e inténtalo de nuevo.";
   }
 
   // Buscar el nodo solo tiene sentido con una configuración que se pueda
@@ -4067,10 +4219,16 @@ function formLockRed() {
     document.getElementById("f-mtls").checked = m.tls !== false;
     if (d.source !== "gateway") {
       const nota = document.getElementById("f-red-nota");
-      nota.textContent += " (Aviso: no se pudo leer la config del gateway; se "
-        + "muestran valores por defecto.)";
+      nota.className = "mensaje mensaje-error";
+      nota.innerHTML = '<span class="mensaje-titulo">No se han podido comprobar los ajustes de red</span>'
+        + '<span class="mensaje-detalle">Actualiza la página antes de configurar el nodo.</span>';
     }
-  }).catch(() => {});
+  }).catch(() => {
+    const nota = document.getElementById("f-red-nota");
+    nota.className = "mensaje mensaje-error";
+    nota.innerHTML = '<span class="mensaje-titulo">No se han podido comprobar los ajustes de red</span>'
+      + '<span class="mensaje-detalle">Actualiza la página antes de configurar el nodo.</span>';
+  });
 }
 
 // Popup de incongruencia (camino B): al leer un nodo, compara sus parámetros
@@ -4093,13 +4251,11 @@ function formNetCheck(cfg) {
   if (cmp(!!sec.enabled, !!Rsec.enabled)) dif.push("seguridad");
   else if ((sec.enabled || Rsec.enabled) && cmp(sec.key, Rsec.key)) dif.push("clave de red");
   if (!dif.length) return;
-  cfgDialogo("Parámetros de red distintos",
-    "Los parámetros de red leídos del nodo no coinciden con los de la red "
-    + "actual (" + dif.join(", ") + "). ¿Actualizarlos a la red actual? "
-    + "Con «Sí» se enviarán los de la red actual (recomendado). Con «No» se "
-    + "conservan los del nodo y quedan editables.",
-    { confirmar: true, confirmarText: "Sí, actualizar", confirmarPeligro: false,
-      cancelar: true, cancelarText: "No, editar",
+  cfgDialogo("Ajustes de red diferentes",
+    "La configuración del nodo no coincide con la red actual: " + dif.join(", ")
+    + ". Para mantenerlo conectado, aplica los ajustes actuales.",
+    { confirmar: true, confirmarText: "Usar ajustes actuales", confirmarPeligro: false,
+      cancelar: true, cancelarText: "Revisar manualmente",
       onCancelar: () => formNetUnlock(cfg) });
   cfgConfirmarCb = () => cfgDialogoCerrar();
 }
@@ -4317,35 +4473,35 @@ function buildConfig(f) {
 function fValidate(f) {
   const e = [];
   const id = Number(f.node.id);
-  if (!(id >= 1 && id <= 254)) e.push("ID del nodo 1-254");
-  if (!f.node.name) e.push("nombre del nodo requerido");
-  const sf = Number(f.lora.sf); if (!(sf >= 7 && sf <= 12)) e.push("SF 7-12");
-  const tx = Number(f.lora.tx_power_dbm); if (!(tx >= 2 && tx <= 22)) e.push("potencia 2-22 dBm");
-  if (!(Number(f.lora.send_interval_ms) >= 100)) e.push("intervalo ≥100 ms");
+  if (!(id >= 1 && id <= 254)) e.push("el identificador debe estar entre 1 y 254");
+  if (!f.node.name) e.push("indica el nombre del nodo");
+  const sf = Number(f.lora.sf); if (!(sf >= 7 && sf <= 12)) e.push("el factor de dispersión debe estar entre 7 y 12");
+  const tx = Number(f.lora.tx_power_dbm); if (!(tx >= 2 && tx <= 22)) e.push("la potencia debe estar entre 2 y 22 dBm");
+  if (!(Number(f.lora.send_interval_ms) >= 100)) e.push("el intervalo de envío debe ser de al menos 100 ms");
   if (f.lora.security_enabled && !/^[0-9a-fA-F]{32}$/.test(f.lora.security_key || ""))
-    e.push("clave de red de 32 hex");
+    e.push("la clave de red debe tener 32 caracteres hexadecimales");
   if (f.node.type === "super_node") {
-    if (!f.nbiot.apn) e.push("NB-IoT: APN requerido");
-    if (!f.nbiot.mqtt_broker) e.push("NB-IoT: broker requerido");
+    if (!f.nbiot.apn) e.push("indica el APN del supernodo");
+    if (!f.nbiot.mqtt_broker) e.push("indica el servidor MQTT del supernodo");
   }
-  if (!f.modbus.devices.length) e.push("al menos un dispositivo Modbus");
+  if (!f.modbus.devices.length) e.push("añade al menos un dispositivo Modbus");
   f.modbus.devices.forEach((d, i) => {
-    const p = `disp ${i + 1}: `;
-    if (!d.name) e.push(p + "nombre requerido");
+    const p = `dispositivo ${i + 1}: `;
+    if (!d.name) e.push(p + "indica el nombre");
     const ds = Number(d.default_slave_id), de = Number(d.desired_slave_id);
-    if (!(ds >= 1 && ds <= 247)) e.push(p + "slave fábrica 1-247");
-    if (!(de >= 1 && de <= 247)) e.push(p + "slave deseado 1-247");
-    if (ds !== de && !d.change_function) e.push(p + "slave distinto exige función de cambio");
-    if (!d.reads.length) e.push(p + "sin lecturas");
+    if (!(ds >= 1 && ds <= 247)) e.push(p + "la dirección actual debe estar entre 1 y 247");
+    if (!(de >= 1 && de <= 247)) e.push(p + "la nueva dirección debe estar entre 1 y 247");
+    if (ds !== de && !d.change_function) e.push(p + "selecciona cómo cambiar la dirección Modbus");
+    if (!d.reads.length) e.push(p + "añade al menos una medida");
     [...d.reads, ...d.writes].forEach((r) => {
-      const rp = p + (r.id || "(sin id)") + ": ";
-      if (!r.id || r.id.length < 2 || r.id.length > 8) e.push(rp + "id de 2-8 caracteres");
-      if (!r.name) e.push(rp + "nombre requerido");
-      const a = Number(r.address); if (!(a >= 0 && a <= 65535)) e.push(rp + "dirección 0-65535");
+      const rp = p + (r.id || "medida sin identificar") + ": ";
+      if (!r.id || r.id.length < 2 || r.id.length > 8) e.push(rp + "el identificador debe tener entre 2 y 8 caracteres");
+      if (!r.name) e.push(rp + "indica el nombre");
+      const a = Number(r.address); if (!(a >= 0 && a <= 65535)) e.push(rp + "la dirección debe estar entre 0 y 65535");
       const bits = ["read_coils", "read_discrete_inputs", "write_single_coil",
                     "write_multiple_coils"].includes(r.function);
-      if (!bits && !r.type) e.push(rp + "tipo requerido para registros");
-      if (!bits && REG32.has(r.type) && Number(r.count || 1) !== 2) e.push(rp + "count=2 para 32 bits");
+      if (!bits && !r.type) e.push(rp + "selecciona el tipo de dato");
+      if (!bits && REG32.has(r.type) && Number(r.count || 1) !== 2) e.push(rp + "los valores de 32 bits requieren dos registros");
     });
   });
   return e;
@@ -4480,12 +4636,12 @@ async function formLoraNodos() {
     });
     if (!sel.options.length) {
       const o = document.createElement("option");
-      o.value = ""; o.textContent = "sin nodos conocidos";
+      o.value = ""; o.textContent = "No hay nodos disponibles";
       sel.appendChild(o);
     }
   } catch (e) {
     const o = document.createElement("option");
-    o.value = ""; o.textContent = "error consultando la red";
+    o.value = ""; o.textContent = "Red no disponible";
     sel.appendChild(o);
   }
 }
@@ -4501,16 +4657,16 @@ async function formLoraNodos() {
 // quedaría vivo, en línea y midiendo nada.
 async function fLeerLora(aviso) {
   const origin = Number(document.getElementById("f-lora-nodo").value);
-  if (!origin) { aviso.textContent = "elegir primero el nodo en la lista"; return; }
+  if (!origin) { aviso.textContent = "Selecciona un nodo antes de continuar."; return; }
 
   document.getElementById("f-leer").disabled = true;
-  aviso.textContent = "pidiendo la configuración al nodo por radio...";
+  aviso.textContent = "Cargando la configuración del nodo...";
   try {
     const r = await fetchApi("/api/config/lora/leer", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ origin }) });
     const d = await r.json();
-    if (!r.ok) { aviso.textContent = d.error ?? "error"; return; }
+    if (!r.ok) { aviso.textContent = d.error ?? "No se pudo cargar la configuración del nodo."; return; }
 
     // El nodo sube sus fragmentos espaciados por su propio ciclo de trabajo,
     // así que esto tarda del orden de un minuto.
@@ -4525,26 +4681,24 @@ async function fLeerLora(aviso) {
       if (e.state === "done" && e.config) {
         let cfg;
         try { cfg = JSON.parse(e.config); } catch (err) {
-          aviso.textContent = "lo recibido no es JSON válido"; return;
+          aviso.textContent = "La configuración recibida no tiene un formato válido."; return;
         }
         fillForm(cfg);
         idLeido = Number(document.getElementById("f-id").value);
         formLive();
         formNetCheck(cfg);
-        aviso.textContent = `formulario rellenado desde el nodo ${origin} por radio `
-          + `(${e.detail || ""})`;
+        aviso.textContent = `Configuración cargada desde el nodo ${origin}.`;
         return;
       }
       if (e.state === "failed") {
-        aviso.textContent = "no se pudo leer: " + (e.detail || "error");
+        aviso.textContent = "No se pudo cargar la configuración del nodo. Inténtalo de nuevo.";
         return;
       }
-      aviso.textContent = `leyendo del nodo ${origin} por radio... `
-        + `(${Math.round(e.elapsed_s)} s)`;
+      aviso.textContent = `Cargando la configuración del nodo ${origin}...`;
     }
-    aviso.textContent = "la lectura no terminó en dos minutos y medio";
+    aviso.textContent = "La configuración está tardando más de lo esperado. Inténtalo de nuevo.";
   } catch (e) {
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo cargar la configuración del nodo. Inténtalo de nuevo.");
   } finally {
     document.getElementById("f-leer").disabled = false;
   }
@@ -4554,11 +4708,11 @@ async function fLeerLora(aviso) {
 // estado final llega del propio nodo por su CONFIG_RESULT, no de un timeout.
 async function formLoraSeguir(id, T, applyAt = 0) {
   const ETIQ = {
-    pending:    "en cola, esperando al gateway",
-    sending:    "enviando fragmentos por radio",
+    pending:    "Preparando la configuración...",
+    sending:    "Guardando la configuración...",
     committing: applyAt
-      ? "fragmentos entregados, guardando en el nodo hasta la hora del salto"
-      : "fragmentos entregados, aplicando en el nodo",
+      ? "Guardando la configuración..."
+      : "Aplicando la configuración...",
   };
   for (let i = 0; i < 240; i++) {         // hasta 4 min, con sondeo de 1 s
     await new Promise((r) => setTimeout(r, 1000));
@@ -4572,29 +4726,22 @@ async function formLoraSeguir(id, T, applyAt = 0) {
       // "aplicada" aquí sería mentir en el momento en que más importa saber
       // exactamente qué ha pasado y qué falta por pasar.
       cfgDialogo(T, applyAt
-        ? ("Configuración <b>guardada</b> en el nodo, sin aplicar.<pre>"
-           + (d.detail || "") + "</pre>La aplicará el "
+        ? ("Configuración guardada. Se aplicará el "
            + new Date(applyAt * 1000).toLocaleString()
-           + ", a la vez que el resto de la red y que el propio gateway. "
-           + "Hasta entonces sigue funcionando con la que tenía, y la "
-           + "operación se puede abortar sin consecuencias.")
-        : ("Configuración aplicada en el nodo.<pre>"
-           + (d.detail || "") + "</pre>El nodo reinicia y dispone de "
-           + "una ventana para volver a registrarse; si no lo consigue, "
-           + "restaura sola la configuración anterior."), { cerrar: true });
+           + " junto con el resto de la red.")
+        : "Configuración aplicada. El nodo volverá a estar disponible en unos segundos.",
+        { cerrar: true });
       return;
     }
     if (d.state === "failed") {
-      cfgDialogo(T, "El envío no se completó:<pre>" + (d.detail || "error")
-                  + "</pre>La configuración del nodo no ha cambiado.",
+      cfgDialogo(T, "No se pudo guardar la configuración. El nodo conserva la configuración anterior. Inténtalo de nuevo.",
                  { cerrar: true });
       return;
     }
-    cfgDialogo(T, SPIN + (ETIQ[d.state] || d.state)
+    cfgDialogo(T, SPIN + (ETIQ[d.state] || "Operación en curso...")
                  + ` (${Math.round(d.elapsed_s)} s)`);
   }
-  cfgDialogo(T, "El envío sigue en curso tras cuatro minutos. Puedes cerrar "
-              + "esta ventana: el gateway lo termina por su cuenta.",
+  cfgDialogo(T, "La operación continúa. El resultado estará disponible en esta pantalla.",
              { cerrar: true });
 }
 
@@ -4645,18 +4792,21 @@ async function formUltimaOperacion(origin) {
     const r = await fetchApi("/api/config/lora/ultima?origin=" + origin);
     const d = await r.json();
     if (!r.ok) { est.hidden = true; return; }
+    const estados = {
+      pending: "pendiente", sending: "en curso", committing: "guardando",
+      done: "completada", failed: "no completada", cancelled: "cancelada",
+    };
     const partes = [];
-    for (const [que, op] of [["Envío", d.envio], ["Lectura", d.lectura]]) {
+    for (const [que, op] of [["Último cambio", d.envio], ["Última importación", d.lectura]]) {
       if (!op) continue;
       const cuando = op.hace_s < 90 ? `hace ${Math.round(op.hace_s)} s`
                    : op.hace_s < 5400 ? `hace ${Math.round(op.hace_s / 60)} min`
                    : `hace ${(op.hace_s / 3600).toFixed(1)} h`;
-      partes.push(`${que}: ${op.viva ? "en curso" : op.state} ${cuando}`
-                  + (op.detail ? ` · ${op.detail}` : ""));
+      partes.push(`${que}: ${op.viva ? "en curso" : (estados[op.state] || "finalizada")} ${cuando}`);
     }
     est.hidden = partes.length === 0;
     est.className = "aviso";
-    est.textContent = partes.join(" — ");
+    est.textContent = partes.join(". ");
   } catch (e) { est.hidden = true; }
 }
 
@@ -4674,20 +4824,17 @@ function formLoraDestino() {
   if (!est) return;
   if (!origin) {
     est.hidden = false; est.className = "aviso";
-    est.textContent = "Elige arriba el nodo de destino.";
+    est.textContent = "Selecciona un nodo.";
     return;
   }
   const ver = fwPorNodo.get(origin) || "";
   est.hidden = false;
   est.className = "aviso";
-  est.textContent = (ver
-      ? `El nodo declaró firmware ${ver} al registrarse`
-        + (fwGateway && cmpVersionFw(ver, fwGateway) === -1
-           ? `, anterior al binario del gateway (${fwGateway}). Por radio no se `
-             + "puede actualizar el firmware; para eso hace falta cable. "
-           : ". ")
-      : "El gateway no tiene registrada la versión de firmware de este nodo. ")
-    + "Se envía solo la configuración, compactada para ahorrar aire.";
+  est.textContent = ver
+    ? (fwGateway && cmpVersionFw(ver, fwGateway) === -1
+      ? "El nodo necesita una actualización antes de poder editarse por la red LoRa. Conéctalo por cable."
+      : "Nodo disponible para editar.")
+    : "No se puede confirmar la versión del nodo. Solo se guardará la configuración.";
 }
 
 async function fLeer() {
@@ -4698,13 +4845,13 @@ async function fLeer() {
 
   if (formFuenteLocal()) {
     document.getElementById("f-leer").disabled = true;
-    aviso.textContent = "abriendo el puerto y leyendo el nodo...";
+    aviso.textContent = "Cargando la configuración del nodo...";
     try {
       const { ses, ident } = await formLocalSesion();
       const texto = await ses.get();
       let cfg;
       try { cfg = JSON.parse(texto); } catch (e) {
-        aviso.textContent = "config del nodo no es JSON válido"; return;
+        aviso.textContent = "La configuración del nodo no tiene un formato válido."; return;
       }
       fillForm(cfg);
       formPuerto = "local";
@@ -4715,10 +4862,9 @@ async function fLeer() {
       // aquí y se ahorra el "Buscar nodo" de abajo, que preguntaba por segunda
       // vez lo mismo que esta lectura ya sabe.
       await formCheckFw(ident || {});
-      aviso.textContent = "formulario rellenado desde el nodo en este equipo"
-        + (ident && ident.version ? ` (firmware ${ident.version})` : "");
+      aviso.textContent = "Configuración cargada desde el nodo.";
     } catch (e) {
-      aviso.textContent = "error: " + e.message;
+      aviso.textContent = textoError(e, "No se pudo cargar la configuración del nodo. Inténtalo de nuevo.");
     } finally {
       document.getElementById("f-leer").disabled = false;
     }
@@ -4728,21 +4874,21 @@ async function fLeer() {
   const body = {};
   if (!sel.hidden && sel.value) body.port = sel.value;
   document.getElementById("f-leer").disabled = true;
-  aviso.textContent = "detectando y leyendo el nodo...";
+  aviso.textContent = "Buscando el nodo y cargando su configuración...";
   try {
     const rd = await fetchApi("/api/config/detectar", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const dd = await rd.json();
     if (rd.status === 300 && dd.need_port) {
       sel.innerHTML = dd.ports.map((p) => `<option value="${p}">${p.split("/").pop()}</option>`).join("");
-      sel.hidden = false; aviso.textContent = "varios puertos: elegir y reintentar"; return;
+      sel.hidden = false; aviso.textContent = "Se han encontrado varios nodos. Selecciona uno e inténtalo de nuevo."; return;
     }
-    if (!rd.ok) { aviso.textContent = dd.error ?? "error"; return; }
+    if (!rd.ok) { aviso.textContent = dd.error ?? "No se pudo localizar el nodo."; return; }
     const r = await fetchApi("/api/config/nodo?port=" + encodeURIComponent(dd.port));
     const data = await r.json();
-    if (!r.ok) { aviso.textContent = data.error ?? "el nodo no devolvió config"; return; }
+    if (!r.ok) { aviso.textContent = data.error ?? "No se pudo cargar la configuración del nodo."; return; }
     let cfg;
-    try { cfg = JSON.parse(data.config); } catch (e) { aviso.textContent = "config del nodo no es JSON válido"; return; }
+    try { cfg = JSON.parse(data.config); } catch (e) { aviso.textContent = "La configuración del nodo no tiene un formato válido."; return; }
     fillForm(cfg);
     formPuerto = dd.port;
     idLeido = Number(document.getElementById("f-id").value);
@@ -4751,9 +4897,9 @@ async function fLeer() {
     // Mismo motivo que en la rama local: el nodo leído es el destino, y su
     // firmware se comprueba aquí en vez de con otro botón más abajo.
     await formCheckFw(dd.node || {});
-    aviso.textContent = "formulario rellenado desde el nodo en " + dd.port.split("/").pop();
+    aviso.textContent = "Configuración cargada desde el nodo.";
   } catch (e) {
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo cargar la configuración del nodo. Inténtalo de nuevo.");
   } finally {
     document.getElementById("f-leer").disabled = false;
   }
@@ -4776,14 +4922,12 @@ async function formCargarArchivo(file) {
     cfg = JSON.parse(await file.text());
   } catch (e) {
     res.className = "aviso mal";
-    res.textContent = `«${file.name}» no es JSON válido: ${e.message}. `
-      + "El formulario no se ha tocado.";
+    res.textContent = `«${file.name}» no tiene un formato válido. Selecciona otro archivo.`;
     return;
   }
   if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
     res.className = "aviso mal";
-    res.textContent = `«${file.name}» no contiene un objeto de configuración. `
-      + "El formulario no se ha tocado.";
+    res.textContent = `«${file.name}» no contiene una configuración válida. Selecciona otro archivo.`;
     return;
   }
 
@@ -4799,7 +4943,7 @@ async function formCargarArchivo(file) {
       + (errs.length === 1 ? "problema" : "problemas") + ": " + errs.join("; ");
   } else {
     res.className = "aviso";
-    res.textContent = `«${file.name}» cargado sin errores.`;
+    res.textContent = `«${file.name}» importado.`;
   }
   // Los parámetros de red del archivo pueden no ser los del gateway: el mismo
   // popup que avisa al leer de un nodo sirve aquí.
@@ -4811,7 +4955,7 @@ function formGuardarArchivo() {
   const texto = document.getElementById("f-preview").value;
   if (!texto) {
     res.className = "aviso mal";
-    res.textContent = "no hay config que guardar";
+    res.textContent = "Completa la configuración antes de descargarla.";
     return;
   }
   const form = collectForm();
@@ -4826,7 +4970,7 @@ function formGuardarArchivo() {
   a.click();
   URL.revokeObjectURL(url);
   res.className = "aviso";
-  res.textContent = "guardado como " + a.download;
+  res.textContent = "Archivo exportado: " + a.download;
 }
 
 async function formCopiar() {
@@ -4834,18 +4978,17 @@ async function formCopiar() {
   const texto = document.getElementById("f-preview").value;
   if (!texto) {
     res.className = "aviso mal";
-    res.textContent = "no hay config que copiar";
+    res.textContent = "Completa la configuración antes de copiarla.";
     return;
   }
   try {
     await navigator.clipboard.writeText(texto);
     res.className = "aviso";
-    res.textContent = "config copiado al portapapeles";
+    res.textContent = "Configuración copiada al portapapeles.";
   } catch (e) {
     // El portapapeles exige contexto seguro: por http a la IP de la Pi no está.
     res.className = "aviso mal";
-    res.textContent = "el navegador no deja copiar aquí (" + e.message
-      + "): selecciona el texto de la caja y cópialo a mano.";
+    res.textContent = "No se pudo copiar automáticamente. Selecciona el contenido y cópialo de forma manual.";
   }
 }
 
@@ -4895,9 +5038,9 @@ async function formCheckFw(node) {
     if (!latest || !ver || ver === latest || cmp === 0) {
       formMode = "config";
       est.className = "aviso";
-      est.textContent = (latest && ver ? `Firmware ModuLinkr ${ver} (última versión). `
-                                       : `Firmware ModuLinkr ${ver || "detectado"}. `)
-        + "Al enviar se cargará solo la configuración.";
+      est.textContent = latest && ver
+        ? `El nodo está actualizado (${ver}). Al continuar se guardará la configuración.`
+        : "Nodo detectado. Al continuar se guardará la configuración.";
       formDestino(true);
       return;
     }
@@ -4908,10 +5051,7 @@ async function formCheckFw(node) {
     if (cmp === 1) {
       formMode = "config";
       est.className = "aviso";
-      est.textContent = `El nodo lleva ModuLinkr ${ver}, MÁS NUEVO que el binario `
-        + `del gateway (${latest}). Cargar el firmware lo haría retroceder, así que `
-        + "al enviar se cargará solo la configuración. Para poder actualizar nodos "
-        + "hay que regenerar nodo.bin con nodo/make_dist.sh y copiarlo al gateway.";
+      est.textContent = `El nodo tiene una versión más reciente (${ver}). Solo se guardará la configuración.`;
       formDestino(true);
       return;
     }
@@ -4920,8 +5060,7 @@ async function formCheckFw(node) {
     if (cmp === null) {
       formMode = "config";
       est.className = "aviso";
-      est.textContent = `Firmware ModuLinkr ${ver} y binario del gateway ${latest}: `
-        + "no se pueden comparar. Al enviar se cargará solo la configuración.";
+      est.textContent = "No se pudo comprobar la versión del nodo. Solo se guardará la configuración.";
       formDestino(true);
       return;
     }
@@ -4934,12 +5073,8 @@ async function formCheckFw(node) {
     formMode = "config";
     est.className = "aviso";
     est.textContent = fw.startsWith("ModuLinkr")
-      ? `Firmware ModuLinkr ${ver}, desactualizado (última: ${latest}). `
-        + "Al enviar se cargará solo la configuración. Para actualizar el "
-        + "firmware, usa la página de firmware con la fuente 'este equipo'."
-      : "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
-        + "Cárgale el firmware desde la página de firmware con la fuente "
-        + "'este equipo' y vuelve aquí.";
+      ? "Hay una actualización disponible. Instálala desde Actualizar nodos antes de continuar."
+      : "El nodo necesita una actualización antes de poder configurarse.";
     formDestino(fw.startsWith("ModuLinkr"));
     return;
   }
@@ -4949,11 +5084,9 @@ async function formCheckFw(node) {
   formMode = "flash";
   est.className = "aviso";
   if (fw.startsWith("ModuLinkr")) {
-    est.textContent = `Firmware ModuLinkr ${ver}, desactualizado (última: ${latest}). `
-      + "Al enviar se actualizará el firmware y luego se cargará la configuración.";
+    est.textContent = `Hay una actualización disponible. Se instalará antes de guardar la configuración.`;
   } else {
-    est.textContent = "El nodo no responde como firmware ModuLinkr (virgen o ajeno). "
-      + "Al enviar se cargará el firmware y luego la configuración.";
+    est.textContent = "El nodo necesita una actualización. Se instalará antes de guardar la configuración.";
   }
   formDestino(true);
 }
@@ -4969,11 +5102,11 @@ async function formBuscar() {
 
   if (formFuenteLocal()) {
     document.getElementById("f-buscar").disabled = true;
-    aviso.textContent = "abriendo el puerto y detectando el nodo...";
+    aviso.textContent = "Buscando el nodo...";
     try {
       const { ident } = await formLocalSesion();
       formPuerto = "local";
-      aviso.textContent = "nodo detectado en este equipo";
+      aviso.textContent = "Nodo encontrado.";
       // La identidad de CFG.HELLO trae los mismos campos que la detección de
       // la Pi (fw y version), así que la comprobación de firmware vale igual.
       await formCheckFw(ident || {});
@@ -4981,9 +5114,7 @@ async function formBuscar() {
       // Sin respuesta al protocolo: por el gateway aquí se ofrecería flashear,
       // pero el flasheo local vive en la página de firmware. Se dice qué hacer
       // en vez de dejar al usuario con un error a secas.
-      aviso.textContent = "el nodo no respondió al protocolo de comisionamiento ("
-        + e.message + "). Si está virgen, cárgale antes el firmware desde la "
-        + "página de firmware con la fuente 'este equipo'.";
+      aviso.textContent = "El nodo necesita una actualización antes de poder configurarse.";
     } finally {
       document.getElementById("f-buscar").disabled = false;
     }
@@ -4993,7 +5124,7 @@ async function formBuscar() {
   const body = {};
   if (!sel.hidden && sel.value) body.port = sel.value;
   document.getElementById("f-buscar").disabled = true;
-  aviso.textContent = "buscando nodo (se reinicia al abrir el puerto)...";
+  aviso.textContent = "Buscando el nodo...";
   try {
     const r = await fetchApi("/api/config/detectar", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -5003,7 +5134,7 @@ async function formBuscar() {
       sel.innerHTML = data.ports.map((p) =>
         `<option value="${p}">${p.split("/").pop()}</option>`).join("");
       sel.hidden = false;
-      aviso.textContent = "varios puertos candidatos: elegir y volver a buscar";
+      aviso.textContent = "Se han encontrado varios nodos. Selecciona uno y vuelve a buscar.";
       return;
     }
     if (!r.ok) {
@@ -5014,10 +5145,10 @@ async function formBuscar() {
       return;
     }
     formPuerto = data.port;
-    aviso.textContent = `nodo en ${data.port.split("/").pop()}`;
+    aviso.textContent = "Nodo encontrado.";
     await formCheckFw(data.node || {});
   } catch (e) {
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo buscar el nodo. Revisa la conexión e inténtalo de nuevo.");
   } finally {
     document.getElementById("f-buscar").disabled = false;
   }
@@ -5036,19 +5167,18 @@ async function formVirgen(aviso, sel, chosenPort) {
         sel.innerHTML = cands.map((p) =>
           `<option value="${p.port}">${p.port.split("/").pop()}</option>`).join("");
         sel.hidden = false;
-        aviso.textContent = "no respondió el protocolo: elegir el puerto del Atom y reintentar";
+        aviso.textContent = "Se han encontrado varios nodos. Selecciona uno e inténtalo de nuevo.";
         return;
       } else {
-        aviso.textContent = "sin puertos candidatos: ¿Atom conectado por USB?";
+        aviso.textContent = "No se ha encontrado ningún nodo conectado. Revisa la conexión e inténtalo de nuevo.";
         return;
       }
     }
     formPuerto = port;
-    aviso.textContent = "Atom en " + port.split("/").pop()
-      + " sin responder el protocolo ModuLinkr.";
+    aviso.textContent = "Nodo encontrado. Necesita una actualización antes de poder configurarse.";
     await formCheckFw({});
   } catch (e) {
-    aviso.textContent = "error: " + e.message;
+    aviso.textContent = textoError(e, "No se pudo comprobar el nodo. Revisa la conexión e inténtalo de nuevo.");
   }
 }
 
@@ -5058,7 +5188,7 @@ async function formEnviar() {
   // Por LoRa no hay puerto que detectar: el destino es el nodo elegido en la
   // lista, y esa comprobación la hace la rama de envío por radio de abajo.
   if (!formPuerto && !formFuenteLora()) {
-    res.className = "aviso mal"; res.textContent = "buscar primero el nodo"; return;
+    res.className = "aviso mal"; res.textContent = "Busca y selecciona un nodo antes de continuar."; return;
   }
   // La caja la genera el formulario y se revalida aquí de todos modos: es la
   // última barrera antes de ocupar el aire o el cable con algo que el nodo
@@ -5066,20 +5196,20 @@ async function formEnviar() {
   const errs = fValidate(collectForm());
   if (errs.length) {
     res.className = "aviso mal";
-    res.textContent = `la configuración tiene ${errs.length} `
-      + (errs.length === 1 ? "problema" : "problemas") + ": " + errs.join("; ");
+    res.textContent = `Revisa ${errs.length} `
+      + (errs.length === 1 ? "campo" : "campos") + ": " + errs.join("; ");
     return;
   }
-  if (!texto) { res.className = "aviso mal"; res.textContent = "no hay configuración que enviar"; return; }
+  if (!texto) { res.className = "aviso mal"; res.textContent = "Completa la configuración antes de continuar."; return; }
   try { JSON.parse(texto); } catch (e) {
-    res.className = "aviso mal"; res.textContent = "no es JSON válido: " + e.message; return;
+    res.className = "aviso mal"; res.textContent = "La configuración no tiene un formato válido. Revisa los campos e inténtalo de nuevo."; return;
   }
 
   // Misma puerta que la página de JSON en crudo, y por el mismo motivo. Aquí
   // la versión sale de la caja, que la regenera el propio asistente.
   if (!await schemaPuerta(cfgSchemaVersion(texto), schemasDestino)) return;
 
-  const T = "Enviar al nodo";
+  const T = "Guardar en el nodo";
 
   // Fuente LoRa: se encola y lo ejecuta el gateway. Antes se avisa de los
   // campos que pueden dejar el nodo sin comunicación, porque por radio no hay
@@ -5089,18 +5219,16 @@ async function formEnviar() {
     const origin = Number(document.getElementById("f-lora-nodo").value);
     if (!origin) {
       res.className = "aviso mal";
-      res.textContent = "elegir primero el nodo destino";
+      res.textContent = "Selecciona un nodo antes de continuar.";
       return;
     }
     const riesgos = formLoraRiesgos(JSON.parse(texto));
     if (riesgos.length) {
       const seguir = await new Promise((resolve) => {
         cfgConfirmarCb = () => resolve(true);
-        cfgDialogo(T, "Este envío cambia <b>" + riesgos.join(", ")
-          + "</b>, que son los parámetros con los que el nodo habla con el "
-          + "gateway. Si quedan mal, el nodo deja de responder y solo vuelve "
-          + "gracias a su reversión automática, unos minutos después.",
-          { cancelar: true, confirmar: true, confirmarText: "Enviar igualmente",
+        cfgDialogo(T, "Este cambio puede desconectar el nodo de la red: <b>" + riesgos.join(", ")
+          + "</b>. Revisa estos valores antes de continuar.",
+          { cancelar: true, confirmar: true, confirmarText: "Continuar",
             onCancelar: () => resolve(false) });
       });
       if (!seguir) { cfgDialogoCerrar(); return; }
@@ -5124,25 +5252,24 @@ async function formEnviar() {
       applyAt = mig.apply_at;
     }
 
-    cfgDialogo(T, SPIN + "encolando el envío...");
+    cfgDialogo(T, SPIN + "Guardando la configuración...");
     try {
       const r = await fetchApi("/api/config/lora/enviar", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ origin, config: compacto, apply_at: applyAt }) });
       const d = await r.json();
       if (!r.ok) {
-        cfgDialogo(T, "No se pudo encolar:<pre>" + (d.error ?? "error") + "</pre>",
+        cfgDialogo(T, d.error ?? "No se pudo guardar la configuración. Inténtalo de nuevo.",
                    { cerrar: true });
         return;
       }
       const cita = applyAt
-        ? `, a aplicar el ${new Date(applyAt * 1000).toLocaleString()}`
+        ? ` Se aplicará el ${new Date(applyAt * 1000).toLocaleString()}.`
         : "";
-      cfgDialogo(T, SPIN + `en cola: ${d.bytes} B en ${d.fragmentos} fragmentos`
-                 + cita);
+      cfgDialogo(T, SPIN + "Guardando la configuración..." + cita);
       await formLoraSeguir(d.id, T, applyAt);
     } catch (e) {
-      cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true });
     }
     return;
   }
@@ -5152,50 +5279,47 @@ async function formEnviar() {
   // página de firmware), así que formCheckFw ya dejó formMode en "config".
   if (formFuenteLocal()) {
     try {
-      cfgDialogo(T, SPIN + "enviando y validando la configuración en el nodo...");
+      cfgDialogo(T, SPIN + "Guardando la configuración...");
       const ses = await cfgLocalAsegurar();
       const detalle = await ses.put(texto);
       // El nodo se reinicia tras aceptar el config, así que la sesión abierta
       // deja de servir: se cierra para que la próxima búsqueda parta limpia.
       await cfgLocalCerrar();
-      cfgDialogo(T, "Configuración aceptada. El nodo arranca con la "
-                  + "configuración nueva.<pre>" + (detalle || "") + "</pre>",
+      cfgDialogo(T, "Configuración aplicada. El nodo volverá a estar disponible en unos segundos.",
                  { cerrar: true });
     } catch (e) {
-      cfgDialogo(T, "El nodo rechazó el config o se perdió el puerto:<pre>"
-                  + e.message + "</pre>", { cerrar: true });
+      cfgDialogo(T, textoError(e, "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo."), { cerrar: true });
     }
     return;
   }
 
   try {
     if (formMode === "flash") {
-      cfgDialogo(T, SPIN + "cargando el firmware del nodo por USB (cerca de un minuto)...");
+      cfgDialogo(T, SPIN + "Instalando la actualización...");
       const rf = await fetchApi("/api/config/flash", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port: formPuerto }) });
       const df = await rf.json();
       if (!rf.ok) {
-        cfgDialogo(T, "No se pudo cargar el firmware:<pre>" + (df.error ?? "error") + "</pre>", { cerrar: true });
+        cfgDialogo(T, df.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true });
         return;
       }
     }
-    cfgDialogo(T, SPIN + "enviando y validando la configuración en el nodo...");
+    cfgDialogo(T, SPIN + "Guardando la configuración...");
     const r = await fetchApi("/api/config/subir", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ port: formPuerto, config: texto }) });
     const data = await r.json();
     if (!r.ok) {
-      cfgDialogo(T, "El nodo rechazó el config:<pre>" + (data.error ?? "error") + "</pre>", { cerrar: true });
+      cfgDialogo(T, data.error ?? "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo.", { cerrar: true });
       return;
     }
-    const pre = formMode === "flash"
-      ? "Firmware cargado y configuración aceptada. "
-      : "Configuración aceptada. ";
-    cfgDialogo(T, pre + "El nodo arranca con la configuración nueva.<pre>"
-                  + (data.detail ?? "") + "</pre>", { cerrar: true });
+    cfgDialogo(T, formMode === "flash"
+      ? "Actualización instalada y configuración aplicada. El nodo volverá a estar disponible en unos segundos."
+      : "Configuración aplicada. El nodo volverá a estar disponible en unos segundos.",
+      { cerrar: true });
   } catch (e) {
-    cfgDialogo(T, "Error: " + e.message, { cerrar: true });
+    cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true });
   }
 }
 
@@ -5294,6 +5418,7 @@ document.getElementById("cfg-archivo").addEventListener("change", (e) => {
 // ----- Arranque, refresco periódico y reloj -----
 
 // Esqueletos mientras llega la primera respuesta.
+iniciarMensajes();
 document.getElementById("tarjetas").innerHTML =
   '<div class="skeleton"></div>'.repeat(3);
 

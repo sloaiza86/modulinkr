@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=layout-2-20260813">
 </head>
 <body>
 
@@ -35,9 +35,9 @@
       <svg viewBox="0 0 24 24"><line x1="5" y1="4" x2="5" y2="10"/><circle cx="5" cy="13" r="2.4"/><line x1="5" y1="15.4" x2="5" y2="20"/><line x1="12" y1="4" x2="12" y2="6"/><circle cx="12" cy="9" r="2.4"/><line x1="12" y1="11.4" x2="12" y2="20"/><line x1="19" y1="4" x2="19" y2="13"/><circle cx="19" cy="16" r="2.4"/><line x1="19" y1="18.4" x2="19" y2="20"/></svg>
       <span>Configuración</span>
     </a>
-    <a class="nav-item" id="btn-logout" href="/logout" title="Salir">
+    <a class="nav-item" id="btn-logout" href="/logout" title="Cerrar sesión">
       <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-      <span>Salir</span>
+      <span>Cerrar sesión</span>
     </a>
   </div>
 </aside>
@@ -60,29 +60,29 @@
 
     <section id="view-topologia" class="view" hidden>
       <div class="card card-mapa"><div id="mapa"></div></div>
-      <p class="leyenda">Arista: hijo a padre (último eco de BEACON). Azul: gateway. Verde: en línea. Gris: sin tramas recientes.</p>
+      <p class="leyenda">Las líneas muestran la relación entre los nodos. Azul: gateway. Verde: disponible. Gris: sin actividad reciente.</p>
     </section>
 
     <section id="view-datos" class="view" hidden>
       <div id="datos-controles" class="card">
         <div id="selector-cabecera">
-          <input type="search" id="filtro" placeholder="Filtrar nodos o medidas...">
+          <input type="search" id="filtro" placeholder="Buscar nodos o medidas">
           <div class="modo">
             <button class="modo-btn active" data-modo="nodo">Por nodo</button>
             <button class="modo-btn" data-modo="medida">Por medida</button>
           </div>
           <div class="vistas">
             <select id="vistas-guardadas"><option value="">Vistas guardadas...</option></select>
-            <button id="btn-guardar-vista" title="Guardar la selección actual">Guardar</button>
-            <button id="btn-borrar-vista" title="Borrar la vista elegida">Borrar</button>
+            <button id="btn-guardar-vista" title="Guardar la selección actual">Guardar vista</button>
+            <button id="btn-borrar-vista" title="Eliminar la vista seleccionada">Eliminar vista</button>
           </div>
         </div>
-        <div id="selector-canales"><p class="aviso">Cargando catálogo...</p></div>
+        <div id="selector-canales"><p class="aviso">Cargando las medidas disponibles...</p></div>
         <div class="rango">
           <label>Desde <input type="datetime-local" id="desde"></label>
           <label>Hasta <input type="datetime-local" id="hasta"></label>
-          <button id="btn-graficar">Graficar</button>
-          <button id="btn-csv">Exportar CSV</button>
+          <button id="btn-graficar">Mostrar gráfico</button>
+          <button id="btn-csv">Exportar datos</button>
         </div>
       </div>
       <div id="grafico" class="card"></div>
@@ -99,8 +99,8 @@
               <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar nodo</div>
-              <div class="ai-sub">Comisionamiento y configuración de los nodos de la red</div>
+              <div class="ai-titulo">Nodos</div>
+              <div class="ai-sub">Añadir, editar y actualizar nodos</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -109,8 +109,8 @@
               <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar radio LoRa</div>
-              <div class="ai-sub">Puerto serie del Heltec y actualización de su firmware</div>
+              <div class="ai-titulo">Radio LoRa</div>
+              <div class="ai-sub">Estado, conexión y actualización</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -119,8 +119,8 @@
               <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Parámetros de red LoRa</div>
-              <div class="ai-sub">ID de red, frecuencia, SF, BW, seguridad y TTL, compartidos por todos los nodos</div>
+              <div class="ai-titulo">Red LoRa</div>
+              <div class="ai-sub">Parámetros compartidos por toda la red</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -129,8 +129,8 @@
               <svg viewBox="0 0 24 24"><path d="M4.5 9.5a12 12 0 0 1 15 0"/><path d="M7.5 12.5a8 8 0 0 1 9 0"/><path d="M10 15.5a4 4 0 0 1 4 0"/><circle cx="12" cy="18.5" r="0.6"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar red WiFi</div>
-              <div class="ai-sub">Red WiFi a la que se conecta el gateway</div>
+              <div class="ai-titulo">Red Wi-Fi</div>
+              <div class="ai-sub">Conexión inalámbrica del gateway</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -139,8 +139,8 @@
               <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="13.5"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar zona horaria</div>
-              <div class="ai-sub">Zona de visualización del reloj y las gráficas del visor</div>
+              <div class="ai-titulo">Zona horaria</div>
+              <div class="ai-sub">Hora utilizada en el visor y las gráficas</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -149,8 +149,8 @@
               <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.6 3.1 3 7 3s7-1.4 7-3V6"/><path d="M5 12v6c0 1.6 3.1 3 7 3s7-1.4 7-3v-6"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar base de datos</div>
-              <div class="ai-sub">Conexión al PostgreSQL de la nube para el histórico</div>
+              <div class="ai-titulo">Base de datos</div>
+              <div class="ai-sub">Conexión PostgreSQL y almacenamiento de datos</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -159,8 +159,8 @@
               <svg viewBox="0 0 24 24"><path d="M18 18H7a4 4 0 0 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/><line x1="12" y1="13" x2="12" y2="17"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar MQTT</div>
-              <div class="ai-sub">Broker cloud al que el gateway publica la telemetría</div>
+              <div class="ai-titulo">Conexión MQTT</div>
+              <div class="ai-sub">Destino de los datos del gateway</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -169,8 +169,8 @@
               <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="7 9 10 12 7 15"/><line x1="13" y1="15" x2="16.5" y2="15"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Herramientas de depuración</div>
-              <div class="ai-sub">Journal del gateway, serie de un nodo y tramas Modbus de debug</div>
+              <div class="ai-titulo">Diagnóstico</div>
+              <div class="ai-sub">Estado del gateway, los nodos y las lecturas</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -183,7 +183,7 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar nodo</h2>
+          <h2>Nodos</h2>
         </div>
         <div class="card lista-ajustes">
           <a class="ajuste-item" href="#/configuracion/nodo/firmware">
@@ -191,8 +191,8 @@
               <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="15" x2="4" y2="15"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="15" x2="22" y2="15"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Cargar firmware</div>
-              <div class="ai-sub">Flashear el firmware del nodo en un Atom conectado por USB</div>
+              <div class="ai-titulo">Actualizar nodos</div>
+              <div class="ai-sub">Instalar una actualización por cable o LoRa</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -201,8 +201,8 @@
               <svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="7"/><circle cx="12" cy="21" r="1.4"/><polyline points="12 15 7.5 12.5 7.5 9.5"/><rect x="6.3" y="6.6" width="2.4" height="2.4"/><polyline points="12 12 16.5 9.8 16.5 7.5"/><circle cx="16.5" cy="5.8" r="1.3"/><polyline points="9.5 4.5 12 7 14.5 4.5"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Cargar nodo vía USB</div>
-              <div class="ai-sub">Subir un config.json a un Atom conectado al puerto USB del Pi</div>
+              <div class="ai-titulo">Configuración avanzada</div>
+              <div class="ai-sub">Importar o exportar la configuración por USB</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -211,8 +211,8 @@
               <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Asistente de configuración de nodo</div>
-              <div class="ai-sub">Rellenar los datos del nodo y enviarlos sin escribir el JSON a mano</div>
+              <div class="ai-titulo">Configurar nodo</div>
+              <div class="ai-sub">Añadir un nodo o editar su configuración</div>
             </div>
             <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
           </a>
@@ -225,56 +225,46 @@
           <a class="volver" href="#/configuracion/nodo" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Cargar firmware</h2>
+          <h2>Actualizar nodos</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Firmware del nodo</h3>
-          <p class="aviso" id="fw-bin-info">Comprobando el binario...</p>
+          <h3>Actualización individual</h3>
+          <div class="mensaje mensaje-progreso mensaje-compacto" id="fw-bin-info" role="status" aria-live="polite">Comprobando actualizaciones...</div>
           <div class="cfg-fila">
-            <label class="cfg-campo"><span>Nodo conectado a</span>
+            <label class="cfg-campo"><span>Método de conexión</span>
               <select id="fw-fuente">
-                <option value="gateway">el gateway (Pi)</option>
-                <option value="local">este equipo</option>
-                <option value="lora">nada: enviar por LoRa</option>
+                <option value="gateway">Gateway</option>
+                <option value="local">Este ordenador</option>
+                <option value="lora">Red LoRa</option>
               </select>
             </label>
           </div>
           <div id="fw-gateway">
-            <p class="aviso">Conectar el Atom a un puerto USB del Pi y buscarlo. El
-              puerto de la radio del gateway queda excluido. El flasheo borra el
-              firmware anterior del Atom (su config.json en flash se conserva).</p>
+            <p class="texto-ayuda">Conecta el nodo al gateway. La configuración actual se conservará.</p>
             <div class="cfg-fila">
               <button id="fw-buscar" class="btn-primario">Buscar nodo</button>
               <select id="fw-puertos" hidden></select>
               <span id="fw-busqueda-aviso" class="aviso"></span>
             </div>
             <div class="cfg-fila">
-              <button id="fw-flash" class="btn-primario" disabled>Flashear firmware</button>
+              <button id="fw-flash" class="btn-primario" disabled>Actualizar nodo</button>
               <span id="fw-resultado" class="aviso"></span>
             </div>
           </div>
           <div id="fw-local" hidden>
-            <p class="aviso">Flashea el nodo conectado al USB de este ordenador
-              (Chrome o Edge de escritorio). Reescribe solo el firmware y
-              <b>conserva el config.json</b> del nodo. Al terminar se resetea
-              solo; si no arranca, desenchufa y vuelve a enchufar el nodo una
-              vez.</p>
+            <p class="texto-ayuda">Conecta el nodo a este ordenador. La configuración actual se conservará.</p>
             <div class="cfg-fila">
-              <button id="fw-local-flash" class="btn-primario">Flashear por este equipo</button>
+              <button id="fw-local-flash" class="btn-primario">Actualizar nodo</button>
               <span id="fw-local-aviso" class="aviso"></span>
             </div>
             <pre id="fw-local-log" class="dbg-consola" hidden></pre>
           </div>
           <div id="fw-lora" hidden>
-            <p class="aviso">Sube la imagen al nodo por radio, sin cable. Son
-              unos 2500 fragmentos y el gateway cede el aire a la telemetría,
-              así que va de fondo. Lo que marca el reloj es el ciclo de trabajo:
-              medido en banco sin ese límite, media hora; con el 8 % que permite
-              la norma, unas dos. La subida no toca el firmware que está
-              corriendo, se escribe en la partición dormida. Instalar es una
-              orden aparte, y solo aparece cuando el nodo tiene la imagen entera
-              y verificada.</p>
+            <div class="mensaje mensaje-info">
+              <span class="mensaje-titulo">Actualización por LoRa</span>
+              <span class="mensaje-detalle">Tiempo estimado: dos horas. El nodo seguirá disponible hasta la instalación.</span>
+            </div>
             <div class="cfg-fila">
               <select id="fw-lora-nodo"></select>
               <label class="cfg-campo"><span>Desde (hora)</span>
@@ -284,9 +274,9 @@
             </div>
             <p class="aviso" id="fw-lora-riesgo"></p>
             <div class="cfg-fila">
-              <button id="fw-lora-enviar" class="btn-primario">Enviar por LoRa</button>
-              <button id="fw-lora-cancelar" hidden>Cancelar subida</button>
-              <button id="fw-lora-instalar" hidden>Instalar en el nodo</button>
+              <button id="fw-lora-enviar" class="btn-primario">Iniciar actualización</button>
+              <button id="fw-lora-cancelar" hidden>Cancelar actualización</button>
+              <button id="fw-lora-instalar" hidden>Instalar actualización</button>
               <span id="fw-lora-aviso" class="aviso"></span>
             </div>
             <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"></progress>
@@ -297,30 +287,20 @@
              individual porque son el mismo trabajo por dos caminos, y quien
              busca "cargar firmware" tiene que encontrar los dos. -->
         <div class="card cfg-card" id="bc-card">
-          <h3>Difundir a toda la red</h3>
-          <p class="aviso">La subida de arriba manda la imagen a <b>un</b> nodo, y
-            hay que repetirla entera por cada uno. La difusión la emite <b>una
-            sola vez para todos</b>, y ese tiempo no crece con el número de
-            nodos. Se emiten además unos fragmentos de repuesto que permiten
-            rellenar huecos sin pedirlos, y al terminar cada pasada el gateway
-            pregunta a cada nodo qué le falta y reemite solo eso. Medido en
-            banco con un nodo, una imagen de 541 kB llegó entera y verificada en
-            31 minutos, en una sola pasada y sin reemisiones: los fragmentos que
-            se perdieron los rellenó el propio nodo con los de repuesto.
-            <br><br>
-            Llega a los nodos que oyen al gateway <b>directamente</b>. Uno que
-            esté a dos saltos no la recibe, y hay que subirle la imagen por el
-            camino individual. Como aquella, esto no instala nada: la orden de
-            instalar sigue siendo aparte y nodo a nodo.</p>
+          <h3>Actualizar varios nodos</h3>
+          <div class="mensaje mensaje-info">
+            <span class="mensaje-titulo">Nodos disponibles</span>
+            <span class="mensaje-detalle">La actualización llegará a los nodos conectados directamente. Los demás deberán actualizarse de forma individual.</span>
+          </div>
           <div class="cfg-fila">
-            <button id="bc-lanzar" class="btn-primario">Difundir a toda la red</button>
-            <button id="bc-cancelar" hidden>Cancelar difusión</button>
+            <button id="bc-lanzar" class="btn-primario">Actualizar red</button>
+            <button id="bc-cancelar" hidden>Cancelar actualización</button>
             <span id="bc-aviso" class="aviso"></span>
           </div>
           <div id="bc-panel" hidden>
             <div id="bc-estado" class="mig-estado"></div>
             <table class="tabla" id="bc-tabla">
-              <thead><tr><th>Nodo</th><th>Recibido</th><th>Faltan</th><th>Último mapa</th><th></th></tr></thead>
+              <thead><tr><th>Nodo</th><th>Progreso</th><th>Pendiente</th><th>Última actualización</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -333,20 +313,17 @@
           <a class="volver" href="#/configuracion/nodo" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Cargar JSON vía USB</h2>
+          <h2>Configuración avanzada</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Nodo por USB</h3>
-          <p class="aviso">Elige dónde está enchufado el nodo Atom: al gateway
-            (lo maneja la Pi; el puerto del Heltec queda excluido) o a este
-            equipo (lo maneja el navegador por Web Serial, solo Chrome o Edge
-            de escritorio).</p>
+          <h3>Nodo conectado por USB</h3>
+          <p class="texto-ayuda">Selecciona dónde está conectado el nodo.</p>
           <div class="cfg-fila">
-            <label class="cfg-campo"><span>Nodo conectado a</span>
+            <label class="cfg-campo"><span>Método de conexión</span>
               <select id="cfg-fuente">
-                <option value="gateway">el gateway (Pi)</option>
-                <option value="local">este equipo</option>
+                <option value="gateway">Gateway</option>
+                <option value="local">Este ordenador</option>
               </select>
             </label>
           </div>
@@ -359,17 +336,17 @@
         </div>
 
         <div class="card cfg-card" id="cfg-editor" hidden>
-          <h3>config.json</h3>
+          <h3>Archivo de configuración</h3>
           <div class="cfg-fila">
-            <button id="cfg-leer">Leer del nodo</button>
-            <button id="cfg-archivo-btn">Cargar archivo</button>
+            <button id="cfg-leer">Importar del nodo</button>
+            <button id="cfg-archivo-btn">Importar archivo</button>
             <input type="file" id="cfg-archivo" accept=".json,application/json" hidden>
           </div>
           <textarea id="cfg-texto" spellcheck="false"
-                    placeholder="Pegar aquí el config.json, cargarlo de un archivo o leerlo del nodo..."></textarea>
+                    placeholder="Pega o importa aquí la configuración"></textarea>
           <div class="cfg-fila">
-            <button id="cfg-enviar" class="btn-primario">Enviar al nodo</button>
-            <button id="cfg-borrar" class="peligro-borde">Borrar config del nodo</button>
+            <button id="cfg-enviar" class="btn-primario">Guardar en el nodo</button>
+            <button id="cfg-borrar" class="peligro-borde">Eliminar configuración</button>
             <span id="cfg-resultado" class="aviso"></span>
           </div>
         </div>
@@ -381,29 +358,28 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar radio LoRa</h2>
+          <h2>Radio LoRa</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Radio del gateway</h3>
+          <h3>Estado</h3>
           <div id="radio-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Puerto serie del Heltec</h3>
-          <p class="aviso">Cambiarlo actualiza la configuración del gateway y
-            reinicia su servicio (la radio queda fuera unos segundos).</p>
+          <h3>Conexión</h3>
+          <p class="texto-ayuda">Selecciona la conexión utilizada por la radio.</p>
           <div class="cfg-fila">
             <select id="radio-puertos"></select>
-            <button id="radio-aplicar" class="btn-primario">Aplicar puerto</button>
+            <button id="radio-aplicar" class="btn-primario">Guardar conexión</button>
           </div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Firmware de la radio</h3>
+          <h3>Actualización</h3>
           <p class="aviso" id="radio-bin-info"></p>
           <div class="cfg-fila">
-            <button id="radio-flash" class="btn-primario">Actualizar firmware de la radio</button>
+            <button id="radio-flash" class="btn-primario">Actualizar radio</button>
           </div>
         </div>
       </div>
@@ -414,34 +390,31 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Parámetros de red LoRa</h2>
+          <h2>Red LoRa</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Identidad y radio de la red</h3>
-          <p class="aviso">Estos parámetros los comparte todo el despliegue. Al
-            guardar se reescribe la configuración del gateway y se reinicia su
-            servicio. Todos los nodos deben usar los mismos valores: tras
-            cambiarlos hay que reconfigurar los nodos con el asistente, o
-            dejarán de comunicarse con el gateway. El ID de red, la frecuencia,
-            el SF y el BW se aplican al Heltec en caliente, sin reflashear. La
-            clave de red en blanco conserva la vigente.</p>
+          <h3>Parámetros</h3>
+          <div class="mensaje mensaje-advertencia">
+            <span class="mensaje-titulo">Los nodos pueden perder la conexión</span>
+            <span class="mensaje-detalle">Para mantenerlos conectados, aplica los cambios a toda la red.</span>
+          </div>
           <div class="cfg-form">
             <label class="cfg-campo"><span>Región</span>
               <select id="r-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
             </label>
             <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="r-freq" type="number" min="100000000" max="1000000000" value="869525000"></label>
-            <label class="cfg-campo"><span>ID de red</span><input id="r-netid" type="number" min="1" max="254" value="1"></label>
-            <label class="cfg-campo"><span>SF</span><input id="r-sf" type="number" min="7" max="12" value="7"></label>
+            <label class="cfg-campo"><span>Identificador de red</span><input id="r-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Factor de dispersión (SF)</span><input id="r-sf" type="number" min="7" max="12" value="7"></label>
             <label class="cfg-campo"><span>Ancho de banda (kHz)</span>
               <select id="r-bw"><option>125</option><option>250</option><option>500</option></select>
             </label>
-            <label class="cfg-campo"><span>Max TTL</span><input id="r-ttl" type="number" min="1" max="15" value="4"></label>
-            <label class="cfg-check"><input id="r-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
-            <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="r-seckey" type="text" maxlength="32" placeholder="dejar en blanco para no cambiar"></label>
+            <label class="cfg-campo"><span>TTL máximo</span><input id="r-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-check"><input id="r-sec" type="checkbox"><span>Cifrado AES-CCM</span></label>
+            <label class="cfg-campo"><span>Clave de red</span><input id="r-seckey" type="text" maxlength="32" placeholder="Sin cambios"></label>
           </div>
           <div class="cfg-fila">
-            <button id="r-guardar" class="btn-primario">Guardar</button>
+            <button id="r-guardar" class="btn-primario">Guardar cambios</button>
             <span id="r-resultado" class="aviso"></span>
           </div>
         </div>
@@ -450,26 +423,17 @@
              propósito: es el mismo cambio por el camino que no pierde nodos,
              y separarlo en otra página invitaría a no encontrarlo. -->
         <div class="card cfg-card" id="mig-card">
-          <h3>Cambio coordinado (red viva)</h3>
-          <p class="aviso">Guardar ahí arriba cambia los parámetros al momento y
-            deja incomunicado a todo nodo que siga con los viejos: es lo
-            correcto en un banco, no en una red desplegada. El cambio
-            coordinado hace lo mismo sin perder a nadie y sin que tengas que
-            hacer nada más: el gateway le pide su configuración a cada nodo, le
-            cambia solo los parámetros de red y se la devuelve citada a una
-            hora; llegada esa hora saltan todos a la vez, el gateway incluido.
-            Hasta entonces no ha cambiado nada y se puede abortar sin
-            consecuencias.</p>
-          <p class="aviso">La hora la calcula el sistema con lo que cuesta
-            citar a los nodos que hay, que depende de cuántos son y de su
-            clase. Si al terminar alguno se quedó atrás, aparece un botón para
-            ir a buscarlo.</p>
+          <h3>Aplicar cambios a toda la red</h3>
+          <div class="mensaje mensaje-info">
+            <span class="mensaje-titulo">Cambio coordinado</span>
+            <span class="mensaje-detalle">La configuración se aplicará cuando todos los nodos estén preparados.</span>
+          </div>
 
           <!-- Sin operación en curso: programarla -->
           <div id="mig-nueva">
             <p class="aviso" id="mig-estimacion"></p>
             <div class="cfg-fila">
-              <button id="mig-programar" class="btn-primario">Programar cambio coordinado</button>
+              <button id="mig-programar" class="btn-primario">Programar cambios</button>
               <span id="mig-resultado" class="aviso"></span>
             </div>
           </div>
@@ -482,10 +446,10 @@
               <tbody></tbody>
             </table>
             <div class="cfg-fila">
-              <button id="mig-saltar" hidden>Saltar sin los que faltan</button>
-              <button id="mig-rescatar" hidden>Buscar rezagados</button>
-              <button id="mig-abortar">Abortar</button>
-              <button id="mig-cerrar" class="btn-primario">Cerrar operación</button>
+              <button id="mig-saltar" hidden>Continuar con nodos disponibles</button>
+              <button id="mig-rescatar" hidden>Buscar nodos pendientes</button>
+              <button id="mig-abortar">Cancelar cambios</button>
+              <button id="mig-cerrar" class="btn-primario">Finalizar</button>
               <span id="mig-resultado2" class="aviso"></span>
             </div>
           </div>
@@ -498,21 +462,18 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar zona horaria</h2>
+          <h2>Zona horaria</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Zona de visualización</h3>
-          <p class="aviso">Zona en la que el visor muestra el reloj de la cabecera
-            y las horas de las gráficas. Se guarda en el gateway y la comparten
-            todos los navegadores. La opción automática usa la zona de cada
-            navegador.</p>
+          <h3>Visualización</h3>
+          <p class="texto-ayuda">Zona utilizada en el reloj y las gráficas.</p>
           <div class="cfg-fila">
             <select id="tz-select"></select>
-            <button id="tz-detectar">Detectar del navegador</button>
+            <button id="tz-detectar">Usar zona del navegador</button>
           </div>
           <div class="cfg-fila">
-            <button id="tz-guardar" class="btn-primario">Guardar</button>
+            <button id="tz-guardar" class="btn-primario">Guardar cambios</button>
             <span id="tz-resultado" class="aviso"></span>
           </div>
         </div>
@@ -524,24 +485,22 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar base de datos</h2>
+          <h2>Base de datos</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>PostgreSQL de la nube</h3>
-          <p class="aviso">Conexión de solo lectura que usa la vista de Datos para
-            el histórico. Los cambios se aplican al momento, sin reiniciar el
-            visor. Dejar la contraseña en blanco conserva la vigente.</p>
+          <h3>Conexión</h3>
+          <p class="texto-ayuda">La contraseña actual se conservará si no se modifica.</p>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Host</span><input id="bd-host" type="text" placeholder="modulinkr.ejemplo.com"></label>
+            <label class="cfg-campo"><span>Servidor</span><input id="bd-host" type="text" placeholder="modulinkr.ejemplo.com"></label>
             <label class="cfg-campo"><span>Puerto</span><input id="bd-port" type="number" min="1" max="65535" value="5432"></label>
-            <label class="cfg-campo"><span>Base</span><input id="bd-db" type="text" value="modulinkr"></label>
+            <label class="cfg-campo"><span>Base de datos</span><input id="bd-db" type="text" value="modulinkr"></label>
             <label class="cfg-campo"><span>Usuario</span><input id="bd-user" type="text" value="modulinkr_ro"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="bd-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="bd-pass" type="password" placeholder="Sin cambios"></label>
           </div>
           <div class="cfg-fila">
             <button id="bd-probar">Probar conexión</button>
-            <button id="bd-guardar" class="btn-primario">Guardar</button>
+            <button id="bd-guardar" class="btn-primario">Guardar cambios</button>
             <span id="bd-resultado" class="aviso"></span>
           </div>
         </div>
@@ -553,33 +512,29 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar MQTT</h2>
+          <h2>Conexión MQTT</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Broker cloud</h3>
+          <h3>Estado</h3>
           <div id="mqtt-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Parámetros del broker</h3>
-          <p class="aviso">Al guardar se reescribe la configuración del gateway y
-            se reinicia su servicio (la telemetría cloud queda fuera unos
-            segundos). El certificado debe ser el de una CA RSA (el SIM7028 no
-            valida cadenas ECDSA). Dejar la contraseña en blanco conserva la
-            vigente.</p>
+          <h3>Servidor MQTT</h3>
+          <p class="texto-ayuda">La contraseña actual se conservará si no se modifica.</p>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Host</span><input id="mqtt-host" type="text" placeholder="broker.ejemplo.com"></label>
+            <label class="cfg-campo"><span>Servidor</span><input id="mqtt-host" type="text" placeholder="broker.ejemplo.com"></label>
             <label class="cfg-campo"><span>Puerto</span><input id="mqtt-port" type="number" min="1" max="65535" value="8883"></label>
             <label class="cfg-campo"><span>Usuario</span><input id="mqtt-user" type="text"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="mqtt-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="mqtt-pass" type="password" placeholder="Sin cambios"></label>
             <label class="cfg-campo"><span>Certificado CA</span><input id="mqtt-cafile" type="text" placeholder="/etc/modulinkr/ca.crt (opcional)"></label>
             <label class="cfg-check"><input id="mqtt-tls" type="checkbox" checked><span>Usar TLS (cifrado)</span></label>
-            <label class="cfg-check"><input id="mqtt-insecure" type="checkbox"><span>No verificar el hostname del certificado (solo banco)</span></label>
+            <label class="cfg-check"><input id="mqtt-insecure" type="checkbox"><span>Permitir un certificado no verificado (solo para pruebas)</span></label>
           </div>
           <div class="cfg-fila">
             <button id="mqtt-probar">Probar conexión</button>
-            <button id="mqtt-guardar" class="btn-primario">Guardar</button>
+            <button id="mqtt-guardar" class="btn-primario">Guardar cambios</button>
             <span id="mqtt-resultado" class="aviso"></span>
           </div>
         </div>
@@ -591,7 +546,7 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Configurar red WiFi</h2>
+          <h2>Red Wi-Fi</h2>
         </div>
 
         <div class="card cfg-card">
@@ -601,20 +556,21 @@
 
         <div class="card cfg-card">
           <h3>Redes disponibles</h3>
-          <p class="aviso">Conectar a una red distinta cambia la IP del gateway y
-            puede cortar esta sesión si entras por ese mismo WiFi. El acceso por
-            <code>gateway.local</code> se mantiene.</p>
+          <div class="mensaje mensaje-advertencia">
+            <span class="mensaje-titulo">La conexión se interrumpirá</span>
+            <span class="mensaje-detalle">Después del cambio, abre <code>gateway.local</code> para volver a entrar.</span>
+          </div>
           <div class="cfg-fila">
-            <button id="wifi-buscar" class="btn-primario">Buscar redes</button>
+            <button id="wifi-buscar" class="btn-primario">Actualizar lista</button>
             <span id="wifi-buscar-info" class="aviso"></span>
           </div>
           <div id="wifi-lista" class="wifi-lista"></div>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Red</span><input id="wifi-ssid" type="text" placeholder="elige de la lista o escribe el SSID"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="wifi-pass" type="password" placeholder="vacía si la red es abierta"></label>
+            <label class="cfg-campo"><span>Nombre de la red</span><input id="wifi-ssid" type="text" placeholder="Selecciona una red o escribe su nombre"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="wifi-pass" type="password" placeholder="No necesaria para redes abiertas"></label>
           </div>
           <div class="cfg-fila">
-            <button id="wifi-conectar" class="btn-primario">Conectar</button>
+            <button id="wifi-conectar" class="btn-primario">Conectar a la red</button>
             <span id="wifi-resultado" class="aviso"></span>
           </div>
         </div>
@@ -626,14 +582,14 @@
           <a class="volver" href="#/configuracion" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Herramientas de depuración</h2>
+          <h2>Diagnóstico</h2>
         </div>
 
         <div class="card cfg-card">
           <div class="dbg-tabs">
-            <button class="dbg-tab activa" data-tab="gateway">Journal del gateway</button>
-            <button class="dbg-tab" data-tab="serial">Serie de un nodo</button>
-            <button class="dbg-tab" data-tab="modbus">Tramas Modbus</button>
+            <button class="dbg-tab activa" data-tab="gateway">Gateway</button>
+            <button class="dbg-tab" data-tab="serial">Nodo USB</button>
+            <button class="dbg-tab" data-tab="modbus">Modbus</button>
           </div>
 
           <div class="cfg-fila dbg-controles">
@@ -643,11 +599,11 @@
             </select>
             <select id="dbg-puerto" hidden></select>
             <select id="dbg-nodo" hidden></select>
-            <button id="dbg-toggle" class="btn-primario">Iniciar</button>
+            <button id="dbg-toggle" class="btn-primario">Iniciar diagnóstico</button>
             <button id="dbg-limpiar">Limpiar</button>
             <span id="dbg-info" class="aviso"></span>
           </div>
-          <p class="aviso" id="dbg-ayuda"></p>
+          <p class="texto-ayuda" id="dbg-ayuda"></p>
           <p class="aviso" id="dbg-modo" hidden></p>
 
           <pre id="dbg-consola" class="dbg-consola"></pre>
@@ -660,29 +616,36 @@
           <a class="volver" href="#/configuracion/nodo" title="Volver">
             <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
           </a>
-          <h2>Asistente de configuración de nodo</h2>
+          <h2>Configurar nodo</h2>
         </div>
 
         <div class="card cfg-card" id="f-modo-card">
-          <h3>¿Qué vas a hacer?</h3>
-          <div class="cfg-fila">
-            <button id="f-modo-nuevo" class="btn-primario">Configurar nodo nuevo</button>
-            <button id="f-modo-existente" class="btn-primario">Reconfigurar nodo existente</button>
-            <span id="f-modo-aviso" class="aviso"></span>
+          <div class="selector-tareas" role="group" aria-label="Tipo de configuración">
+            <button id="f-modo-nuevo" class="opcion-tarea" aria-pressed="false">
+              <span class="opcion-tarea-titulo">Añadir nodo</span>
+              <span class="opcion-tarea-detalle">Crear la configuración inicial</span>
+            </button>
+            <button id="f-modo-existente" class="opcion-tarea" aria-pressed="false">
+              <span class="opcion-tarea-titulo">Editar nodo</span>
+              <span class="opcion-tarea-detalle">Modificar la configuración actual</span>
+            </button>
           </div>
+          <span id="f-modo-aviso" class="aviso" aria-live="polite"></span>
         </div>
 
         <div class="card cfg-card" id="f-destino-card">
-          <h3>Nodo y conexión</h3>
-          <p class="aviso" id="f-destino-nota"></p>
+          <h3>Conexión del nodo</h3>
+          <p class="texto-ayuda" id="f-destino-nota"></p>
           <div class="cfg-fila">
-            <select id="f-fuente">
-              <option value="gateway">Conectado al gateway</option>
-              <option value="local">Conectado a este equipo</option>
-              <option value="lora">Por LoRa (sin cable)</option>
-            </select>
+            <label class="cfg-campo"><span>Método de conexión</span>
+              <select id="f-fuente">
+                <option value="gateway">Gateway</option>
+                <option value="local">Este ordenador</option>
+                <option value="lora">Red LoRa</option>
+              </select>
+            </label>
             <select id="f-lora-nodo" hidden></select>
-            <button id="f-leer" class="btn-primario">Leer del nodo</button>
+            <button id="f-leer" class="btn-primario">Importar configuración</button>
             <select id="f-leer-puertos" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>
           </div>
@@ -694,23 +657,22 @@
         <div class="card cfg-card">
           <h3>Identidad</h3>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>ID del nodo <span class="req">*</span></span><input id="f-id" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Identificador <span class="req">*</span></span><input id="f-id" type="number" min="1" max="254" value="1"></label>
             <label class="cfg-campo"><span>Tipo</span>
               <select id="f-type"><option value="node">Nodo</option><option value="super_node">Supernodo (con NB-IoT)</option></select>
             </label>
-            <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input id="f-name" type="text" maxlength="64" placeholder="Nodo banco TFM"></label>
-            <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="opcional"></label>
+            <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input id="f-name" type="text" maxlength="64" placeholder="Nodo de almacén"></label>
+            <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="Opcional"></label>
           </div>
           <p class="aviso" id="f-id-aviso"></p>
         </div>
 
         <div class="card cfg-card">
-          <h3>LoRa</h3>
-          <p class="aviso" id="f-red-nota">Los campos atenuados (aquí y en NB-IoT)
-            los fija la red del gateway: región, frecuencia, SF, ancho de banda,
-            Network ID, TTL, seguridad y el broker MQTT. Se muestran para
-            referencia y no se editan, porque cambiarlos impediría al nodo unirse
-            a la red o publicar en la misma nube.</p>
+          <h3>Conexión LoRa</h3>
+          <div class="mensaje mensaje-info" id="f-red-nota">
+            <span class="mensaje-titulo">Configuración de la red</span>
+            <span class="mensaje-detalle">Los valores atenuados proceden de la red actual.</span>
+          </div>
           <div class="cfg-form">
             <label class="cfg-campo"><span>Región</span>
               <select id="f-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
@@ -718,44 +680,44 @@
             <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="f-freq" type="number" value="869525000"></label>
             <label class="cfg-campo"><span>SF</span><input id="f-sf" type="number" min="7" max="12" value="7"></label>
             <label class="cfg-campo"><span>Potencia (dBm)</span><input id="f-txpow" type="number" min="2" max="22" value="14"></label>
-            <label class="cfg-campo"><span>Network ID</span><input id="f-netid" type="number" min="1" max="254" value="1"></label>
-            <label class="cfg-campo"><span>Intervalo envío (ms)</span><input id="f-interval" type="number" min="100" value="5000"></label>
+            <label class="cfg-campo"><span>Identificador de red</span><input id="f-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Intervalo de envío (ms)</span><input id="f-interval" type="number" min="100" value="5000"></label>
           </div>
           <details class="form-avz">
             <summary>Avanzado LoRa</summary>
             <div class="cfg-form">
-              <label class="cfg-campo"><span>Ancho banda (kHz)</span>
+              <label class="cfg-campo"><span>Ancho de banda (kHz)</span>
                 <select id="f-bw"><option>125</option><option>250</option><option>500</option></select>
               </label>
-              <label class="cfg-check"><input id="f-ack" type="checkbox" checked><span>Esperar ACK del gateway</span></label>
-              <label class="cfg-campo"><span>ACK timeout (ms)</span><input id="f-acktimeout" type="number" min="100" value="3000"></label>
-              <label class="cfg-campo"><span>Reintentos máx.</span><input id="f-retries" type="number" min="0" max="10" value="2"></label>
-              <label class="cfg-check"><input id="f-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
-              <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="f-seckey" type="text" maxlength="32" placeholder="32 caracteres hex"></label>
+              <label class="cfg-check"><input id="f-ack" type="checkbox" checked><span>Confirmación de entrega (ACK)</span></label>
+              <label class="cfg-campo"><span>Tiempo de espera del ACK (ms)</span><input id="f-acktimeout" type="number" min="100" value="3000"></label>
+              <label class="cfg-campo"><span>Reintentos máximos</span><input id="f-retries" type="number" min="0" max="10" value="2"></label>
+              <label class="cfg-check"><input id="f-sec" type="checkbox"><span>Cifrado AES-CCM</span></label>
+              <label class="cfg-campo"><span>Clave de red</span><input id="f-seckey" type="text" maxlength="32" placeholder="32 caracteres hexadecimales"></label>
             </div>
           </details>
         </div>
 
         <details class="card cfg-card form-avz">
-          <summary><h3 style="display:inline">Mesh (avanzado)</h3></summary>
+          <summary><h3 style="display:inline">Red mallada</h3></summary>
           <div class="cfg-form">
-            <label class="cfg-check"><input id="f-relay" type="checkbox" checked><span>Reenviar tramas de otros (relay)</span></label>
-            <label class="cfg-campo"><span>Max TTL</span><input id="f-ttl" type="number" min="1" max="15" value="4"></label>
-            <label class="cfg-campo"><span>Beacon timeout (ms)</span><input id="f-beacon" type="number" min="10000" value="90000"></label>
-            <label class="cfg-campo"><span>RSSI mín. padre</span><input id="f-minrssi" type="number" min="-120" max="0" value="-100"></label>
+            <label class="cfg-check"><input id="f-relay" type="checkbox" checked><span>Actuar como repetidor</span></label>
+            <label class="cfg-campo"><span>TTL máximo</span><input id="f-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-campo"><span>Tiempo sin baliza (ms)</span><input id="f-beacon" type="number" min="10000" value="90000"></label>
+            <label class="cfg-campo"><span>Señal mínima del nodo principal (dBm)</span><input id="f-minrssi" type="number" min="-120" max="0" value="-100"></label>
             <label class="cfg-campo"><span>Histéresis (dB)</span><input id="f-hyst" type="number" min="0" max="30" value="6"></label>
             <label class="cfg-campo"><span>Tramas perdidas</span><input id="f-missed" type="number" min="1" value="3"></label>
-            <label class="cfg-campo"><span>Espera oferta SN (ms)</span><input id="f-snwait" type="number" min="200" value="1000"></label>
+            <label class="cfg-campo"><span>Espera de oferta del supernodo (ms)</span><input id="f-snwait" type="number" min="200" value="1000"></label>
           </div>
         </details>
 
         <div class="card cfg-card" id="f-nbiot-card" hidden>
-          <h3>NB-IoT (supernodo)</h3>
+          <h3>Conexión celular del supernodo</h3>
           <div class="cfg-form">
             <label class="cfg-campo"><span>APN <span class="req">*</span></span><input id="f-apn" type="text" placeholder="nb.wlapn.com"></label>
             <label class="cfg-campo"><span>Broker MQTT</span><input id="f-mbroker" type="text" placeholder="modulinkr.ejemplo.com"></label>
             <label class="cfg-campo"><span>Puerto MQTT</span><input id="f-mport" type="number" min="1" max="65535" value="8883"></label>
-            <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>TLS (cert RSA en el broker)</span></label>
+            <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>Cifrado TLS</span></label>
             <label class="cfg-campo"><span>Usuario MQTT</span><input id="f-muser" type="text" placeholder="opcional"></label>
             <label class="cfg-campo"><span>Contraseña MQTT</span><input id="f-mpass" type="text" placeholder="opcional"></label>
           </div>
@@ -764,11 +726,11 @@
             <div class="cfg-form">
               <label class="cfg-campo"><span>Usuario APN</span><input id="f-apnuser" type="text" placeholder="opcional"></label>
               <label class="cfg-campo"><span>Contraseña APN</span><input id="f-apnpass" type="text" placeholder="opcional"></label>
-              <label class="cfg-campo"><span>Topic telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
-              <label class="cfg-campo"><span>Topic comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
-              <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Sobre debug en la telemetría</span></label>
+              <label class="cfg-campo"><span>Tema MQTT de telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
+              <label class="cfg-campo"><span>Tema MQTT de comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
+              <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Incluir diagnóstico en la telemetría</span></label>
               <label class="cfg-check"><input id="f-nbrelay" type="checkbox" checked><span>Ofrecer salida celular a vecinos</span></label>
-              <label class="cfg-campo"><span>Cola custodia máx.</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
+              <label class="cfg-campo"><span>Capacidad de almacenamiento temporal</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
             </div>
           </details>
         </div>
@@ -776,16 +738,16 @@
         <div class="card cfg-card">
           <h3>Modbus</h3>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Baudrate</span>
+            <label class="cfg-campo"><span>Velocidad</span>
               <select id="f-baud"><option>2400</option><option>4800</option><option selected>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option></select>
             </label>
             <label class="cfg-campo"><span>Paridad</span>
               <select id="f-parity"><option value="N">Ninguna (N)</option><option value="E">Par (E)</option><option value="O">Impar (O)</option></select>
             </label>
-            <label class="cfg-campo"><span>Stop bits</span>
+            <label class="cfg-campo"><span>Bits de parada</span>
               <select id="f-stopbits"><option>1</option><option>2</option></select>
             </label>
-            <label class="cfg-campo"><span>Debug Modbus</span>
+            <label class="cfg-campo"><span>Registro de diagnóstico</span>
               <select id="f-mbdebug">
                 <option value="off" selected>Desactivado</option>
                 <option value="errors_last">Fallidas, la última por ciclo</option>
@@ -797,26 +759,25 @@
           </div>
           <div id="f-devices"></div>
           <div class="cfg-fila">
-            <button id="f-add-device">+ Añadir dispositivo</button>
+            <button id="f-add-device">Añadir dispositivo</button>
           </div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Revisar y enviar</h3>
-          <p class="aviso">El config.json de abajo se regenera con cada cambio
-            del formulario y refleja exactamente lo que se enviaría. No se edita
-            a mano: para escribir JSON en crudo está la página «Cargar JSON vía
-            USB». Con el formulario sin errores se habilita el envío; el nodo lo
-            valida de nuevo y solo graba si pasa sus reglas.</p>
+          <h3>Revisar y guardar</h3>
+          <p class="texto-ayuda">Confirma los datos antes de guardar la configuración.</p>
           <p class="aviso" id="f-pendientes"></p>
-          <div class="cfg-fila">
-            <button id="f-cargar-archivo">Cargar de archivo</button>
-            <button id="f-guardar-archivo">Guardar en archivo</button>
-            <button id="f-copiar">Copiar</button>
-            <input id="f-archivo" type="file" accept=".json,application/json" hidden>
-            <span id="f-resultado" class="aviso"></span>
-          </div>
-          <textarea id="f-preview" spellcheck="false" readonly placeholder="El config.json generado aparece aquí a medida que se rellena el formulario."></textarea>
+          <details class="form-avz archivo-config">
+            <summary>Archivo de configuración</summary>
+            <div class="cfg-fila">
+              <button id="f-cargar-archivo">Importar archivo</button>
+              <button id="f-guardar-archivo">Exportar archivo</button>
+              <button id="f-copiar">Copiar contenido</button>
+              <input id="f-archivo" type="file" accept=".json,application/json" hidden>
+              <span id="f-resultado" class="aviso"></span>
+            </div>
+            <textarea id="f-preview" spellcheck="false" readonly placeholder="La configuración aparecerá aquí"></textarea>
+          </details>
           <div class="cfg-fila">
             <button id="f-buscar" disabled>Buscar nodo</button>
             <select id="f-puertos" hidden></select>
@@ -825,7 +786,7 @@
           <p class="aviso" id="f-fw-estado" hidden></p>
           <p class="aviso" id="f-schema-aviso" hidden></p>
           <div class="cfg-fila">
-            <button id="f-enviar" class="btn-primario" disabled>Enviar al nodo</button>
+            <button id="f-enviar" class="btn-primario" disabled>Guardar configuración</button>
             <span id="f-envio-aviso" class="aviso"></span>
           </div>
         </div>
@@ -862,11 +823,14 @@
   <div id="modal-grafico"></div>
 </div>
 
-<!-- Diálogo de progreso y confirmación del comisionamiento -->
+<!-- El diálogo común conserva el foco dentro de la decisión activa. -->
 <div id="cfg-dialogo-fondo" hidden></div>
-<div id="cfg-dialogo" class="dialogo" hidden>
+<div id="cfg-dialogo" class="dialogo" role="dialog" aria-modal="true"
+     aria-labelledby="cfg-dialogo-titulo" aria-describedby="cfg-dialogo-texto"
+     tabindex="-1" hidden>
+  <div id="cfg-dialogo-icono" class="dialogo-icono" aria-hidden="true">i</div>
   <h3 id="cfg-dialogo-titulo"></h3>
-  <p id="cfg-dialogo-texto"></p>
+  <div id="cfg-dialogo-texto"></div>
   <div class="cfg-fila dialogo-botones">
     <button id="cfg-dialogo-cancelar" hidden>Cancelar</button>
     <!-- Tercera vía: cuando el camino correcto no es ni seguir ni cancelar,
@@ -878,7 +842,7 @@
   </div>
 </div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script src="/static/vendor/vis-network.min.js"></script>
 <script src="/static/vendor/echarts.min.js"></script>
@@ -890,6 +854,6 @@
   window.ESPLoader = ESPLoader;
   window.Transport = Transport;
 </script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=ux-20260812"></script>
 </body>
 </html>
