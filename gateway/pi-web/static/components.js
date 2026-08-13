@@ -192,9 +192,12 @@
 
   class ModuLinkrNodeCard extends ModuLinkrElement {
     connectedCallback() {
-      this.setAttribute("role", "button");
-      this.setAttribute("tabindex", "0");
+      this.setAttribute("role", "group");
       this.setAttribute("aria-label", this._label());
+      this._header = this.querySelector(".tn-cabecera");
+      this._header?.setAttribute("role", "button");
+      this._header?.setAttribute("tabindex", "0");
+      this._header?.setAttribute("aria-label", this._label());
       this.addEventListener("click", this._onClick);
       this.addEventListener("keydown", this._onKeydown);
     }
@@ -219,16 +222,20 @@
         });
         return;
       }
+      const interactivo = evento.target.closest("button, a, input, select, textarea");
+      if (interactivo && this.contains(interactivo)) return;
       this.emit("modulinkr-node-open", {
         origin: Number(this.dataset.origin),
       });
     };
 
     _onKeydown = (evento) => {
-      if (evento.target !== this) return;
+      if (evento.target !== this._header) return;
       if (evento.key === "Enter" || evento.key === " ") {
         evento.preventDefault();
-        this.click();
+        this.emit("modulinkr-node-open", {
+          origin: Number(this.dataset.origin),
+        });
       }
     };
   }

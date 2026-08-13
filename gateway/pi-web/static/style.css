@@ -22,6 +22,11 @@
   --sombra: 0 1px 3px rgba(20, 40, 60, 0.08), 0 4px 14px rgba(20, 40, 60, 0.05);
   --sb-ancho: 232px;
   --sb-contraida: 60px;
+  --dashboard-ancho-tarjeta: 560px;
+  --dashboard-alto-elemento: 68px;
+  --dashboard-icono: 40px;
+  --dashboard-radio: 12px;
+  --dashboard-espacio: 10px;
 }
 
 * { box-sizing: border-box; }
@@ -105,7 +110,7 @@ h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
 
 .badge {
   padding: 0.15rem 0.7rem; border-radius: 999px; font-size: 0.82rem;
-  font-weight: 600; background: var(--ok-suave); color: var(--ok);
+  font-weight: 600; background: var(--ok-suave); color: var(--ok); white-space: nowrap;
 }
 .badge.warn { background: var(--warn-suave); color: var(--warn); }
 .badge.bad  { background: var(--bad-suave);  color: var(--bad); }
@@ -178,30 +183,59 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 
 .grid-tarjetas {
   display: grid; gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
+  max-width: calc(1680px + 2rem);
+  align-items: start; justify-content: start;
 }
 
-.tarjeta-nodo { display: block; padding: 0.9rem 1rem 0.6rem; cursor: pointer; transition: box-shadow 0.15s ease; }
-.tarjeta-nodo:hover { box-shadow: 0 2px 6px rgba(20,40,60,0.12), 0 8px 22px rgba(20,40,60,0.09); }
+.tarjeta-nodo {
+  display: block; min-width: 0; padding: 12px; cursor: pointer;
+  border-radius: 14px; box-shadow: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.tarjeta-nodo:hover { border-color: color-mix(in srgb, var(--accent) 32%, var(--border)); }
+.tarjeta-nodo.nodo-offline { background: color-mix(in srgb, var(--card) 88%, var(--off-suave)); }
+.tarjeta-nodo.nodo-offline .tn-sensores { opacity: 0.62; }
 
-.tn-cabecera { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
+.tn-cabecera {
+  display: flex; align-items: center; gap: 10px; min-height: 44px;
+  margin-bottom: 10px; border-radius: 10px;
+}
+.tn-cabecera:hover .tn-nombre { color: var(--accent); }
+.tn-cabecera:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 2px;
+}
 .tn-info { flex: 1; min-width: 0; }
 .tn-icono {
-  width: 38px; height: 38px; border-radius: 50%; flex: none;
+  width: var(--dashboard-icono); height: var(--dashboard-icono); border-radius: 50%; flex: none;
   display: grid; place-items: center;
   background: var(--accent-suave); color: var(--accent);
 }
-.tn-icono modulinkr-icon { width: 20px; height: 20px; }
+.tn-icono modulinkr-icon { width: 22px; height: 22px; }
 .tn-icono.off { background: var(--off-suave); color: var(--off); }
-.tn-nombre { font-weight: 600; }
-.tn-sub { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
-.tn-estado { flex: none; align-self: flex-start; margin-top: 0.15rem; }
+.tn-nombre {
+  overflow: hidden; color: var(--text); font-size: 1rem; font-weight: 650;
+  line-height: 1.25; text-overflow: ellipsis; white-space: nowrap;
+}
+.tn-sub {
+  overflow: hidden; color: var(--dim); font-size: 0.78rem; line-height: 1.35;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.tn-estado { flex: none; }
 /* Pila de estados del gateway (LoRa y MQTT), alineada arriba a la derecha. */
-.tn-estados { flex: none; align-self: flex-start; margin-top: 0.15rem;
-  display: flex; flex-direction: column; align-items: flex-end; gap: 0.3rem; }
+.tn-estados {
+  display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end;
+  align-items: center; gap: 5px; max-width: 52%;
+}
 
-.chip { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  border-radius: 999px; font-size: 0.75rem; font-weight: 650; line-height: 1.5;
+  white-space: nowrap;
+}
+.chip modulinkr-icon { width: 14px; height: 14px; }
+.chip.conexion { padding: 4px 7px; }
 .chip.on     { background: var(--ok-suave);   color: var(--ok); }
 .chip.off    { background: var(--off-suave);  color: var(--off); }
 .chip.ambar  { background: var(--warn-suave); color: var(--warn); }
@@ -209,29 +243,51 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 /* MQTT no configurado: presente pero atenuado, no es una alarma. */
 .chip.neutro { background: var(--off-suave);  color: var(--off); opacity: 0.6; }
 
-.tn-sensores { display: flex; flex-direction: column; }
-.sensor {
-  display: flex; align-items: center; gap: 0.6rem;
-  padding: 0.45rem 0; border-top: 1px solid var(--border);
+.tn-sensores {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--dashboard-espacio);
 }
-.sensor { cursor: pointer; border-radius: 8px; }
-.sensor:hover { background: var(--bg); }
-.sensor > modulinkr-icon { width: 18px; height: 18px; color: var(--dim); }
+.sensor {
+  display: grid; grid-template-columns: var(--dashboard-icono) minmax(0, 1fr);
+  grid-template-rows: auto auto; align-content: center; column-gap: 11px;
+  min-height: var(--dashboard-alto-elemento); padding: 10px 12px;
+  background: var(--card); border: 1px solid var(--border);
+}
+.sensor { cursor: pointer; border-radius: var(--dashboard-radio); }
+.sensor:hover { background: color-mix(in srgb, var(--accent-suave) 35%, var(--card)); }
+.sensor > modulinkr-icon {
+  grid-row: 1 / 3; align-self: center; width: var(--dashboard-icono);
+  height: var(--dashboard-icono); padding: 9px; border-radius: 50%;
+  color: var(--accent); background: var(--accent-suave);
+}
+.sensor.tiene-fallo { background: color-mix(in srgb, var(--warn-suave) 55%, var(--card)); }
+.sensor.tiene-fallo > modulinkr-icon { color: var(--warn); background: var(--warn-suave); }
 /* Nombre a la izquierda con todo el espacio sobrante: empuja la
    miniatura y el valor al borde derecho de la tarjeta. */
-.sensor .s-nombre { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sensor .s-spark { flex: none; }
+.sensor .s-nombre {
+  grid-column: 2; min-width: 0; overflow: hidden; color: var(--text);
+  font-size: 0.92rem; font-weight: 600; line-height: 1.25;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.sensor .s-spark { display: none; }
 .sensor .s-spark { fill: none; }
 .sensor .s-spark polyline {
   fill: none; stroke: var(--accent); stroke-width: 1.5;
   stroke-linecap: round; stroke-linejoin: round;
 }
-.sensor .s-valor { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; min-width: 4.5rem; text-align: right; }
+.sensor .s-valor {
+  grid-column: 2; min-width: 0; overflow: hidden; color: var(--dim);
+  font-size: 0.9rem; font-weight: 500; font-variant-numeric: tabular-nums;
+  line-height: 1.3; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Estado Modbus con fallo (v3.2): el motivo sustituye al valor, en ámbar. */
 .s-fallo { color: var(--warn); font-weight: 600; }
 .sensor .s-unidad { color: var(--dim); font-weight: 400; font-size: 0.85em; }
 
-.tn-vacio { color: var(--dim); font-size: 0.85rem; padding: 0.4rem 0 0.6rem; border-top: 1px solid var(--border); }
+.tn-vacio {
+  grid-column: 1 / -1; color: var(--dim); font-size: 0.85rem;
+  padding: 0.8rem; border: 1px dashed var(--border); border-radius: var(--dashboard-radio);
+}
 
 /* Tarjeta del gateway: mismas filas etiqueta/valor que las medidas,
    pero sin cursor de clic (no abren minigráfica). */
@@ -551,7 +607,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 
 .skeleton {
-  border-radius: 14px; height: 150px;
+  border-radius: 14px; height: 210px;
   background: linear-gradient(100deg, var(--card) 40%, var(--bg) 50%, var(--card) 60%);
   background-size: 200% 100%;
   animation: brillo 1.2s linear infinite;
@@ -588,6 +644,28 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   modulinkr-app-header { padding: 0 0.9rem; }
   .vistas, .rango { margin-left: 0; }
   .campo-error { margin-left: 0; }
+  .grid-tarjetas { grid-template-columns: minmax(0, 1fr); }
+  .tn-estados { max-width: 58%; }
+}
+
+@media (max-width: 520px) {
+  :root { --dashboard-alto-elemento: 64px; }
+  modulinkr-app-header { gap: 0.55rem; }
+  modulinkr-app-header .header-derecha { display: none; }
+  #filtro { width: 100%; min-width: 0; }
+  .vistas { width: 100%; flex-wrap: wrap; }
+  .vistas select { flex: 1 1 100%; min-width: 0; }
+  .vistas button { flex: 1 1 0; }
+  #selector-canales details { width: 100%; min-width: 0; }
+  .cfg-campo { width: 100%; min-width: 0; flex-direction: column; align-items: stretch; gap: 0.35rem; }
+  .cfg-campo > span { width: auto; }
+  .tarjeta-nodo { padding: 10px; }
+  .tn-cabecera { align-items: flex-start; }
+  .tn-estados { max-width: 50%; }
+  .chip.conexion span { display: none; }
+  .chip.conexion { width: 30px; height: 30px; justify-content: center; padding: 0; }
+  .chip.conexion modulinkr-icon { width: 16px; height: 16px; }
+  .tn-sensores { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }
 
 /* Configurar red WiFi: lista de redes del escaneo (botones seleccionables). */
