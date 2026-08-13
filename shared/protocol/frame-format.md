@@ -28,36 +28,38 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 
 Versión actual: `0x39` (= `v3.9`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
-**Correspondencia con el JSON**: el byte `0xMm` de la trama binaria equivale al string `"M.m"` del campo `schema_version` que aparece en `node-config.md`, `batch-format.md` y `commands-format.md`. Ejemplo: `0x20` equivale a `"2.0"`, `0x21` a `"2.1"`. La traducción es automática en el firmware al serializar/deserializar.
+Los formatos se versionan por separado en la implementación vigente. La trama LoRa usa v3.9, la configuración del nodo usa v3.3 y el mensaje MQTT usa v3.2. `commands-format.md` conserva el diseño v2.0 de un plano de comandos todavía no implementado. La equivalencia directa que se asumió en las primeras revisiones ya no describe el sistema actual.
 
 Reglas de compatibilidad:
 
 - Major distinto, trama incompatible. El receptor descarta y registra el evento.
 - Minor distinto, trama parseable. El receptor interpreta lo que entienda y silencia campos desconocidos.
 
+La segunda regla expresa la intención original, pero las revisiones históricas que siguen incluyen cambios de layout incompatibles bajo incrementos minor. La política definitiva de compatibilidad y la relación entre las versiones de cada formato permanecen pendientes de una decisión explícita. Hasta entonces, la interoperabilidad debe verificarse contra los parsers y constantes de la misma entrega, no inferirse solo del número de versión.
+
 **Historia**: el schema v1.0 definía una cabecera de 6 bytes sin soporte de red (sin `network_id`, sin direcciones de salto, sin TTL). La cabecera v2.0 no es parseable por un receptor v1.0, por eso el salto es de major y no de minor. El v1.0 nunca llegó a desplegarse más allá del banco de pruebas, así que no se mantiene compatibilidad hacia atrás en firmware.
 
-**v2.1 (10-jul-2026)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
+**v2.1 (2026-07-10)**: añade el timestamp de captura al payload de TELEMETRY (§3), el `epoch` al payload de BEACON (§7), y las tramas de registro NODE_REGISTER / WELCOME (§13). Nota de honestidad sobre el versionado: el cambio de layout de TELEMETRY y BEACON no es estrictamente "parseable por un receptor v2.0" (violaría la regla de minor de arriba); se acepta como minor porque no existe ningún despliegue v2.0 fuera del banco de pruebas y ambos extremos se actualizan a la vez, la misma justificación que se aplicó al retirar el v1.0.
 
-**v2.2 (11-jul-2026)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+**v2.2 (2026-07-11)**: añade la seguridad de la interfaz aire (§14): cifrado y autenticación AES-CCM de toda trama, activable por configuración a nivel de red. Con `security.enabled == false` la trama es idéntica a v2.1 (solo cambia el byte de versión); con `true`, el payload viaja cifrado y la trama gana un sobre de 8 bytes (`sec_ts` + MIC), no parseable por un receptor v2.1. Misma nota de honestidad que en v2.1: se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
-**v3.6 (31-jul-2026)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
+**v3.6 (2026-07-31)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
 
-**v3.7 (31-jul-2026)**: actualización de firmware por LoRa (§18), con FW_OFFER (`0x19`), FW_DATA (`0x1A`), FW_STATUS (`0x1B`), FW_INSTALL (`0x1C`) y FW_RESULT (`0x1D`). La entrega es secuencial y no lleva mapa de fragmentos: el mapa de 32 bits del canal de configuración no escala a los 2485 fragmentos de una imagen, y la escritura en la partición es secuencial de todos modos, así que un único número (por qué byte va el nodo) resuelve a la vez el progreso, la reanudación tras un reinicio y la detección de huecos. Bump aditivo.
+**v3.7 (2026-07-31)**: actualización de firmware por LoRa (§18), con FW_OFFER (`0x19`), FW_DATA (`0x1A`), FW_STATUS (`0x1B`), FW_INSTALL (`0x1C`) y FW_RESULT (`0x1D`). La entrega es secuencial y no lleva mapa de fragmentos: el mapa de 32 bits del canal de configuración no escala a los 2485 fragmentos de una imagen, y la escritura en la partición es secuencial de todos modos, así que un único número (por qué byte va el nodo) resuelve a la vez el progreso, la reanudación tras un reinicio y la detección de huecos. Bump aditivo.
 
-**v3.8 (31-jul-2026)**: ventana de silencio (§19), con la trama QUIET (`0x1E`). El gateway anuncia un intervalo durante el cual los nodos retienen su cola de transmisión, para poder emitir algo a toda la red sin que se lo tapen entre ellos. Trama propia y no un campo del BEACON, porque el payload del beacon es de tamaño fijo y validado: ensancharlo dejaría a un nodo anterior descartando todos los beacons, sin hora ni padre, huérfano en 90 s. Bump aditivo.
+**v3.8 (2026-07-31)**: ventana de silencio (§19), con la trama QUIET (`0x1E`). El gateway anuncia un intervalo durante el cual los nodos retienen su cola de transmisión, para poder emitir algo a toda la red sin que se lo tapen entre ellos. Trama propia y no un campo del BEACON, porque el payload del beacon es de tamaño fijo y validado: ensancharlo dejaría a un nodo anterior descartando todos los beacons, sin hora ni padre, huérfano en 90 s. Bump aditivo.
 
-**v3.9 (31-jul-2026)**: escritura aplazada de configuración (§17.7). El CONFIG_COMMIT gana un campo con la hora de aplicación, donde el cero significa "ahora" y reproduce exactamente el comportamiento anterior, de modo que la trama sigue saliendo con sus 38 bytes cuando no se usa. Con hora, el nodo guarda el config sin aplicarlo y sigue operando con el suyo hasta ese instante. Hace falta para cambiar los parámetros de red de toda la malla: repartir lleva minutos y el salto tiene que ser simultáneo. Bump aditivo.
+**v3.9 (2026-07-31)**: escritura aplazada de configuración (§17.7). El CONFIG_COMMIT gana un campo con la hora de aplicación, donde el cero significa "ahora" y reproduce exactamente el comportamiento anterior, de modo que la trama sigue saliendo con sus 38 bytes cuando no se usa. Con hora, el nodo guarda el config sin aplicarlo y sigue operando con el suyo hasta ese instante. Hace falta para cambiar los parámetros de red de toda la malla: repartir lleva minutos y el salto tiene que ser simultáneo. Bump aditivo.
 
-**v3.5 (31-jul-2026)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
+**v3.5 (2026-07-31)**: canal de configuración remota (§17), con las cuatro tramas CONFIG_PUSH (`0x13`), CONFIG_ACK (`0x14`), CONFIG_COMMIT (`0x15`) y CONFIG_RESULT (`0x16`), del rango que §11 reservaba desde el principio para comandos por LoRa. Permite sustituir el `config.json` de un nodo sin ir hasta él con un cable. El bump es aditivo: ninguna trama existente cambia. Se apoya en la reversión automática del nodo, que ya protegía el camino por USB, para que un config que rompa el enlace se deshaga solo.
 
-**v3.4 (29-jul-2026)**: reorganización del diagnóstico Modbus. MODBUS_DEBUG (§15.1) gana el campo `purge_len` y, tras la petición y la respuesta, los bytes purgados del cambio de sentido de esa transacción y los dos acumulados del bus, `purged_total` y `resync_total`. NODE_HEALTH (§16.1) gana un byte final con el modo de depuración Modbus vigente. Motiva el cambio que esa información solo existía en la consola del nodo, accesible por USB, y que una pestaña de tramas vacía en el visor no distinguía un bus limpio de una depuración apagada. En el firmware desaparece además la constante de compilación que gobernaba la traza por consola al margen del config: `modbus.debug` pasa a gobernar las dos salidas, consola y aire.
+**v3.4 (2026-07-29)**: reorganización del diagnóstico Modbus. MODBUS_DEBUG (§15.1) gana el campo `purge_len` y, tras la petición y la respuesta, los bytes purgados del cambio de sentido de esa transacción y los dos acumulados del bus, `purged_total` y `resync_total`. NODE_HEALTH (§16.1) gana un byte final con el modo de depuración Modbus vigente. Motiva el cambio que esa información solo existía en la consola del nodo, accesible por USB, y que una pestaña de tramas vacía en el visor no distinguía un bus limpio de una depuración apagada. En el firmware desaparece además la constante de compilación que gobernaba la traza por consola al margen del config: `modbus.debug` pasa a gobernar las dos salidas, consola y aire.
 
-**v3.3 (28-jul-2026)**: aparece la trama NODE_HEALTH (`frame_type = 0x07`, §16), con el estado de la radio del nodo: motivo del último fallo, causa del arranque, arranques acumulados, recuperaciones ejecutadas por nivel y contadores de transmisión y recepción. El bump es aditivo y no cambia ninguna trama existente: un receptor v3.2 la descarta como tipo desconocido. Motiva el cambio el incidente del 27 y 28 de julio de 2026, en el que un módulo colgado dejó al nodo un día entero transmitiendo al vacío sin que ningún contador lo delatara.
+**v3.3 (2026-07-28)**: aparece la trama NODE_HEALTH (`frame_type = 0x07`, §16), con el estado de la radio del nodo: motivo del último fallo, causa del arranque, arranques acumulados, recuperaciones ejecutadas por nivel y contadores de transmisión y recepción. El bump es aditivo y no cambia ninguna trama existente: un receptor v3.2 la descarta como tipo desconocido. Motiva el cambio el incidente del 2026-07-27 y 2026-07-28, en el que un módulo colgado dejó al nodo un día entero transmitiendo al vacío sin que ningún contador lo delatara.
 
-**v3.2 (20-jul-2026)**: visibilidad del estado Modbus desde el gateway. TELEMETRY gana un byte de estado por read (§3.1) y **se emite en cada ciclo con reloj sincronizado, incluso con todas las lecturas fallidas**: una lectura fallida viaja como NaN con su estado, en lugar del silencio de v3.1 (que hacía indistinguible "sensor desconectado" de "nodo muerto"). Aparece la trama MODBUS_DEBUG (`frame_type = 0x06`, §15): la transacción Modbus fallida en crudo, activable con `modbus.debug` del config (`node-config.md` §5). Misma nota de honestidad que en v2.1: el cambio de layout de TELEMETRY se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
+**v3.2 (2026-07-20)**: visibilidad del estado Modbus desde el gateway. TELEMETRY gana un byte de estado por read (§3.1) y **se emite en cada ciclo con reloj sincronizado, incluso con todas las lecturas fallidas**: una lectura fallida viaja como NaN con su estado, en lugar del silencio de v3.1 (que hacía indistinguible "sensor desconectado" de "nodo muerto"). Aparece la trama MODBUS_DEBUG (`frame_type = 0x06`, §15): la transacción Modbus fallida en crudo, activable con `modbus.debug` del config (`node-config.md` §5). Misma nota de honestidad que en v2.1: el cambio de layout de TELEMETRY se acepta como minor porque todos los extremos del despliegue se actualizan a la vez.
 
-**v3.0 (16-jul-2026)**: replanteo de la hora del sistema y unificación de la telemetría MQTT. Toda muestra nace con hora: el nodo **no muestrea sin reloj sincronizado**, con lo que `ts = 0` en TELEMETRY pasa de "capturada sin hora" a **inválido** (§3.1, §10). La obtención de hora pasa de perezosa a activa (§13.4): el supernodo intenta NTP desde el arranque y el nodo huérfano emite SN_REQUEST aunque tenga la cola vacía, solo para obtener el `epoch` del SN_OFFER (§8.1). Desaparece el `boot_id` (§13.1): su única función fuerte era identificar muestras sin hora, que ya no existen. El mensaje MQTT de telemetría se unifica para las cuatro rutas de entrega (gateway y supernodo publican el mismo formato, ver [`batch-format.md`](batch-format.md)). El bump es de major: un receptor v2.x acepta `ts = 0` y el mensaje MQTT cambia de forma incompatible.
+**v3.0 (2026-07-16)**: replanteo de la hora del sistema y unificación de la telemetría MQTT. Toda muestra nace con hora: el nodo **no muestrea sin reloj sincronizado**, con lo que `ts = 0` en TELEMETRY pasa de "capturada sin hora" a **inválido** (§3.1, §10). La obtención de hora pasa de perezosa a activa (§13.4): el supernodo intenta NTP desde el arranque y el nodo huérfano emite SN_REQUEST aunque tenga la cola vacía, solo para obtener el `epoch` del SN_OFFER (§8.1). Desaparece el `boot_id` (§13.1): su única función fuerte era identificar muestras sin hora, que ya no existen. El mensaje MQTT de telemetría se unifica para las cuatro rutas de entrega (gateway y supernodo publican el mismo formato, ver [`batch-format.md`](batch-format.md)). El bump es de major: un receptor v2.x acepta `ts = 0` y el mensaje MQTT cambia de forma incompatible.
 
 ### 1.3 CRC de aplicación
 
@@ -76,7 +78,7 @@ El CRC cubre **todos los bytes anteriores**, desde el byte 0 hasta el byte inmed
 Todas las tramas comparten una cabecera de **11 bytes** seguida de un payload variable y el CRC:
 
 ```
-byte 0      schema_version   (1 B)      0x32 para v3.2
+byte 0      schema_version   (1 B)      0x39 para v3.9
 byte 1      network_id       (1 B)      identificador de red
 byte 2      hop_src          (1 B)      emisor de este salto
 byte 3      hop_dst          (1 B)      receptor de este salto
@@ -209,7 +211,7 @@ El CRC de aplicación cubre también los campos mutables, así que valida la int
 
 ### 2.6 Deduplicación en el gateway
 
-> **Actualización del 10-jul-2026 (v2.1, replanteo del `seq`)**: el `seq` deja de ser identidad persistente del dato y queda como contador **efímero de enlace**: nace en 1 en cada arranque del nodo y nadie lo persiste. La identidad extremo a extremo de una muestra pasa a ser `(origin, ts, seq)`, donde `ts` es el timestamp de captura que ahora viaja en la trama TELEMETRY (§3). El `ts` hace el trabajo pesado (la misma muestra llega con el mismo `ts` por cualquier camino; muestras de arranques distintos nunca comparten `ts`) y el `seq` desempata muestras del mismo segundo.
+> **Actualización del 2026-07-10 (v2.1, replanteo del `seq`)**: el `seq` deja de ser identidad persistente del dato y queda como contador **efímero de enlace**: nace en 1 en cada arranque del nodo y nadie lo persiste. La identidad extremo a extremo de una muestra pasa a ser `(origin, ts, seq)`, donde `ts` es el timestamp de captura que ahora viaja en la trama TELEMETRY (§3). El `ts` hace el trabajo pesado (la misma muestra llega con el mismo `ts` por cualquier camino; muestras de arranques distintos nunca comparten `ts`) y el `seq` desempata muestras del mismo segundo.
 
 Para el re-ACK de reintentos, el gateway mantiene por cada `origin_id` una **memoria corta de seqs recientes** (ventana temporal recomendada: 10 min). Una trama con `seq` ya visto en la ventana **no se vuelve a procesar como dato, pero sí se vuelve a confirmar**: el gateway re-emite el ACK, porque un duplicado entrante significa casi siempre que el ACK anterior se perdió. La deduplicación **persistente** (buffer del gateway y consumidor cloud) usa la identidad `(origin, ts, seq)`; así, un nodo reiniciado cuyo `seq` vuelve a 1 no colisiona con muestras de corridas anteriores (desaparece el paliativo de vaciar la BBDD del Pi tras reflashear).
 
@@ -299,11 +301,11 @@ Para SF12 BW125 (alcance máximo, baja velocidad), el payload PHY baja a ~51 byt
 
 Confirmación **extremo a extremo**: solo la emite el receptor final de la telemetría (el gateway en operación normal, o el supernodo elegido durante el fallback NB-IoT, ver §8). Los relays intermedios nunca generan ACK, solo lo transportan por la ruta inversa (§2.4). Así, un ACK recibido significa con certeza que la trama llegó a su destino final, que es exactamente la señal que gobierna el respaldo NB-IoT.
 
-**Actualización del 6-jul-2026 (cambio de arquitectura del gateway, sin cambio de formato en el aire)**: el ACK lo genera el **Raspberry Pi** del gateway, no el Heltec. El formato de la trama ACK no cambia (mismo `schema_version = 0x20`, misma estructura de §4.1); solo cambia quién la construye. El Heltec pasa a ser radio pura: recibe y vuelca al Pi por USB, y transmite lo que el Pi le ordena por el enlace serial de §12. El ACK con `status = OK` significa ahora que **el Pi ha aceptado el dato en su buffer local** (custodia), no solo que el front-end de radio oyó la trama. Esta es la señal correcta para el respaldo NB-IoT: si el Pi cae o su servicio se detiene, deja de emitir ACK (y BEACON), el nodo agota reintentos y escala a NB-IoT. Con el ACK autónomo previo del Heltec, una caída del Pi era invisible para la red y los datos se perdían silenciosamente en el front-end.
+**Actualización del 2026-07-06 (cambio de arquitectura del gateway, sin cambio de formato en el aire)**: el ACK lo genera el **Raspberry Pi** del gateway, no el Heltec. El formato de la trama ACK no cambia (mismo `schema_version = 0x20`, misma estructura de §4.1); solo cambia quién la construye. El Heltec pasa a ser radio pura: recibe y vuelca al Pi por USB, y transmite lo que el Pi le ordena por el enlace serial de §12. El ACK con `status = OK` significa ahora que **el Pi ha aceptado el dato en su buffer local** (custodia), no solo que el front-end de radio oyó la trama. Esta es la señal correcta para el respaldo NB-IoT: si el Pi cae o su servicio se detiene, deja de emitir ACK (y BEACON), el nodo agota reintentos y escala a NB-IoT. Con el ACK autónomo previo del Heltec, una caída del Pi era invisible para la red y los datos se perdían silenciosamente en el front-end.
 
 El Pi, al tener ahora la lógica y el catálogo, sí puede emitir los status que requieren catálogo (`SCHEMA_MISMATCH`, `UNKNOWN_NODE`, `DECODE_ERROR`). El parámetro `lora.ack_enabled` del config gobierna si el **nodo** espera y contabiliza ACKs, no si el gateway los emite.
 
-> **Historia**: en la versión previa el front-end de radio del gateway (Heltec) generaba el ACK de forma autónoma, validando CRC y schema y respondiendo de inmediato sin consultar al Pi, y los status de catálogo quedaban pendientes del enlace Pi a Heltec. El cambio del 6-jul-2026 construye ese enlace (§12) y traslada la generación del ACK y del BEACON al Pi, sin tocar el formato de las tramas.
+> **Historia**: en la versión previa el front-end de radio del gateway (Heltec) generaba el ACK de forma autónoma, validando CRC y schema y respondiendo de inmediato sin consultar al Pi, y los status de catálogo quedaban pendientes del enlace Pi a Heltec. El cambio del 2026-07-06 construye ese enlace (§12) y traslada la generación del ACK y del BEACON al Pi, sin tocar el formato de las tramas.
 
 ### 4.1 Estructura del payload
 
@@ -407,7 +409,7 @@ Es decir, una diferencia menor que la mitad del rango se considera "a anterior a
 
 ## 6. Trama HEARTBEAT (uplink, `frame_type = 0x02`)
 
-> **Actualización del 16-jul-2026 (v3.1)**: el HEARTBEAT pasa de "vivo sin lecturas" a **diagnóstico periódico del duty cycle**. Gana un payload de 4 bytes y pierde el régimen de ACK.
+> **Actualización del 2026-07-16 (v3.1)**: el HEARTBEAT pasa de "vivo sin lecturas" a **diagnóstico periódico del duty cycle**. Gana un payload de 4 bytes y pierde el régimen de ACK.
 
 Payload (4 bytes):
 
@@ -422,7 +424,7 @@ Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay)
 
 Tamaño: **17 bytes** (25 con seguridad v2.2). Coste de aire del propio reporte: ~50 ms/min a SF7, ~0,08 % de duty, y queda contado en el contador que transporta.
 
-### 6.1 Estado NB-IoT/MQTT del supernodo (25-jul-2026)
+### 6.1 Estado NB-IoT/MQTT del supernodo (2026-07-25)
 
 El supernodo añade 2 bytes al final del payload del HEARTBEAT con el estado de su enlace celular, para que el visor del gateway lo muestre por nodo sin depender del canal cloud. Payload del supernodo (6 bytes):
 
@@ -439,7 +441,7 @@ El receptor distingue por longitud del payload: 4 bytes es un nodo normal (solo 
 
 Mantiene el árbol de rutas (§2.1). La origina el gateway; los nodos con padre la re-emiten una sola vez por `seq`.
 
-> **Actualización del 6-jul-2026 (cambio de arquitectura del gateway, sin cambio de formato en el aire)**: dentro del gateway, el BEACON lo genera el **Raspberry Pi**, no el Heltec. El Pi construye la trama y la entrega al Heltec para transmitir por el enlace serial de §12. El formato del BEACON no cambia. Consecuencia deliberada: la vida del árbol de rutas depende de que el servicio del Pi esté corriendo. Si el Pi cae, el BEACON se corta, los nodos que dependían del gateway como padre lo pierden por silencio (§2.2) y, sumado a la ausencia de ACK, escalan a NB-IoT. El servicio del Pi debe correr bajo un supervisor con reinicio automático (systemd) para que un reinicio del proceso no derribe la red más de lo imprescindible.
+> **Actualización del 2026-07-06 (cambio de arquitectura del gateway, sin cambio de formato en el aire)**: dentro del gateway, el BEACON lo genera el **Raspberry Pi**, no el Heltec. El Pi construye la trama y la entrega al Heltec para transmitir por el enlace serial de §12. El formato del BEACON no cambia. Consecuencia deliberada: la vida del árbol de rutas depende de que el servicio del Pi esté corriendo. Si el Pi cae, el BEACON se corta, los nodos que dependían del gateway como padre lo pierden por silencio (§2.2) y, sumado a la ausencia de ACK, escalan a NB-IoT. El servicio del Pi debe correr bajo un supervisor con reinicio automático (systemd) para que un reinicio del proceso no derribe la red más de lo imprescindible.
 
 ### 7.1 Direccionamiento
 
@@ -547,7 +549,7 @@ El supernodo publica las muestras en custodia con trigger `"relay"` según su pr
 
 La asociación con el supernodo es **transitoria**: en cuanto el solicitante recupera padre válido (beacon fresco, §2.1), vuelve a la ruta LoRa normal.
 
-### 8.4 Registro en custodia (añadido 12-jul-2026, pendiente de implementación)
+### 8.4 Registro en custodia (añadido 2026-07-12, pendiente de implementación)
 
 Extensión del flujo de custodia para el **alta zero-touch en el cloud** (`db-schema.md`): si nodo y supernodo arrancan sin gateway, las muestras del nodo llegan al backend por custodia pero su catálogo no llegaría por ninguna vía hasta que el gateway reviva. Esta extensión cierra ese hueco haciendo viajar también el NODE_REGISTER por el supernodo.
 
@@ -606,16 +608,16 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 
 Cambios contemplados para versiones futuras del schema, listados aquí para que el diseño actual los soporte sin refactor mayor:
 
-- **Enlace descendente Pi a Heltec**: **implementado el 6-jul-2026, ver §12**. Protocolo serial bidireccional para que el Pi construya y ordene la transmisión de ACKs (incluidos los de catálogo `SCHEMA_MISMATCH`, `UNKNOWN_NODE`, `DECODE_ERROR`), BEACON y, en el futuro, comandos downlink. Los `frame_type` `0x13`-`0x1F` quedan apartados para comandos por LoRa.
+- **Enlace descendente Pi a Heltec**: **implementado el 2026-07-06, ver §12**. Protocolo serial bidireccional para que el Pi construya y ordene la transmisión de ACKs (incluidos los de catálogo `SCHEMA_MISMATCH`, `UNKNOWN_NODE`, `DECODE_ERROR`), BEACON y, en el futuro, comandos downlink. Los `frame_type` `0x13`-`0x1F` quedan apartados para comandos por LoRa.
 - **Comandos a nodos sin NB-IoT**: ruta principal prevista: backend, Pi del gateway, Heltec, y descenso por el árbol con la misma ruta inversa de los ACKs (§2.4). Ruta de respaldo: entrada por un supernodo vía MQTT y entrega LoRa al vecino, simétrica al flujo de custodia de §8. Requiere resolver fragmentación del JSON en tramas y autenticación de comandos por aire.
 - **ACKs batched**: un ACK que cubre un rango de seqs (`ack_seq_from`, `ack_seq_to`) para abaratar downlink en rutas largas. Requeriría bump de minor de schema.
 - **Fallback multi-salto**: permitir que un SN_REQUEST/entrega en custodia atraviese relays (`ttl > 1`) cuando el supernodo no es vecino directo.
 - **Alarmas** (`frame_type = 0x03`): formato del payload TBD según necesidades del despliegue.
-- **Seguridad del canal (cifrado + autenticación)**: **implementado el 11-jul-2026 en v2.2, ver §14**. El `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 6-jul-2026: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. El modelo previsto aquí era de dos claves inspirado en LoRaWAN (clave de red para el MAC, clave de aplicación para el payload); la implementación final de §14 lo simplifica a **una clave de red con AES-CCM** (justificación en §14.1) y sustituye el anti-replay por `seq` (inviable tras el replanteo del seq efímero de v2.1) por el control de frescura basado en `sec_ts` (§14.5). Sin flag de cifrado en el aire: la activación es de toda la red, para cerrar el ataque de downgrade. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves); la rotación de claves es una mejora opcional fuera del alcance de v2.2 (§14.7).
+- **Seguridad del canal (cifrado + autenticación)**: **implementado el 2026-07-11 en v2.2, ver §14**. El `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 2026-07-06: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. El modelo previsto aquí era de dos claves inspirado en LoRaWAN (clave de red para el MAC, clave de aplicación para el payload); la implementación final de §14 lo simplifica a **una clave de red con AES-CCM** (justificación en §14.1) y sustituye el anti-replay por `seq` (inviable tras el replanteo del seq efímero de v2.1) por el control de frescura basado en `sec_ts` (§14.5). Sin flag de cifrado en el aire: la activación es de toda la red, para cerrar el ataque de downgrade. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves); la rotación de claves es una mejora opcional fuera del alcance de v2.2 (§14.7).
 
 ## 12. Enlace serial Pi a Heltec (dentro del gateway)
 
-Sección añadida el 6-jul-2026. Describe el protocolo entre las dos piezas internas del gateway: el **Raspberry Pi** (cerebro: valida, deduplica, bufferiza, construye tramas descendentes, lleva contadores) y el **Heltec** (radio pura: recibe del aire y vuelca al Pi, transmite lo que el Pi le ordena). Este enlace no viaja por el aire LoRa; es serial local por USB (CDC) entre ambos.
+Sección añadida el 2026-07-06. Describe el protocolo entre las dos piezas internas del gateway: el **Raspberry Pi** (cerebro: valida, deduplica, bufferiza, construye tramas descendentes, lleva contadores) y el **Heltec** (radio pura: recibe del aire y vuelca al Pi, transmite lo que el Pi le ordena). Este enlace no viaja por el aire LoRa; es serial local por USB (CDC) entre ambos.
 
 ### 12.1 Reparto de responsabilidades
 
@@ -666,7 +668,7 @@ Donde `<hexstring>` es la trama LoRa completa **ya construida por el Pi** (cabec
 - Half-duplex: al recibir un `TX`, el Heltec sale del modo recepción, transmite y vuelve a recepción, con el mismo cuidado del disparo fantasma de DIO1 que ya se aplicaba a los ACK/BEACON autónomos previos.
 - El servicio del Pi debe correr bajo systemd con reinicio automático: como el Pi genera ahora el BEACON, un proceso caído derriba el árbol de rutas hasta que se reinicie.
 
-### 12.5 Estado para la pantalla OLED (Pi a Heltec, 25-jul-2026)
+### 12.5 Estado para la pantalla OLED (Pi a Heltec, 2026-07-25)
 
 El Heltec lleva una OLED (SSD1306 128x64) que hasta la v3.1 quedaba apagada. El Pi es el dueño del estado de la red, así que compone lo que se muestra y lo empuja por la misma línea serie; el Heltec solo dibuja. Una línea de texto por refresco, terminada en `\n`:
 
@@ -676,11 +678,11 @@ OLED <ssid>\t<red>\t<ip>\t<en_linea>\t<fuera_de_linea>
 
 Los cinco campos van separados por tabulador (`\t`), no por espacio, porque el SSID admite espacios. Significan, en orden: SSID del WiFi al que está asociado el gateway, etiqueta de red ya compuesta por el Pi que el Heltec dibuja tal cual (`Red Modulinkr: <nombre> - ID: <network_id>` con `MODULINKR_NETWORK_NAME` fijado, o `ID de Red Modulinkr: <network_id>` sin nombre), IP LAN del gateway, número de nodos en línea y número de nodos fuera de línea. Un campo vacío se admite (por ejemplo, sin WiFi asociado el `ssid` va vacío). El conteo de nodos usa el umbral `MODULINKR_ONLINE_S` sobre la tabla `node_status` del buffer, el mismo criterio que el visor.
 
-Desde el 25-jul-2026 el segundo campo lleva la etiqueta entera. Antes contenía solo el nombre de la red y el Heltec le anteponía el texto fijo `Red Modulinkr: `; ese prefijo se retiró del firmware para poder variar la etiqueta según haya nombre o no, sin recompilar el Heltec. El buffer del campo en el Heltec pasó a 64 bytes para admitir el texto compuesto.
+Desde el 2026-07-25 el segundo campo lleva la etiqueta entera. Antes contenía solo el nombre de la red y el Heltec le anteponía el texto fijo `Red Modulinkr: `; ese prefijo se retiró del firmware para poder variar la etiqueta según haya nombre o no, sin recompilar el Heltec. El buffer del campo en el Heltec pasó a 64 bytes para admitir el texto compuesto.
 
 El Pi empuja esta línea al abrir el puerto del Heltec y luego cada `MODULINKR_OLED_S` (default 5 s). Antes del primer empuje, o si el Pi no está, el Heltec muestra `esperando Pi`. El redibujado por I2C es independiente del SPI de la radio y solo ocurre al llegar una línea nueva, así que no compite con la recepción LoRa.
 
-### 12.6 Configuración de radio en caliente (Pi a Heltec, 25-jul-2026)
+### 12.6 Configuración de radio en caliente (Pi a Heltec, 2026-07-25)
 
 Hasta esta fecha los parámetros de radio (`network_id`, frecuencia, SF y ancho de banda) vivían solo en los `build_flags` del Heltec, fijados al compilar. Para poder editarlos desde el visor sin reflashear, el Pi los empuja por la misma línea serie y el Heltec reconfigura su radio en caliente. Una línea de texto por empuje, terminada en `\n`:
 
@@ -694,7 +696,7 @@ El Pi empuja esta línea al abrir el puerto y luego con la cadencia de la OLED. 
 
 ## 13. Registro e incorporación a la red (NODE_REGISTER / WELCOME, v2.1)
 
-Sección añadida el 10-jul-2026. Define el proceso por el que un nodo (o supernodo) se presenta a la red al arrancar, obtiene la hora, y anuncia qué mide y qué puede escribir. Resuelve tres pendientes con un solo mecanismo: la estrategia de timestamps, los duplicados tras reinicio (vía el replanteo del `seq` de §2.6) y el catálogo del gateway.
+Sección añadida el 2026-07-10. Define el proceso por el que un nodo (o supernodo) se presenta a la red al arrancar, obtiene la hora, y anuncia qué mide y qué puede escribir. Resuelve tres pendientes con un solo mecanismo: la estrategia de timestamps, los duplicados tras reinicio (vía el replanteo del `seq` de §2.6) y el catálogo del gateway.
 
 ### 13.1 Secuencia de arranque
 
@@ -781,7 +783,7 @@ Ventana asumida: entre el boot y la primera fuente de hora no se captura nada. C
 
 ## 14. Seguridad de la interfaz aire (v2.2)
 
-Sección añadida el 11-jul-2026. Materializa la extensión prevista en §11 ("Seguridad del canal"): confidencialidad, autenticidad e integridad de las tramas LoRa, **extremo a extremo entre los nodos y el Pi del gateway**. El Heltec, según la decisión de arquitectura del 6-jul-2026, no cifra ni descifra ni tiene claves: transporta bytes opacos (su único filtro, el `network_id`, sigue en claro en la cabecera).
+Sección añadida el 2026-07-11. Materializa la extensión prevista en §11 ("Seguridad del canal"): confidencialidad, autenticidad e integridad de las tramas LoRa, **extremo a extremo entre los nodos y el Pi del gateway**. El Heltec, según la decisión de arquitectura del 2026-07-06, no cifra ni descifra ni tiene claves: transporta bytes opacos (su único filtro, el `network_id`, sigue en claro en la cabecera).
 
 ### 14.1 Modelo y decisiones de diseño
 
@@ -860,7 +862,7 @@ Donde el replay sí hace daño es en las tramas de **control**, cuyo efecto no p
 
 El control se **omite** cuando falta cualquiera de las dos horas: si el reloj propio del receptor no está sincronizado, o si `sec_ts < 0x40000000` (salt de emisor sin hora, §14.4). Riesgo residual aceptado y documentado: (a) un receptor sin hora no puede validar frescura (es la ventana entre el boot y el primer beacon/WELCOME); (b) tramas de control emitidas por un gateway sin hora (arranque sin NTP) viajan con salt y quedan exentas, con una ventana de exposición igual de corta. En ambos casos el atacante sigue sin poder **fabricar** tramas; solo reemitir, y solo durante esas ventanas.
 
-**Encierro por reloj desfasado y salida (1-ago-2026).** La regla anterior tiene un punto ciego que se manifestó en banco. Cubre el caso del emisor **sin** hora, que va con salt y queda exento, pero no el del emisor con una hora **equivocada y plausible**, que va con `sec_ts` normal. El Pi del gateway no lleva reloj de batería: al arrancar restaura la hora del último apagado, que está horas atrás pero es perfectamente posterior a cualquier umbral de plausibilidad. El gateway repartió esa hora en su primer beacon, un nodo la adoptó como propia, y veinte segundos después el NTP corrigió el Pi doce horas de golpe. A partir de ese instante toda trama del gateway llegaba con un `sec_ts` doce horas por delante del reloj del nodo, que las descartaba por rancias. Incluido el BEACON, que es lo único capaz de corregir la hora. El nodo quedó sordo de forma permanente: transmitía, el gateway recibía y confirmaba, y ninguna confirmación entraba. Su detector de receptor mudo escaló hasta reiniciar la radio, que estaba perfecta, y la telemetría de ese rato se publicó fechada doce horas antes.
+**Encierro por reloj desfasado y salida (2026-08-01).** La regla anterior tiene un punto ciego que se manifestó en banco. Cubre el caso del emisor **sin** hora, que va con salt y queda exento, pero no el del emisor con una hora **equivocada y plausible**, que va con `sec_ts` normal. El Pi del gateway no lleva reloj de batería: al arrancar restaura la hora del último apagado, que está horas atrás pero es perfectamente posterior a cualquier umbral de plausibilidad. El gateway repartió esa hora en su primer beacon, un nodo la adoptó como propia, y veinte segundos después el NTP corrigió el Pi doce horas de golpe. A partir de ese instante toda trama del gateway llegaba con un `sec_ts` doce horas por delante del reloj del nodo, que las descartaba por rancias. Incluido el BEACON, que es lo único capaz de corregir la hora. El nodo quedó sordo de forma permanente: transmitía, el gateway recibía y confirmaba, y ninguna confirmación entraba. Su detector de receptor mudo escaló hasta reiniciar la radio, que estaba perfecta, y la telemetría de ese rato se publicó fechada doce horas antes.
 
 La corrección va en los dos extremos, porque cada uno arregla la mitad:
 
@@ -924,15 +926,15 @@ Los tres últimos campos existen para que el visor enseñe lo mismo que la conso
 2. El modo gobierna qué transacciones y cuántas por ciclo de envío se reportan: `errors_last`, la última fallida del ciclo (comportamiento v3.2); `errors_each`, cada transacción fallida; `all_last`, la última transacción del ciclo, correcta o fallida; `all_each`, cada transacción del ciclo, correcta o fallida. Los modos `_each` pueden emitir varias tramas por ciclo, así que su coste de aire crece con el número de transacciones y la cadencia (duty cycle, §9). Los contadores agregados por lectura viajan igualmente en los `st[]` de TELEMETRY, en todos los modos.
 3. Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay), emitida inmediatamente después de la TELEMETRY del ciclo.
 4. **Sin ACK, sin reintentos, sin cola de pendientes y sin custodia NB-IoT**: es diagnóstico best-effort, como el HEARTBEAT (§6). Perder una no compromete nada: mientras el fallo persista, el ciclo siguiente emite otra.
-5. La trama solo viaja por LoRa. Un supernodo sin ruta LoRa no la saca por NB-IoT: el punto de observación del debug es el Pi del gateway (decisión del 20-jul-2026; el estado agregado sigue llegando por los `st[]` de la telemetría, que sí viaja por todos los caminos).
+5. La trama solo viaja por LoRa. Un supernodo sin ruta LoRa no la saca por NB-IoT: el punto de observación del debug es el Pi del gateway (decisión del 2026-07-20; el estado agregado sigue llegando por los `st[]` de la telemetría, que sí viaja por todos los caminos).
 
 ### 15.3 En el gateway
 
-El gateway decodifica la trama y la escribe en su log (journal del servicio), y ahí termina: sin ACK, sin buffer de telemetría y sin publicación MQTT (decisión del 20-jul-2026: el debug se observa en el Pi, no en el broker).
+El gateway decodifica la trama y la escribe en su log (journal del servicio), y ahí termina: sin ACK, sin buffer de telemetría y sin publicación MQTT (decisión del 2026-07-20: el debug se observa en el Pi, no en el broker).
 
 ## 16. Trama NODE_HEALTH (uplink, `frame_type = 0x07`, v3.3)
 
-Estado de la radio del nodo y de las recuperaciones que ha necesitado. Nace del incidente del 27 y 28 de julio de 2026: el módulo RAK3172 se colgó dos veces, una por el lado del transmisor y otra por el del receptor, y el nodo siguió reportando envíos correctos mientras el gateway no recibía nada. Un nodo que se recupera solo borra la prueba de que algo iba mal, así que el estado tiene que viajar y quedar guardado.
+Estado de la radio del nodo y de las recuperaciones que ha necesitado. Nace del incidente del 2026-07-27 y 2026-07-28: el módulo RAK3172 se colgó dos veces, una por el lado del transmisor y otra por el del receptor, y el nodo siguió reportando envíos correctos mientras el gateway no recibía nada. Un nodo que se recupera solo borra la prueba de que algo iba mal, así que el estado tiene que viajar y quedar guardado.
 
 ### 16.1 Estructura del payload
 
@@ -1106,7 +1108,7 @@ Quitada la cita, el procedimiento se reduce a esto, y no cambia el formato de ni
 
 1. **Aviso.** El gateway le pide su configuración a cada nodo, le cambia solo los parámetros de red y se la devuelve. Cada uno se parchea sobre la SUYA: el gateway no sabe qué lee un nodo ni con qué función Modbus, y un config fabricado con lo poco que sabe sería válido, el nodo lo aplicaría y quedaría vivo, en línea y midiendo nada.
 2. **Confirmación.** El nodo valida, guarda, **contesta y luego reinicia**, con segundo y medio de margen para que su respuesta salga por aire antes de que su radio cambie de parámetros. Ese "ok, salto" viaja por los parámetros viejos, que es donde el gateway sigue escuchando.
-3. **Salto del gateway.** Cuando todos han contestado, el gateway cambia su radio. Medido en banco el 2-ago-2026: un segundo después de la última confirmación.
+3. **Salto del gateway.** Cuando todos han contestado, el gateway cambia su radio. Medido en banco el 2026-08-02: un segundo después de la última confirmación.
 4. **Los que falten.** Si alguno no contesta, no se salta. Seguir sin él es una decisión del operador y no del programa, porque el que se queda atrás sigue midiendo con los parámetros viejos y deja de oír al gateway hasta que se le vaya a buscar.
 5. **Rescate.** El gateway vuelve a los parámetros viejos **solo cuando se le pide**, y se queda el tiempo que el rescate necesita.
 
@@ -1116,7 +1118,7 @@ Quitada la cita, el procedimiento se reduce a esto, y no cambia el formato de ni
 
 **Los parámetros van juntos o no van.** El juego que se cambia incluye `network_id`, frecuencia, SF, ancho de banda, TTL máximo y la clave de red. La clave viaja con el resto a propósito: cambiarla incomunica igual que cambiar el canal, así que pertenece al mismo cambio y a la misma vuelta atrás. Separarlas daría un estado en el que el gateway escucha en el canal correcto y no entiende nada de lo que oye.
 
-**Las rutas del parcheo son las que lee el nodo, y solo esas.** `transport.lora` para frecuencia, SF, ancho de banda, `network_id` y la clave; `transport.mesh` para el TTL. Escribir en un bloque de primer nivel produce el peor fallo posible de esta operación: el nodo acepta la configuración, contesta que la aplica, reinicia, y arranca con la radio de antes. Todo parece ir bien y el cambio no ocurre. Pasó el 2-ago-2026 con el ancho de banda, mientras el TTL sí cambiaba porque ese sí iba a su ruta correcta.
+**Las rutas del parcheo son las que lee el nodo, y solo esas.** `transport.lora` para frecuencia, SF, ancho de banda, `network_id` y la clave; `transport.mesh` para el TTL. Escribir en un bloque de primer nivel produce el peor fallo posible de esta operación: el nodo acepta la configuración, contesta que la aplica, reinicia, y arranca con la radio de antes. Todo parece ir bien y el cambio no ocurre. Pasó el 2026-08-02 con el ancho de banda, mientras el TTL sí cambiaba porque ese sí iba a su ruta correcta.
 
 **Durante el aviso no se envía nada más pesado.** Las transferencias de firmware ceden: los canales de lectura y escritura de configuración son de uno en uno, y el aviso tiene prioridad porque de él depende que la red entera siga junta.
 
@@ -1402,7 +1404,7 @@ El primer sumando es un suelo duro, y no por prudencia. El contador de ciclo de 
 
 El segundo aplica el criterio que ya usan otros protocolos con el mismo problema: quien ocupa el medio de forma continuada deja un hueco explícito para que el otro extremo pueda hablar, como el SIFS de 802.11, las ventanas RX1 y RX2 de LoRaWAN o el silencio de 3,5 caracteres de Modbus RTU. Se dimensiona con una telemetría, que es la trama más larga que el nodo emite sin que se le pida.
 
-A SF7 y 250 kHz la cuenta da 243 ms (182 de fragmento, 57 de telemetría, 4 de margen), y a SF9 y 125 kHz, 1551 ms. Ninguna constante cubre los dos casos: los 0,6 s fijos que se usaron hasta el 1-ago-2026 sobraban en el primero, donde alargaban una imagen de 541 kB de 11 a 27 minutos, y se quedaban muy cortos en el segundo, donde el hueco ni siquiera cubría el tiempo de aire de la trama anterior. El recorte solo se nota mientras el ciclo de trabajo no sea la restricción: al 8 % legal el presupuesto de aire manda y la imagen tarda lo mismo se ponga el hueco como se ponga.
+A SF7 y 250 kHz la cuenta da 243 ms (182 de fragmento, 57 de telemetría, 4 de margen), y a SF9 y 125 kHz, 1551 ms. Ninguna constante cubre los dos casos: los 0,6 s fijos que se usaron hasta el 2026-08-01 sobraban en el primero, donde alargaban una imagen de 541 kB de 11 a 27 minutos, y se quedaban muy cortos en el segundo, donde el hueco ni siquiera cubría el tiempo de aire de la trama anterior. El recorte solo se nota mientras el ciclo de trabajo no sea la restricción: al 8 % legal el presupuesto de aire manda y la imagen tarda lo mismo se ponga el hueco como se ponga.
 
 ### 20.8 FW_BCAST_POLL (downlink, `frame_type = 0x21`)
 
@@ -1443,7 +1445,7 @@ Este apartado deja sin uso el camino secuencial de §18, y conviene el porqué e
 
 §18 entrega la imagen en orden y el nodo solo acepta el fragmento que le toca. Si se pierde uno, todo lo que llega después se descarta y hay que rebobinar. Para pedir ese rebobinado **el nodo tiene que hablar**, y ahí está el problema: una radio que transmite no oye, así que cada vez que el nodo abre la boca pierde el fragmento que llegaba en ese instante.
 
-Medido en banco el 1-ago-2026, con el resto de fallos ya corregidos, quedó un patrón perfectamente periódico: un rebobinado cada 32 fragmentos exactos, que es cada cuántos el nodo emite su reporte de progreso. **El propio informe de progreso era lo que provocaba la pérdida siguiente.** Se puede paliar dejando un hueco tras cada informe, que es lo que hacen SIFS en 802.11 o el silencio de 3,5 caracteres de Modbus RTU, pero eso mitiga el síntoma.
+Medido en banco el 2026-08-01, con el resto de fallos ya corregidos, quedó un patrón perfectamente periódico: un rebobinado cada 32 fragmentos exactos, que es cada cuántos el nodo emite su reporte de progreso. **El propio informe de progreso era lo que provocaba la pérdida siguiente.** Se puede paliar dejando un hueco tras cada informe, que es lo que hacen SIFS en 802.11 o el silencio de 3,5 caracteres de Modbus RTU, pero eso mitiga el síntoma.
 
 El transporte de §20 no tiene ese problema en absoluto, y no por casualidad: **el receptor no habla en toda la transferencia**. Recibe en cualquier orden, escribe cada fragmento en su sitio porque están alineados, lleva un mapa de bits de lo recibido, y solo al final, cuando le preguntan, dice qué le falta. Cero transmisiones durante la emisión, cero sordera propia, cero rebobinados, porque no hay nada que rebobinar.
 
@@ -1460,7 +1462,7 @@ De ahí sale además el margen de anuncio: en difusión el aviso se repite duran
 
 ## 21. Clases de nodo y latencia de bajada (v4.0)
 
-Esta sección sale de una medida de banco del 1-ago-2026 y de la conversación que provocó. La primera subida de firmware a un nodo real iba camino de tardar nueve horas, y al buscar por qué apareció que el problema no era de radio sino de una regla del gateway heredada de un caso que este despliegue no tiene.
+Esta sección sale de una medida de banco del 2026-08-01 y de la conversación que provocó. La primera subida de firmware a un nodo real iba camino de tardar nueve horas, y al buscar por qué apareció que el problema no era de radio sino de una regla del gateway heredada de un caso que este despliegue no tiene.
 
 ### 21.1 La regla que había, y de dónde venía
 
@@ -1492,7 +1494,7 @@ La clase deja de ser una constante del código y pasa a `node.class` en la confi
 
 **Clase A**: se mantiene la ventana tras oírle, que es lo único posible si el nodo no escucha el resto del tiempo. La consecuencia hay que decirla antes de empezar y no descubrirla a mitad: el visor calcula cuánto tardará una transferencia con el intervalo medido de ese nodo y lo enseña.
 
-**Y el batimiento, que es lo que la ventana también resolvía sin querer.** En banco se vio un fragmento perdiéndose tres veces seguidas mientras los demás pasaban a la primera (31-jul-2026): dos ritmos periódicos que se enganchan producen colisiones repetidas, no aleatorias. La respuesta no es predecir cuándo hablará el nodo sino **desordenar un poco el propio ritmo**, con un pequeño azar en el hueco entre tramas. Es lo mismo que hace Ethernet con su espera aleatoria y lo que LoRaWAN obliga en los reintentos, y cuesta una línea.
+**Y el batimiento, que es lo que la ventana también resolvía sin querer.** En banco se vio un fragmento perdiéndose tres veces seguidas mientras los demás pasaban a la primera (2026-07-31): dos ritmos periódicos que se enganchan producen colisiones repetidas, no aleatorias. La respuesta no es predecir cuándo hablará el nodo sino **desordenar un poco el propio ritmo**, con un pequeño azar en el hueco entre tramas. Es lo mismo que hace Ethernet con su espera aleatoria y lo que LoRaWAN obliga en los reintentos, y cuesta una línea.
 
 ### 21.5 Cuándo hace falta silencio, y cuándo sobra
 
@@ -1573,11 +1575,11 @@ Resumen para trazabilidad del TFM:
 1. Cabecera ampliada de 6 a 11 bytes: `network_id` (aislamiento de despliegues), `hop_src`/`hop_dst` (direccionamiento por salto), `origin_id`/`dest_id` (direccionamiento extremo a extremo), `ttl`.
 2. Frame types nuevos: BEACON (`0x10`), SN_REQUEST (`0x11`), SN_OFFER (`0x12`).
 3. Status de ACK nuevo: `OK_VIA_NBIOT` (`0x05`).
-4. ACK generado de forma autónoma por el front-end de radio del gateway; los status de catálogo quedan pendientes del enlace Pi a Heltec. **Actualizado el 6-jul-2026**: el ACK y el BEACON pasan a generarse en el Pi a través del enlace serial de §12; los status de catálogo quedan habilitados. El formato de las tramas no cambia.
+4. ACK generado de forma autónoma por el front-end de radio del gateway; los status de catálogo quedan pendientes del enlace Pi a Heltec. **Actualizado el 2026-07-06**: el ACK y el BEACON pasan a generarse en el Pi a través del enlace serial de §12; los status de catálogo quedan habilitados. El formato de las tramas no cambia.
 5. Reintentos por trama (`lora.max_retries`) formalizados en la reconciliación.
 6. El bump es de major (no el v1.1 previsto en la v1.0 §8) porque la cabecera nueva no es parseable por un receptor v1.0, y las reglas de §1.2 reservan el minor para cambios parseables.
 
-**Cambios de v2.0 a v2.1 (10-jul-2026)**:
+**Cambios de v2.0 a v2.1 (2026-07-10)**:
 
 1. TELEMETRY lleva `ts` de captura (uint32 epoch, 4 B) al inicio del payload (§3.1).
 2. BEACON lleva `epoch` del gateway (4 B) al final del payload (§7.2).
@@ -1585,14 +1587,14 @@ Resumen para trazabilidad del TFM:
 4. Replanteo del `seq`: contador efímero de enlace, nace en 1 en cada boot; la identidad persistente del dato pasa a ser `(origin, ts, seq)` (§2.6). Desaparecen la persistencia de contadores y la tabla de último seq por origen.
 5. La hora de red LTE por `AT+CCLK?` (NITZ) queda eliminada; jerarquía de fuentes de hora en §13.4.
 
-**Cambios de v2.1 a v2.2 (11-jul-2026)**:
+**Cambios de v2.1 a v2.2 (2026-07-11)**:
 
 1. Seguridad de la interfaz aire (§14): AES-CCM extremo a extremo entre nodos y Pi, con una clave de red de 128 bits. Payload cifrado, cabecera en claro y autenticada (AAD), MIC de 4 bytes. Sobre de +8 B por trama (`sec_ts` + MIC).
 2. Activación por configuración a nivel de red (`transport.lora.security`, `node-config.md` §4.5), sin flag en el aire (anti-downgrade).
 3. Anti-replay por control de frescura sobre `sec_ts`, solo para tramas de control (ACK, WELCOME, BEACON, SN_OFFER); las tramas de datos quedan cubiertas por la deduplicación de §2.6.
 4. Con `security.enabled == false` la trama es idéntica a v2.1 salvo el byte de versión (`0x22`).
 
-**Cambios de v2.2 a v3.0 (16-jul-2026)**:
+**Cambios de v2.2 a v3.0 (2026-07-16)**:
 
 1. Sin hora sincronizada no se muestrea (§13.4): toda muestra nace con `ts` válido. `ts = 0` en TELEMETRY pasa a inválido (regla 11 de §10, ACK `DECODE_ERROR`).
 2. Obtención de hora activa: NTP desde el arranque en supernodos, `epoch` del SN_OFFER como fuente formal para huérfanos, SN_REQUEST emisible con cola vacía (§8.1, §13.4).
@@ -1602,13 +1604,13 @@ Resumen para trazabilidad del TFM:
 
 (La v2.3, `epoch` en SN_OFFER, fue interna a la malla y no cambió el byte de versión; queda documentada en §8.2.)
 
-**Cambios de v3.0 a v3.1 (16-jul-2026)**:
+**Cambios de v3.0 a v3.1 (2026-07-16)**:
 
 1. HEARTBEAT rediseñado como diagnóstico del duty cycle (§6): payload de 4 bytes con `tx_ms` (aire acumulado del transmisor, medido en el punto que define EN 300 220-1), emisión periódica cada 60 s, y sin régimen de ACK (la pérdida la absorbe la totalización por deltas en el receptor). Regla 8 de §10 actualizada (`payload_length ∈ {0, 4}`).
 2. El gateway contabiliza su propio aire (beacons, ACKs, WELCOME) con la misma fórmula de ToA y se reporta a sí mismo.
 3. Nota de honestidad habitual: un receptor v3.0 rechaza el HEARTBEAT de 4 bytes, pero todo el despliegue se flashea a la vez y el resto de tramas es idéntico; se acepta como minor.
 
-**Cambios de v3.1 a v3.2 (20-jul-2026)**:
+**Cambios de v3.1 a v3.2 (2026-07-20)**:
 
 1. TELEMETRY gana N bytes de estado `st[]` tras los valores (§3.1): nibble bajo estado de la transacción Modbus, nibble alto código de excepción. Lecturas fallidas viajan como NaN. Reglas 8 y 10 de §10 actualizadas (5 B por read).
 2. La TELEMETRY se emite en cada ciclo con reloj sincronizado aunque todas las lecturas fallen: el gateway distingue "sensor desconectado" (trama de NaN con `timeout`) de "nodo muerto" (silencio).

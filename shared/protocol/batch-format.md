@@ -2,9 +2,9 @@
 
 Documento normativo del **formato JSON** con el que la telemetría del despliegue llega al broker cloud. Es un formato **único para las cuatro rutas de entrega**: LoRa directo y LoRa multi-salto (publica el gateway) y NB-IoT propio y NB-IoT en custodia (publica el supernodo). El consumidor cloud procesa un solo formato, un solo topic con wildcard y una sola clave de deduplicación.
 
-> **Actualización del 20-jul-2026 (v3.2)**: acompaña al estado Modbus por read de la trama LoRa (`frame-format.md` §3.1). Cada sample puede llevar `null` en `v[]` (lectura fallida, NaN en la trama) y un array opcional `st` con los bytes de estado (§4). El debug Modbus crudo (trama MODBUS_DEBUG, `frame-format.md` §15) **no pasa por MQTT**: se observa en el log del Pi del gateway.
+> **Actualización del 2026-07-20 (v3.2)**: acompaña al estado Modbus por read de la trama LoRa (`frame-format.md` §3.1). Cada sample puede llevar `null` en `v[]` (lectura fallida, NaN en la trama) y un array opcional `st` con los bytes de estado (§4). El debug Modbus crudo (trama MODBUS_DEBUG, `frame-format.md` §15) **no pasa por MQTT**: se observa en el log del Pi del gateway.
 
-> **Reescritura del 16-jul-2026 (v3.0)**: hasta v2.x este documento describía solo el batch NB-IoT del supernodo, y el gateway publicaba aparte un mensaje por muestra con formato propio. v3.0 unifica ambos caminos en este mensaje. Cambios respecto al batch v2.x: desaparecen `boot_id` y `clock_synced` (sin hora no se muestrea, `frame-format.md` §13.4, así que toda muestra lleva `ts` válido), y los metadatos de diagnóstico (`publisher`, `batch_id`, `trigger`, `fw_version`) pasan a un sobre `debug` opcional activable por configuración. El nombre del archivo se conserva por las referencias cruzadas del repo.
+> **Reescritura del 2026-07-16 (v3.0)**: hasta v2.x este documento describía solo el batch NB-IoT del supernodo, y el gateway publicaba aparte un mensaje por muestra con formato propio. v3.0 unifica ambos caminos en este mensaje. Cambios respecto al batch v2.x: desaparecen `boot_id` y `clock_synced` (sin hora no se muestrea, `frame-format.md` §13.4, así que toda muestra lleva `ts` válido), y los metadatos de diagnóstico (`publisher`, `batch_id`, `trigger`, `fw_version`) pasan a un sobre `debug` opcional activable por configuración. El nombre del archivo se conserva por las referencias cruzadas del repo.
 
 Este formato es complemento de:
 
@@ -19,8 +19,8 @@ Este formato es complemento de:
 | **Gateway** (Pi) | Al drenar su buffer local: agrupa las muestras pendientes de cada vuelta de drenado (hasta `MODULINKR_MQTT_DRAIN_MAX`) en un mensaje. | Muestras recibidas por LoRa (directo o multi-salto), de cualquier origen. |
 | **Supernodo**, trigger `"failover"` | Automático: muestras propias sin ACK LoRa acumuladas en el buzón de reenvío (`node-config.md` §4.4). | Muestras propias no confirmadas. |
 | **Supernodo**, trigger `"relay"` | Automático: tramas de vecinos aceptadas en custodia (`frame-format.md` §8). | Muestras ajenas, cada una con su `origin` real. Puede mezclar propias si hay failover simultáneo. |
-| **Supernodo**, trigger `"manual"` | Comando externo `{"type":"flush_batch"}` (`commands-format.md`). | Todo lo no confirmado en cola. |
-| **Supernodo**, trigger `"test"` | Comando externo `{"type":"test_batch"}` en comisionamiento. | `samples` vacío: ping extremo a extremo. |
+| **Supernodo**, trigger `"manual"` | Previsto para el comando externo `{"type":"flush_batch"}` de `commands-format.md`, todavía no implementado. | Todo lo no confirmado en cola. |
+| **Supernodo**, trigger `"test"` | Previsto para el comando externo `{"type":"test_batch"}` de `commands-format.md`, todavía no implementado. | `samples` vacío: ping extremo a extremo. |
 
 En condiciones normales el supernodo no publica nada: NB-IoT sigue siendo respaldo selectivo. El gateway sí publica de continuo: es el camino primario de la telemetría hacia el cloud.
 
@@ -36,7 +36,7 @@ En condiciones normales el supernodo no publica nada: NB-IoT sigue siendo respal
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "samples":        [ ... ],
   "debug":          { ... }
 }
@@ -44,7 +44,7 @@ En condiciones normales el supernodo no publica nada: NB-IoT sigue siendo respal
 
 | Campo | Tipo | Obligatorio | Notas |
 | --- | --- | --- | --- |
-| `schema_version` | string | sí | Versión del esquema (`frame-format.md` §1.2). |
+| `schema_version` | string | sí | Versión de este esquema MQTT. La implementación vigente publica `3.2`. |
 | `samples` | array | sí | Lista de muestras. Vacía solo con `debug.trigger == "test"` (§5). Ver §4. |
 | `debug` | object | no | Sobre de diagnóstico, activable por configuración. El consumidor procesa el dato exactamente igual con o sin él. Ver §5. |
 
@@ -110,7 +110,7 @@ La jerarquía de fuentes de hora y la regla "sin hora no se muestrea" son normat
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "samples": [
     { "origin": 1,  "seq": 88,   "ts": 1718000010, "v": [24.5, 51.2] },
     { "origin": 1,  "seq": 89,   "ts": 1718000015, "v": [24.5, 51.3] },
@@ -126,7 +126,7 @@ La jerarquía de fuentes de hora y la regla "sin hora no se muestrea" son normat
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "samples": [
     { "origin": 10, "seq": 1431, "ts": 1718000010, "v": [24.5, 51.2] },
     { "origin": 10, "seq": 1432, "ts": 1718000011, "v": [24.5, 51.3] },
@@ -144,7 +144,7 @@ El `seq` 1433 no está: se confirmó por LoRa. Si su ACK se hubiera perdido y la
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "samples": [
     { "origin": 3, "seq": 220, "ts": 1718000105, "v": [22.1, 63.0] },
     { "origin": 3, "seq": 221, "ts": 1718000110, "v": [22.2, 62.8] }
@@ -161,7 +161,7 @@ El consumidor acredita las muestras al nodo 3, no al 10.
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "samples": [],
   "debug": {
     "publisher": 10, "batch_id": 43, "trigger": "test", "fw_version": "0.0.7"
@@ -209,7 +209,7 @@ Con `debug` desactivado, cada mensaje ahorra ~90 B. La estimación de consumo an
 
 ## 10. Mensaje de registro (register retenido)
 
-> **Añadido el 12-jul-2026** como parte del alta zero-touch (`db-schema.md`); equivalente MQTT del NODE_REGISTER LoRa (`frame-format.md` §13), inspirado en el patrón BIRTH de Sparkplug B. **Actualizado el 16-jul-2026 (v3.0)**: se retira `boot_id` del payload (eliminado del protocolo).
+> **Añadido el 2026-07-12** como parte del alta zero-touch (`db-schema.md`); equivalente MQTT del NODE_REGISTER LoRa (`frame-format.md` §13), inspirado en el patrón BIRTH de Sparkplug B. **Actualizado el 2026-07-16 (v3.0)**: se retira `boot_id` del payload (eliminado del protocolo).
 
 ### 10.1 Publicación
 
@@ -222,7 +222,7 @@ Con `debug` desactivado, cada mensaje ahorra ~90 B. La estimación de consumo an
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "node_id":        10,
   "name":           "Supernodo planta 2",
   "fw_version":     "0.0.7",
@@ -244,13 +244,13 @@ El consumidor procesa todo register según `db-schema.md` §3: alta automática 
 
 ### 10.4 Register en custodia (nodo sin NB-IoT, vía supernodo)
 
-> **Añadido el 12-jul-2026 (decisión B1: supernodo mensajero), pendiente de implementación.** Cubre el alta de un nodo normal cuando ni él ni el gateway se han visto nunca: el nodo entrega su NODE_REGISTER al supernodo en custodia (`frame-format.md` §8.4) y el supernodo lo reenvía crudo.
+> **Añadido el 2026-07-12 (decisión B1: supernodo mensajero), pendiente de implementación.** Cubre el alta de un nodo normal cuando ni él ni el gateway se han visto nunca: el nodo entrega su NODE_REGISTER al supernodo en custodia (`frame-format.md` §8.4) y el supernodo lo reenvía crudo.
 
 Cuando el supernodo tiene el blob completo del catálogo de un vecino, lo publica en el **topic register del origen** (no el propio), retained y QoS 1, con esta variante de payload:
 
 ```json
 {
-  "schema_version": "3.0",
+  "schema_version": "3.2",
   "node_id":        3,
   "via":            10,
   "raw_catalog":    "<blob de frame-format.md §13.2, en base64>"

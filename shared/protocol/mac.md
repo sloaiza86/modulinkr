@@ -6,7 +6,7 @@ acceso al medio (MAC) se aplican para que escale. Complementa a
 `frame-format.md` (formato de trama y reglas de enrutamiento) con la capa de
 acceso al canal.
 
-Iniciado el 6 de julio de 2026. Es un documento vivo: el análisis se abre
+Iniciado el 2026-07-06. Es un documento vivo: el análisis se abre
 con lo observado en banco y se va completando con mediciones a medida que se
 aplican las mejoras.
 
@@ -30,7 +30,7 @@ Con pocos nodos y cadencia baja (el banco: 1 nodo + 1 supernodo cada 5 s),
 las colisiones son raras y el problema no se manifiesta. Pero el diseño debe
 sostener más nodos, relays y retransmisiones simultáneas sin colapsar.
 
-## 2. Tráfico redundante por muestra útil (observado en banco, 6-jul-2026)
+## 2. Tráfico redundante por muestra útil (observado en banco, 2026-07-06)
 
 Medido sobre el log del banco con el nodo 2 emitiendo hacia su padre (nodo
 1), con enlace directo marginal al gateway (RSSI -96 a -105 dBm) y relay
@@ -51,7 +51,7 @@ en régimen bueno, subiendo a 8-10 con retransmisiones. No escala.
 
 ### Causa A: el gateway confirmaba tramas que no le iban dirigidas (regresión)
 
-Al migrar la generación del ACK del Heltec al Pi (6-jul-2026), el servicio
+Al migrar la generación del ACK del Heltec al Pi (2026-07-06), el servicio
 del Pi comprobaba `dest_id == gateway` (destino final) pero **no**
 `hop_dst == gateway` (destino de este salto). El firmware autónomo anterior
 del Heltec sí filtraba por `hop_dst`. La consecuencia: cuando el nodo 2
@@ -60,7 +60,7 @@ transmitía hacia su padre (nodo 1), esa trama llevaba `hop_dst=1` pero
 solo `dest_id`, la confirmaba, **duplicando el ACK**. Es la fuente del ACK
 del camino directo marginal.
 
-**Corrección (6-jul-2026)**: el gateway procesa solo tramas con
+**Corrección (2026-07-06)**: el gateway procesa solo tramas con
 `hop_dst == gateway` (regla de `frame-format.md` §10.6). Coste: una
 condición. Impacto esperado: eliminar el ACK del camino directo, ~50 % menos
 ACK. Las tramas oídas de refilón se contabilizan aparte (`overheard`) para
@@ -87,11 +87,11 @@ selección de padre, no se elimina sin perder robustez.
 
 ## 4. Mecanismos de mejora
 
-### 4.1 Filtro de salto en el gateway (aplicado 6-jul-2026)
+### 4.1 Filtro de salto en el gateway (aplicado 2026-07-06)
 
 Ver Causa A. El gateway solo confirma el salto que le va dirigido.
 
-### 4.2 Supresión de ACK duplicado por ventana temporal (aplicado 6-jul-2026)
+### 4.2 Supresión de ACK duplicado por ventana temporal (aplicado 2026-07-06)
 
 Si la misma `(origin, seq)` llega dos veces en una ventana corta (< 1 s), es
 multi-camino (no un reintento) y se confirma una sola vez. Un reintento real
@@ -121,7 +121,7 @@ canal está ocupado, espera un backoff aleatorio y reintenta.
 Ventaja regulatoria: en la sub-banda g3 de EU868, **con LBT el duty cycle
 legal sube del 1 % al 10 %**.
 
-**Resultado de la investigación (6-jul-2026).** Los nodos no hablan con el
+**Resultado de la investigación (2026-07-06).** Los nodos no hablan con el
 SX1262 directamente, sino con el STM32WLE5 del Atom DTU (módulo RAK3172) vía
 firmware AT RUI3. Verificado en la documentación oficial de RAKwireless y en
 los hilos de su foro (respuestas de Bernd Giesecke, RAK):
@@ -154,7 +154,7 @@ forma de fijar un backoff máximo desde el firmware AT.
 con jitter que RUI3 no da, en vez de dejar que el módulo bloquee. Es decir,
 CAD nos da la detección; nosotros ponemos la política de reintento.
 
-**Confirmado en banco (6-jul-2026)**: el nodo 2 (Atom DTU EU868) reporta
+**Confirmado en banco (2026-07-06)**: el nodo 2 (Atom DTU EU868) reporta
 `AT+VER` = **`RUI_4.0.6_RAK3172-E`**, justo la versión en la que se añadió
 `AT+CAD`. Es decir, el CAD está disponible en el hardware en mano; no hace
 falta actualizar el módulo. Falta confirmar la versión del segundo DTU (misma
@@ -166,7 +166,7 @@ La consulta de versión quedó permanente en el firmware del nodo: `begin()`
 pregunta `AT+VER=?` y la muestra en el banner de arranque (`LoraP2P::
 queryVersion()`), para tener a la vista la capacidad CAD de cada unidad.
 
-**Implementación (nodo, aplicado 6-jul-2026).** `LoraP2P::begin()` fija
+**Implementación (nodo, aplicado 2026-07-06).** `LoraP2P::begin()` fija
 `AT+CAD=1` (vía `module_.sendCommand`, tras `config` y antes del modo TX+RX);
 el resultado se guarda en `cad_ok_` y se muestra en el banner (`CAD: on/off`).
 A partir de ahí, cada `AT+PSEND` hace CAD antes de transmitir.
@@ -188,7 +188,7 @@ canal quede libre. En el banco actual (tráfico bajo, canal casi siempre libre)
 esto no se manifiesta; se observará bajo contención en la prueba de estrés
 (§5), que es donde se decidirá si hace falta mitigar el bloqueo.
 
-### 4.4 Backoff exponencial con jitter en retransmisiones (aplicado 6-jul-2026)
+### 4.4 Backoff exponencial con jitter en retransmisiones (aplicado 2026-07-06)
 
 En vez de reintentar a intervalo fijo, el tiempo de espera del ACK crece con
 cada reintento, con techo, más un jitter aleatorio. Reduce el efecto de
@@ -250,7 +250,7 @@ aparecían **dos** líneas `ack`, una por la trama que llegaba por el relay
 
 ### 6.2 Después del filtro de salto (§4.1)
 
-Capturado el 6-jul-2026, 1 nodo + 1 supernodo, cadencia 5 s. Ventana estable
+Capturado el 2026-07-06, 1 nodo + 1 supernodo, cadencia 5 s. Ventana estable
 de 60 s (STATS 15:02:26 a 15:03:26):
 
 | Contador | t0 | t0+60 s | delta |
@@ -278,7 +278,7 @@ recibida, nueva o duplicada).
 
 ### 6.3 Fase 1: supresión de ACK (§4.2) y backoff (§4.4)
 
-Capturado el 6-jul-2026, misma topología (nodo 2 con padre nodo 1, relay al
+Capturado el 2026-07-06, misma topología (nodo 2 con padre nodo 1, relay al
 gateway). STATS de referencia: `rx=30 ack=9 acksup=0 dup=9 overheard=21
 notconf=0 drop=0`. Ratio `ack/rx` = 0.30, igual que en §6.2: sin regresión.
 
@@ -301,11 +301,11 @@ pendiente de captura en el lado del nodo.
 
 | Mecanismo | Estado | Fecha |
 | --- | --- | --- |
-| Filtro de salto en el gateway (§4.1) | aplicado y medido (~50 % menos ACK) | 6-jul-2026 |
-| Instrumentación de tráfico (§6) | aplicada | 6-jul-2026 |
-| Supresión de ACK duplicado (§4.2) | aplicado, pendiente de medir | 6-jul-2026 |
-| LBT con CAD (§4.3) | aplicado (nodo): AT+CAD=1 + reintento rápido ante busy; pendiente de estrés | 6-jul-2026 |
-| Backoff con jitter (§4.4) | aplicado (nodo), pendiente de medir | 6-jul-2026 |
+| Filtro de salto en el gateway (§4.1) | aplicado y medido (~50 % menos ACK) | 2026-07-06 |
+| Instrumentación de tráfico (§6) | aplicada | 2026-07-06 |
+| Supresión de ACK duplicado (§4.2) | aplicado, pendiente de medir | 2026-07-06 |
+| LBT con CAD (§4.3) | aplicado (nodo): AT+CAD=1 + reintento rápido ante busy; pendiente de estrés | 2026-07-06 |
+| Backoff con jitter (§4.4) | aplicado (nodo), pendiente de medir | 2026-07-06 |
 | Calibración parent_min_rssi (§4.5) | previsto | |
 | Prueba de estrés y análisis de escalabilidad (§5) | previsto | |
 

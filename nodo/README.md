@@ -1,173 +1,50 @@
-# ModuLinkr, nodo (V1)
+# ModuLinkr, firmware de nodo y supernodo
 
-Firmware del nodo de prueba en banco. Lee un sensor Modbus RTU y publica las medidas por dos canales redundantes: LoRa P2P y NB-IoT.
+El directorio contiene el firmware común de los dispositivos de campo ModuLinkr.
 
-## Hardware
+## Estado actual
 
-| Componente    | Modelo                                                         | Función                                       |
-| ------------- | -------------------------------------------------------------- | --------------------------------------------- |
-| MCU           | M5Stack **Atom Lite** (ESP32-PICO-D4, 520 KB SRAM, 4 MB flash) | Cerebro del nodo                              |
-| LoRa + RS-485 | M5Stack **Atom DTU LoRaWAN EU868** (STM32WLE5CC + SP3485EN)    | Radio sub-GHz y bus Modbus, controlado por AT |
-| Celular       | M5Stack **NB-IoT 2 Unit Global** (SIM7028)                     | NB-IoT Cat-NB2 multi-banda, en puerto Grove   |
-| Sensor        | **XY-MD02**                                                    | Temperatura + humedad por Modbus RTU          |
+La versión declarada en `src/main.cpp` es `0.0.58-difusion-red`. El firmware usa la trama LoRa `0x39` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
 
-> **Nota región**: el firmware se compila con `REGION_EU868` desde la portación del 30 de junio de 2026. La región US915 sigue soportada como `build_flag` alternativo en `platformio.ini` por si se necesitara recompilar para hardware de la primera tanda.
+El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
-## Esquema funcional
+## Hardware del banco
 
-```
-  XY-MD02
-     │ (Modbus RTU, 9600 8N1, slave 1, regs 0..1)
-     │
-   RS-485 (A/B)
-     │
-  ┌──┴──────────────────┐
-  │  Atom DTU LoRaWAN   │ ← STM32WLE5CC + SP3485EN
-  │  - LoRa P2P         │
-  │  - RS-485 bridge    │
-  └──┬──────────────────┘
-     │ UART (AT commands)
-     │
-  ┌──┴──────────────────┐         ┌──────────────────────┐
-  │   Atom Lite (ESP32) │ ←Grove→ │  NB-IoT 2 Unit       │
-  │                     │  UART   │  (SIM7028, Cat-NB2)  │
-  │  • Tareas FreeRTOS  │  AT     └──────────────────────┘
-  │  • Buffer circular  │
-  │  • Consola USB      │ → CP2104 → /dev/cu.usbserial-*
-  └─────────────────────┘
-```
+| Rol | Componentes |
+| --- | --- |
+| Nodo | M5Stack Atom Lite, Atom DTU LoRaWAN EU868 y XY-MD02 |
+| Supernodo | M5Stack Atom Lite, Atom DTU LoRaWAN EU868, NB-IoT 2 Unit SIM7028 y WT901C485 |
 
-## Plan de hitos
+El Atom Lite usa SoftwareSerial para Modbus y reserva las UART hardware para LoRa y NB-IoT. El bloque NB-IoT solo se inicia cuando la configuración declara el rol de supernodo.
 
-| Hito | Descripción | Estado |
-| --- | --- | --- |
-| H0 | Estructura inicial del repo, stub compilable | Completado (tag `v0.0.1-h0`) |
-| H1 | Modbus → consola: lectura XY-MD02 cada 1 s, volcado por `Serial` | Completado (tag `v0.0.2-h1`) |
-| H2 emisor | LoRa P2P, solo TX: trama TELEMETRY según `frame-format.md` cada 1 s tras lectura Modbus OK | Completado (tag `v0.0.4-h2-tx`) |
-| H2 receptor | LoRa P2P, RX con segundo DTU o SDR para validar payload extremo a extremo y emitir ACKs | Pendiente (a la espera de segundo DTU o RTL-SDR) |
-| H3 fase 2a | NB-IoT en aislamiento: attach + MQTT publish periódico al broker público de HiveMQ | Completado en la sesión del 16 de junio de 2026 (sin tag, fase intermedia) |
-| H3 fase 2b | Ciclo dual LoRa + NB-IoT alternando cada 2,5 s con medición fresca por canal | Completado (tag `v0.0.5-h3-dual`). Conflicto de UART resuelto por Opción B (ver §"Resolución del conflicto de UART") |
-| H4 | Integrar Modbus + LoRa + NB-IoT en una sola tarea FreeRTOS con cola de ACKs | Pendiente |
-| H5 | Tarea NB-IoT con cola FreeRTOS compartida y batch JSON periódico (modo prueba de concepto cada 5 min) | Pendiente |
-| H6 | Consola estructurada con timestamps, LED de estado, manejo de errores | Pendiente |
+## Comportamiento
 
-## Resolución del conflicto de UART
+El dispositivo obtiene hora antes de muestrear, se registra en la red y anuncia su catálogo. La telemetría incluye timestamp, valores y estado de cada transacción Modbus. Las muestras no confirmadas permanecen en la outbox y pueden entregarse mediante custodia NB-IoT.
 
-El microcontrolador ESP32-PICO-D4 del Atom Lite expone **tres UART hardware**: UART0, UART1 y UART2. UART0 lo usa el puente CP2104 para la consola USB y queda fuera de discusión. Quedan UART1 y UART2 libres para periféricos. El nodo final del proyecto requiere comunicarse con **tres subsistemas serie**:
+El firmware también implementa relay LoRa, diagnóstico Modbus, salud y recuperación de la radio, configuración por USB y LoRa, lectura remota de configuración, actualización de firmware y reversión de configuraciones o imágenes que no vuelven a registrarse.
 
-| Subsistema | Velocidad | Pines actuales | UART asignado en cada hito |
-| --- | --- | --- | --- |
-| Modbus RTU (SP3485EN del DTU LoRa) | 9600 8N1 | GPIO 33 RX / GPIO 23 TX | `Serial1` desde H1 |
-| LoRa P2P (STM32WLE5 del DTU LoRa) | 115200 8N1 | GPIO 19 RX / GPIO 22 TX | `Serial2` desde H2 |
-| NB-IoT (SIM7028 del Unit Grove) | 115200 8N1 | GPIO 32 RX / GPIO 26 TX | `Serial2` durante H3 fase 2a |
+No está implementada la ejecución del catálogo `writes[]` ni el canal general de comandos MQTT. El register de un nodo normal a través de un supernodo también sigue pendiente.
 
-Tres subsistemas, dos UART hardware. **El conflicto es estructural**: no caben todos a la vez.
+## Configuración
 
-### Estado actual
+El archivo operativo es `/config.json` en LittleFS. Las configuraciones de `configs/` describen el banco y no contienen secretos. El formato completo se define en [`../shared/protocol/node-config.md`](../shared/protocol/node-config.md).
 
-H3 fase 2b validado con **Opción B**: Modbus migrado a SoftwareSerial a 9600 baud, los dos UART hardware quedan para LoRa (`Serial1`) y NB-IoT (`Serial2`) a 115200. La pasada de validación en banco mostró cero errores Modbus en ciclos consecutivos tras un warmup inicial de tres lecturas descartadas.
+Una configuración puede cargarse desde el visor por Web Serial o mediante el canal LoRa. Antes de aplicarla se valida completa. Tras el reinicio queda a prueba hasta que el nodo vuelve a registrarse; si no lo consigue dentro de la ventana configurada, se restaura la anterior.
 
-### Opciones evaluadas (Opción B elegida)
+## Compilación y carga
 
-**Opción A**: bajar el baud del SIM7028 a 9600 y migrar NB-IoT a `SoftwareSerial`.
+La compilación y la carga se realizan desde VS Code:
 
-Se ejecuta `AT+IPR=9600;&W` una vez para que el SIM7028 guarde 9600 baud en memoria no volátil. A partir de ahí el firmware abre el SIM7028 desde la librería `EspSoftwareSerial` (o equivalente) por GPIO 32/26, y `Serial2` queda disponible para LoRa.
+1. `Cmd+Shift+P`, `PlatformIO: Build`.
+2. `Cmd+Shift+P`, `PlatformIO: Upload`.
+3. `Cmd+Shift+P`, `PlatformIO: Monitor` para observar un dispositivo.
 
-Pro: cambio puramente software, hardware intacto.
-Contra: `SoftwareSerial` en ESP32 pierde bytes esporádicamente incluso a 9600 baud; los AT del SIM7028 con URC asíncronas (`+CEREG`, `+CMQTT...`) podrían quedar truncados.
+El banco dispone de un solo monitor serie USB, por lo que las capturas de dos nodos se realizan por separado.
 
-**Opción B**: mover el driver Modbus a `SoftwareSerial`.
+## Artefactos de distribución
 
-`Serial1` se libera para NB-IoT a 115200 (UART hardware fiable). Modbus a 9600 sobre `SoftwareSerial` es la combinación más tolerante porque Modbus tiene timing relajado y los frames son cortos.
+Después de compilar en VS Code, `make_dist.sh` genera los binarios que consume el gateway para aprovisionamiento USB y actualización por radio. El empaquetado no sustituye la compilación.
 
-Pro: NB-IoT y LoRa quedan en UART hardware, donde más importa la fiabilidad.
-Contra: requiere repinear el RS-485 del DTU si el firmware del STM32WLE5 expone los pines de RS-485 al header. Hay que verificar si el `Atom DTU LoRaWAN US915` permite reasignar `RS485_RX` y `RS485_TX` a otros GPIO del Atom.
+## Documentos relacionados
 
-**Opción C**: multiplexar `Serial2` en software entre LoRa y NB-IoT entre ciclos.
-
-`Serial2` cambia de pines y baud según toque mandar trama LoRa o publicar MQTT. Frágil por las latencias de re-arranque del UART (varias decenas de ms) y por la cola de bytes pendientes que se pierde al hacer el switch. No recomendado.
-
-**Opción D**: cambiar a un MCU con más UART hardware.
-
-El M5Stack **AtomS3 Lite** lleva ESP32-S3 con dos UART hardware adicionales y USB-OTG nativo (sin necesidad de puente). Encaja todo sin conflictos.
-
-Pro: solución limpia desde el día 1.
-Contra: cambio de hardware en mitad del proyecto, implica revisar el firmware y rehacer las pruebas de H0 a H3 en el nuevo MCU.
-
-### Decisión aplicada
-
-**Opción B** quedó adoptada en `v0.0.5-h3-dual`. Las razones técnicas que la favorecieron sobre A:
-
-- Modbus tolera mejor el timing impreciso de SoftwareSerial: las tramas son cortas, el CRC16 cierra la integridad, los reintentos por timeout son baratos.
-- NB-IoT y LoRa quedan en UART hardware donde URC asíncronas y AT cargados aprovechan la velocidad de 115200 sin riesgo de pérdida de bytes.
-- No requiere modificar el baud del SIM7028 en memoria no volátil (Opción A obligaba a `AT+IPR=9600;&W`).
-
-El único cuidado añadido es un warmup de tres lecturas descartadas en setup tras `modbus.begin()`, para que el ISR de SoftwareSerial se estabilice antes de que el scheduler dual dispare la primera trama LoRa.
-
-Opciones C y D quedan reservadas como camino futuro si el escalado del proyecto lo justifica (multi-sensor, multi-canal, MCU con más UART hardware).
-
-## Cadencia de envío y duty cycle
-
-| Canal | Cadencia objetivo | Notas |
-| --- | --- | --- |
-| LoRa | cada 1 s en EU868 g3 (869.525 MHz) | SF7 BW125. Trama TELEMETRY con 2 reads = 16 bytes (ver `shared/protocol/frame-format.md` §6), ToA ≈ 57 ms |
-| NB-IoT, fase prueba de concepto (actual) | cada 5 min | Publica un batch periódico para validar que LoRa y NB-IoT conviven sin interferirse |
-| NB-IoT, fase operacional (post-validación) | respaldo selectivo | Se activa solo cuando una racha de ACKs LoRa falla. Mecanismo en `shared/protocol/node-config.md` §4.3 |
-| Consola | continua, formato append con timestamp | Sin cadencia fija. Cada evento imprime una línea |
-
-## Compilar y flashear
-
-Pre-requisitos: PlatformIO instalado en VS Code (extension `PlatformIO IDE`).
-
-```bash
-# Desde la raíz del nodo
-pio run                            # compilar
-pio run --target upload            # flashear
-pio device monitor --filter time   # monitor con timestamps
-```
-
-Atajos en VS Code: `PlatformIO: Build`, `PlatformIO: Upload`, `PlatformIO: Monitor`.
-
-## Comisionamiento por USB (fase 2)
-
-El binario es único: no lleva ningún parámetro de despliegue. La identidad, la red LoRa y mesh, el bloque NB-IoT y el bus Modbus salen del `config.json` del nodo (spec en [`node-config.md`](../shared/protocol/node-config.md)), que vive en la flash (`/config.json` en LittleFS) y se gestiona por el puerto USB con el protocolo `CFG.*` (`src/commission.h`): identidad, lectura, carga con sha256 y borrado. Un config nuevo se valida con las reglas del arranque y solo se graba si pasa; el nodo se reinicia para aplicarlo.
-
-Sin config en flash (primer flasheo o tras `CFG.DEL`) el nodo no opera: LED rojo parpadeando y el protocolo a la espera. Los config del banco están en `configs/` (nodo1 y nodo2).
-
-Vías de carga: la página "Cargar JSON vía USB" del visor web del gateway (Atom conectado al Pi), o `tools/cfgtool.py` desde cualquier equipo con pyserial:
-
-```bash
-python3 tools/cfgtool.py list                          # puertos candidatos
-python3 tools/cfgtool.py hello -p <puerto>             # identidad
-python3 tools/cfgtool.py put   -p <puerto> configs/nodo1.json
-python3 tools/cfgtool.py get   -p <puerto> -o actual.json
-python3 tools/cfgtool.py del   -p <puerto>             # deja sin configurar
-```
-
-## Estructura
-
-```
-nodo/
-├── platformio.ini          Configuración del proyecto (sin build_flags de despliegue)
-├── configs/                config.json de cada unidad del banco (nodo1, nodo2)
-├── tools/
-│   └── cfgtool.py          Cliente serie del comisionamiento (list, hello, get, put, del)
-├── src/
-│   ├── main.cpp            Punto de entrada y orquestación
-│   ├── config.{cpp,h}      Carga y validación del config.json (node-config.md)
-│   ├── configstore.{cpp,h} Almacén del config en LittleFS (/config.json)
-│   ├── commission.{cpp,h}  Protocolo CFG.* de comisionamiento por USB
-│   ├── modbus.{cpp,h}      Driver Modbus RTU sobre RS-485
-│   ├── sampler.{cpp,h}     Muestreo Modbus dirigido por el config
-│   ├── lora.{cpp,h}        Driver LoRa P2P (RAK3172, M5-LoRaWAN-RAK)
-│   ├── mesh.{cpp,h}        Árbol mesh: beacons, padre, rutas
-│   ├── nbiot.{cpp,h}       Driver NB-IoT sobre AT del SIM7028
-│   ├── nbiot_service.{cpp,h}  Servicio NB-IoT en el núcleo 0
-│   ├── pending.{cpp,h}     Cola de tramas con ACK pendiente
-│   ├── outbox.{cpp,h}      Retención de muestras sin ruta (custodia, batch)
-│   ├── nodeclock.{cpp,h}   Reloj del sistema (epoch de red)
-│   └── protocol.h          Constantes del frame-format
-└── lib/                    Librerías propias específicas del nodo
-```
-
-Todo parámetro de despliegue vive en el `config.json` del nodo; `platformio.ini` solo conserva flags de hardware del banco (etiqueta del módem) y de compilación.
+La arquitectura general está en [`../ARCHITECTURE.md`](../ARCHITECTURE.md). La trama LoRa se define en [`../shared/protocol/frame-format.md`](../shared/protocol/frame-format.md), los mensajes MQTT en [`../shared/protocol/batch-format.md`](../shared/protocol/batch-format.md) y el control de acceso al medio en [`../shared/protocol/mac.md`](../shared/protocol/mac.md).

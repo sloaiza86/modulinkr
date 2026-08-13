@@ -1,7 +1,7 @@
 # ModuLinkr, servicio del gateway (lado Pi)
 
 El cerebro del gateway. Corre sobre el Raspberry Pi Zero 2W y habla con el
-Heltec (radio pura) por USB serial. Desde el 5 de julio de 2026, el Pi
+Heltec (radio pura) por USB serial. Desde el 2026-07-05, el Pi
 genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 (ver `firmware/shared/protocol/frame-format.md` §12).
 
@@ -9,10 +9,10 @@ genera el ACK y el BEACON que antes generaba el Heltec de forma autónoma
 
 | Archivo | Función |
 | --- | --- |
-| `protocol.py` | Librería del protocolo v3.1: constantes, CRC16, `parse_frame`, los `build_*`, la seguridad v2.2 (AES-CCM, nonce, AAD) y `toa_ms` (Time-on-Air para el duty cycle propio). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
+| `protocol.py` | Librería del protocolo LoRa v3.9: constantes, CRC16, `parse_frame`, los `build_*`, la seguridad v2.2 (AES-CCM, nonce, AAD) y `toa_ms` (Time-on-Air para el duty cycle propio). Sin dependencia de hardware. Fuente canónica para el lado Pi. |
 | `buffer.py` | Buffer SQLite pequeño de reenvío. Clave primaria `(origin, ts, seq)` para deduplicación e idempotencia, cota FIFO. Expone `fetch_pending` / `mark_published` (telemetría), sus equivalentes de catálogo, `node_status` (estado de red para el visor), `node_airtime` (reportes `tx_ms` del duty cycle v3.1, totalizados por deltas en `airtime_duty`) y `gateway_status` (fila única con el latido del servicio para el visor: `lora_link`, `mqtt_enabled`, `mqtt_connected` y `t_updated`). |
 | `mqtt_publisher.py` | Cliente Paho que republica el buffer al broker MQTT cloud: telemetría en el mensaje unificado de `batch-format.md` a `modulinkr/v1/255/telemetry` y catálogo a `modulinkr/v1/{origin}/register` (retenido). Marca `published=1` solo tras el PUBACK. Además se **suscribe** a `modulinkr/v1/+/telemetry` para observar el camino NB-IoT (failover): un publisher distinto de 255 es un supernodo publicando por celular (`db-schema.md` §2). `on_message` solo encola (hilo de paho); el bucle del servicio escribe al buffer con `drain_nbiot` (`node_status.mqtt_seen` y `nbiot_last`). Requiere permiso de suscripción del usuario MQTT del gateway en el broker. |
-| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, lleva el contador `seq` descendente, y drena el buffer a cloud cada `MODULINKR_MQTT_DRAIN_S`. Desde v3.1 registra los HEARTBEAT con `tx_ms` (sin confirmarlos) y contabiliza su propio aire en `_tx` con `toa_ms`, reportándose con la cadencia del beacon (duty cycle por transmisor, EN 300 220-1). Escribe el latido de estado (`gateway_status`) cada `MODULINKR_HEARTBEAT_S`; ante una desconexión del Heltec marca `lora_link=0` en el acto, cierra el puerto y reintenta abrirlo sin morir, en vez de caer y dejar que systemd lo recicle. |
+| `gateway_service.py` | Servicio principal: lee del Heltec, valida, acepta en buffer, emite ACK y BEACON, drena el buffer a cloud y coordina configuración remota, lectura de configuración, firmware por LoRa, difusión y migración de red. Registra HEARTBEAT y uso de aire, escribe el estado del gateway para el visor y recupera el enlace serial sin terminar el proceso. |
 | `systemd/modulinkr-gateway.service` | Unidad systemd con reinicio automático. |
 | `flash_heltec.sh` | Flashea el firmware de la radio Heltec (ESP32-S3) por USB con el esptool del venv: imagen única desde `0x0`, auto-reset por el CP2102 (sin botones), servicio parado y rearrancado alrededor. El binario `heltec-radio.bin` lo genera `heltec-radio/make_dist.sh` en el Mac (merge de los artefactos de PlatformIO) y viaja con el mismo scp del pi-service; el instalador lo ofrece como paso opcional para la instalación fresca. |
 | `set_mqtt.sh` | Acción privilegiada de la página "Configurar MQTT" del visor. Reescribe las claves `MODULINKR_MQTT_*` de `gateway.env` con los pares `KEY=VALUE` que llegan por stdin (lista blanca; los secretos no van por argumentos) y reinicia el servicio del gateway. Solo toca las claves recibidas (una omitida conserva su valor). |
@@ -53,10 +53,12 @@ eso el servicio corre bajo systemd con `Restart=always`.
 | `MODULINKR_LORA_FREQ_HZ` | `869525000` | Frecuencia LoRa en Hz (camino B: fuente de verdad que el servicio empuja al Heltec) |
 | `MODULINKR_LORA_REGION` | `EU868` | Región LoRa (etiqueta para el asistente de nodo) |
 | `MODULINKR_ONLINE_S` | `30` | Umbral "en línea" del conteo de nodos de la OLED (igual que `MODULINKR_WEB_ONLINE_S` del visor) |
-| `MODULINKR_BW_KHZ` | `125` | BW del despliegue, ídem |
 | `MODULINKR_HEARTBEAT_S` | `3` | Periodo del latido de estado hacia el visor, en segundos |
 | `MODULINKR_OLED_S` | `5` | Periodo del empuje de estado a la pantalla OLED del Heltec, en segundos |
-| `MODULINKR_ONLINE_S` | `60` | Umbral "en línea" del conteo de nodos de la pantalla (igual que el `MODULINKR_WEB_ONLINE_S` del visor) |
+| `MODULINKR_STATS_S` | `60` | Periodo del reporte de estadísticas del gateway, en segundos |
+| `MODULINKR_ACK_WINDOW_S` | `1.0` | Ventana de supresión de ACK duplicados, en segundos |
+| `MODULINKR_DUTY_PCT` | `8.0` | Presupuesto de ciclo de trabajo del gateway, en porcentaje |
+| `MODULINKR_BCAST_GAP_S` | `0` | Sobrescritura diagnóstica del hueco entre fragmentos de difusión. El cero conserva el cálculo automático |
 | `MODULINKR_NETWORK_NAME` | (sin default) | Nombre de la red ModuLinkr que muestra la pantalla. Vacío usa `net <network_id>` |
 | `MODULINKR_SEC_ENABLED` | `0` | Seguridad v2.2 de la interfaz aire (`frame-format.md` §14) |
 | `MODULINKR_SEC_KEY` | (sin default) | Clave de red, 32 caracteres hex. Obligatoria con `SEC_ENABLED=1`. **Debe coincidir** con `security.key` del config de todos los nodos |

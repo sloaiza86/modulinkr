@@ -2,12 +2,14 @@
 
 Documento normativo del **formato JSON** de los comandos que el backend (o el operador) envía al supernodo para disparar acciones: escrituras Modbus, recargas de configuración, lecturas bajo demanda, batches de prueba, reinicios, etc.
 
+> **Estado actual:** diseño no implementado de extremo a extremo. No debe interpretarse como una capacidad disponible del firmware ni del visor. La configuración remota y la actualización de firmware por LoRa usan flujos específicos definidos en `frame-format.md`, no este esquema general de comandos.
+
 Este formato es complemento de:
 
 - [`node-config.md`](node-config.md): define los `writes[]` y `reads[]` que los comandos pueden referenciar por su `id`.
 - [`batch-format.md`](batch-format.md): describe los batches NB-IoT que algunos comandos pueden disparar manualmente.
 
-> **Actualización del 5-jul-2026**: el broker MQTT desde el que llegan los comandos pasa a ser el **broker cloud propio del despliegue** (Mosquitto self-hosted, universidad o FIWARE IoT Agent MQTT), no HiveMQ público. Además, la web local del gateway se formaliza como **punto de emisión de comandos**: el operador humano interactúa con el dashboard del Pi, el Pi publica al broker cloud, y el destino (supernodo con NB-IoT propio, o nodo sin celular al que se llega vía el gateway y el enlace descendente Pi a Heltec) recibe el comando por su ruta natural. Se anticipa la extensión del §11 de `frame-format.md` (enlace descendente Pi a Heltec) que llevará los comandos por LoRa a los nodos sin NB-IoT. Ver `Red V4.md` §"Actualización del 5-jul-2026" para el diseño completo.
+> **Actualización del 2026-07-05**: el broker MQTT desde el que llegan los comandos pasa a ser el **broker cloud propio del despliegue** (Mosquitto self-hosted, universidad o FIWARE IoT Agent MQTT), no HiveMQ público. Además, la web local del gateway se formaliza como **punto de emisión de comandos**: el operador humano interactúa con el dashboard del Pi, el Pi publica al broker cloud, y el destino (supernodo con NB-IoT propio, o nodo sin celular al que se llega vía el gateway y el enlace descendente Pi a Heltec) recibe el comando por su ruta natural. Se anticipa la extensión del §11 de `frame-format.md` (enlace descendente Pi a Heltec) que llevará los comandos por LoRa a los nodos sin NB-IoT. Ver `Red V4.md` §"Actualización del 2026-07-05" para el diseño completo.
 
 ## 1. Alcance
 

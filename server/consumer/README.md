@@ -2,6 +2,8 @@
 
 Servicio Python que cierra la fase 3 del camino del dato: se suscribe al broker MQTT y persiste la telemetría en PostgreSQL según [`db-schema.md`](../../shared/protocol/db-schema.md).
 
+El servicio está desplegado y su ingestión quedó validada en la VM según el registro de la bitácora.
+
 | Archivo | Qué hace |
 | --- | --- |
 | `consumer_service.py` | Bucle principal: conexión MQTT (sesión persistente, QoS 1), dispatch por topic, STATS periódico al log. |

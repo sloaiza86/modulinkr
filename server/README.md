@@ -66,4 +66,4 @@ server/
 
 ## Estado
 
-La base de datos y el broker están desplegados y corriendo en la VM de Azure (`modulinkr.loaiza.co`): PostgreSQL con las cinco tablas del esquema más `schema_migrations`, y Mosquitto sirviendo TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. Pendiente de validar en hardware el handshake TLS del SIM7028 contra el broker. El consumidor cloud (fase 3) está implementado como componente `consumer` del instalador (16-jul-2026), pendiente de desplegar y validar en la VM.
+La base de datos, el broker y el consumidor están desplegados en la VM de Azure (`modulinkr.loaiza.co`). PostgreSQL mantiene las cinco tablas del esquema más `schema_migrations`; Mosquitto sirve TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. El handshake TLS del SIM7028 y la ingestión del consumidor cloud quedaron validados en el despliegue registrado en la bitácora.
