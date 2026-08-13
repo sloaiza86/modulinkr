@@ -31,6 +31,22 @@ Interfaz web servida desde el Raspberry Pi del gateway con cuatro funciones en f
 - **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol **solo lectura** dedicado (`modulinkr_ro`, únicamente `SELECT` sobre la base de telemetría; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
 - **Autenticación**: página de login propia con cookie de sesión firmada (HMAC SHA-256 con `MODULINKR_WEB_SECRET`; usuario y contraseña preguntados en la instalación, la clave de firma autogenerada). Sustituye al basic auth de la primera iteración: misma protección, sin el diálogo del navegador y con logout. Desde el 25-jul-2026 el visor sirve HTTPS con certificado autofirmado (§8); la cookie se marca `Secure` cuando hay TLS.
 
+### 2.1 Componentes web (2026-08-13)
+
+El frontend usa Custom Elements nativos registrados en `static/components.js`. La aplicación, la barra lateral, la cabecera, el enrutador, las vistas, las tarjetas de nodo, las mediciones, el detalle, el histórico, los diálogos, los avisos y la pantalla de acceso tienen límites de componente explícitos. Las tarjetas y mediciones creadas con telemetría se comunican con la aplicación mediante eventos del DOM, por lo que el refresco periódico sustituye su contenido sin volver a conectar manejadores de interacción.
+
+Se mantiene el DOM ligero y la hoja de estilos compartida. Esta elección conserva las variables visuales de `style.css`, los identificadores usados por los formularios existentes y la compatibilidad con ECharts, vis-network, Web Serial y esptool-js. No se incorpora Lit ni un proceso de compilación: el visor debe seguir instalándose como archivos estáticos, funcionar sin Internet y consumir pocos recursos en la Raspberry Pi. Los componentes nativos permiten desarrollar el dashboard y sus tarjetas sobre la arquitectura definitiva sin imponer una migración posterior.
+
+### 2.2 Sistema de iconos (2026-08-13)
+
+La interfaz usa Material Design Icons 7.4.47 mediante el componente `<modulinkr-icon>`. Se incorpora el catálogo completo de 7.447 pictogramas porque no es posible anticipar todos los sensores, actuadores y equipos que podrán configurarse. El navegador no descarga el catálogo completo: `static/mdi/manifest.json` localiza el bloque alfabético que contiene cada nombre, el componente solicita ese bloque una sola vez y conserva sus iconos en memoria. Los 39 bloques suman aproximadamente 2,7 MB en el gateway y la pantalla solo transfiere los que utiliza. No se requiere Internet, Node ni un servicio externo durante la operación.
+
+Todo icono de la interfaz se solicita con el espacio de nombres `mdi:`, por ejemplo `<modulinkr-icon name="mdi:thermometer">`. El componente constituye el único punto de renderizado para evitar SVG duplicados, mantener tamaño y color mediante CSS y permitir que un nombre pueda sustituirse de forma centralizada. Si el icono transmite información que el texto contiguo no expresa, se añade el atributo `label`; en caso contrario queda oculto para los lectores de pantalla como elemento decorativo.
+
+Los logotipos de tecnologías y marcas no se fuerzan dentro de MDI. Cuando se incorporen LoRa, NB-IoT, Modbus u otras identidades oficiales, se reservarán espacios de nombres propios y se conservarán sus condiciones de uso. Los pictogramas específicos de ModuLinkr seguirán el mismo punto de acceso, pero no se mezclarán con el catálogo de terceros.
+
+El catálogo se regenera con `tools/build_mdi_catalog.py` a partir del paquete oficial `@mdi/svg`. La versión, el número de iconos y la licencia quedan registrados en el manifiesto; el texto de licencia distribuido por Pictogrammers se conserva en `static/mdi/LICENSE`. Una actualización de MDI debe regenerar todos los bloques y comprobar los nombres usados por `index.html` y `app.js` antes de sustituir la versión anterior.
+
 ## 3. Fuentes de datos
 
 | Función | Fuente | Notas |

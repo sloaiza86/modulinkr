@@ -48,9 +48,11 @@ body.con-error .error { display: block; }
 .pie { text-align: center; margin: 1.2rem 0 0; font-size: 0.82rem; }
 .pie a { color: var(--dim); text-decoration: none; }
 .pie a:hover { color: var(--accent); text-decoration: underline; }
+modulinkr-login-page { display: contents; }
 </style>
 </head>
 <body>
+<modulinkr-login-page>
 <form class="tarjeta" method="post" action="/login">
   <img class="logo" src="/static/img/logo.svg" alt="ModuLinkr">
   <p class="sub">Panel del gateway</p>
@@ -62,10 +64,7 @@ body.con-error .error { display: block; }
   <button type="submit">Entrar</button>
   <p class="pie"><a href="/cert" download>Descargar certificado</a></p>
 </form>
-<script>
-if (new URLSearchParams(location.search).has("e")) {
-  document.body.classList.add("con-error");
-}
-</script>
+</modulinkr-login-page>
+<script src="/static/components.js"></script>
 </body>
 </html>

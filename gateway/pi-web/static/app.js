@@ -17,32 +17,23 @@ const COLOR = {
   border: CSS.getPropertyValue("--border").trim(),
 };
 
-// ----- Iconos SVG (trazo, heredan currentColor) -----
-
-const ICONO = {
-  termometro: '<path d="M10 13.5V4a2 2 0 0 1 4 0v9.5a4.5 4.5 0 1 1-4 0z"/><line x1="12" y1="9" x2="12" y2="15"/>',
-  gota: '<path d="M12 3c3 4 6 7.2 6 10.8a6 6 0 0 1-12 0C6 10.2 9 7 12 3z"/>',
-  rayo: '<polygon points="13 2 3 14 11 14 10 22 21 9 13 9 13 2"/>',
-  sol: '<circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/>',
-  actividad: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
-  nube: '<path d="M18 18H7a4 4 0 1 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/>',
-  chip: '<rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/>',
-  antena: '<line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/>',
-  nodos: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>',
-};
-
-// Icono por nombre de medida, con actividad como genérico.
+// Icono MDI por nombre de medida, con pulso como genérico.
 function iconoMedida(id) {
   const s = String(id).toLowerCase();
-  if (/temp|° ?c/.test(s)) return ICONO.termometro;
-  if (/hum|rh|moist/.test(s)) return ICONO.gota;
-  if (/volt|curr|amp|power|watt|bat/.test(s)) return ICONO.rayo;
-  if (/lux|luz|light|illum/.test(s)) return ICONO.sol;
-  if (/co2|gas|aire|air/.test(s)) return ICONO.nube;
-  return ICONO.actividad;
+  if (/temp|° ?c/.test(s)) return "thermometer";
+  if (/hum|rh|moist/.test(s)) return "water-percent";
+  if (/bat/.test(s)) return "battery";
+  if (/curr|amp/.test(s)) return "current-ac";
+  if (/volt|power|watt/.test(s)) return "lightning-bolt";
+  if (/lux|luz|light|illum/.test(s)) return "brightness-5";
+  if (/co2/.test(s)) return "molecule-co2";
+  if (/pressure|presion|presión/.test(s)) return "gauge";
+  if (/level|nivel|tank|deposit|depósito/.test(s)) return "storage-tank";
+  if (/gas|aire|air/.test(s)) return "air-filter";
+  return "pulse";
 }
-function svg(contenido, cls = "") {
-  return `<svg viewBox="0 0 24 24" class="${cls}">${contenido}</svg>`;
+function iconoMdi(nombre, cls = "") {
+  return `<modulinkr-icon name="mdi:${nombre}"${cls ? ` class="${cls}"` : ""}></modulinkr-icon>`;
 }
 
 // ----- Utilidades -----
@@ -221,12 +212,7 @@ async function fetchApi(url, opts) {
 }
 
 function toast(msg, tipo = "exito") {
-  const cont = document.getElementById("toasts");
-  const el = document.createElement("div");
-  el.className = "toast " + tipo;
-  el.textContent = textoCliente(msg);
-  cont.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  document.getElementById("toasts").show(textoCliente(msg), tipo);
 }
 
 function tipoMensaje(el, texto) {
@@ -316,15 +302,6 @@ function sparkline(serie, w = 64, h = 22) {
 const TITULOS = { red: "Red", topologia: "Topología", datos: "Datos",
                   configuracion: "Configuración" };
 
-document.getElementById("btn-menu").addEventListener("click", () => {
-  document.body.classList.toggle("sb-contraida");
-  localStorage.setItem("modulinkr_sb",
-    document.body.classList.contains("sb-contraida") ? "1" : "0");
-});
-if (localStorage.getItem("modulinkr_sb") === "1") {
-  document.body.classList.add("sb-contraida");
-}
-
 function vistaActual() {
   // La vista es el primer tramo del hash; Configuración tiene subrutas
   // (#/configuracion/nodo, #/configuracion/nodo/usb) dentro de su vista.
@@ -334,11 +311,9 @@ function vistaActual() {
 
 function navegar() {
   const v = vistaActual();
-  document.querySelectorAll(".nav-item[data-view]").forEach((a) =>
-    a.classList.toggle("active", a.dataset.view === v));
-  document.querySelectorAll(".view").forEach((s) => { s.hidden = true; });
-  document.getElementById("view-" + v).hidden = false;
-  document.getElementById("titulo-vista").textContent = TITULOS[v];
+  document.getElementById("sidebar").activeView = v;
+  document.querySelector("modulinkr-view-router").show(v);
+  document.querySelector("modulinkr-app-header").title = TITULOS[v];
   if (v === "topologia") refrescarMapa();
   if (v === "datos" && catalogo === null) cargarCatalogo();
   if (v === "configuracion") cfgRuta();
@@ -391,9 +366,9 @@ function tarjetaGateway(data) {
   const chips = e.chips
     .map((c) => `<span class="chip ${c.cls}">${c.txt}</span>`).join("");
   return `
-  <div class="card tarjeta-nodo tarjeta-gw" data-origin="255">
+  <modulinkr-node-card class="card tarjeta-nodo tarjeta-gw" data-origin="255">
     <div class="tn-cabecera">
-      <div class="tn-icono${e.caido ? " off" : ""}">${svg(ICONO.antena)}</div>
+      <div class="tn-icono${e.caido ? " off" : ""}">${iconoMdi("radio-tower")}</div>
       <div class="tn-info">
         <div class="tn-nombre">Gateway</div>
         <div class="tn-sub">${e.sub}</div>
@@ -402,17 +377,17 @@ function tarjetaGateway(data) {
     </div>
     <div class="tn-sensores">
       <div class="sensor fila-info">
-        ${svg(ICONO.nodos)}
+        ${iconoMdi("access-point-check")}
         <span class="s-nombre">Nodos disponibles</span>
         <span class="s-valor">${online}/${total}</span>
       </div>
       <div class="sensor fila-info">
-        ${svg(ICONO.actividad)}
+        ${iconoMdi("pulse")}
         <span class="s-nombre">Uso de radio, última hora</span>
         <span class="s-valor">${chipDuty(data.gateway_duty_1h)}</span>
       </div>
     </div>
-  </div>`;
+  </modulinkr-node-card>`;
 }
 
 // Estado del nodo: en línea con telemetría sana (verde); en línea con
@@ -545,23 +520,23 @@ function chipsNodo(n, ult, onlineS) {
 function tarjetaNodo(n, ult, onlineS) {
   const canales = ult ? ult.channels : [];
   const filas = canales.map((c, i) => `
-    <div class="sensor" data-origin="${n.origin}" data-canal="${i}" title="Ver el histórico">
-      ${svg(iconoMedida(c.read_id))}
+    <modulinkr-measurement class="sensor" data-origin="${n.origin}" data-canal="${i}" title="Ver el histórico">
+      ${iconoMdi(iconoMedida(c.read_id))}
       <span class="s-nombre">${c.read_id}</span>
       ${sparkline(c.serie)}
       ${c.st_code
         ? `<span class="s-valor s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
         : `<span class="s-valor">${fmtValor(c.value)}${c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""}</span>`}
-    </div>`).join("");
+    </modulinkr-measurement>`).join("");
   // Dos tiempos distintos: la última trama oída por LoRa (de
   // node_status, incluye beacons) y la última telemetría con valores.
   const visto = `Última actividad hace ${fmtAgo(n.ago_s)}`;
   const medida = ult
     ? `Última medida hace ${fmtAgo(ult.ago_s)}` : "Sin medidas recibidas";
   return `
-  <div class="card tarjeta-nodo" data-origin="${n.origin}">
+  <modulinkr-node-card class="card tarjeta-nodo" data-origin="${n.origin}">
     <div class="tn-cabecera">
-      <div class="tn-icono ${n.online ? "" : "off"}">${svg(ICONO.chip)}</div>
+      <div class="tn-icono ${n.online ? "" : "off"}">${iconoMdi("memory")}</div>
       <div class="tn-info">
         <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
         <div class="tn-sub">${visto}</div>
@@ -573,17 +548,15 @@ function tarjetaNodo(n, ult, onlineS) {
     <div class="tn-sensores">
       ${filas || '<div class="tn-vacio">Aún no hay medidas.</div>'}
     </div>
-  </div>`;
+  </modulinkr-node-card>`;
 }
 
 function pintarBadge(data) {
-  const badge = document.getElementById("badge-red");
-  if (!data || !data.nodes.length) { badge.hidden = true; return; }
+  const cabecera = document.querySelector("modulinkr-app-header");
+  if (!data || !data.nodes.length) { cabecera.setNetworkStatus(0, 0); return; }
   const online = data.nodes.filter((n) => n.online).length;
   const total = data.nodes.length;
-  badge.textContent = `${online}/${total} en línea`;
-  badge.className = "badge " + (online === total ? "" : (online === 0 ? "bad" : "warn"));
-  badge.hidden = false;
+  cabecera.setNetworkStatus(online, total);
 }
 
 async function refrescarRed() {
@@ -619,17 +592,6 @@ async function refrescarRed() {
     estado.nodes.map((n) =>
       tarjetaNodo(n, porOrigen.get(n.origin), estado.online_s)).join("");
 
-  cont.querySelectorAll(".tarjeta-nodo").forEach((el) => {
-    el.addEventListener("click", () => abrirDetalle(Number(el.dataset.origin)));
-  });
-  // La fila de una medida abre su minigráfica, no el detalle del nodo.
-  // Solo las filas con data-canal (las del gateway son informativas).
-  cont.querySelectorAll(".sensor[data-canal]").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      abrirModal(Number(el.dataset.origin), Number(el.dataset.canal));
-    });
-  });
   if (detalleOrigen !== null) pintarDetalle(detalleOrigen);
   // El refresco solo actualiza la cabecera del modal; la gráfica se
   // carga al abrirlo (evita pedir el histórico cloud cada 5 s).
@@ -792,8 +754,7 @@ async function cargarModalGrafica() {
 
 function abrirModal(origin, canal) {
   modalSel = { origin, canal };
-  document.getElementById("modal").hidden = false;
-  document.getElementById("modal-fondo").hidden = false;
+  document.getElementById("modal").show();
   pintarModalCabecera();
   cargarModalGrafica();
 }
@@ -801,11 +762,10 @@ function cerrarModal() {
   modalSel = null;
   modalToken++;
   if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
-  document.getElementById("modal").hidden = true;
-  document.getElementById("modal-fondo").hidden = true;
+  document.getElementById("modal").hide();
 }
-document.getElementById("modal-cerrar").addEventListener("click", cerrarModal);
-document.getElementById("modal-fondo").addEventListener("click", cerrarModal);
+document.getElementById("modal").addEventListener(
+  "modulinkr-close-request", cerrarModal);
 
 // ----- Panel de detalle de nodo -----
 
@@ -891,16 +851,14 @@ function bloqueSalud(h) {
 function abrirDetalle(origin) {
   detalleOrigen = origin;
   pintarDetalle(origin);
-  document.getElementById("detalle").hidden = false;
-  document.getElementById("detalle-fondo").hidden = false;
+  document.getElementById("detalle").show();
 }
 function cerrarDetalle() {
   detalleOrigen = null;
-  document.getElementById("detalle").hidden = true;
-  document.getElementById("detalle-fondo").hidden = true;
+  document.getElementById("detalle").hide();
 }
-document.getElementById("detalle-cerrar").addEventListener("click", cerrarDetalle);
-document.getElementById("detalle-fondo").addEventListener("click", cerrarDetalle);
+document.getElementById("detalle").addEventListener(
+  "modulinkr-close-request", cerrarDetalle);
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (modalSel !== null) cerrarModal(); else cerrarDetalle();
@@ -1363,14 +1321,12 @@ function cfgDialogo(titulo, texto, botones = {}) {
     const el = document.getElementById(id);
     if (el) el.setAttribute("inert", "");
   });
-  document.getElementById("cfg-dialogo-fondo").hidden = false;
-  dialogo.hidden = false;
+  dialogo.show();
   requestAnimationFrame(() => dialogo.focus());
 }
 
 function cfgDialogoCerrar() {
-  document.getElementById("cfg-dialogo-fondo").hidden = true;
-  document.getElementById("cfg-dialogo").hidden = true;
+  document.getElementById("cfg-dialogo").hide();
   cfgConfirmarCb = null;
   cfgCancelarCb = null;
   cfgOtroCb = null;
@@ -1418,7 +1374,7 @@ function cfgPintarNodo(port, n) {
   const el = document.getElementById("cfg-nodo");
   el.innerHTML = `
     <div class="sensor fila-info">
-      ${svg(ICONO.chip)}
+      ${iconoMdi("memory")}
       <span class="s-nombre">${titulo}</span>
       <span class="s-valor">${chip}</span>
     </div>` + filas.map(([k, v]) => `
@@ -5417,9 +5373,17 @@ document.getElementById("cfg-archivo").addEventListener("change", (e) => {
 
 // ----- Arranque, refresco periódico y reloj -----
 
+const tarjetas = document.getElementById("tarjetas");
+tarjetas.addEventListener("modulinkr-node-open", (evento) => {
+  abrirDetalle(evento.detail.origin);
+});
+tarjetas.addEventListener("modulinkr-measurement-open", (evento) => {
+  abrirModal(evento.detail.origin, evento.detail.channel);
+});
+
 // Esqueletos mientras llega la primera respuesta.
 iniciarMensajes();
-document.getElementById("tarjetas").innerHTML =
+tarjetas.innerHTML =
   '<div class="skeleton"></div>'.repeat(3);
 
 navegar();

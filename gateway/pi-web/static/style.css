@@ -32,7 +32,11 @@ body {
   display: flex;
 }
 
-svg { stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+modulinkr-icon {
+  display: inline-grid; place-items: center; width: 1em; height: 1em;
+  color: inherit; flex: none;
+}
+modulinkr-icon svg { display: block; width: 100%; height: 100%; fill: currentColor; }
 
 /* ----- Sidebar contraible ----- */
 
@@ -62,7 +66,7 @@ body.sb-contraida #sidebar { width: var(--sb-contraida); }
   padding: 0.55rem 0.75rem; border-radius: 10px;
   min-height: 44px; color: var(--dim); text-decoration: none; white-space: nowrap;
 }
-.nav-item svg { width: 20px; height: 20px; flex: none; }
+.nav-item modulinkr-icon { width: 20px; height: 20px; }
 .nav-item:hover { background: var(--bg); color: var(--text); }
 .nav-item.active { background: var(--accent-suave); color: var(--accent); font-weight: 600; }
 
@@ -77,7 +81,7 @@ body.sb-contraida .nav-item { justify-content: center; padding: 0.55rem 0; }
   display: grid; place-items: center; padding: 0;
 }
 .icono-btn:hover { background: var(--bg); color: var(--text); }
-.icono-btn svg { width: 20px; height: 20px; }
+.icono-btn modulinkr-icon { width: 20px; height: 20px; }
 
 /* ----- Zona principal ----- */
 
@@ -88,7 +92,7 @@ body.sb-contraida .nav-item { justify-content: center; padding: 0.55rem 0; }
 }
 body.sb-contraida #contenido { margin-left: var(--sb-contraida); }
 
-header {
+modulinkr-app-header {
   display: flex; align-items: center; gap: 0.9rem;
   padding: 0 1.4rem; min-height: 56px;
   background: var(--card); border-bottom: 1px solid var(--border);
@@ -106,7 +110,9 @@ h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
 .badge.warn { background: var(--warn-suave); color: var(--warn); }
 .badge.bad  { background: var(--bad-suave);  color: var(--bad); }
 
-main { padding: 1.2rem 1.4rem; flex: 1; }
+modulinkr-view-router { padding: 1.2rem 1.4rem; flex: 1; }
+modulinkr-view { display: block; }
+modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 
 .card {
   background: var(--card); border-radius: 14px; box-shadow: var(--sombra);
@@ -176,7 +182,7 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
   align-items: start;
 }
 
-.tarjeta-nodo { padding: 0.9rem 1rem 0.6rem; cursor: pointer; transition: box-shadow 0.15s ease; }
+.tarjeta-nodo { display: block; padding: 0.9rem 1rem 0.6rem; cursor: pointer; transition: box-shadow 0.15s ease; }
 .tarjeta-nodo:hover { box-shadow: 0 2px 6px rgba(20,40,60,0.12), 0 8px 22px rgba(20,40,60,0.09); }
 
 .tn-cabecera { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
@@ -186,7 +192,7 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
   display: grid; place-items: center;
   background: var(--accent-suave); color: var(--accent);
 }
-.tn-icono svg { width: 20px; height: 20px; }
+.tn-icono modulinkr-icon { width: 20px; height: 20px; }
 .tn-icono.off { background: var(--off-suave); color: var(--off); }
 .tn-nombre { font-weight: 600; }
 .tn-sub { color: var(--dim); font-size: 0.78rem; line-height: 1.4; }
@@ -210,12 +216,16 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
 }
 .sensor { cursor: pointer; border-radius: 8px; }
 .sensor:hover { background: var(--bg); }
-.sensor svg { width: 18px; height: 18px; color: var(--dim); flex: none; }
+.sensor > modulinkr-icon { width: 18px; height: 18px; color: var(--dim); }
 /* Nombre a la izquierda con todo el espacio sobrante: empuja la
    miniatura y el valor al borde derecho de la tarjeta. */
 .sensor .s-nombre { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sensor .s-spark { flex: none; }
-.sensor .s-spark polyline { stroke: var(--accent); stroke-width: 1.5; }
+.sensor .s-spark { fill: none; }
+.sensor .s-spark polyline {
+  fill: none; stroke: var(--accent); stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .sensor .s-valor { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; min-width: 4.5rem; text-align: right; }
 /* Estado Modbus con fallo (v3.2): el motivo sustituye al valor, en ámbar. */
 .s-fallo { color: var(--warn); font-weight: 600; }
@@ -360,7 +370,7 @@ main { padding: 1.2rem 1.4rem; flex: 1; }
   display: grid; place-items: center; color: var(--dim);
 }
 .volver:hover { background: var(--border); color: var(--text); }
-.volver svg { width: 20px; height: 20px; }
+.volver modulinkr-icon { width: 20px; height: 20px; }
 
 .lista-ajustes { padding: 0.35rem 0; }
 .ajuste-item {
@@ -374,7 +384,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   width: 40px; height: 40px; border-radius: 50%; flex: none;
   display: grid; place-items: center; color: #fff;
 }
-.ai-icono svg { width: 21px; height: 21px; }
+.ai-icono modulinkr-icon { width: 21px; height: 21px; }
 .ai-azul    { background: var(--accent); }
 .ai-verde   { background: var(--ok); }
 .ai-naranja { background: #e8930c; }
@@ -473,7 +483,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 .req { color: var(--bad); margin-left: 2px; }
 
 .cfg-nodo { margin-top: 0.9rem; border-top: 1px solid var(--border); }
-.cfg-nodo .sensor svg { width: 18px; height: 18px; }
+.cfg-nodo .sensor > modulinkr-icon { width: 18px; height: 18px; }
 #cfg-texto {
   width: 100%; min-height: 320px; margin-top: 0.8rem; resize: vertical;
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -574,8 +584,8 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   body:not(.sb-contraida) .nav-item span { display: none; }
   body:not(.sb-contraida) .sb-cabecera { justify-content: center; padding: 0.375rem 0; }
   body:not(.sb-contraida) .nav-item { justify-content: center; padding: 0.55rem 0; }
-  main { padding: 0.9rem; }
-  header { padding: 0 0.9rem; }
+  modulinkr-view-router { padding: 0.9rem; }
+  modulinkr-app-header { padding: 0 0.9rem; }
   .vistas, .rango { margin-left: 0; }
   .campo-error { margin-left: 0; }
 }

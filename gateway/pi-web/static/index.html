@@ -5,65 +5,65 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
-<link rel="stylesheet" href="/static/style.css?v=layout-2-20260813">
+<link rel="stylesheet" href="/static/style.css?v=components-mdi-20260813">
 </head>
 <body>
 
-<aside id="sidebar">
+<modulinkr-sidebar id="sidebar">
   <div class="sb-cabecera">
     <button id="btn-menu" class="icono-btn" title="Contraer menú">
-      <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      <modulinkr-icon name="mdi:menu"></modulinkr-icon>
     </button>
     <span class="sb-titulo"><img src="/static/img/logo-texto.svg" alt="ModuLinkr"></span>
   </div>
   <nav class="sb-nav">
     <a class="nav-item" href="#/red" data-view="red" title="Red">
-      <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
+      <modulinkr-icon name="mdi:view-dashboard-outline"></modulinkr-icon>
       <span>Red</span>
     </a>
     <a class="nav-item" href="#/topologia" data-view="topologia" title="Topología">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="4" r="2.6"/><circle cx="5" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6"/><line x1="12" y1="6.6" x2="5.8" y2="16.8"/><line x1="12" y1="6.6" x2="18.2" y2="16.8"/></svg>
+      <modulinkr-icon name="mdi:graph-outline"></modulinkr-icon>
       <span>Topología</span>
     </a>
     <a class="nav-item" href="#/datos" data-view="datos" title="Datos">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="14"/></svg>
+      <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
       <span>Datos</span>
     </a>
   </nav>
   <div class="sb-pie">
     <a class="nav-item" href="#/configuracion" data-view="configuracion" title="Configuración">
-      <svg viewBox="0 0 24 24"><line x1="5" y1="4" x2="5" y2="10"/><circle cx="5" cy="13" r="2.4"/><line x1="5" y1="15.4" x2="5" y2="20"/><line x1="12" y1="4" x2="12" y2="6"/><circle cx="12" cy="9" r="2.4"/><line x1="12" y1="11.4" x2="12" y2="20"/><line x1="19" y1="4" x2="19" y2="13"/><circle cx="19" cy="16" r="2.4"/><line x1="19" y1="18.4" x2="19" y2="20"/></svg>
+      <modulinkr-icon name="mdi:tune-variant"></modulinkr-icon>
       <span>Configuración</span>
     </a>
     <a class="nav-item" id="btn-logout" href="/logout" title="Cerrar sesión">
-      <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      <modulinkr-icon name="mdi:logout"></modulinkr-icon>
       <span>Cerrar sesión</span>
     </a>
   </div>
-</aside>
+</modulinkr-sidebar>
 
-<div id="contenido">
-  <header>
+<modulinkr-app id="contenido">
+  <modulinkr-app-header>
     <h1 id="titulo-vista">Red</h1>
     <span id="badge-red" class="badge" hidden></span>
     <div class="header-derecha">
       <span id="refresco"></span>
       <span id="clock"></span>
     </div>
-  </header>
+  </modulinkr-app-header>
 
-  <main>
-    <section id="view-red" class="view">
+  <modulinkr-view-router>
+    <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Red">
       <div id="tarjetas" class="grid-tarjetas"></div>
       <p id="red-aviso" class="aviso"></p>
-    </section>
+    </modulinkr-view>
 
-    <section id="view-topologia" class="view" hidden>
+    <modulinkr-view id="view-topologia" class="view" data-view="topologia" aria-label="Topología" hidden>
       <div class="card card-mapa"><div id="mapa"></div></div>
       <p class="leyenda">Las líneas muestran la relación entre los nodos. Azul: gateway. Verde: disponible. Gris: sin actividad reciente.</p>
-    </section>
+    </modulinkr-view>
 
-    <section id="view-datos" class="view" hidden>
+    <modulinkr-view id="view-datos" class="view" data-view="datos" aria-label="Datos" hidden>
       <div id="datos-controles" class="card">
         <div id="selector-cabecera">
           <input type="search" id="filtro" placeholder="Buscar nodos o medidas">
@@ -87,92 +87,92 @@
       </div>
       <div id="grafico" class="card"></div>
       <p id="datos-aviso" class="aviso"></p>
-    </section>
+    </modulinkr-view>
 
-    <section id="view-configuracion" class="view" hidden>
+    <modulinkr-view id="view-configuracion" class="view" data-view="configuracion" aria-label="Configuración" hidden>
 
       <!-- Nivel 1: menú de ajustes (patrón de panel domótico) -->
       <div class="ajustes" id="cfg-menu">
         <div class="card lista-ajustes">
           <a class="ajuste-item" href="#/configuracion/nodo">
             <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/></svg>
+              <modulinkr-icon name="mdi:memory"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Nodos</div>
               <div class="ai-sub">Añadir, editar y actualizar nodos</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/radio">
             <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
+              <modulinkr-icon name="mdi:router-wireless"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Radio LoRa</div>
               <div class="ai-sub">Estado, conexión y actualización</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/red-lora">
             <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
+              <modulinkr-icon name="mdi:radio-tower"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Red LoRa</div>
               <div class="ai-sub">Parámetros compartidos por toda la red</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/wifi">
             <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><path d="M4.5 9.5a12 12 0 0 1 15 0"/><path d="M7.5 12.5a8 8 0 0 1 9 0"/><path d="M10 15.5a4 4 0 0 1 4 0"/><circle cx="12" cy="18.5" r="0.6"/></svg>
+              <modulinkr-icon name="mdi:wifi"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Red Wi-Fi</div>
               <div class="ai-sub">Conexión inalámbrica del gateway</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/zona">
             <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="13.5"/></svg>
+              <modulinkr-icon name="mdi:clock-outline"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Zona horaria</div>
               <div class="ai-sub">Hora utilizada en el visor y las gráficas</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/bd">
             <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.6 3.1 3 7 3s7-1.4 7-3V6"/><path d="M5 12v6c0 1.6 3.1 3 7 3s7-1.4 7-3v-6"/></svg>
+              <modulinkr-icon name="mdi:database"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Base de datos</div>
               <div class="ai-sub">Conexión PostgreSQL y almacenamiento de datos</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/mqtt">
             <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><path d="M18 18H7a4 4 0 0 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/><line x1="12" y1="13" x2="12" y2="17"/></svg>
+              <modulinkr-icon name="mdi:cloud-outline"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Conexión MQTT</div>
               <div class="ai-sub">Destino de los datos del gateway</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/depuracion">
             <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="7 9 10 12 7 15"/><line x1="13" y1="15" x2="16.5" y2="15"/></svg>
+              <modulinkr-icon name="mdi:console-line"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Diagnóstico</div>
               <div class="ai-sub">Estado del gateway, los nodos y las lecturas</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
         </div>
       </div>
@@ -181,40 +181,40 @@
       <div class="ajustes" id="cfg-sub-nodo" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Nodos</h2>
         </div>
         <div class="card lista-ajustes">
           <a class="ajuste-item" href="#/configuracion/nodo/firmware">
             <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="15" x2="4" y2="15"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="15" x2="22" y2="15"/></svg>
+              <modulinkr-icon name="mdi:open-in-app"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Actualizar nodos</div>
               <div class="ai-sub">Instalar una actualización por cable o LoRa</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/nodo/usb">
             <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="7"/><circle cx="12" cy="21" r="1.4"/><polyline points="12 15 7.5 12.5 7.5 9.5"/><rect x="6.3" y="6.6" width="2.4" height="2.4"/><polyline points="12 12 16.5 9.8 16.5 7.5"/><circle cx="16.5" cy="5.8" r="1.3"/><polyline points="9.5 4.5 12 7 14.5 4.5"/></svg>
+              <modulinkr-icon name="mdi:usb"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Configuración avanzada</div>
               <div class="ai-sub">Importar o exportar la configuración por USB</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/nodo/form">
             <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>
+              <modulinkr-icon name="mdi:form-select"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Configurar nodo</div>
               <div class="ai-sub">Añadir un nodo o editar su configuración</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
         </div>
       </div>
@@ -223,7 +223,7 @@
       <div class="ajustes" id="cfg-fw" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Actualizar nodos</h2>
         </div>
@@ -311,7 +311,7 @@
       <div class="ajustes" id="cfg-usb" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Configuración avanzada</h2>
         </div>
@@ -356,7 +356,7 @@
       <div class="ajustes" id="cfg-radio" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Radio LoRa</h2>
         </div>
@@ -388,7 +388,7 @@
       <div class="ajustes" id="cfg-red-lora" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Red LoRa</h2>
         </div>
@@ -460,7 +460,7 @@
       <div class="ajustes" id="cfg-zona" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Zona horaria</h2>
         </div>
@@ -483,7 +483,7 @@
       <div class="ajustes" id="cfg-bd" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Base de datos</h2>
         </div>
@@ -510,7 +510,7 @@
       <div class="ajustes" id="cfg-mqtt" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Conexión MQTT</h2>
         </div>
@@ -544,7 +544,7 @@
       <div class="ajustes" id="cfg-wifi" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Red Wi-Fi</h2>
         </div>
@@ -580,7 +580,7 @@
       <div class="ajustes" id="cfg-debug" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Diagnóstico</h2>
         </div>
@@ -614,7 +614,7 @@
       <div class="ajustes" id="cfg-form" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Configurar nodo</h2>
         </div>
@@ -791,29 +791,29 @@
           </div>
         </div>
       </div>
-    </section>
-  </main>
-</div>
+    </modulinkr-view>
+  </modulinkr-view-router>
+</modulinkr-app>
 
 <!-- Panel lateral de detalle de nodo -->
 <div id="detalle-fondo" hidden></div>
-<aside id="detalle" hidden>
+<modulinkr-node-detail id="detalle" backdrop="detalle-fondo" hidden>
   <div class="detalle-cabecera">
     <h2 id="detalle-titulo"></h2>
-    <button id="detalle-cerrar" class="icono-btn" title="Cerrar">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+    <button id="detalle-cerrar" class="icono-btn" title="Cerrar" data-close>
+      <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
   <div id="detalle-cuerpo"></div>
-</aside>
+</modulinkr-node-detail>
 
 <!-- Modal de minigráfica de una medida (última hora, buffer local) -->
 <div id="modal-fondo" hidden></div>
-<div id="modal" hidden>
+<modulinkr-history-dialog id="modal" backdrop="modal-fondo" hidden>
   <div class="modal-cabecera">
     <h2 id="modal-titulo"></h2>
-    <button id="modal-cerrar" class="icono-btn" title="Cerrar">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+    <button id="modal-cerrar" class="icono-btn" title="Cerrar" data-close>
+      <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
   <div class="modal-sub">
@@ -821,13 +821,12 @@
     <span class="m-actual" id="modal-valor"></span>
   </div>
   <div id="modal-grafico"></div>
-</div>
+</modulinkr-history-dialog>
 
 <!-- El diálogo común conserva el foco dentro de la decisión activa. -->
 <div id="cfg-dialogo-fondo" hidden></div>
-<div id="cfg-dialogo" class="dialogo" role="dialog" aria-modal="true"
-     aria-labelledby="cfg-dialogo-titulo" aria-describedby="cfg-dialogo-texto"
-     tabindex="-1" hidden>
+<modulinkr-confirm-dialog id="cfg-dialogo" class="dialogo"
+     aria-describedby="cfg-dialogo-texto" tabindex="-1" hidden>
   <div id="cfg-dialogo-icono" class="dialogo-icono" aria-hidden="true">i</div>
   <h3 id="cfg-dialogo-titulo"></h3>
   <div id="cfg-dialogo-texto"></div>
@@ -840,9 +839,9 @@
     <button id="cfg-dialogo-confirmar" class="peligro" hidden>Borrar</button>
     <button id="cfg-dialogo-cerrar" class="btn-primario" hidden>Cerrar</button>
   </div>
-</div>
+</modulinkr-confirm-dialog>
 
-<div id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
+<modulinkr-toast-region id="toasts"></modulinkr-toast-region>
 
 <script src="/static/vendor/vis-network.min.js"></script>
 <script src="/static/vendor/echarts.min.js"></script>
@@ -854,6 +853,7 @@
   window.ESPLoader = ESPLoader;
   window.Transport = Transport;
 </script>
-<script src="/static/app.js?v=ux-20260812"></script>
+<script src="/static/components.js?v=components-mdi-20260813"></script>
+<script src="/static/app.js?v=components-mdi-20260813"></script>
 </body>
 </html>
