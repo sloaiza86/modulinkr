@@ -302,11 +302,11 @@ def enviar(body: dict = Body(...)):
             c.commit()
             push_id = cur.lastrowid
     except sqlite3.Error as e:
-        LOG.warning("no se pudo encolar el envío: %s", e)
+        LOG.warning("event=config_push.enqueue_failed error=%s", e)
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
-    LOG.info("envío de config encolado id=%d origin=%d (%d B) apply_at=%d",
+    LOG.info("event=config_push.enqueued id=%d origin=%d bytes=%d apply_at_epoch=%d",
              push_id, origin, len(data), apply_at)
     return {"id": push_id, "bytes": len(data),
             "fragmentos": -(-len(data) // 213)}
@@ -354,7 +354,7 @@ def leer(body: dict = Body(...)):
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
-    LOG.info("lectura de config encolada id=%d origin=%d", read_id, origin)
+    LOG.info("event=config_read.enqueued id=%d origin=%d", read_id, origin)
     return {"id": read_id}
 
 
@@ -487,7 +487,7 @@ def firmware_enviar(body: dict = Body(...)):
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
-    LOG.info("firmware encolado id=%d destino=%d %s (%d B, ventana %s-%s)",
+    LOG.info("event=firmware_push.enqueued id=%d origin=%d version=%s bytes=%d window_start=%s window_end=%s",
              push_id, origin, info["version"], info["bytes"], desde, hasta)
     return {"id": push_id, "version": info["version"], "bytes": info["bytes"],
             "fragmentos": info["fragmentos"]}
@@ -604,7 +604,7 @@ def firmware_cancelar(body: dict = Body(default={})):
     if cur.rowcount == 0:
         return JSONResponse(status_code=409,
                             content={"error": "esa subida ya no estaba en curso"})
-    LOG.info("subida de firmware %s cancelada desde el visor", ident)
+    LOG.info("event=firmware_push.cancelled id=%s source=web", ident)
     return {"ok": True, "id": ident}
 
 
@@ -644,7 +644,7 @@ def firmware_instalar(body: dict = Body(...)):
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
-    LOG.info("instalación pedida para la actualización id=%d", push_id)
+    LOG.info("event=firmware_push.install_requested id=%d", push_id)
     return {"id": push_id, "state": "install_req"}
 
 
@@ -681,7 +681,7 @@ def silencio(body: dict = Body(...)):
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
-    LOG.info("ventana de silencio pedida id=%d, %d s", req_id, dur)
+    LOG.info("event=quiet_window.requested id=%d duration_s=%d", req_id, dur)
     return {"id": req_id, "duracion_s": dur}
 
 
@@ -751,7 +751,7 @@ def firmware_difundir(body: dict = Body(default={})):
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
-    LOG.info("difusion de firmware encolada id=%d version=%s (%d B)",
+    LOG.info("event=firmware_broadcast.enqueued id=%d version=%s bytes=%d",
              bid, info["version"], info["bytes"])
     return {"id": bid, "version": info["version"], "bytes": info["bytes"]}
 
@@ -820,7 +820,7 @@ def firmware_difusion_cancelar():
     if cur.rowcount == 0:
         return JSONResponse(status_code=404,
                             content={"error": "no hay difusión en curso"})
-    LOG.info("difusion de firmware cancelada desde el visor")
+    LOG.info("event=firmware_broadcast.cancelled source=web")
     return {"ok": True}
 
 
@@ -934,5 +934,5 @@ def difusion_instalar(body: dict = Body(...)):
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
-    LOG.info("instalación de la difusión pedida para el nodo %d", origin)
+    LOG.info("event=firmware_broadcast.install_requested origin=%d", origin)
     return {"origin": origin, "version": version, "state": "pending"}

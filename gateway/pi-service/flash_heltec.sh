@@ -18,23 +18,23 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${1:-$DIR/heltec-radio.bin}"
 VENV="$DIR/.venv"
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo (env del servicio y systemctl)." >&2; exit 1; }
-[ -f "$BIN" ] || { echo "No existe el binario: $BIN (generarlo con make_dist.sh y copiarlo)." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -f "$BIN" ] || { echo "[ERROR] No existe $BIN. Genéralo con make_dist.sh y cópialo al gateway." >&2; exit 1; }
 
 if [ -f /etc/modulinkr/gateway.env ]; then
     # shellcheck disable=SC1091
     . /etc/modulinkr/gateway.env
 fi
 PORT="${MODULINKR_PORT:-}"
-[ -n "$PORT" ] || { echo "MODULINKR_PORT sin definir (¿instalador del gateway ejecutado?)." >&2; exit 1; }
-[ -e "$PORT" ] || { echo "El puerto $PORT no existe. ¿Heltec conectado?" >&2; exit 1; }
+[ -n "$PORT" ] || { echo "[ERROR] MODULINKR_PORT no está definido. Ejecuta primero el instalador del gateway." >&2; exit 1; }
+[ -e "$PORT" ] || { echo "[ERROR] El puerto $PORT no existe. Conecta el Heltec y vuelve a intentarlo." >&2; exit 1; }
 
 # esptool vive en el venv del servicio (lo instala el Gateway Installer);
 # si falta (venv anterior), se añade sobre la marcha.
 PY="$VENV/bin/python3"
-[ -x "$PY" ] || { echo "Venv no encontrado en $VENV (correr el instalador primero)." >&2; exit 1; }
+[ -x "$PY" ] || { echo "[ERROR] No existe el entorno Python en $VENV. Ejecuta primero el instalador." >&2; exit 1; }
 "$PY" -m esptool version >/dev/null 2>&1 || {
-    echo "Instalando esptool en el venv..."
+    echo "[INFO] Instalando esptool en el entorno Python..."
     "$VENV/bin/pip" install esptool
 }
 
@@ -42,12 +42,12 @@ echo "Binario : $BIN"
 echo "Puerto  : $PORT"
 (sha256sum "$BIN" 2>/dev/null || shasum -a 256 "$BIN") | awk '{print "sha256  :", $1}'
 
-echo "Parando modulinkr-gateway (libera el puerto)..."
+echo "[INFO] Deteniendo modulinkr-gateway para liberar el puerto..."
 systemctl stop modulinkr-gateway 2>/dev/null || true
 
-echo "Flasheando (esptool escribe la imagen completa desde 0x0)..."
+echo "[INFO] Escribiendo la imagen completa de la radio desde 0x0..."
 "$PY" -m esptool --chip esp32s3 --port "$PORT" --baud 460800 \
     write_flash 0x0 "$BIN"
 
-echo "Rearrancando modulinkr-gateway..."
+echo "[INFO] Iniciando modulinkr-gateway..."
 systemctl start modulinkr-gateway 2>/dev/null || true

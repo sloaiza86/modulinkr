@@ -155,9 +155,9 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
         // Se reporta aunque la lectura posterior salga bien: es la pista
         // de una respuesta rezagada de la transacción anterior. Con traza
         // de solo errores, sale dentro del volcado de fallo si lo hay.
-        Serial.printf("[mb]   buffer previo con %u bytes antes de la peticion\n",
+        Serial.printf("[mb]   stale_buffer bytes=%u stage=before_request\n",
                       static_cast<unsigned>(pre_total));
-        diagHex("previos", pre, pre_len);
+        diagHex("stale", pre, pre_len);
     }
 
     // Construye la petición Modbus RTU.
@@ -197,16 +197,16 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
         record(st, req, sizeof(req), resp, rx_len, purged, purged_n);
         if (trace_ == Trace::NONE) return st;
-        Serial.printf("[mb] fallo '%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
+        Serial.printf("[mb] failed reason='%s' slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
         if (pre_total > 0) {
-            Serial.printf("[mb]   buffer previo NO vacio: %u bytes descartados\n",
+            Serial.printf("[mb]   stale_buffer bytes_dropped=%u\n",
                           static_cast<unsigned>(pre_total));
-            diagHex("previos", pre, pre_len);
+            diagHex("stale", pre, pre_len);
         }
-        if (purged_n > 0) diagHex("purgados", purged, purged_n);
-        diagHex("peticion", req, sizeof(req));
-        diagHex("recibido", resp, rx_len);
+        if (purged_n > 0) diagHex("purged", purged, purged_n);
+        diagHex("request", req, sizeof(req));
+        diagHex("response", resp, rx_len);
         uint8_t tail[32];
         size_t  tn = 0;
         const uint32_t t0 = millis();
@@ -218,9 +218,9 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
             delay(2);
         }
         if (tn > 0) {
-            diagHex("cola tardia", tail, tn);
+            diagHex("late_tail", tail, tn);
         } else {
-            Serial.println(F("[mb]   cola tardia: nada en 120 ms"));
+            Serial.println(F("[mb]   late_tail bytes=0 wait_ms=120"));
         }
         return st;
     };
@@ -266,9 +266,9 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
             const bool eco = std::memcmp(skipped_bytes,
                                          req + sizeof(req) - skipped,
                                          skipped) == 0;
-            Serial.printf("[mb] resync: %u byte(s) espurio(s) tras la purga (%s)\n",
-                          skipped, eco ? "ECO de la peticion" : "NO coincide con la peticion");
-            diagHex("espurios", skipped_bytes, skipped);
+            Serial.printf("[mb] resync stray_bytes=%u stage=after_flush reason=%s\n",
+                          skipped, eco ? "request_echo" : "request_mismatch");
+            diagHex("stray", skipped_bytes, skipped);
         }
     }
 
@@ -339,12 +339,12 @@ ModbusRTU::Status ModbusRTU::readRegisters(uint8_t function_code, uint8_t slave_
     }
     if (trace_ == Trace::ALL) {
         Serial.printf("[mb] ok slave=0x%02X fn=0x%02X addr=%u count=%u  "
-                      "purgados=%u (total %lu)  resyncs=%lu\n",
+                      "purged=%u purged_total=%lu resyncs=%lu\n",
                       slave_id, function_code, address, count,
                       static_cast<unsigned>(purged_n),
                       static_cast<unsigned long>(purged_total_),
                       static_cast<unsigned long>(resync_total_));
-        if (purged_n > 0) diagHex("purgados", purged, purged_n);
+        if (purged_n > 0) diagHex("purged", purged, purged_n);
     }
     return Status::OK;
 }
@@ -370,9 +370,9 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
         }
     }
     if (trace_ == Trace::ALL && pre_total > 0) {
-        Serial.printf("[mb]   buffer previo con %u bytes antes de la peticion (bits)\n",
+        Serial.printf("[mb]   stale_buffer bytes=%u stage=before_bit_request\n",
                       static_cast<unsigned>(pre_total));
-        diagHex("previos", pre, pre_len);
+        diagHex("stale", pre, pre_len);
     }
 
     // Petición idéntica en estructura a la de registros.
@@ -400,10 +400,10 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
     auto failRet = [&](Status st, const char* etapa, size_t rx_len) -> Status {
         record(st, req, sizeof(req), resp, rx_len, purged, purged_n);
         if (trace_ == Trace::NONE) return st;
-        Serial.printf("[mb] fallo '%s' (bits) slave=0x%02X fn=0x%02X addr=%u count=%u\n",
+        Serial.printf("[mb] failed reason='%s' type=bits slave=0x%02X fn=0x%02X addr=%u count=%u\n",
                       etapa, slave_id, function_code, address, count);
-        diagHex("peticion", req, sizeof(req));
-        diagHex("recibido", resp, rx_len);
+        diagHex("request", req, sizeof(req));
+        diagHex("response", resp, rx_len);
         return st;
     };
 
@@ -483,12 +483,12 @@ ModbusRTU::Status ModbusRTU::readBits(uint8_t function_code, uint8_t slave_id,
     }
     if (trace_ == Trace::ALL) {
         Serial.printf("[mb] ok slave=0x%02X fn=0x%02X addr=%u count=%u  "
-                      "purgados=%u (total %lu)  resyncs=%lu\n",
+                      "purged=%u purged_total=%lu resyncs=%lu\n",
                       slave_id, function_code, address, count,
                       static_cast<unsigned>(purged_n),
                       static_cast<unsigned long>(purged_total_),
                       static_cast<unsigned long>(resync_total_));
-        if (purged_n > 0) diagHex("purgados", purged, purged_n);
+        if (purged_n > 0) diagHex("purged", purged, purged_n);
     }
     return Status::OK;
 }

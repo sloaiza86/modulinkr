@@ -123,7 +123,7 @@ def estado():
 def escanear():
     ok, out = _sudo(["scan"], stdin=None, timeout_s=SCAN_TIMEOUT_S)
     if not ok:
-        LOG.warning("escaneo WiFi fallido: %s", out)
+        LOG.warning("event=wifi.scan_failed detail=%s", out)
         return _err(502, out)
     # Una fila por red; se colapsan los SSID repetidos (varios AP) quedándose
     # con la señal más fuerte. Se descartan las redes ocultas (SSID vacío).
@@ -174,7 +174,7 @@ async def conectar(request: Request):
     stdin = f"{ssid}\n{password}\n"
     ok, out = _sudo(["connect"], stdin=stdin, timeout_s=CONNECT_TIMEOUT_S)
     if not ok:
-        LOG.warning("conexión WiFi a %r fallida: %s", ssid, out)
+        LOG.warning("event=wifi.connection_failed ssid=%r detail=%s", ssid, out)
         return _err(502, out)
-    LOG.info("WiFi conectado a %r", ssid)
+    LOG.info("event=wifi.connected ssid=%r", ssid)
     return {"ok": True, "output": out, "ip": _lan_ip() or None}

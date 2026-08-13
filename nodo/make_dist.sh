@@ -26,7 +26,7 @@ OUT="$DIR/../gateway/pi-service/nodo.bin"
 
 for f in bootloader.bin partitions.bin firmware.bin; do
     if [ ! -f "$BUILD/$f" ]; then
-        echo "Falta $BUILD/$f. Compilar primero en VS Code (PlatformIO)." >&2
+        echo "[ERROR] Falta $BUILD/$f. Compila primero en VS Code con PlatformIO." >&2
         exit 1
     fi
 done
@@ -34,7 +34,7 @@ done
 BOOT_APP0="$(find "$HOME/.platformio/packages" -path "*arduinoespressif32*" \
              -name boot_app0.bin 2>/dev/null | head -1)"
 if [ -z "$BOOT_APP0" ]; then
-    echo "boot_app0.bin no encontrado en ~/.platformio/packages" >&2
+    echo "[ERROR] No se encontró boot_app0.bin en ~/.platformio/packages." >&2
     exit 1
 fi
 
@@ -49,7 +49,7 @@ if [ -n "$ESPTOOL_PY" ] && [ -x "$PIO_PYTHON" ]; then
 elif command -v esptool.py >/dev/null 2>&1; then
     ESPTOOL=(esptool.py)
 else
-    echo "esptool no encontrado (ni en PlatformIO ni en el PATH)" >&2
+    echo "[ERROR] No se encontró esptool en PlatformIO ni en PATH." >&2
     exit 1
 fi
 
@@ -80,8 +80,8 @@ VER="$(grep -oE 'kFirmwareVersion[^"]*"[^"]+"' "$DIR/src/main.cpp" \
 # firmware), así que comprobarlo es buscarla ahí.
 if [ -n "$VER" ]; then
     if ! grep -qa -- "$VER" "$BUILD/firmware.bin"; then
-        echo "ERROR: main.cpp dice version '$VER' pero el binario compilado no" >&2
-        echo "       la contiene. Falta compilar tras cambiar la version." >&2
+        echo "[ERROR] main.cpp declara la versión '$VER', pero el binario compilado no la contiene." >&2
+        echo "[ERROR] Compila el firmware después de cambiar la versión." >&2
         exit 1
     fi
     printf '%s' "$VER" > "$OUT.version"
@@ -105,14 +105,14 @@ printf '%s' "$APP_SHA" > "$APP_OUT.sha256"
 [ -n "$VER" ] && printf '%s' "$VER" > "$APP_OUT.version"
 
 echo
-echo "Generado: $OUT"
+echo "[ OK ] Archivo generado: $OUT"
 ls -lh "$OUT" | awk '{print "  tamaño:", $5}'
 (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") | awk '{print "  sha256:", $1}'
 [ -n "$VER" ] && echo "  versión: $VER (en $OUT.version)"
 
 APP_BYTES="$(wc -c < "$APP_OUT" | tr -d ' ')"
 echo
-echo "Generado: $APP_OUT"
+echo "[ OK ] Archivo generado: $APP_OUT"
 echo "  tamaño: $APP_BYTES B ($((APP_BYTES / 1024)) kB, $((APP_BYTES * 100 / 1310720))% de app1)"
 echo "  sha256: $APP_SHA"
 echo "  fragmentos por radio: $(( (APP_BYTES + 212) / 213 ))"

@@ -110,7 +110,7 @@ void printBanner() {
     Serial.printf ("  freq=%.3f MHz  SF%u  BW%.0f kHz  CR4/%u  sync=0x%02X\n",
                    g_freq_mhz, g_sf, g_bw_khz,
                    kCodingRate, kSyncWord);
-    Serial.printf ("  network_id=%u  rol=radio pura (ACK y BEACON en el Pi)\n",
+    Serial.printf ("  network_id=%u  role=radio-front-end (ACK and BEACON on Pi)\n",
                    g_network_id);
     Serial.println(F("  Pi->Heltec: 'TX <hex>' / 'OLED ...' / 'RADIO ...'   Heltec->Pi: '[rx] ...'"));
     Serial.println(F("=================================================="));
@@ -149,7 +149,7 @@ void txRaw(const uint8_t* frame, size_t len) {
 
     const int16_t restart = radio.startReceive();
     if (restart != RADIOLIB_ERR_NONE) {
-        Serial.printf("[tx] startReceive() fallo code=%d\n", restart);
+        Serial.printf("[tx] startReceive failed code=%d\n", restart);
     }
 }
 
@@ -248,12 +248,12 @@ void handleRadioLine(char* rest) {
     unsigned netid = 0, sf = 0, bw = 0;
     unsigned long freq_hz = 0;
     if (sscanf(rest, "%u %lu %u %u", &netid, &freq_hz, &sf, &bw) != 4) {
-        Serial.println(F("[radio] err formato (RADIO <netid> <freq_hz> <sf> <bw_khz>)"));
+        Serial.println(F("[radio] err invalid_format expected='RADIO <netid> <freq_hz> <sf> <bw_khz>'"));
         return;
     }
     if (netid < 1 || netid > 254 || freq_hz < 100000000UL || freq_hz > 1000000000UL ||
         sf < 7 || sf > 12 || (bw != 125 && bw != 250 && bw != 500)) {
-        Serial.println(F("[radio] err valores fuera de rango"));
+        Serial.println(F("[radio] err values_out_of_range"));
         return;
     }
     const float freq_mhz = freq_hz / 1.0e6f;
@@ -277,8 +277,8 @@ void handleRadioLine(char* rest) {
 
     const int16_t rs = radio.startReceive();
     if (rs != RADIOLIB_ERR_NONE) Serial.printf("[radio] startReceive err=%d\n", rs);
-    Serial.printf("[radio] aplicado netid=%u freq=%.3f MHz SF%u BW%.0f kHz%s\n",
-                  g_network_id, g_freq_mhz, g_sf, g_bw_khz, ok ? "" : " (con errores)");
+    Serial.printf("[radio] applied netid=%u freq=%.3f MHz SF%u BW%.0f kHz%s\n",
+                  g_network_id, g_freq_mhz, g_sf, g_bw_khz, ok ? "" : " errors=true");
 }
 
 // Procesa una línea completa recibida del Pi por USB. Entiende "TX <hex>"
@@ -297,7 +297,7 @@ void handleInLine(char* line, size_t len) {
         static uint8_t frame[protocol::kMaxPayload + protocol::kOverhead];
         const size_t n = hexToBytes(hex, hex_len, frame, sizeof(frame));
         if (n == 0) {
-            Serial.println(F("[tx] err hex invalido"));
+            Serial.println(F("[tx] err invalid_hex"));
             return;
         }
         txRaw(frame, n);
@@ -306,7 +306,7 @@ void handleInLine(char* line, size_t len) {
     } else if (len >= 6 && strncmp(line, "RADIO ", 6) == 0) {
         handleRadioLine(line + 6);
     } else {
-        Serial.println(F("[in] comando desconocido (solo 'TX', 'OLED' o 'RADIO')"));
+        Serial.println(F("[in] unknown_command allowed='TX|OLED|RADIO'"));
     }
 }
 
@@ -324,7 +324,7 @@ void pollInput() {
         } else {
             // Línea demasiado larga: descartar hasta el próximo '\n'.
             g_in_len = 0;
-            Serial.println(F("[in] linea demasiado larga, descartada"));
+            Serial.println(F("[in] line_dropped reason=too_long"));
         }
     }
 }
@@ -402,7 +402,7 @@ void setup() {
         true    // useRegulatorLDO
     );
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("FALLO (code=%d)\n", state);
+        Serial.printf("FAILED code=%d\n", state);
         while (true) {
             delay(1000);
         }
@@ -414,14 +414,14 @@ void setup() {
     Serial.print(F("[init] startReceive... "));
     state = radio.startReceive();
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("FALLO (code=%d)\n", state);
+        Serial.printf("FAILED code=%d\n", state);
         while (true) {
             delay(1000);
         }
     }
     Serial.println(F("OK"));
 
-    Serial.println(F("[init] Radio pura lista. Escuchando LoRa y USB..."));
+    Serial.println(F("[init] radio_ready interfaces=LoRa,USB"));
 }
 
 void loop() {
@@ -455,6 +455,6 @@ void loop() {
     // Re-arma RX para la siguiente trama.
     int16_t restart = radio.startReceive();
     if (restart != RADIOLIB_ERR_NONE) {
-        Serial.printf("[rx] startReceive() fallo code=%d\n", restart);
+        Serial.printf("[rx] startReceive failed code=%d\n", restart);
     }
 }

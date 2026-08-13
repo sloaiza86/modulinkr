@@ -37,7 +37,7 @@ _detect_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
 # credenciales MQTT. La IP es un camino de primera clase, no un apaño: no todo
 # despliegue tiene dominio.
 gather_broker() {
-    ask MODULINKR_USE_DOMAIN "¿El broker usará un dominio? (yes = dominio, no = IP)" "no"
+    ask MODULINKR_USE_DOMAIN "¿Configurar el broker con un dominio? (sí/no)" "no"
     case "${MODULINKR_USE_DOMAIN,,}" in
         y|yes|si|sí|s) MODULINKR_USE_DOMAIN="yes" ;;
         *)             MODULINKR_USE_DOMAIN="no" ;;
@@ -81,7 +81,7 @@ broker_letsencrypt() {
         log "Solicitando certificado (requiere el puerto 80 accesible desde internet)"
         certbot certonly --standalone --non-interactive --agree-tos $email_arg \
             -d "$MODULINKR_BROKER_DOMAIN" \
-            || die "certbot no pudo emitir el certificado. ¿Puerto 80 abierto en el NSG de Azure y el DNS apuntando a esta VM?"
+            || die "Certbot no pudo emitir el certificado. Comprueba que el puerto 80 esté accesible en el NSG de Azure y que el dominio apunte a esta VM."
         ok "Certificado emitido"
     else
         ok "El certificado ya existe; certbot lo renueva por su timer"
@@ -90,9 +90,8 @@ broker_letsencrypt() {
     broker_install_renewal_hook
     CERTFILE="$CERT_DIR/fullchain.pem"; KEYFILE="$CERT_DIR/privkey.pem"
     BROKER_CA_HINT="confianza pública (Let's Encrypt)"
-    warn "Renovación: certbot en modo standalone necesita el puerto 80 accesible también"
-    warn "al renovar (cada ~60 días). Mantener 80 abierto en el NSG de Azure. Probar sin"
-    warn "esperar con: sudo certbot renew --dry-run"
+    warn "Certbot necesita el puerto 80 accesible durante las renovaciones, aproximadamente cada 60 días."
+    warn "Mantén abierto el puerto 80 en el NSG de Azure. Comprueba la renovación con: sudo certbot renew --dry-run"
 }
 
 # broker_deploy_le_cert: copia el cert de Let's Encrypt a la carpeta de
@@ -220,7 +219,7 @@ broker_enable() {
     if systemctl is-active --quiet mosquitto; then
         ok "Mosquitto activo"
     else
-        warn "Mosquitto no quedó activo; revisar: journalctl -u mosquitto -n 40"
+        warn "Mosquitto no quedó activo. Revisa el servicio con: journalctl -u mosquitto -n 40"
     fi
 }
 

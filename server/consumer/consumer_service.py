@@ -110,10 +110,10 @@ class Consumer:
 
     def _on_connect(self, client, userdata, flags, rc) -> None:
         if rc != 0:
-            LOG.error("MQTT rechazado por el broker (rc=%s)", rc)
+            LOG.error("event=mqtt.connection_rejected rc=%s", rc)
             return
-        LOG.info("MQTT conectado a %s:%d%s", self.host, self.port,
-                 " (sesion previa presente)" if flags.get("session present") else "")
+        LOG.info("event=mqtt.connected host=%s port=%d session_present=%s",
+                 self.host, self.port, bool(flags.get("session present")))
         # La suscripción se (re)emite en cada conexión: con sesión
         # persistente es redundante pero inocua, y cubre el primer
         # arranque y los brokers reiniciados sin estado.
@@ -123,22 +123,22 @@ class Consumer:
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         if rc != 0:
-            LOG.warning("MQTT desconectado (rc=%s), reintentando", rc)
+            LOG.warning("event=mqtt.disconnected rc=%s retry=true", rc)
 
     def _on_message(self, client, userdata, msg) -> None:
         m = TOPIC_RE.match(msg.topic)
         if m is None:
-            LOG.warning("topic inesperado: %s", msg.topic)
+            LOG.warning("event=mqtt.topic_rejected topic=%s", msg.topic)
             return
         publisher, kind = int(m.group(1)), m.group(2)
 
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
             if not isinstance(payload, dict):
-                raise ValueError("el payload no es un objeto JSON")
+                raise ValueError("payload is not a JSON object")
         except (ValueError, UnicodeDecodeError) as e:
             self.stats[_BAD_KEY[kind]] += 1
-            LOG.warning("payload no parseable en %s: %s", msg.topic, e)
+            LOG.warning("event=payload.parse_failed topic=%s error=%s", msg.topic, e)
             return
 
         try:
@@ -154,21 +154,22 @@ class Consumer:
             # detalle queda en el log; el dato lo reentrega el sistema.
             self.stats["infra_err"] += 1
             self.db.rollback()
-            LOG.exception("fallo procesando %s", msg.topic)
+            LOG.exception("event=message.processing_failed topic=%s", msg.topic)
 
     # ----- Ciclo de vida -----
 
     def run(self) -> int:
         if not self.host:
-            LOG.error("falta MODULINKR_MQTT_HOST; nada que consumir")
+            LOG.error("event=config.missing key=MODULINKR_MQTT_HOST")
             return 2
 
         signal.signal(signal.SIGTERM, self._on_sigterm)
         signal.signal(signal.SIGINT, self._on_sigterm)
 
-        LOG.info("conectando a %s:%d (%s)", self.host, self.port,
-                 "en claro" if not self.tls else
-                 ("TLS insecure" if self.tls_insec else "TLS"))
+        LOG.info("event=mqtt.connecting host=%s port=%d transport=%s",
+                 self.host, self.port,
+                 "tcp" if not self.tls else
+                 ("tls-insecure" if self.tls_insec else "tls"))
         self.client.connect_async(self.host, self.port, keepalive=60)
         self.client.loop_start()
 
@@ -180,7 +181,7 @@ class Consumer:
                 last_stats = now
                 self.report_stats()
 
-        LOG.info("parando (senal recibida)")
+        LOG.info("event=service.stopping reason=signal")
         self.client.loop_stop()
         try:
             self.client.disconnect()
@@ -205,9 +206,11 @@ class Consumer:
 
 
 def main() -> int:
+    logging.Formatter.converter = time.gmtime
     logging.basicConfig(
         level=os.environ.get("MODULINKR_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+        format="%(asctime)sZ %(levelname)-8s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S")
     return Consumer().run()
 
 

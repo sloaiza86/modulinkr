@@ -67,7 +67,7 @@ def load_settings() -> dict:
     except FileNotFoundError:
         pass
     except (json.JSONDecodeError, OSError) as e:
-        LOG.warning("ajustes ilegibles en %s (%s): se usan los defaults",
+        LOG.warning("event=settings.read_failed path=%s error=%s fallback=defaults",
                     SETTINGS_PATH, e)
     return settings
 
@@ -84,7 +84,7 @@ def load_raw() -> dict:
     except FileNotFoundError:
         return {}
     except (json.JSONDecodeError, OSError) as e:
-        LOG.warning("ajustes ilegibles en %s (%s)", SETTINGS_PATH, e)
+        LOG.warning("event=settings.read_failed path=%s error=%s", SETTINGS_PATH, e)
         return {}
 
 
@@ -165,8 +165,8 @@ async def post_ajustes(request: Request):
     try:
         _save_settings(settings)
     except OSError as e:
-        LOG.error("no se pudieron guardar los ajustes en %s: %s",
+        LOG.error("event=settings.save_failed path=%s error=%s",
                   SETTINGS_PATH, e)
         return _err(500, f"no se pudieron guardar los ajustes: {e}")
-    LOG.info("ajustes guardados: %s", settings)
+    LOG.info("event=settings.saved values=%s", settings)
     return {"ok": True, **settings}

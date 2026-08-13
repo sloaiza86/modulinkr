@@ -44,7 +44,7 @@ void NbiotService::run() {
         }
 
         if (!step()) {
-            Serial.printf("%s fallo en estado %s, backoff %lu ms\n",
+            Serial.printf("%s state_failed state=%s backoff_ms=%lu\n",
                           kTag, stateName(state_),
                           static_cast<unsigned long>(kBackoffMs));
             state_ = State::BACKOFF;
@@ -59,7 +59,7 @@ void NbiotService::run() {
 bool NbiotService::step() {
     switch (state_) {
         case State::UART_INIT: {
-            Serial.printf("%s abriendo UART al SIM7028...\n", kTag);
+            Serial.printf("%s uart_opening modem=SIM7028\n", kTag);
             if (!modem_.begin(*cfg_.uart, cfg_.rx_pin, cfg_.tx_pin,
                               cfg_.baudrate)) {
                 return false;
@@ -71,10 +71,10 @@ bool NbiotService::step() {
 
         case State::SIM_CHECK: {
             if (!modem_.isSimReady()) {
-                Serial.printf("%s SIM no lista\n", kTag);
+                Serial.printf("%s sim_not_ready\n", kTag);
                 return false;
             }
-            Serial.printf("%s SIM ok, IMSI=%s\n", kTag,
+            Serial.printf("%s sim_ready imsi=%s\n", kTag,
                           modem_.readIMSI().c_str());
             state_ = State::APN_CONFIG;
             return true;
@@ -82,7 +82,7 @@ bool NbiotService::step() {
 
         case State::APN_CONFIG: {
             if (!modem_.configureAPN(cfg_.apn, cfg_.user, cfg_.pass)) {
-                Serial.printf("%s APN rechazado\n", kTag);
+                Serial.printf("%s apn_rejected\n", kTag);
                 // No fatal: algunos operadores registran igual.
             }
             // v2.1: la hora de red NITZ (AT+CTZU / CCLK) sale del diseño;
@@ -99,13 +99,13 @@ bool NbiotService::step() {
             csq_dbm_ = modem_.getCSQ();
             if (creg == Nbiot::CeregStatus::REGISTERED_HOME ||
                 creg == Nbiot::CeregStatus::REGISTERED_ROAMING) {
-                Serial.printf("%s registrado en red (%s)\n", kTag,
+                Serial.printf("%s network_registered response=%s\n", kTag,
                               Nbiot::ceregToString(creg));
                 state_ = State::MQTT_START;
                 return true;
             }
             if ((millis() - register_start_ms_) > kRegisterLimitMs) {
-                Serial.printf("%s registro agotado tras 30 min\n", kTag);
+                Serial.printf("%s network_registration_timeout timeout_min=30\n", kTag);
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(kRegisterPollMs));
@@ -115,7 +115,7 @@ bool NbiotService::step() {
         case State::MQTT_START: {
             modem_.mqttReset();
             if (!modem_.mqttBegin(cfg_.client_id, cfg_.tls)) {
-                Serial.printf("%s CMQTTSTART/ACCQ fallo: %s\n", kTag,
+                Serial.printf("%s mqtt_session_start_failed response=%s\n", kTag,
                               modem_.lastResponse().c_str());
                 return false;
             }
@@ -126,12 +126,12 @@ bool NbiotService::step() {
         case State::MQTT_CONNECT: {
             if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                     cfg_.mqtt_user, cfg_.mqtt_pass)) {
-                Serial.printf("%s conexión MQTT fallo: %s\n", kTag,
+                Serial.printf("%s mqtt_connection_failed response=%s\n", kTag,
                               modem_.lastResponse().c_str());
                 return false;
             }
-            Serial.printf("%s MQTT listo (%s:%u %s)\n", kTag, cfg_.broker,
-                          cfg_.port, cfg_.tls ? "TLS" : "plano");
+            Serial.printf("%s mqtt_ready host=%s port=%u transport=%s\n", kTag, cfg_.broker,
+                          cfg_.port, cfg_.tls ? "tls" : "tcp");
             last_csq_ms_ = millis();
             state_ = State::READY;
             return true;
@@ -144,7 +144,7 @@ bool NbiotService::step() {
                 bool ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
                 if (!ok && !modem_.mqttIsConnected()) {
                     // Sesión caída: un intento de reconexión y reintento.
-                    Serial.printf("%s sesión caída, reconectando...\n", kTag);
+                    Serial.printf("%s mqtt_session_lost reconnecting=true\n", kTag);
                     if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                            cfg_.mqtt_user, cfg_.mqtt_pass)) {
                         ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
@@ -155,7 +155,7 @@ bool NbiotService::step() {
                     // Confirmación: el loop (núcleo 1) libera del outbox las
                     // muestras de los batches con id <= este (v2.3).
                     last_published_batch_id_ = item.batch_id;
-                    Serial.printf("%s batch id=%lu publicado (%u bytes) ok=%lu\n",
+                    Serial.printf("%s batch_published id=%lu bytes=%u published=%lu\n",
                                   kTag, static_cast<unsigned long>(item.batch_id),
                                   static_cast<unsigned>(strlen(item.json)),
                                   static_cast<unsigned long>(published_ok_));
@@ -163,7 +163,7 @@ bool NbiotService::step() {
                     // No se confirma: el batch sigue en el outbox y el loop
                     // lo reintentará (el backend deduplica por origin/ts/seq).
                     published_err_ = published_err_ + 1;
-                    Serial.printf("%s batch id=%lu NO publicado err=%lu: %s\n", kTag,
+                    Serial.printf("%s batch_publish_failed id=%lu errors=%lu response=%s\n", kTag,
                                   static_cast<unsigned long>(item.batch_id),
                                   static_cast<unsigned long>(published_err_),
                                   modem_.lastResponse().c_str());
@@ -180,10 +180,10 @@ bool NbiotService::step() {
                 ntp_last_try_ms_ = millis();
                 if (epoch != 0) {
                     nodeclock::sync(epoch);
-                    Serial.printf("%s hora por NTP: epoch=%lu\n", kTag,
+                    Serial.printf("%s ntp_synchronized epoch=%lu\n", kTag,
                                   static_cast<unsigned long>(epoch));
                 } else {
-                    Serial.printf("%s NTP sin exito (%s)\n", kTag,
+                    Serial.printf("%s ntp_failed response=%s\n", kTag,
                                   modem_.lastResponse().c_str());
                 }
                 ntp_pending_ = false;

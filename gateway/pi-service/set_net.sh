@@ -19,8 +19,8 @@ ALLOWED=" MODULINKR_LORA_REGION MODULINKR_LORA_FREQ_HZ MODULINKR_NETWORK_ID \
 MODULINKR_SF MODULINKR_BW_KHZ MODULINKR_MAX_TTL \
 MODULINKR_SEC_ENABLED MODULINKR_SEC_KEY "
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-[ -f "$GW_ENV" ] || { echo "No existe $GW_ENV (¿instalador ejecutado?)." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -f "$GW_ENV" ] || { echo "[ERROR] No existe $GW_ENV. Ejecuta primero el instalador." >&2; exit 1; }
 
 declare -A NEW
 cnt=0
@@ -30,11 +30,11 @@ while IFS= read -r line; do
     val=${line#*=}
     case "$ALLOWED" in
         *" $key "*) NEW["$key"]="$val"; cnt=$((cnt + 1)) ;;
-        *) echo "Clave no admitida: $key" >&2; exit 1 ;;
+        *) echo "[ERROR] Clave no admitida: $key" >&2; exit 1 ;;
     esac
 done
 
-[ "$cnt" -gt 0 ] || { echo "Sin claves que actualizar." >&2; exit 1; }
+[ "$cnt" -gt 0 ] || { echo "[ERROR] No se recibieron claves para actualizar." >&2; exit 1; }
 
 tmp=$(mktemp)
 # Conserva las lineas cuyas claves NO se estan actualizando.
@@ -54,5 +54,5 @@ mv "$tmp" "$GW_ENV"
 
 systemctl restart modulinkr-gateway 2>/dev/null || true
 
-echo "gateway.env: ${#NEW[@]} clave(s) de red actualizada(s)"
-echo "servicio: modulinkr-gateway reiniciado"
+echo "[ OK ] gateway.env: ${#NEW[@]} clave(s) de red actualizada(s)"
+echo "[ OK ] Servicio reiniciado: modulinkr-gateway"

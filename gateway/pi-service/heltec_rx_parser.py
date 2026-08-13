@@ -102,7 +102,7 @@ def parse_frame(frame: bytes) -> dict:
     campos o {'error': '...'} si no valida."""
 
     if len(frame) < OVERHEAD:
-        return {'error': f'trama demasiado corta ({len(frame)} bytes, mín {OVERHEAD})'}
+        return {'error': f'frame too short ({len(frame)} bytes, minimum {OVERHEAD})'}
 
     schema_version = frame[0]
     network_id     = frame[1]
@@ -117,8 +117,8 @@ def parse_frame(frame: bytes) -> dict:
 
     expected_total = HEADER_BYTES + payload_length + CRC_BYTES
     if len(frame) != expected_total:
-        return {'error': f'payload_length={payload_length} no cuadra '
-                         f'(total={len(frame)} esperado={expected_total})'}
+        return {'error': f'payload_length={payload_length} does not match '
+                         f'(total={len(frame)} expected={expected_total})'}
 
     crc_received = struct.unpack_from('<H', frame, HEADER_BYTES + payload_length)[0]
     crc_computed = crc16_modbus(frame[:HEADER_BYTES + payload_length])
@@ -145,14 +145,14 @@ def parse_frame(frame: bytes) -> dict:
     }
 
     if not crc_ok:
-        out['error'] = 'CRC inválido'
+        out['error'] = 'CRC mismatch'
         return out
 
     payload = frame[HEADER_BYTES:HEADER_BYTES + payload_length]
 
     if frame_type == FRAME_TELEMETRY:
         if payload_length % 4 != 0:
-            out['error'] = f'TELEMETRY payload_length={payload_length} no es múltiplo de 4'
+            out['error'] = f'TELEMETRY payload_length={payload_length} is not divisible by 4'
             return out
         n_reads = payload_length // 4
         reads = [struct.unpack_from('<f', payload, i * 4)[0] for i in range(n_reads)]
@@ -160,7 +160,7 @@ def parse_frame(frame: bytes) -> dict:
 
     elif frame_type == FRAME_ACK:
         if payload_length != 3:
-            out['error'] = f'ACK payload_length={payload_length}, esperado 3'
+            out['error'] = f'ACK payload_length={payload_length}, expected 3'
             return out
         out['ack_seq'] = struct.unpack_from('<H', payload, 0)[0]
         status = payload[2]
@@ -170,7 +170,7 @@ def parse_frame(frame: bytes) -> dict:
     elif frame_type == FRAME_HEARTBEAT:
         # v3.1: 4 B con tx_ms; el supernodo añade 2 B (nb_flags, csq), §6.
         if payload_length not in (0, 4, 6):
-            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0, 4 o 6'
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, expected 0, 4, or 6'
         else:
             if payload_length >= 4:
                 out['tx_ms'] = struct.unpack_from('<I', payload, 0)[0]
@@ -180,7 +180,7 @@ def parse_frame(frame: bytes) -> dict:
 
     elif frame_type == FRAME_BEACON:
         if payload_length != 3:
-            out['error'] = f'BEACON payload_length={payload_length}, esperado 3'
+            out['error'] = f'BEACON payload_length={payload_length}, expected 3'
             return out
         out['hop_count'] = payload[0]
         out['parent'] = payload[1]
@@ -188,13 +188,13 @@ def parse_frame(frame: bytes) -> dict:
 
     elif frame_type == FRAME_SN_REQUEST:
         if payload_length != 2:
-            out['error'] = f'SN_REQUEST payload_length={payload_length}, esperado 2'
+            out['error'] = f'SN_REQUEST payload_length={payload_length}, expected 2'
             return out
         out['queued'] = payload[0]
 
     elif frame_type == FRAME_SN_OFFER:
         if payload_length != 2:
-            out['error'] = f'SN_OFFER payload_length={payload_length}, esperado 2'
+            out['error'] = f'SN_OFFER payload_length={payload_length}, expected 2'
             return out
         out['quality'] = payload[0]
         out['queue_space'] = payload[1]
@@ -208,7 +208,7 @@ def format_frame_summary(parsed: dict, rssi: float, snr: float, count: int) -> s
 
     schema   = parsed['schema_version']
     route    = (f'{addr_name(parsed["hop_src"])}>{addr_name(parsed["hop_dst"])} '
-                f'({addr_name(parsed["origin_id"])} a {addr_name(parsed["dest_id"])})')
+                f'({addr_name(parsed["origin_id"])} to {addr_name(parsed["dest_id"])})')
     seq      = parsed['seq']
     ft_name  = parsed['frame_type_name']
     ttl      = parsed['ttl']
@@ -277,7 +277,7 @@ def main() -> int:
                 try:
                     frame = bytes.fromhex(m.group('hex'))
                 except ValueError:
-                    print(f'    [parser] hex inválido: {line}')
+                    print(f'    [parser] invalid_hex line={line}')
                     continue
 
                 parsed = parse_frame(frame)
@@ -287,7 +287,7 @@ def main() -> int:
                 print(format_frame_summary(parsed, rssi, snr, count))
 
     except KeyboardInterrupt:
-        print('\n[parser] interrumpido por usuario')
+        print('\n[parser] stopped reason=keyboard_interrupt')
     finally:
         s.close()
     return 0

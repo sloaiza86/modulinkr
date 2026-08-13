@@ -152,7 +152,7 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
         for (uint8_t m = 0; m < g.n_reads; ++m) {
             slots_[globalIndex(g.dev, g.first_read + m)].status = status_byte;
         }
-        Serial.printf("[modbus] err %s dev=%s grupo@%u(x%u fn=0x%02X)  ok=%lu err=%lu\n",
+        Serial.printf("[modbus] error=%s device=%s group_start=%u count=%u function=0x%02X ok=%lu errors=%lu\n",
                       ModbusRTU::statusToString(st), dev.name,
                       g.address, g.n_regs, g.function,
                       static_cast<unsigned long>(ok_count_),

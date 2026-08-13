@@ -192,7 +192,7 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
 
     // Contexto SSL listo ANTES de arrancar la pila MQTT (v2.3).
     if (tls && !sslConfigure(ssl_ctx)) {
-        Serial.println("[nbiot]  aviso: CSSLCFG rechazado, se intenta TLS igual");
+        Serial.println("[nbiot]  warn event=tls.config_rejected action=continue");
     }
 
     // Arranca el servicio MQTT. Activa el PDP context internamente.
@@ -228,7 +228,7 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
     if (tls) {
         snprintf(cmd, sizeof(cmd), "AT+CMQTTSSLCFG=0,%u", ssl_ctx);
         if (!sendAT(cmd, "OK", 3000)) {
-            Serial.printf("[nbiot]  aviso: CMQTTSSLCFG fallo: %s\n",
+            Serial.printf("[nbiot]  warn event=mqtt.tls_config_failed response=%s\n",
                           last_response_.c_str());
         }
     }
@@ -258,7 +258,15 @@ bool Nbiot::mqttConnect(const char* broker,
                  broker, port, keepalive_s, clean_session ? 1 : 0);
     }
 
-    if (verbose_) Serial.printf("[at] >> %s\n", cmd);
+    if (verbose_) {
+        if (have_auth) {
+            Serial.printf("[at] >> AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u,\"<redacted>\",\"<redacted>\"\n",
+                          broker, port, keepalive_s,
+                          clean_session ? 1 : 0);
+        } else {
+            Serial.printf("[at] >> %s\n", cmd);
+        }
+    }
     drain(*uart_);
     uart_->println(cmd);
 
@@ -304,7 +312,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) Serial.println("[at] << TOPIC sin OK");
+            if (verbose_) Serial.println("[at] << TOPIC missing OK");
             return false;
         }
     }
@@ -326,7 +334,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) Serial.println("[at] << PAYLOAD sin OK");
+            if (verbose_) Serial.println("[at] << PAYLOAD missing OK");
             return false;
         }
     }
@@ -565,7 +573,7 @@ done:
     if (verbose_) {
         String t = buffer;
         t.trim();
-        if (t.length() == 0) t = "(sin respuesta)";
+        if (t.length() == 0) t = "(no response)";
         Serial.printf("[at] << %s\n", t.c_str());
     }
     return result;

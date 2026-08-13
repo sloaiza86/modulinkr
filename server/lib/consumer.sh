@@ -97,7 +97,7 @@ consumer_install_service() {
     if systemctl is-active --quiet "$CONSUMER_SERVICE"; then
         ok "Servicio $CONSUMER_SERVICE activo"
     else
-        warn "El servicio no arranco; revisar: journalctl -u $CONSUMER_SERVICE -n 50"
+        warn "El servicio no arrancó. Revisa el registro con: journalctl -u $CONSUMER_SERVICE -n 50"
     fi
 }
 

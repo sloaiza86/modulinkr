@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
         --config)  CONFIG_FILE="$2"; shift 2 ;;
         -y|--yes)  ASSUME_YES=1; shift ;;
         -h|--help) usage 0 ;;
-        *) echo "Argumento no reconocido: $1" >&2; usage 2 ;;
+        *) echo "[ERROR] Argumento no reconocido: $1" >&2; usage 2 ;;
     esac
 done
 

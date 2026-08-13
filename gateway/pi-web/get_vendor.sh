@@ -26,5 +26,5 @@ ESPTOOL_VERSION="0.4.5"
 curl -fsSL -o "$DIR/esptool-bundle.js" \
     "https://unpkg.com/esptool-js@$ESPTOOL_VERSION/bundle.js"
 
-echo "assets en $DIR:"
+echo "[ OK ] Recursos descargados en $DIR:"
 ls -lh "$DIR"

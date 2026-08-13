@@ -17,8 +17,8 @@ set -euo pipefail
 
 GW_ENV=/etc/modulinkr/gateway.env
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-[ -f "$GW_ENV" ] || { echo "No existe $GW_ENV." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -f "$GW_ENV" ] || { echo "[ERROR] No existe $GW_ENV." >&2; exit 1; }
 
 for k in MODULINKR_LORA_REGION MODULINKR_LORA_FREQ_HZ \
          MODULINKR_NETWORK_ID MODULINKR_MAX_TTL MODULINKR_SF MODULINKR_BW_KHZ \

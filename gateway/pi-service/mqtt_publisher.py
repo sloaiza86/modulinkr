@@ -125,8 +125,7 @@ class MqttPublisher:
         """Abre la conexión al broker en segundo plano. No bloquea: paho
         gestiona la conexión y las reconexiones en su hilo de red."""
         if not self.enabled:
-            LOG.warning("MQTT deshabilitado (sin MODULINKR_MQTT_HOST): "
-                        "la telemetria se queda en el buffer local")
+            LOG.warning("event=mqtt.disabled reason=missing_host fallback=local_buffer")
             return
 
         # paho 2.x exige declarar la versión de la API de callbacks; paho 1.6
@@ -163,12 +162,12 @@ class MqttPublisher:
         try:
             self.client.connect_async(self.host, self.port, keepalive=60)
         except Exception as e:                       # noqa: BLE001
-            LOG.error("no se pudo iniciar conexion MQTT a %s:%d: %s",
+            LOG.error("event=mqtt.connection_start_failed host=%s port=%d error=%s",
                       self.host, self.port, e)
         self.client.loop_start()
-        LOG.info("MQTT: conectando a %s:%d (%s)", self.host, self.port,
-                 "en claro" if not self.tls else
-                 ("TLS insecure" if self.tls_insec else "TLS"))
+        LOG.info("event=mqtt.connecting host=%s port=%d transport=%s", self.host, self.port,
+                 "tcp" if not self.tls else
+                 ("tls-insecure" if self.tls_insec else "tls"))
 
     def stop(self) -> None:
         if self.client is not None:
@@ -181,21 +180,21 @@ class MqttPublisher:
     def _on_connect(self, client, userdata, flags, rc) -> None:
         if rc == 0:
             self.connected = True
-            LOG.info("MQTT conectado al broker cloud")
+            LOG.info("event=mqtt.connected")
             # Suscripción a la telemetría de todos los publishers (camino
             # NB-IoT/failover). Se resuscribe en cada reconexión.
             try:
                 client.subscribe(SUBSCRIBE_TOPIC, qos=1)
             except Exception as e:                    # noqa: BLE001
-                LOG.warning("MQTT subscribe falló: %s", e)
+                LOG.warning("event=mqtt.subscribe_failed error=%s", e)
         else:
             self.connected = False
-            LOG.error("MQTT rechazado por el broker (rc=%s)", rc)
+            LOG.error("event=mqtt.connection_rejected rc=%s", rc)
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         self.connected = False
         if rc != 0:
-            LOG.warning("MQTT desconectado (rc=%s), reintentando", rc)
+            LOG.warning("event=mqtt.disconnected rc=%s retry=true", rc)
 
     def _on_message(self, client, userdata, msg) -> None:
         """Telemetría oída del broker. Un publisher distinto del gateway es un
@@ -218,7 +217,7 @@ class MqttPublisher:
                     (origin, ts, json.dumps({"v": v, "st": st} if st else v)))
             self._nbiot_q.append((publisher, samples))
         except Exception as e:                        # noqa: BLE001
-            LOG.warning("MQTT on_message descartado: %s", e)
+            LOG.warning("event=mqtt.message_rejected error=%s", e)
 
     def drain_nbiot(self) -> None:
         """Vuelca la cola del camino NB-IoT al buffer (hilo principal). Marca
@@ -260,7 +259,7 @@ class MqttPublisher:
                 self.buf.mark_catalog_published(origin)
                 self.n_pub_cat += 1
                 confirmed += 1
-                LOG.info("MQTT register publicado origin=%d", origin)
+                LOG.info("event=mqtt.register_published origin=%d", origin)
             else:
                 # Sin PUBACK: se queda pendiente y se reintenta la próxima
                 # vuelta. No se sigue si el broker no confirma.
@@ -310,8 +309,8 @@ class MqttPublisher:
         keys = [(r["origin_id"], r["ts"], r["seq"]) for r in rows]
         self.buf.mark_published(keys)
         self.n_pub_tel += len(keys)
-        LOG.info("MQTT telemetria publicada: %d muestra(s) en 1 mensaje "
-                 "(batch_id=%d)", len(keys), self.batch_id)
+        LOG.info("event=mqtt.telemetry_published samples=%d messages=1 batch_id=%d",
+                 len(keys), self.batch_id)
         return len(keys)
 
     def _publish(self, topic: str, payload: str, qos: int,
@@ -322,15 +321,15 @@ class MqttPublisher:
         try:
             info = self.client.publish(topic, payload, qos=qos, retain=retain)
         except Exception as e:                       # noqa: BLE001
-            LOG.warning("MQTT publish fallo topic=%s: %s", topic, e)
+            LOG.warning("event=mqtt.publish_failed topic=%s error=%s", topic, e)
             return False
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
-            LOG.warning("MQTT publish rc=%s topic=%s", info.rc, topic)
+            LOG.warning("event=mqtt.publish_rejected rc=%s topic=%s", info.rc, topic)
             return False
         try:
             info.wait_for_publish(self.pub_timeout)
         except (ValueError, RuntimeError) as e:
-            LOG.warning("MQTT sin PUBACK topic=%s: %s", topic, e)
+            LOG.warning("event=mqtt.puback_timeout topic=%s error=%s", topic, e)
             return False
         return info.is_published()
 

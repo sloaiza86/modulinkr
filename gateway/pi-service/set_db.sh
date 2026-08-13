@@ -18,8 +18,8 @@ WEB_ENV=/etc/modulinkr/web.env
 ALLOWED=" MODULINKR_PG_HOST MODULINKR_PG_PORT MODULINKR_PG_DB \
 MODULINKR_PG_USER MODULINKR_PG_PASSWORD "
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-[ -f "$WEB_ENV" ] || { echo "No existe $WEB_ENV (¿instalador ejecutado?)." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -f "$WEB_ENV" ] || { echo "[ERROR] No existe $WEB_ENV. Ejecuta primero el instalador." >&2; exit 1; }
 
 declare -A NEW
 cnt=0
@@ -29,11 +29,11 @@ while IFS= read -r line; do
     val=${line#*=}
     case "$ALLOWED" in
         *" $key "*) NEW["$key"]="$val"; cnt=$((cnt + 1)) ;;
-        *) echo "Clave no admitida: $key" >&2; exit 1 ;;
+        *) echo "[ERROR] Clave no admitida: $key" >&2; exit 1 ;;
     esac
 done
 
-[ "$cnt" -gt 0 ] || { echo "Sin claves que actualizar." >&2; exit 1; }
+[ "$cnt" -gt 0 ] || { echo "[ERROR] No se recibieron claves para actualizar." >&2; exit 1; }
 
 tmp=$(mktemp)
 while IFS= read -r line || [ -n "$line" ]; do
@@ -49,4 +49,4 @@ chmod 600 "$tmp"
 chown root:root "$tmp" 2>/dev/null || true
 mv "$tmp" "$WEB_ENV"
 
-echo "web.env: ${#NEW[@]} clave(s) PG actualizada(s)"
+echo "[ OK ] web.env: ${#NEW[@]} clave(s) de PostgreSQL actualizada(s)"

@@ -83,13 +83,13 @@ void handleHello() {
         doc["type"]    = g_id.config->super_node ? "super_node" : "node";
         doc["name"]    = g_id.config->node_name;
     } else {
-        doc["error"] = (g_id.err != nullptr) ? g_id.err : "sin config";
+        doc["error"] = (g_id.err != nullptr) ? g_id.err : "configuration missing";
     }
 
     char json[320];
     const size_t n = serializeJson(doc, json, sizeof(json));
     if (n == 0 || n >= sizeof(json)) {
-        respondErr("identidad no serializable");
+        respondErr("identity serialization failed");
         return;
     }
     char line[336];
@@ -101,7 +101,7 @@ void handleGet() {
     size_t len = 0;
     char* text = configstore::read(len);
     if (text == nullptr) {
-        respondErr("sin config en flash");
+        respondErr("configuration missing from flash");
         return;
     }
 
@@ -112,7 +112,7 @@ void handleGet() {
     char* line = static_cast<char*>(malloc(line_cap));
     if (line == nullptr) {
         free(text);
-        respondErr("sin memoria para la respuesta");
+        respondErr("insufficient memory for response");
         return;
     }
     memcpy(line, "CFG:DATA ", 9);
@@ -123,7 +123,7 @@ void handleGet() {
     free(text);
     if (rc != 0) {
         free(line);
-        respondErr("fallo codificando base64");
+        respondErr("base64 encoding failed");
         return;
     }
     line[9 + b64_len] = '\n';
@@ -152,29 +152,29 @@ void handlePut(const char* args) {
     unsigned long len = 0;
     char sha_hex[65] = {0};
     if (sscanf(args, "%lu %64s", &len, sha_hex) != 2) {
-        respondErr("uso: CFG.PUT <len> <sha256hex>");
+        respondErr("usage: CFG.PUT <len> <sha256hex>");
         return;
     }
     if (len == 0 || len > kMaxConfigLen) {
-        respondErr("len fuera de rango (1-16384)");
+        respondErr("length out of range (1-16384)");
         return;
     }
     uint8_t sha_expected[32];
     if (!parseSha256Hex(sha_hex, sha_expected)) {
-        respondErr("sha256 malformado (64 hex)");
+        respondErr("malformed sha256 (expected 64 hex characters)");
         return;
     }
 
     uint8_t* buf = static_cast<uint8_t*>(malloc(len + 1));
     if (buf == nullptr) {
-        respondErr("sin memoria para el payload");
+        respondErr("insufficient memory for payload");
         return;
     }
 
     respond("CFG:READY");
     if (!readPayload(buf, len)) {
         free(buf);
-        respondErr("timeout recibiendo el payload");
+        respondErr("payload receive timeout");
         return;
     }
     buf[len] = '\0';
@@ -183,7 +183,7 @@ void handlePut(const char* args) {
     if (!sha256(buf, len, sha_got) ||
         memcmp(sha_got, sha_expected, sizeof(sha_got)) != 0) {
         free(buf);
-        respondErr("sha256 no coincide, transferencia corrupta");
+        respondErr("sha256 mismatch, transfer corrupted");
         return;
     }
 
@@ -192,7 +192,7 @@ void handlePut(const char* args) {
     auto* tmp = new (std::nothrow) cfg::Config();
     if (tmp == nullptr) {
         free(buf);
-        respondErr("sin memoria para validar");
+        respondErr("insufficient memory for validation");
         return;
     }
     char err[96];
@@ -226,13 +226,13 @@ void handlePut(const char* args) {
         // cambio anterior, se respeta.
         if (respaldado && !prueba_previa) configstore::clearTrial();
         free(buf);
-        respondErr("fallo escribiendo en flash");
+        respondErr("flash write failed");
         return;
     }
     free(buf);
 
-    respond(respaldado ? "CFG:OK guardado (a prueba hasta confirmar red), reiniciando"
-                       : "CFG:OK guardado, reiniciando");
+    respond(respaldado ? "CFG:OK saved (trial until network confirmation), restarting"
+                       : "CFG:OK saved, restarting");
     Serial.flush();
     delay(300);
     ESP.restart();
@@ -240,10 +240,10 @@ void handlePut(const char* args) {
 
 void handleDel() {
     if (!configstore::remove()) {
-        respondErr("fallo borrando el config de flash");
+        respondErr("configuration delete from flash failed");
         return;
     }
-    respond("CFG:OK config borrado, reiniciando");
+    respond("CFG:OK configuration deleted, restarting");
     Serial.flush();
     delay(300);
     ESP.restart();

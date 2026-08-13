@@ -179,7 +179,7 @@ bool LoraP2P::resetModule() {
 }
 
 void LoraP2P::queryVersion() {
-    strncpy(fw_version_, "sin respuesta", sizeof(fw_version_) - 1);
+    strncpy(fw_version_, "no response", sizeof(fw_version_) - 1);
     fw_version_[sizeof(fw_version_) - 1] = '\0';
     if (uart_ == nullptr) return;
 
@@ -1032,7 +1032,7 @@ void LoraP2P::checkMute() {
     if (psend_no_done_ >= kMuteThreshold) {
         mute_flagged_ = true;
         mute_events_++;
-        anotarMudo("acumulacion");
+        anotarMudo("accumulation");
         return;
     }
 
@@ -1054,7 +1054,7 @@ void LoraP2P::checkMute() {
         static_cast<int32_t>(kMuteTimeoutMs)) {
         mute_flagged_ = true;
         mute_events_++;
-        anotarMudo("espera");
+        anotarMudo("timeout");
     }
 }
 

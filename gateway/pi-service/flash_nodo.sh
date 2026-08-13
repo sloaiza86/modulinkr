@@ -17,14 +17,14 @@ BIN="$DIR/nodo.bin"
 VENV="$DIR/.venv"
 PORT="${1:-}"
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-[ -n "$PORT" ] || { echo "Uso: flash_nodo.sh <puerto>" >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -n "$PORT" ] || { echo "[ERROR] Uso: flash_nodo.sh <puerto>" >&2; exit 1; }
 case "$PORT" in
     /dev/serial/by-id/*|/dev/ttyUSB*|/dev/ttyACM*) ;;
-    *) echo "Puerto no admitido: $PORT" >&2; exit 1 ;;
+    *) echo "[ERROR] Puerto no admitido: $PORT" >&2; exit 1 ;;
 esac
-[ -e "$PORT" ] || { echo "El puerto $PORT no existe." >&2; exit 1; }
-[ -f "$BIN" ] || { echo "No existe $BIN (generarlo con make_dist.sh y copiarlo)." >&2; exit 1; }
+[ -e "$PORT" ] || { echo "[ERROR] El puerto $PORT no existe." >&2; exit 1; }
+[ -f "$BIN" ] || { echo "[ERROR] No existe $BIN. Genéralo con make_dist.sh y cópialo al gateway." >&2; exit 1; }
 
 # Excluir el puerto del Heltec del gateway. Se lee con grep (no con source:
 # gateway.env puede tener valores con caracteres que el shell interpretaría).
@@ -34,14 +34,14 @@ else
     GW_PORT=""
 fi
 if [ -n "$GW_PORT" ] && [ "$(readlink -f "$PORT")" = "$(readlink -f "$GW_PORT")" ]; then
-    echo "Ese puerto es la radio del gateway, no un nodo." >&2
+    echo "[ERROR] Ese puerto pertenece a la radio del gateway, no a un nodo." >&2
     exit 1
 fi
 
 PY="$VENV/bin/python3"
-[ -x "$PY" ] || { echo "Venv no encontrado en $VENV (correr el instalador primero)." >&2; exit 1; }
+[ -x "$PY" ] || { echo "[ERROR] No existe el entorno Python en $VENV. Ejecuta primero el instalador." >&2; exit 1; }
 "$PY" -m esptool version >/dev/null 2>&1 || {
-    echo "Instalando esptool en el venv..."
+    echo "[INFO] Instalando esptool en el entorno Python..."
     "$VENV/bin/pip" install esptool
 }
 
@@ -54,8 +54,8 @@ echo "Puerto  : $PORT"
 # al verificar el flash al subir de baud). El binario es pequeño, así que
 # el tiempo extra es asumible. (La radio Heltec, con otro adaptador, sí
 # admite 460800 en flash_heltec.sh.)
-echo "Flasheando el nodo (esptool, ESP32, imagen completa desde 0x0)..."
+echo "[INFO] Escribiendo la imagen completa del nodo desde 0x0..."
 "$PY" -m esptool --chip esp32 --port "$PORT" --baud 115200 \
     write_flash 0x0 "$BIN"
 
-echo "nodo: firmware escrito; el Atom arranca con el binario nuevo"
+echo "[ OK ] Firmware del nodo escrito. El Atom arranca con la imagen nueva."

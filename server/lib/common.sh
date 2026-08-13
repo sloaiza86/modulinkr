@@ -11,17 +11,17 @@ else
     C_RESET=""; C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""; C_STEP=""
 fi
 
-log()  { printf "%b[modulinkr]%b %s\n" "$C_INFO" "$C_RESET" "$*"; }
-ok()   { printf "%b[  ok  ]%b %s\n" "$C_OK" "$C_RESET" "$*"; }
-warn() { printf "%b[ warn ]%b %s\n" "$C_WARN" "$C_RESET" "$*" >&2; }
-err()  { printf "%b[ error ]%b %s\n" "$C_ERR" "$C_RESET" "$*" >&2; }
+log()  { printf "%b[INFO]%b %s\n" "$C_INFO" "$C_RESET" "$*"; }
+ok()   { printf "%b[ OK ]%b %s\n" "$C_OK" "$C_RESET" "$*"; }
+warn() { printf "%b[AVISO]%b %s\n" "$C_WARN" "$C_RESET" "$*" >&2; }
+err()  { printf "%b[ERROR]%b %s\n" "$C_ERR" "$C_RESET" "$*" >&2; }
 step() { printf "\n%b== %s ==%b\n" "$C_STEP" "$*" "$C_RESET"; }
 die()  { err "$*"; exit 1; }
 
 # require_root: la mayoría de acciones necesitan privilegios (apt, systemctl).
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        die "Este paso requiere root. Reejecutar con sudo."
+        die "Este paso requiere permisos de root. Vuelve a ejecutar el instalador con sudo."
     fi
 }
 
@@ -45,10 +45,10 @@ require_ubuntu() {
 confirm() {
     local prompt="$1" def="${2:-n}" reply
     if [ "${ASSUME_YES:-0}" = "1" ]; then return 0; fi
-    local hint="[y/N]"; [ "$def" = "y" ] && hint="[Y/n]"
+    local hint="[s/N]"; [ "$def" = "y" ] && hint="[S/n]"
     read -r -p "$prompt $hint " reply || true
     reply="${reply:-$def}"
-    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+    case "$reply" in [sSyY]*) return 0 ;; *) return 1 ;; esac
 }
 
 # ask VAR "PREGUNTA" "DEFAULT": lee un valor. Si la variable ya trae valor
@@ -76,15 +76,15 @@ ask_secret() {
     eval "cur=\${$__var:-}"
     if [ -n "$cur" ]; then eval "$__var=\"\$cur\""; return 0; fi
     if [ "${ASSUME_YES:-0}" = "1" ]; then
-        die "Falta '$__var' y el modo es no interactivo. Definirlo en el config."
+        die "Falta '$__var' en el modo no interactivo. Defínelo en el archivo de configuración."
     fi
     while :; do
         read -r -s -p "$prompt: " reply || true; echo
         read -r -s -p "$prompt (repetir): " reply2 || true; echo
         if [ -z "$reply" ]; then
-            warn "La contraseña no puede quedar vacía. Reintentar."
+            warn "La contraseña no puede quedar vacía. Vuelve a intentarlo."
         elif [ "$reply" != "$reply2" ]; then
-            warn "Las contraseñas no coinciden. Reintentar."
+            warn "Las contraseñas no coinciden. Vuelve a intentarlo."
         else
             break
         fi
@@ -100,10 +100,10 @@ rand_secret() { openssl rand -base64 "${1:-24}" | tr -d '\n/+=' | cut -c1-32; }
 load_config() {
     local f="$1"
     [ -n "$f" ] || return 0
-    [ -f "$f" ] || { warn "Config '$f' no existe; se continúa en modo interactivo."; return 0; }
+    [ -f "$f" ] || { warn "El archivo de configuración '$f' no existe. Se continúa en modo interactivo."; return 0; }
     # shellcheck disable=SC1090
     set -a; . "$f"; set +a
-    log "Config cargada desde $f"
+    log "Configuración cargada desde $f"
 }
 
 # backup_once ARCHIVO: guarda una copia .bak la primera vez que se toca un
