@@ -40,16 +40,22 @@ function chipConexion(c) {
   const detalle = c.txt;
   let nombre = detalle;
   let icono = "information-outline";
-  if (/LoRa/i.test(detalle)) { nombre = "LoRa"; icono = "router-wireless"; }
-  else if (/NB-IoT/i.test(detalle)) { nombre = "NB-IoT"; icono = "signal-4g"; }
-  else if (/Modbus/i.test(detalle)) { nombre = "Modbus"; icono = "serial-port"; }
-  else if (/MQTT/i.test(detalle)) { nombre = "MQTT"; icono = "cloud-check"; }
+  let tecnologia = "";
+  if (/LoRa/i.test(detalle)) { nombre = "LoRa"; tecnologia = "lora"; }
+  else if (/NB-IoT/i.test(detalle)) { nombre = "NB-IoT"; tecnologia = "nbiot"; }
+  else if (/Modbus/i.test(detalle)) { nombre = "Modbus"; tecnologia = "modbus"; }
+  else if (/MQTT/i.test(detalle)) { nombre = "MQTT"; tecnologia = "mqtt"; }
   else if (/actualiz|prepar|instal|comprob|complet/i.test(detalle)) {
     nombre = "Actualizando"; icono = "update";
   } else if (/en línea/i.test(detalle)) {
     nombre = "En línea"; icono = "access-point-check";
   } else if (/sin señal/i.test(detalle)) {
     nombre = "Sin señal"; icono = "access-point-off";
+  }
+  if (tecnologia) {
+    const estado = c.cls === "on" ? "connected"
+      : (c.cls === "ambar" || c.cls === "rojo" ? "warning" : "offline");
+    return `<span class="chip conexion logo-conexion ${c.cls}" role="img" title="${detalle}" aria-label="${detalle}"><img class="logo-tecnologia logo-${tecnologia}" src="/static/img/technology/${tecnologia}-${estado}.png" alt=""></span>`;
   }
   return `<span class="chip conexion ${c.cls}" title="${detalle}" aria-label="${detalle}">${iconoMdi(icono)}<span>${nombre}</span></span>`;
 }
@@ -385,7 +391,7 @@ function tarjetaGateway(data) {
   const chips = e.chips
     .map(chipConexion).join("");
   return `
-  <modulinkr-node-card class="card tarjeta-nodo tarjeta-gw${e.caido ? " nodo-offline" : ""}" data-origin="255">
+  <modulinkr-node-card class="tarjeta-nodo tarjeta-gw${e.caido ? " nodo-offline" : ""}" data-origin="255">
     <div class="tn-cabecera">
       <div class="tn-icono${e.caido ? " off" : ""}">${iconoMdi("radio-tower")}</div>
       <div class="tn-info">
@@ -561,9 +567,9 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const detalle = estado.cls === "on" ? ""
     : (n.online && ult ? medida : visto);
   return `
-  <modulinkr-node-card class="card tarjeta-nodo${n.online ? "" : " nodo-offline"}" data-origin="${n.origin}">
+  <modulinkr-node-card class="tarjeta-nodo${n.online ? "" : " nodo-offline"}" data-origin="${n.origin}">
     <div class="tn-cabecera">
-      <div class="tn-icono ${n.online ? "" : "off"}">${iconoMdi(n.online ? "access-point-check" : "access-point-off")}</div>
+      <div class="tn-icono ${n.online ? "" : "off"}">${iconoMdi("memory")}</div>
       <div class="tn-info">
         <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
         ${detalle ? `<div class="tn-sub">${detalle}</div>` : ""}

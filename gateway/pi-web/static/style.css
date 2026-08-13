@@ -22,11 +22,12 @@
   --sombra: 0 1px 3px rgba(20, 40, 60, 0.08), 0 4px 14px rgba(20, 40, 60, 0.05);
   --sb-ancho: 232px;
   --sb-contraida: 60px;
-  --dashboard-ancho-tarjeta: 560px;
-  --dashboard-alto-elemento: 68px;
-  --dashboard-icono: 40px;
+  --dashboard-ancho-seccion-min: 320px;
+  --dashboard-ancho-seccion-max: 500px;
+  --dashboard-alto-elemento: 56px;
+  --dashboard-icono: 36px;
   --dashboard-radio: 12px;
-  --dashboard-espacio: 10px;
+  --dashboard-espacio: 8px;
 }
 
 * { box-sizing: border-box; }
@@ -179,27 +180,32 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
   margin: 0.25rem 0 0 138px; color: var(--bad); font-size: 0.82rem;
 }
 
-/* ----- Vista Red: tarjetas por nodo ----- */
+/* ----- Dashboard: secciones y tarjetas compactas ----- */
 
 .grid-tarjetas {
-  display: grid; gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
-  max-width: calc(1680px + 2rem);
-  align-items: start; justify-content: start;
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, var(--dashboard-ancho-seccion-min)), 1fr)
+  );
+  gap: 24px 32px;
+  max-width: calc(4 * var(--dashboard-ancho-seccion-max) + 3 * 32px);
+  margin: 0 auto;
+  align-items: start;
+  justify-content: center;
 }
 
 .tarjeta-nodo {
-  display: block; min-width: 0; padding: 12px; cursor: pointer;
-  border-radius: 14px; box-shadow: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  display: block; width: 100%; max-width: var(--dashboard-ancho-seccion-max);
+  min-width: 0; padding: 0; cursor: default; justify-self: center;
+  background: none; border: 0; border-radius: 0; box-shadow: none;
 }
-.tarjeta-nodo:hover { border-color: color-mix(in srgb, var(--accent) 32%, var(--border)); }
-.tarjeta-nodo.nodo-offline { background: color-mix(in srgb, var(--card) 88%, var(--off-suave)); }
+.tarjeta-nodo.nodo-offline .tn-cabecera,
 .tarjeta-nodo.nodo-offline .tn-sensores { opacity: 0.62; }
 
 .tn-cabecera {
-  display: flex; align-items: center; gap: 10px; min-height: 44px;
-  margin-bottom: 10px; border-radius: 10px;
+  display: flex; align-items: center; gap: 8px; min-height: 24px;
+  margin-bottom: 8px; padding: 0 4px; border-radius: 6px; cursor: pointer;
 }
 .tn-cabecera:hover .tn-nombre { color: var(--accent); }
 .tn-cabecera:focus-visible {
@@ -208,26 +214,29 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 }
 .tn-info { flex: 1; min-width: 0; }
 .tn-icono {
-  width: var(--dashboard-icono); height: var(--dashboard-icono); border-radius: 50%; flex: none;
+  width: 18px; height: 24px; border-radius: 0; flex: none;
   display: grid; place-items: center;
-  background: var(--accent-suave); color: var(--accent);
+  background: none; color: var(--text);
 }
-.tn-icono modulinkr-icon { width: 22px; height: 22px; }
-.tn-icono.off { background: var(--off-suave); color: var(--off); }
+.tn-icono modulinkr-icon { width: 18px; height: 18px; }
+.tn-icono.off { background: none; color: var(--off); }
 .tn-nombre {
-  overflow: hidden; color: var(--text); font-size: 1rem; font-weight: 650;
-  line-height: 1.25; text-overflow: ellipsis; white-space: nowrap;
+  overflow: hidden; color: var(--text); font-size: 16px; font-weight: 400;
+  line-height: 1.5; letter-spacing: 0.1px; text-overflow: ellipsis; white-space: nowrap;
 }
 .tn-sub {
-  overflow: hidden; color: var(--dim); font-size: 0.78rem; line-height: 1.35;
+  overflow: hidden; color: var(--dim); font-size: 12px; line-height: 1.2;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .tn-estado { flex: none; }
-/* Pila de estados del gateway (LoRa y MQTT), alineada arriba a la derecha. */
+/* Los lienzos de las marcas conservan sus espacios propios. El bloque se
+   compensa para compartir el eje visual con el título de la sección. */
 .tn-estados {
-  display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end;
-  align-items: center; gap: 5px; max-width: 52%;
+  display: flex; flex: none; flex-wrap: nowrap; justify-content: flex-end;
+  align-items: center; gap: 6px; max-width: 58%; overflow-x: auto;
+  scrollbar-width: none; transform: translateY(-3px);
 }
+.tn-estados::-webkit-scrollbar { display: none; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
@@ -235,13 +244,31 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
   white-space: nowrap;
 }
 .chip modulinkr-icon { width: 14px; height: 14px; }
-.chip.conexion { padding: 4px 7px; }
+.chip.conexion {
+  min-height: 24px; padding: 0; border-radius: 0;
+  background: none; font-size: 12px; font-weight: 400;
+}
 .chip.on     { background: var(--ok-suave);   color: var(--ok); }
 .chip.off    { background: var(--off-suave);  color: var(--off); }
 .chip.ambar  { background: var(--warn-suave); color: var(--warn); }
 .chip.rojo   { background: var(--bad-suave);  color: var(--bad); }
 /* MQTT no configurado: presente pero atenuado, no es una alarma. */
 .chip.neutro { background: var(--off-suave);  color: var(--off); opacity: 0.6; }
+.chip.conexion.on,
+.chip.conexion.off,
+.chip.conexion.ambar,
+.chip.conexion.rojo,
+.chip.conexion.neutro { background: none; }
+.chip.logo-conexion {
+  min-width: 0; height: 32px; padding: 0;
+  align-items: center; justify-content: center;
+}
+.logo-tecnologia {
+  display: block; width: auto; height: 27.2px; object-fit: contain;
+}
+/* MQTT apila símbolo y nombre. Se centra por masa visual, no por la línea
+   base tipográfica que comparten los logotipos horizontales. */
+.logo-mqtt { transform: translateY(6px); }
 
 .tn-sensores {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -249,15 +276,15 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 }
 .sensor {
   display: grid; grid-template-columns: var(--dashboard-icono) minmax(0, 1fr);
-  grid-template-rows: auto auto; align-content: center; column-gap: 11px;
-  min-height: var(--dashboard-alto-elemento); padding: 10px 12px;
+  grid-template-rows: auto auto; align-content: center; column-gap: 10px;
+  min-height: var(--dashboard-alto-elemento); padding: 0 10px;
   background: var(--card); border: 1px solid var(--border);
 }
 .sensor { cursor: pointer; border-radius: var(--dashboard-radio); }
 .sensor:hover { background: color-mix(in srgb, var(--accent-suave) 35%, var(--card)); }
 .sensor > modulinkr-icon {
   grid-row: 1 / 3; align-self: center; width: var(--dashboard-icono);
-  height: var(--dashboard-icono); padding: 9px; border-radius: 50%;
+  height: var(--dashboard-icono); padding: 6px; border-radius: 50%;
   color: var(--accent); background: var(--accent-suave);
 }
 .sensor.tiene-fallo { background: color-mix(in srgb, var(--warn-suave) 55%, var(--card)); }
@@ -266,7 +293,7 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
    miniatura y el valor al borde derecho de la tarjeta. */
 .sensor .s-nombre {
   grid-column: 2; min-width: 0; overflow: hidden; color: var(--text);
-  font-size: 0.92rem; font-weight: 600; line-height: 1.25;
+  font-size: 14px; font-weight: 500; line-height: 1.2; letter-spacing: 0.1px;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .sensor .s-spark { display: none; }
@@ -277,21 +304,26 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 }
 .sensor .s-valor {
   grid-column: 2; min-width: 0; overflow: hidden; color: var(--dim);
-  font-size: 0.9rem; font-weight: 500; font-variant-numeric: tabular-nums;
-  line-height: 1.3; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums;
+  line-height: 1.2; letter-spacing: 0.4px; text-overflow: ellipsis; white-space: nowrap;
+}
+.fila-info .s-valor .chip {
+  padding: 0; border-radius: 0; background: none;
+  font-size: inherit; font-weight: inherit; line-height: inherit;
 }
 /* Estado Modbus con fallo (v3.2): el motivo sustituye al valor, en ámbar. */
 .s-fallo { color: var(--warn); font-weight: 600; }
 .sensor .s-unidad { color: var(--dim); font-weight: 400; font-size: 0.85em; }
 
 .tn-vacio {
-  grid-column: 1 / -1; color: var(--dim); font-size: 0.85rem;
-  padding: 0.8rem; border: 1px dashed var(--border); border-radius: var(--dashboard-radio);
+  grid-column: 1 / -1; display: flex; align-items: center;
+  min-height: var(--dashboard-alto-elemento); padding: 0 10px;
+  color: var(--dim); font-size: 12px; background: var(--card);
+  border: 1px solid var(--border); border-radius: var(--dashboard-radio);
 }
 
-/* Tarjeta del gateway: mismas filas etiqueta/valor que las medidas,
-   pero sin cursor de clic (no abren minigráfica). */
-.tarjeta-gw .tn-icono { background: var(--accent); color: #fff; }
+/* El gateway usa la misma cabecera ligera que el resto de secciones. */
+.tarjeta-gw .tn-icono { background: none; color: var(--text); }
 .fila-info, .fila-info:hover { cursor: default; background: none; }
 
 /* ----- Panel de detalle de nodo ----- */
@@ -644,12 +676,10 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   modulinkr-app-header { padding: 0 0.9rem; }
   .vistas, .rango { margin-left: 0; }
   .campo-error { margin-left: 0; }
-  .grid-tarjetas { grid-template-columns: minmax(0, 1fr); }
   .tn-estados { max-width: 58%; }
 }
 
 @media (max-width: 520px) {
-  :root { --dashboard-alto-elemento: 64px; }
   modulinkr-app-header { gap: 0.55rem; }
   modulinkr-app-header .header-derecha { display: none; }
   #filtro { width: 100%; min-width: 0; }
@@ -659,12 +689,11 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   #selector-canales details { width: 100%; min-width: 0; }
   .cfg-campo { width: 100%; min-width: 0; flex-direction: column; align-items: stretch; gap: 0.35rem; }
   .cfg-campo > span { width: auto; }
-  .tarjeta-nodo { padding: 10px; }
-  .tn-cabecera { align-items: flex-start; }
-  .tn-estados { max-width: 50%; }
-  .chip.conexion span { display: none; }
-  .chip.conexion { width: 30px; height: 30px; justify-content: center; padding: 0; }
-  .chip.conexion modulinkr-icon { width: 16px; height: 16px; }
+  .tarjeta-nodo { padding: 0; }
+  .tn-estados { max-width: 58%; }
+  .chip.conexion:not(.logo-conexion) span { display: none; }
+  .chip.conexion:not(.logo-conexion) { width: 30px; height: 30px; justify-content: center; padding: 0; }
+  .chip.conexion:not(.logo-conexion) modulinkr-icon { width: 16px; height: 16px; }
   .tn-sensores { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }
 
