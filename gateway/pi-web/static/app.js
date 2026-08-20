@@ -1002,27 +1002,55 @@ async function refrescarMapa() {
 
 // ----- Vista de datos (histórico cloud: ECharts + export CSV) -----
 //
-// Selector pensado para escalar a decenas de nodos: filtro por texto,
-// grupos plegables con "todos", dos modos de agrupación (por nodo y por
-// medida, este último para comparar una magnitud entre muchos nodos) y
-// vistas guardadas en localStorage. El gráfico agrupa las series por
-// unidad: 1-2 unidades, doble eje Y; 3 o más, paneles apilados con el
-// zoom enlazado (patrón small multiples).
+// La selección actualiza el gráfico tras una espera breve que agrupa cambios
+// consecutivos. El agrupamiento por medida facilita la comparación de una
+// magnitud entre nodos. Las vistas guardadas se conservan en localStorage. El
+// gráfico agrupa las series por unidad: con una o dos unidades usa doble eje Y;
+// con tres o más usa paneles apilados y zoom enlazado.
 
 let chart = null;             // instancia de ECharts
+let chartResizeObserver = null;
+let seriesGraficoActuales = [];
+let graficoCompacto = null;
 let catalogo = null;          // respuesta de /api/datos/nodos
 let seleccion = new Set();    // channel_ids marcados
 let modo = "nodo";            // "nodo" | "medida"
 const metaCanal = new Map();  // channel_id -> {node_id, node_name, read_id, unit}
+const selectorPeriodo = document.getElementById("selector-periodo");
+const selectorMedidas = document.getElementById("selector-medidas");
+const botonMedidas = document.getElementById("btn-medidas");
+const estadoVacioDatos = document.getElementById("datos-vacio");
 
-// datetime-local trabaja en hora local del navegador; la API espera ISO
-// UTC. Estas dos funciones hacen la conversión en ambos sentidos.
-function localToIso(v) { return new Date(v).toISOString(); }
-function isoDefault(hoursAgo) {
-  const d = new Date(Date.now() - hoursAgo * 3600 * 1000);
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-  return d.toISOString().slice(0, 16);
+function mostrarEstadoVacioDatos(mostrar) {
+  if (estadoVacioDatos) estadoVacioDatos.hidden = !mostrar;
 }
+
+function graficoEsCompacto() {
+  return (document.getElementById("grafico")?.clientWidth ?? window.innerWidth) < 600;
+}
+
+function asegurarGrafico() {
+  const contenedor = document.getElementById("grafico");
+  if (chart === null) chart = echarts.init(contenedor);
+  if (chartResizeObserver === null && "ResizeObserver" in window) {
+    chartResizeObserver = new ResizeObserver(() => {
+      if (!chart) return;
+      const compacto = graficoEsCompacto();
+      chart.resize({ animation: { duration: 0 } });
+      if (seriesGraficoActuales.length && compacto !== graficoCompacto) {
+        graficoCompacto = compacto;
+        chart.setOption(opcionesGrafico(seriesGraficoActuales), true);
+      }
+    });
+    chartResizeObserver.observe(contenedor);
+  }
+  return chart;
+}
+
+window.addEventListener("resize", () => {
+  if (!chartResizeObserver && chart) chart.resize({ animation: { duration: 0 } });
+});
+
 function etiquetaCanal(cid) {
   const m = metaCanal.get(cid);
   if (!m) return String(cid);
@@ -1033,23 +1061,18 @@ function nombreMedida(c) {
   const nombre = String(c.read_id ?? "Medida").replace(/[_-]+/g, " ");
   return nombre.charAt(0).toUpperCase() + nombre.slice(1);
 }
-function medidaConUnidad(c) {
-  const u = unidad(c.unit);
-  return nombreMedida(c) + (u ? ` · ${u}` : "");
-}
 
 async function cargarCatalogo() {
-  const cont = document.getElementById("selector-canales");
   let r;
   try {
     r = await fetchApi("/api/datos/nodos");
   } catch (e) {
-    cont.innerHTML = '<p class="aviso">No se pueden cargar las medidas porque el gateway no responde.</p>';
+    selectorMedidas.error = "No se pueden cargar las medidas porque el gateway no responde.";
     return;
   }
   if (!r.ok) {
     const msg = (await r.json()).detail ?? r.status;
-    cont.innerHTML = `<p class="aviso">No se pudo cargar el histórico. ${msg}</p>`;
+    selectorMedidas.error = `No se pudo cargar el histórico. ${msg}`;
     return;
   }
   catalogo = await r.json();
@@ -1062,96 +1085,18 @@ async function cargarCatalogo() {
       });
     }
   }
-  renderSelector();
+  selectorMedidas.catalog = catalogo;
+  selectorMedidas.value = { selection: [...seleccion], mode: modo };
+  actualizarBotonMedidas();
   renderVistas();
 }
 
-// Agrupaciones del selector. Cada grupo: {clave, titulo, canales:[cid]}.
-function gruposPorNodo() {
-  return catalogo.map((n) => ({
-    clave: "n" + n.node_id,
-    titulo: `${n.name ?? "nodo " + n.node_id} (${n.node_id})`,
-    canales: n.channels.map((c) => ({
-      cid: c.channel_id,
-      texto: medidaConUnidad(c),
-    })),
-  }));
-}
-function gruposPorMedida() {
-  const por = new Map();
-  for (const [cid, m] of metaCanal) {
-    const clave = m.read_id + "|" + (m.unit ?? "");
-    if (!por.has(clave)) {
-      por.set(clave, {
-        clave: "m" + clave,
-        titulo: medidaConUnidad(m),
-        canales: [],
-      });
-    }
-    por.get(clave).canales.push({
-      cid, texto: `${m.node_name ?? "nodo " + m.node_id} (${m.node_id})`,
-    });
-  }
-  return [...por.values()];
-}
-
-function renderSelector() {
-  if (catalogo === null) return;
-  const cont = document.getElementById("selector-canales");
-  const filtro = document.getElementById("filtro").value.trim().toLowerCase();
-  const grupos = (modo === "nodo" ? gruposPorNodo() : gruposPorMedida());
-  cont.innerHTML = "";
-
-  for (const g of grupos) {
-    const coincideTitulo = g.titulo.toLowerCase().includes(filtro);
-    const canales = filtro && !coincideTitulo
-      ? g.canales.filter((c) => c.texto.toLowerCase().includes(filtro))
-      : g.canales;
-    if (filtro && !coincideTitulo && canales.length === 0) continue;
-
-    const marcados = g.canales.filter((c) => seleccion.has(c.cid)).length;
-    const det = document.createElement("details");
-    // Abierto si hay filtro activo, selección dentro, o pocos grupos.
-    det.open = Boolean(filtro) || marcados > 0 || grupos.length <= 6;
-
-    const sum = document.createElement("summary");
-    sum.innerHTML = `${g.titulo} <span class="cuenta">${marcados}/${g.canales.length}</span>`;
-    det.appendChild(sum);
-
-    // "Todos": marca o desmarca el grupo completo de un clic.
-    const todos = document.createElement("label");
-    todos.className = "todos";
-    const cbTodos = document.createElement("input");
-    cbTodos.type = "checkbox";
-    cbTodos.checked = marcados === g.canales.length && g.canales.length > 0;
-    cbTodos.addEventListener("change", () => {
-      for (const c of g.canales) {
-        if (cbTodos.checked) seleccion.add(c.cid); else seleccion.delete(c.cid);
-      }
-      renderSelector();
-    });
-    todos.appendChild(cbTodos);
-    todos.appendChild(document.createTextNode(" Seleccionar todos"));
-    det.appendChild(todos);
-
-    for (const c of canales) {
-      const lbl = document.createElement("label");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = seleccion.has(c.cid);
-      cb.addEventListener("change", () => {
-        if (cb.checked) seleccion.add(c.cid); else seleccion.delete(c.cid);
-        renderSelector();
-      });
-      lbl.appendChild(cb);
-      lbl.appendChild(document.createTextNode(" " + c.texto));
-      det.appendChild(lbl);
-    }
-    cont.appendChild(det);
-  }
-  if (!cont.children.length) {
-    cont.innerHTML = '<p class="aviso">No hay medidas que coincidan con la búsqueda. Cambia el término o borra el filtro.</p>';
-  }
+function actualizarBotonMedidas() {
+  const cantidad = seleccion.size;
+  const cuenta = document.getElementById("btn-medidas-cuenta");
+  if (cuenta) cuenta.textContent = String(cantidad);
+  botonMedidas?.setAttribute("aria-label",
+    `Seleccionar medidas. ${cantidad} ${cantidad === 1 ? "seleccionada" : "seleccionadas"}`);
 }
 
 // ----- Vistas guardadas (localStorage, sin tocar la base) -----
@@ -1163,7 +1108,7 @@ function vistasLeer() {
 function renderVistas() {
   const sel = document.getElementById("vistas-guardadas");
   const vistas = vistasLeer();
-  sel.innerHTML = '<option value="">Seleccionar vista</option>';
+  sel.innerHTML = '<option value="">Vistas guardadas</option>';
   for (const nombre of Object.keys(vistas).sort()) {
     const opt = document.createElement("option");
     opt.value = nombre;
@@ -1195,8 +1140,7 @@ function vistaGuardar() {
     }
     vistas[nombre] = {
       channels: [...seleccion], modo,
-      desde: document.getElementById("desde").value,
-      hasta: document.getElementById("hasta").value,
+      periodo: selectorPeriodo.value,
     };
     localStorage.setItem("modulinkr_vistas", JSON.stringify(vistas));
     renderVistas();
@@ -1216,11 +1160,9 @@ function vistaAplicar(nombre) {
   if (!v) return;
   seleccion = new Set(v.channels);
   modo = v.modo ?? "nodo";
-  document.querySelectorAll(".modo-btn").forEach((b) =>
-    b.classList.toggle("active", b.dataset.modo === modo));
-  if (v.desde) document.getElementById("desde").value = v.desde;
-  if (v.hasta) document.getElementById("hasta").value = v.hasta;
-  renderSelector();
+  if (v.periodo) selectorPeriodo.value = v.periodo;
+  selectorMedidas.value = { selection: [...seleccion], mode: modo };
+  actualizarBotonMedidas();
   graficar();
 }
 function vistaBorrar() {
@@ -1246,10 +1188,7 @@ function vistaBorrar() {
 // ----- Gráfico: ejes por unidad o paneles apilados -----
 
 function rango() {
-  const desde = document.getElementById("desde").value;
-  const hasta = document.getElementById("hasta").value;
-  if (!desde || !hasta) return null;
-  return { desde: localToIso(desde), hasta: localToIso(hasta) };
+  return selectorPeriodo?.range ?? null;
 }
 
 const EJE_Y = {
@@ -1262,23 +1201,38 @@ const EJE_X = { type: "time", axisLabel: { color: COLOR.dim } };
 
 function opcionesGrafico(series) {
   const unidades = [...new Set(series.map((s) => s.unit ?? ""))];
+  const compacto = graficoEsCompacto();
   const linea = (s) => ({
     name: etiquetaCanal(s.channel_id),
-    type: "line", showSymbol: false,
+    type: "line", showSymbol: false, sampling: "lttb",
     data: s.points.map(([t, v]) => [t * 1000, v]),
   });
+  const leyenda = {
+    type: "scroll", left: compacto ? 8 : "center", right: compacto ? 8 : 16,
+    top: 8, itemWidth: 16, itemHeight: 10,
+    textStyle: { color: COLOR.text },
+  };
+  const zoom = [
+    { type: "inside" },
+    { type: "slider", height: compacto ? 18 : 22, bottom: 8 },
+  ];
 
   if (unidades.length <= 2) {
     // 1-2 unidades: un panel, eje izquierdo y (si toca) derecho.
     return {
       backgroundColor: "transparent",
-      tooltip: { trigger: "axis" },
-      legend: { type: "scroll", textStyle: { color: COLOR.text } },
+      tooltip: { trigger: "axis", confine: true },
+      legend: leyenda,
+      grid: {
+        left: compacto ? 48 : 60,
+        right: unidades.length === 2 ? (compacto ? 48 : 60) : (compacto ? 14 : 24),
+        top: compacto ? 54 : 48, bottom: compacto ? 54 : 60, containLabel: true,
+      },
       xAxis: EJE_X,
       yAxis: unidades.map((u, i) => ({
         ...EJE_Y, name: u, position: i === 0 ? "left" : "right",
       })),
-      dataZoom: [{ type: "inside" }, { type: "slider" }],
+      dataZoom: zoom,
       series: series.map((s) => ({
         ...linea(s), yAxisIndex: unidades.indexOf(s.unit ?? ""),
       })),
@@ -1289,17 +1243,21 @@ function opcionesGrafico(series) {
   const alto = Math.floor(84 / unidades.length);  // % útiles bajo la leyenda
   return {
     backgroundColor: "transparent",
-    tooltip: { trigger: "axis" },
-    legend: { type: "scroll", textStyle: { color: COLOR.text } },
+    tooltip: { trigger: "axis", confine: true },
+    legend: leyenda,
     axisPointer: { link: [{ xAxisIndex: "all" }] },
     grid: unidades.map((u, i) => ({
-      left: 70, right: 30, top: `${10 + i * alto}%`, height: `${alto - 6}%`,
+      left: compacto ? 48 : 70, right: compacto ? 16 : 30,
+      top: `${12 + i * alto}%`, height: `${alto - 7}%`, containLabel: true,
     })),
     xAxis: unidades.map((u, i) => ({ ...EJE_X, gridIndex: i })),
     yAxis: unidades.map((u, i) => ({ ...EJE_Y, name: u, gridIndex: i })),
     dataZoom: [
       { type: "inside", xAxisIndex: unidades.map((u, i) => i) },
-      { type: "slider", xAxisIndex: unidades.map((u, i) => i) },
+      {
+        type: "slider", xAxisIndex: unidades.map((u, i) => i),
+        height: compacto ? 18 : 22, bottom: 8,
+      },
     ],
     series: series.map((s) => {
       const gi = unidades.indexOf(s.unit ?? "");
@@ -1308,36 +1266,73 @@ function opcionesGrafico(series) {
   };
 }
 
+let solicitudGrafico = 0;
+let temporizadorGrafico = null;
+
+function programarGrafico() {
+  clearTimeout(temporizadorGrafico);
+  if (!seleccion.size) {
+    solicitudGrafico += 1;
+    seriesGraficoActuales = [];
+    if (chart) chart.clear();
+    mostrarEstadoVacioDatos(true);
+    document.getElementById("datos-aviso").textContent = "";
+    selectorPeriodo.loading = false;
+    return;
+  }
+  mostrarEstadoVacioDatos(false);
+  temporizadorGrafico = window.setTimeout(graficar, 120);
+}
+
 async function graficar() {
   const aviso = document.getElementById("datos-aviso");
   const rg = rango();
-  if (!seleccion.size) { aviso.textContent = "Selecciona al menos una medida."; return; }
-  if (!rg) { aviso.textContent = "Completa el rango de fechas."; return; }
-  aviso.textContent = "Cargando datos...";
-
-  const q = new URLSearchParams({ channels: [...seleccion].join(","), ...rg });
-  let r;
-  try {
-    r = await fetchApi("/api/datos/series?" + q);
-  } catch (e) { aviso.textContent = "No se pueden cargar los datos porque el gateway no responde."; return; }
-  if (!r.ok) {
-    const d = await r.json();
-    aviso.textContent = d.detail ?? "No se pudieron cargar los datos seleccionados.";
+  if (!seleccion.size) {
+    mostrarEstadoVacioDatos(true);
+    aviso.textContent = "";
     return;
   }
-  const data = await r.json();
-  aviso.textContent = data.series.every((s) => s.points.length === 0)
-    ? "No hay lecturas en el rango seleccionado. Cambia las fechas y vuelve a intentarlo." : "";
+  if (!rg) { aviso.textContent = "Selecciona un periodo."; return; }
+  mostrarEstadoVacioDatos(false);
+  const solicitud = ++solicitudGrafico;
+  selectorPeriodo.loading = true;
+  aviso.textContent = "";
 
-  if (chart === null) chart = echarts.init(document.getElementById("grafico"));
-  chart.setOption(opcionesGrafico(data.series), true);
+  const anchoGrafico = document.getElementById("grafico")?.clientWidth ?? 800;
+  const maxPuntos = Math.max(240, Math.min(1200, Math.round(anchoGrafico * 0.75)));
+  const q = new URLSearchParams({
+    channels: [...seleccion].join(","), ...rg, max_puntos: String(maxPuntos),
+  });
+  try {
+    const r = await fetchApi("/api/datos/series?" + q);
+    if (solicitud !== solicitudGrafico) return;
+    if (!r.ok) {
+      const d = await r.json();
+      aviso.textContent = d.detail ?? "No se pudieron cargar los datos seleccionados.";
+      return;
+    }
+    const data = await r.json();
+    if (solicitud !== solicitudGrafico) return;
+    aviso.textContent = data.series.every((s) => s.points.length === 0)
+      ? "No hay lecturas en el periodo seleccionado. Cambia el periodo y vuelve a intentarlo." : "";
+
+    seriesGraficoActuales = data.series;
+    graficoCompacto = graficoEsCompacto();
+    asegurarGrafico().setOption(opcionesGrafico(data.series), true);
+  } catch (e) {
+    if (solicitud === solicitudGrafico) {
+      aviso.textContent = "No se pueden cargar los datos porque el gateway no responde.";
+    }
+  } finally {
+    if (solicitud === solicitudGrafico) selectorPeriodo.loading = false;
+  }
 }
 
 function exportarCsv() {
   const rg = rango();
   const aviso = document.getElementById("datos-aviso");
   if (!seleccion.size || !rg) {
-    aviso.textContent = "Selecciona al menos una medida y completa el rango de fechas.";
+    aviso.textContent = "Selecciona al menos una medida y un periodo.";
     return;
   }
   const q = new URLSearchParams({ channels: [...seleccion].join(","), ...rg });
@@ -1345,25 +1340,23 @@ function exportarCsv() {
   window.location.href = "/api/datos/csv?" + q;
 }
 
-document.getElementById("btn-graficar").addEventListener("click", graficar);
-document.getElementById("btn-csv").addEventListener("click", exportarCsv);
+selectorPeriodo.addEventListener("modulinkr-period-change", programarGrafico);
+selectorPeriodo.addEventListener("modulinkr-period-export", exportarCsv);
+selectorMedidas.addEventListener("modulinkr-measures-apply", (evento) => {
+  const nuevaSeleccion = new Set(evento.detail.selection);
+  const cambio = nuevaSeleccion.size !== seleccion.size
+    || [...nuevaSeleccion].some((canal) => !seleccion.has(canal));
+  seleccion = nuevaSeleccion;
+  modo = evento.detail.mode;
+  actualizarBotonMedidas();
+  if (cambio) programarGrafico();
+});
+botonMedidas.addEventListener("click", () => selectorMedidas.open());
 document.getElementById("btn-guardar-vista").addEventListener("click", vistaGuardar);
 document.getElementById("btn-borrar-vista").addEventListener("click", vistaBorrar);
 document.getElementById("vistas-guardadas").addEventListener("change", (e) => {
   if (e.target.value) vistaAplicar(e.target.value);
 });
-document.getElementById("filtro").addEventListener("input", renderSelector);
-document.querySelectorAll(".modo-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    modo = btn.dataset.modo;
-    document.querySelectorAll(".modo-btn").forEach((b) =>
-      b.classList.toggle("active", b === btn));
-    renderSelector();
-  });
-});
-document.getElementById("desde").value = isoDefault(24);
-document.getElementById("hasta").value = isoDefault(0);
-
 // ----- Vista Configuración: comisionamiento de nodos por USB -----
 // Habla con /api/config (configapi.py), que a su vez habla el protocolo
 // CFG.* con el Atom conectado por USB al Pi. Las operaciones tardan

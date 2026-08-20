@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
-<link rel="stylesheet" href="/static/style.css?v=ui-states-safari-2-20260820">
+<link rel="stylesheet" href="/static/vendor/webawesome/theme-3.11.0.css">
+<link rel="stylesheet" href="/static/style.css?v=measure-selector-3-20260820">
 </head>
 <body>
 
@@ -76,29 +77,143 @@
     </modulinkr-view>
 
     <modulinkr-view id="view-datos" class="view" data-view="datos" aria-label="Datos" hidden>
-      <div id="datos-controles" class="card">
-        <div id="selector-cabecera">
-          <input type="search" id="filtro" placeholder="Buscar por nodo o medida">
+      <div class="datos-layout">
+        <button id="medidas-panel-fondo" class="datos-panel-fondo" type="button"
+                aria-label="Cerrar selección de medidas" hidden></button>
+        <modulinkr-measure-picker id="selector-medidas" class="datos-panel card">
+          <header class="medidas-panel-cabecera">
+            <div>
+              <h2>Medidas</h2>
+              <span class="medidas-cuenta-texto" aria-live="polite">0 seleccionadas</span>
+            </div>
+            <div class="medidas-panel-acciones">
+              <button class="medidas-limpiar" type="button">Limpiar</button>
+              <button class="icono-btn medidas-panel-cerrar" type="button"
+                      title="Cerrar" aria-label="Cerrar selección de medidas">
+                <modulinkr-icon name="mdi:close"></modulinkr-icon>
+              </button>
+            </div>
+          </header>
+          <input class="medidas-buscar" type="search"
+                 placeholder="Buscar por nodo o medida" aria-label="Buscar medidas">
           <div class="modo">
-            <button class="modo-btn active" data-modo="nodo">Por nodo</button>
-            <button class="modo-btn" data-modo="medida">Por medida</button>
+            <button class="modo-btn active" type="button" data-modo="nodo">Por nodo</button>
+            <button class="modo-btn" type="button" data-modo="medida">Por medida</button>
           </div>
-          <div class="vistas">
-            <select id="vistas-guardadas"><option value="">Seleccionar vista</option></select>
-            <button id="btn-guardar-vista" title="Guardar la selección actual">Guardar vista</button>
-            <button id="btn-borrar-vista" title="Eliminar la vista seleccionada">Eliminar vista</button>
+          <div class="medidas-resumen">
+            <button class="medidas-solo" type="button" aria-pressed="false">Solo seleccionadas</button>
           </div>
-        </div>
-        <div id="selector-canales"><p class="aviso">Cargando medidas...</p></div>
-        <div class="rango">
-          <label>Desde <input type="datetime-local" id="desde"></label>
-          <label>Hasta <input type="datetime-local" id="hasta"></label>
-          <button id="btn-graficar">Mostrar gráfico</button>
-          <button id="btn-csv">Exportar CSV</button>
-        </div>
+          <div class="medidas-catalogo">
+            <p class="aviso">Cargando medidas...</p>
+          </div>
+        </modulinkr-measure-picker>
+
+        <section class="datos-principal" aria-label="Histórico de datos">
+          <div class="datos-grafico card">
+            <div class="datos-barra">
+              <button id="btn-medidas" type="button" aria-controls="selector-medidas"
+                      aria-expanded="false">
+                <modulinkr-icon name="mdi:filter-variant"></modulinkr-icon>
+                <span>Medidas</span>
+                <span id="btn-medidas-cuenta" class="badge">0</span>
+              </button>
+              <div class="vistas">
+                <select id="vistas-guardadas" aria-label="Vistas guardadas">
+                  <option value="">Vistas guardadas</option>
+                </select>
+                <button id="btn-guardar-vista" type="button" title="Guardar vista"
+                        aria-label="Guardar la selección actual como vista">
+                  <modulinkr-icon name="mdi:content-save-outline"></modulinkr-icon>
+                </button>
+                <button id="btn-borrar-vista" type="button" title="Eliminar vista"
+                        aria-label="Eliminar la vista seleccionada">
+                  <modulinkr-icon name="mdi:delete-outline"></modulinkr-icon>
+                </button>
+              </div>
+            </div>
+            <div id="grafico"></div>
+            <div id="datos-vacio" class="datos-vacio" role="status">
+              <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
+              <strong>Selecciona una medida</strong>
+              <span>Elige una o varias medidas para consultar sus datos.</span>
+            </div>
+            <p id="datos-aviso" class="aviso"></p>
+          </div>
+        </section>
       </div>
-      <div id="grafico" class="card"></div>
-      <p id="datos-aviso" class="aviso"></p>
+      <modulinkr-period-selector id="selector-periodo">
+        <div class="periodo-barra card">
+          <button class="periodo-abrir" type="button"
+                  aria-haspopup="dialog" aria-controls="periodo-dialogo">
+            <modulinkr-icon name="mdi:calendar" aria-hidden="true"></modulinkr-icon>
+            <span class="periodo-etiqueta">Últimas 24 horas</span>
+            <span class="periodo-carga" aria-label="Cargando datos" hidden></span>
+          </button>
+          <div class="periodo-acciones">
+            <button class="periodo-ahora" type="button">Ahora</button>
+            <button class="periodo-icono periodo-anterior" type="button"
+                    title="Periodo anterior" aria-label="Periodo anterior">
+              <modulinkr-icon name="mdi:chevron-left"></modulinkr-icon>
+            </button>
+            <button class="periodo-icono periodo-siguiente" type="button"
+                    title="Periodo siguiente" aria-label="Periodo siguiente">
+              <modulinkr-icon name="mdi:chevron-right"></modulinkr-icon>
+            </button>
+            <div class="periodo-menu">
+              <button class="periodo-icono periodo-menu-boton" type="button"
+                      title="Más opciones" aria-label="Más opciones"
+                      aria-haspopup="menu" aria-expanded="false"
+                      aria-controls="periodo-menu-lista">
+                <modulinkr-icon name="mdi:dots-vertical"></modulinkr-icon>
+              </button>
+              <div id="periodo-menu-lista" class="periodo-menu-lista"
+                   role="menu" hidden>
+                <button class="periodo-ahora-menu" type="button" role="menuitem">
+                  <modulinkr-icon name="mdi:clock-outline"></modulinkr-icon>
+                  Ahora
+                </button>
+                <button class="periodo-exportar" type="button" role="menuitem">
+                  <modulinkr-icon name="mdi:download"></modulinkr-icon>
+                  Exportar CSV
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <dialog id="periodo-dialogo" class="periodo-dialogo"
+                aria-labelledby="periodo-dialogo-titulo">
+          <h2 id="periodo-dialogo-titulo" class="solo-lector">Seleccionar periodo</h2>
+          <div class="periodo-dialogo-cuerpo">
+            <nav id="periodo-preajustes" class="periodo-preajustes"
+                 aria-label="Periodos rápidos"></nav>
+            <section class="periodo-calendario" aria-label="Intervalo personalizado">
+              <calendar-range id="periodo-calendario" months="1"
+                              first-day-of-week="1" show-outside-days>
+                <modulinkr-icon slot="previous" name="mdi:chevron-left"
+                                label="Mes anterior"></modulinkr-icon>
+                <span slot="heading" class="periodo-mes-titulo"></span>
+                <modulinkr-icon slot="next" name="mdi:chevron-right"
+                                label="Mes siguiente"></modulinkr-icon>
+                <calendar-month></calendar-month>
+              </calendar-range>
+              <div class="periodo-horas">
+                <label>Hora de inicio
+                  <input id="periodo-hora-inicio" type="time" step="60">
+                </label>
+                <label>Hora de finalización
+                  <input id="periodo-hora-fin" type="time" step="60">
+                </label>
+              </div>
+              <p class="periodo-error" role="alert" hidden></p>
+            </section>
+          </div>
+          <div class="periodo-dialogo-acciones">
+            <button class="periodo-cancelar" type="button">Cancelar</button>
+            <button class="periodo-seleccionar btn-primario" type="button">Seleccionar</button>
+          </div>
+        </dialog>
+      </modulinkr-period-selector>
     </modulinkr-view>
 
     <modulinkr-view id="view-configuracion" class="view" data-view="configuracion" aria-label="Configuración" hidden>
@@ -889,7 +1004,9 @@
   window.ESPLoader = ESPLoader;
   window.Transport = Transport;
 </script>
-<script src="/static/components.js?v=config-layout-20260814"></script>
-<script src="/static/app.js?v=ui-states-safari-2-20260820"></script>
+<script type="module" src="/static/vendor/cally/cally.js"></script>
+<script type="module" src="/static/vendor/webawesome/tree-3.11.0.js"></script>
+<script src="/static/components.js?v=measure-selector-3-20260820"></script>
+<script src="/static/app.js?v=measure-selector-3-20260820"></script>
 </body>
 </html>
