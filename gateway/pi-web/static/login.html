@@ -10,9 +10,10 @@
    para no cargar la hoja completa del panel antes de autenticar. */
 :root {
   --bg: #f4f6f9; --card: #ffffff; --text: #17224d; --dim: #5d6b85;
-  --accent: #0756eb; --border: #e2e7f0; --error: #d64545;
+  --accent: #0756eb; --border: #e2e7f0; --error: #d64545; --control-alto: 48px;
 }
 * { box-sizing: border-box; }
+button, input { font: inherit; }
 body {
   margin: 0; min-height: 100vh; min-height: 100svh; display: grid; place-items: center;
   padding: 2rem 1.25rem;
@@ -34,14 +35,18 @@ h1 { margin: 0 0 1rem; font-size: 1.4rem; line-height: 1.25; font-weight: 600; }
 .campo + .campo { margin-top: 0.9rem; }
 label { display: block; color: var(--dim); font-size: 0.9rem; margin: 0 0 0.35rem; }
 input {
-  width: 100%; min-height: 48px; padding: 0 0.75rem; font: inherit; color: var(--text);
+  width: 100%; height: var(--control-alto); min-height: var(--control-alto);
+  padding: 0 0.75rem; line-height: 1.2; color: var(--text);
   border: 1px solid var(--border); border-radius: 10px; background: #fff;
+  -webkit-appearance: none; appearance: none;
 }
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
 button {
-  width: 100%; min-height: 46px; margin-top: 1.25rem; padding: 0.6rem 1rem; font: inherit;
+  width: 100%; height: var(--control-alto); min-height: var(--control-alto);
+  margin-top: 1.25rem; padding: 0 1rem; line-height: 1.2;
   font-weight: 600; color: #fff; background: var(--accent);
   border: none; border-radius: 10px; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
 }
 button:hover { filter: brightness(0.94); }
 button:focus-visible { outline: 3px solid rgba(7, 86, 235, 0.28); outline-offset: 2px; }

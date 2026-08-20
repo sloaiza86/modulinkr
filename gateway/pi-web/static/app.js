@@ -325,6 +325,33 @@ function sparkline(serie, w = 64, h = 22) {
 
 const TITULOS = { red: "Dashboard", topologia: "Topología", datos: "Datos",
                   configuracion: "Configuración" };
+let vistaNavegada = null;
+
+const RUTAS_CONFIG = {
+  "":              { panel: "cfg-menu",     titulo: "Configuración",           volver: null },
+  "nodo":          { panel: "cfg-sub-nodo", titulo: "Nodos",                   volver: "#/configuracion" },
+  "nodo/firmware": { panel: "cfg-fw",       titulo: "Actualizar firmware de nodos", volver: "#/configuracion/nodo" },
+  "nodo/usb":      { panel: "cfg-usb",      titulo: "Archivo de configuración", volver: "#/configuracion/nodo" },
+  "nodo/form":     { panel: "cfg-form",     titulo: "Configurar nodo",          volver: "#/configuracion/nodo" },
+  "radio":         { panel: "cfg-radio",    titulo: "Radio LoRa local",        volver: "#/configuracion" },
+  "red-lora":      { panel: "cfg-red-lora", titulo: "Parámetros de red LoRa",  volver: "#/configuracion" },
+  "servidor":      { panel: "cfg-servidor", titulo: "Servidor",                volver: "#/configuracion" },
+  "wifi":          { panel: "cfg-wifi",     titulo: "Red Wi-Fi",               volver: "#/configuracion" },
+  "zona":          { panel: "cfg-zona",     titulo: "Zona horaria",            volver: "#/configuracion" },
+  // Se mantienen las rutas anteriores para no romper marcadores guardados.
+  "bd":            { panel: "cfg-servidor", titulo: "Servidor",                volver: "#/configuracion" },
+  "mqtt":          { panel: "cfg-servidor", titulo: "Servidor",                volver: "#/configuracion" },
+  "depuracion":    { panel: "cfg-debug",    titulo: "Diagnóstico",              volver: "#/configuracion" },
+};
+
+function actualizarCabecera(titulo, volver = null) {
+  document.querySelector("modulinkr-app-header").title = titulo;
+  const enlace = document.getElementById("config-volver");
+  enlace.hidden = !volver;
+  if (volver) enlace.href = volver;
+  document.getElementById("btn-menu-movil").hidden = Boolean(volver);
+  document.title = `${titulo} · ModuLinkr`;
+}
 
 function vistaActual() {
   // La vista es el primer tramo del hash; Configuración tiene subrutas
@@ -335,14 +362,25 @@ function vistaActual() {
 
 function navegar() {
   const v = vistaActual();
+  if (vistaNavegada === "configuracion" && v !== "configuracion") {
+    cfgLocalCerrar();
+    migSondeoParar();
+    debugStop();
+    bcSondeoParar();
+  }
   document.getElementById("sidebar").activeView = v;
   document.querySelector("modulinkr-view-router").show(v);
-  document.querySelector("modulinkr-app-header").title = TITULOS[v];
+  document.body.classList.toggle("en-configuracion", v === "configuracion");
+  if (v !== "configuracion") actualizarCabecera(TITULOS[v]);
   if (v === "topologia") refrescarMapa();
   if (v === "datos" && catalogo === null) cargarCatalogo();
   if (v === "configuracion") cfgRuta();
+  vistaNavegada = v;
 }
-window.addEventListener("hashchange", navegar);
+window.addEventListener("hashchange", () => {
+  navegar();
+  requestAnimationFrame(() => document.getElementById("titulo-vista")?.focus({ preventScroll: true }));
+});
 
 // ----- Vista de red: tarjetas por nodo -----
 
@@ -364,19 +402,19 @@ function estadoGateway(data) {
       caido,
       sub: caido ? `Sin actividad desde hace ${fmtAgo(data.gateway_ago_s)}`
                  : "Coordinador de la red",
-      chips: [caido ? { cls: "off", txt: "sin señal" }
-                    : { cls: "on", txt: "en línea" }],
+      chips: [caido ? { cls: "gris", txt: "LoRa: sin conexión" }
+                    : { cls: "on", txt: "LoRa: conectado" }],
     };
   }
   const servDown = data.service_online === false;
   const loraUp = data.lora_link === true;
   const chips = [loraUp ? { cls: "on", txt: "LoRa: conectado" }
-                        : { cls: "off", txt: "LoRa: sin señal" }];
+                        : { cls: "gris", txt: "LoRa: sin conexión" }];
   if (data.mqtt_enabled) {
     chips.push(data.mqtt_connected ? { cls: "on", txt: "MQTT: conectado" }
-                                   : { cls: "off", txt: "MQTT: sin conexión" });
+                                   : { cls: "gris", txt: "MQTT: sin conexión" });
   } else if (data.mqtt_enabled === false) {
-    chips.push({ cls: "neutro", txt: "MQTT: desactivado" });
+    chips.push({ cls: "gris", txt: "MQTT: desactivado" });
   }
   const sub = servDown
     ? `Sin actividad desde hace ${fmtAgo(data.status_ago_s)}`
@@ -415,14 +453,11 @@ function tarjetaGateway(data) {
   </modulinkr-node-card>`;
 }
 
-// Estado del nodo: en línea con telemetría sana (verde); en línea con
-// fallo Modbus reportado en la última muestra (ámbar con el motivo,
-// v3.2: la telemetría sigue llegando con st != ok y valores null); en
-// línea sin medidas recientes (ámbar: nodo con firmware previo a v3.2
-// que calla cuando su sensor no entrega); y sin señal (gris). El margen
-// de la telemetría es más laxo que el de conexión (5x) porque el
-// muestreo puede ser más lento que los beacons. Único punto de verdad:
-// lo usan la tarjeta y el panel de detalle.
+// Estado general del nodo en el panel de detalle. El verde indica lecturas
+// correctas, el ámbar se reserva para lecturas parciales y el gris identifica
+// la pérdida total de comunicación, de lecturas o de información reciente.
+// El margen de la telemetría es más laxo que el de conexión porque el
+// muestreo puede ser más lento que los latidos de red.
 // Ventana de mantenimiento. Con una sesión de firmware abierta sobre un nodo,
 // la falta de noticias es lo previsto y no un fallo: el nodo calla sus tramas
 // de diagnóstico mientras baja la imagen, para no perder fragmentos con su
@@ -455,7 +490,7 @@ function chipEstado(n, ult, onlineS) {
   // muestreo. Antes salía de multiplicar por cinco el del enlace, y al pasar
   // ese a medirse contra el latido las dos cosas dejaron de tener relación.
   const datosS = n.datos_s || onlineS * 5;
-  let cls = "off", txt = "Sin señal";
+  let cls = "gris", txt = "Sin conexión";
   // Con sesión abierta, un nodo callado no es un nodo caído.
   const mant = chipMantenimiento(n);
   if (mant && !n.online) return mant;
@@ -463,84 +498,101 @@ function chipEstado(n, ult, onlineS) {
     if (ult && ult.ago_s <= datosS) {
       const canales = ult.channels ?? [];
       const malos = canales.filter((c) => c.st_code);
-      if (!malos.length) { cls = "on"; txt = "En línea"; }
-      else {
+      if (!canales.length) { cls = "gris"; txt = "Sin datos recientes"; }
+      else if (!malos.length) { cls = "on"; txt = "En línea"; }
+      else if (malos.length < canales.length) {
         cls = "ambar";
-        const todos = malos.length === canales.length;
+        txt = "En línea · Algunas lecturas no están disponibles";
+      } else {
         const timeout = malos.every((c) => c.st_name === "timeout");
-        txt = "En línea · " + (todos
-          ? (timeout ? "Sensores sin respuesta" : "Error de lectura")
-          : "Algunas lecturas no están disponibles");
+        cls = "gris";
+        txt = timeout ? "Sensores sin respuesta" : "Sin conexión";
       }
-    } else { cls = "ambar"; txt = "En línea · Sin datos recientes"; }
+    } else { cls = "gris"; txt = "Sin datos recientes"; }
   }
   return { cls, txt };
 }
 
 // Estado por nodo en chips separados (pantalla inicial): enlace LoRa y estado
-// Modbus. El chip Modbus sale de los st_code de la última telemetría (v3.2):
-// sin fallos, "Modbus conectado"; con fallos, el motivo. Cuando el nodo está
-// sin señal no se muestra chip Modbus (no hay dato reciente). El chip
-// NB-IoT/MQTT del supernodo es fase 2 (requiere que el nodo lo reporte).
+// Modbus. El chip Modbus sale de los st_code de la última telemetría (v3.2).
+// NB-IoT y MQTT se muestran por separado porque una red celular registrada no
+// implica que la sesión con el broker esté disponible.
 function chipsNodo(n, ult, onlineS) {
   onlineS = n.online_s || onlineS;
   const datosS = n.datos_s || onlineS * 5;
   const mant = chipMantenimiento(n);
-  // El chip de mantenimiento sustituye al de "sin señal" cuando el nodo calla,
-  // y acompaña al de "en línea" cuando sigue hablando: en los dos casos quien
-  // mire la pantalla sabe que hay una actualización en marcha sobre ese nodo.
+  // El mantenimiento acompaña al estado del enlace. No lo sustituye, porque
+  // la actualización y la comunicación LoRa responden preguntas distintas.
   const chips = [n.online ? { cls: "on", txt: "LoRa: conectado" }
-                          : (mant || { cls: "off", txt: "LoRa: sin señal" })];
-  if (mant && n.online) chips.push(mant);
+                          : { cls: "gris", txt: "LoRa: sin conexión" }];
+  if (mant) chips.push(mant);
   const viaNb = !!(ult && ult.via_nbiot);
-  const mqttFresco = n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
 
-  // Modbus: con datos frescos, sea por LoRa (en línea) o por NB-IoT (failover).
-  if (n.online || viaNb) {
-    if (ult && ult.ago_s <= datosS) {
-      const canales = ult.channels ?? [];
-      const malos = canales.filter((c) => c.st_code);
-      if (!canales.length) {
-        chips.push({ cls: "neutro", txt: "Modbus: sin datos" });
-      } else if (!malos.length) {
-        chips.push({ cls: "on", txt: "Modbus: conectado" });
-      } else {
-        const todos = malos.length === canales.length;
-        const timeout = malos.every((c) => c.st_name === "timeout");
-        chips.push({ cls: "ambar", txt: "Modbus: " + (todos
-          ? (timeout ? "sin respuesta" : "error de lectura")
-          : "algunas lecturas no disponibles") });
-      }
+  if (ult && ult.ago_s <= datosS) {
+    const canales = ult.channels ?? [];
+    const malos = canales.filter((c) => c.st_code);
+    if (!canales.length) {
+      chips.push({ cls: "gris", txt: "Modbus: sin datos recientes" });
+    } else if (!malos.length) {
+      chips.push({ cls: "on", txt: "Modbus: conectado" });
+    } else if (malos.length < canales.length) {
+      chips.push({ cls: "ambar", txt: "Modbus: lecturas parciales" });
     } else {
-      chips.push({ cls: "neutro", txt: "Modbus: sin datos recientes" });
+      const timeout = malos.every((c) => c.st_name === "timeout");
+      chips.push({ cls: "gris", txt: timeout
+        ? "Modbus: sin respuesta" : "Modbus: sin conexión" });
     }
+  } else {
+    chips.push({ cls: "gris", txt: "Modbus: sin datos recientes" });
   }
 
-  // Failover: el dato del nodo llega por NB-IoT. En el propio supernodo esto
-  // ya lo dice el chip NB-IoT+MQTT, así que no se duplica.
-  if (viaNb && !mqttFresco) {
-    chips.push({ cls: "ambar", txt: "NB-IoT: conexión de respaldo" });
-  }
+  const tieneCelular = viaNb || n.nbiot_flags != null
+    || n.nbiot_ago_s != null || n.mqtt_ago_s != null;
+  if (tieneCelular) {
+    const nbFresco = n.nbiot_ago_s != null && n.nbiot_ago_s <= 180;
+    const mqttFresco = n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
+    const reg = n.nbiot_flags != null && (n.nbiot_flags & 0x01) !== 0;
+    const mqtt = n.nbiot_flags != null && (n.nbiot_flags & 0x02) !== 0;
 
-  // NB-IoT/MQTT del supernodo. Fuente primaria: el broker (mqtt_ago_s), que
-  // es el dato real y sobrevive a la caída del LoRa. Respaldo: el heartbeat
-  // por LoRa (nbiot_flags), que puede quedar viejo si el LoRa cae.
-  if (mqttFresco) {
-    chips.push({ cls: "on", txt: "NB-IoT y MQTT: conectados" });
-  } else if (n.nbiot_flags != null) {
-    const fresco = n.nbiot_ago_s != null && n.nbiot_ago_s <= 180;
-    if (!fresco) {
-      chips.push({ cls: "neutro", txt: "NB-IoT: sin datos recientes" });
+    chips.push(!nbFresco
+      ? { cls: "gris", txt: "NB-IoT: sin datos recientes" }
+      : reg ? { cls: "on", txt: "NB-IoT: conectado" }
+            : { cls: "gris", txt: "NB-IoT: sin conexión" });
+
+    if (!nbFresco) {
+      chips.push({ cls: "gris", txt: "MQTT: sin datos recientes" });
+    } else if (!reg) {
+      chips.push({ cls: "gris", txt: "MQTT: no disponible" });
+    } else if (!mqtt) {
+      chips.push({ cls: "gris", txt: "MQTT: sin conexión" });
     } else {
-      const reg = (n.nbiot_flags & 0x01) !== 0;
-      const mqtt = (n.nbiot_flags & 0x02) !== 0;
-      chips.push(reg && mqtt ? { cls: "on", txt: "NB-IoT y MQTT: conectados" }
-               : reg ? { cls: "ambar", txt: "MQTT: sin conexión" }
-               : { cls: "off", txt: "NB-IoT: sin red" });
+      chips.push(mqttFresco
+        ? { cls: "on", txt: "MQTT: conectado" }
+        : { cls: "gris", txt: "MQTT: sin datos recientes" });
     }
   }
   return chips;
 }
+
+let masonryRaf = null;
+function ajustarMasonryTarjetas() {
+  const cont = document.getElementById("tarjetas");
+  if (!cont) return;
+  cont.querySelectorAll(":scope > .tarjeta-nodo").forEach((tarjeta) => {
+    tarjeta.style.gridRowEnd = "auto";
+    const alto = tarjeta.getBoundingClientRect().height + 24;
+    tarjeta.style.gridRowEnd = `span ${Math.max(1, Math.ceil(alto))}`;
+  });
+}
+
+function programarMasonryTarjetas() {
+  if (masonryRaf !== null) cancelAnimationFrame(masonryRaf);
+  masonryRaf = requestAnimationFrame(() => {
+    masonryRaf = null;
+    ajustarMasonryTarjetas();
+  });
+}
+window.addEventListener("resize", programarMasonryTarjetas);
 
 function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const canales = ult ? ult.channels : [];
@@ -549,7 +601,7 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
       ?? catalogoNodo?.reads?.[i];
     const nombre = definicion?.name || c.read_id;
     return `
-    <modulinkr-measurement class="sensor${c.st_code ? " tiene-fallo" : ""}" data-origin="${n.origin}" data-canal="${i}" title="Ver el histórico de ${nombre}">
+    <modulinkr-measurement class="sensor" data-origin="${n.origin}" data-canal="${i}" title="Ver el histórico de ${nombre}">
       ${iconoMdi(iconoMedida(c.read_id))}
       <span class="s-nombre">${nombre}</span>
       ${sparkline(c.serie)}
@@ -635,6 +687,7 @@ async function refrescarRed() {
     estado.nodes.map((n) =>
       tarjetaNodo(n, porOrigen.get(n.origin), estado.online_s,
         catalogosPorOrigen.get(n.origin))).join("");
+  programarMasonryTarjetas();
 
   if (detalleOrigen !== null) pintarDetalle(detalleOrigen);
   // El refresco solo actualiza la cabecera del modal; la gráfica se
@@ -1324,23 +1377,32 @@ let cfgPuerto = null;   // puerto serie del nodo detectado
 // declara (firmware anterior a v3.7) o si no hay nodo detectado.
 let cfgSchemas = "";
 
+let servidorTab = "bd";
+
+function servidorSetTab(tab) {
+  servidorTab = tab === "mqtt" ? "mqtt" : "bd";
+  document.querySelectorAll(".cfg-tab").forEach((boton) => {
+    const activa = boton.dataset.tab === servidorTab;
+    boton.classList.toggle("activa", activa);
+    boton.setAttribute("aria-selected", String(activa));
+    boton.tabIndex = activa ? 0 : -1;
+  });
+  document.getElementById("servidor-panel-bd").hidden = servidorTab !== "bd";
+  document.getElementById("servidor-panel-mqtt").hidden = servidorTab !== "mqtt";
+  if (servidorTab === "bd") bdCargar(); else mqttCargar();
+}
+
 // Panel visible según la subruta: menú, "Configurar nodo", la página USB
 // o la radio LoRa (esta última carga su estado al entrar).
 function cfgRuta() {
-  const sub = location.hash.replace("#/", "").split("/").slice(1).join("/");
-  document.getElementById("cfg-menu").hidden     = sub !== "";
-  document.getElementById("cfg-sub-nodo").hidden = sub !== "nodo";
-  document.getElementById("cfg-usb").hidden      = sub !== "nodo/usb";
+  const solicitada = location.hash.replace("#/", "").split("/").slice(1).join("/");
+  const sub = Object.prototype.hasOwnProperty.call(RUTAS_CONFIG, solicitada) ? solicitada : "";
+  const ruta = RUTAS_CONFIG[sub];
+  Object.values(RUTAS_CONFIG).forEach(({ panel }) => {
+    document.getElementById(panel).hidden = panel !== ruta.panel;
+  });
+  actualizarCabecera(ruta.titulo, ruta.volver);
   if (sub !== "nodo/usb") cfgLocalCerrar();   // cierra el puerto Web Serial al salir
-  document.getElementById("cfg-radio").hidden    = sub !== "radio";
-  document.getElementById("cfg-red-lora").hidden = sub !== "red-lora";
-  document.getElementById("cfg-wifi").hidden     = sub !== "wifi";
-  document.getElementById("cfg-debug").hidden    = sub !== "depuracion";
-  document.getElementById("cfg-zona").hidden     = sub !== "zona";
-  document.getElementById("cfg-bd").hidden       = sub !== "bd";
-  document.getElementById("cfg-mqtt").hidden     = sub !== "mqtt";
-  document.getElementById("cfg-fw").hidden       = sub !== "nodo/firmware";
-  document.getElementById("cfg-form").hidden     = sub !== "nodo/form";
   if (sub === "radio") radioCargar();
   // El panel del cambio coordinado sondea cada pocos segundos, así que su
   // sondeo se para al salir de la página igual que el stream de depuración.
@@ -1350,8 +1412,9 @@ function cfgRuta() {
   // Al salir de depuración se corta el stream SSE abierto.
   if (sub === "depuracion") debugInit(); else debugStop();
   if (sub === "zona") tzCargar();
-  if (sub === "bd") bdCargar();
-  if (sub === "mqtt") mqttCargar();
+  if (sub === "servidor") servidorSetTab(servidorTab);
+  if (sub === "bd") servidorSetTab("bd");
+  if (sub === "mqtt") servidorSetTab("mqtt");
   if (sub === "nodo/firmware") { fwCargar(); bcSondeoArrancar(); }
   else bcSondeoParar();
   if (sub === "nodo/form") formInit();
@@ -1410,7 +1473,7 @@ function cfgDialogo(titulo, texto, botones = {}) {
   dialogo.setAttribute("aria-busy", botones.cancelar || botones.confirmar ||
     botones.cerrar || botones.otroText ? "false" : "true");
   if (dialogo.hidden) cfgDialogoFoco = document.activeElement;
-  ["sidebar", "contenido", "detalle"].forEach((id) => {
+  ["sidebar", "sidebar-fondo", "contenido", "detalle"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.setAttribute("inert", "");
   });
@@ -1423,7 +1486,7 @@ function cfgDialogoCerrar() {
   cfgConfirmarCb = null;
   cfgCancelarCb = null;
   cfgOtroCb = null;
-  ["sidebar", "contenido", "detalle"].forEach((id) => {
+  ["sidebar", "sidebar-fondo", "contenido", "detalle"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.removeAttribute("inert");
   });
@@ -1975,19 +2038,24 @@ async function radioCargar() {
 
     const svcChip = d.service_active
       ? '<span class="chip on">disponible</span>'
-      : '<span class="chip rojo">no disponible</span>';
-    const portChip = d.port
-      ? (d.port_present ? '<span class="chip on">disponible</span>'
-                        : '<span class="chip rojo">no disponible</span>')
-      : '<span class="chip off">sin configurar</span>';
+      : '<span class="chip gris">no disponible</span>';
+    const radioChip = d.port
+      ? (d.port_present ? '<span class="chip on">conectada</span>'
+                        : '<span class="chip gris">sin conexión</span>')
+      : '<span class="chip gris">sin configurar</span>';
+    const puerto = d.port ? d.port.split("/").pop() : "Sin configurar";
     cont.innerHTML = `
       <div class="sensor fila-info">
-        <span class="s-nombre">Gateway</span>
-        <span class="s-valor">${svcChip}</span>
+        <span class="s-nombre">Servicio del gateway</span>
+        ${svcChip}
       </div>
       <div class="sensor fila-info">
-        <span class="s-nombre">Conexión de radio</span>
-        <span class="s-valor" title="${d.port ?? ""}">${d.port ? d.port.split("/").pop() : "Sin conexión"} ${portChip}</span>
+        <span class="s-nombre">Radio LoRa</span>
+        ${radioChip}
+      </div>
+      <div class="sensor fila-info">
+        <span class="s-nombre">Conexión</span>
+        <span class="s-valor" title="${d.port ?? ""}">${puerto}</span>
       </div>`;
 
     const sel = document.getElementById("radio-puertos");
@@ -2132,13 +2200,33 @@ async function tzGuardar() {
 
 // ----- Configuración: base de datos (PostgreSQL de la VM) -----
 
+function bdEstadoHtml(d) {
+  const c = d.config ?? {};
+  if (!c.host) {
+    return '<div class="mensaje mensaje-info"><span class="mensaje-titulo">Base de datos sin configurar</span>'
+         + '<span class="mensaje-detalle">Introduce los datos del servidor para comenzar.</span></div>';
+  }
+  const chip = d.password_set
+    ? '<span class="chip gris">configurada</span>'
+    : '<span class="chip ambar">requiere contraseña</span>';
+  return `<div class="sensor fila-info">
+    <span class="s-nombre">Base de datos</span>${chip}</div>`;
+}
+
 async function bdCargar() {
   const res = document.getElementById("bd-resultado");
   res.textContent = "";
+  const est = document.getElementById("bd-estado");
+  est.innerHTML = '<p class="aviso">Cargando estado...</p>';
   try {
     const r = await fetchApi("/api/db/estado");
     const d = await r.json();
-    if (!r.ok) { res.textContent = d.error ?? "No se pudo cargar la conexión con la base de datos."; return; }
+    if (!r.ok) {
+      est.innerHTML = '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">No se pudo consultar la configuración de la base de datos</span>'
+        + '<span class="mensaje-detalle">Vuelve a intentarlo en unos segundos.</span></div>';
+      return;
+    }
+    est.innerHTML = bdEstadoHtml(d);
     const c = d.config;
     document.getElementById("bd-host").value = c.host ?? "";
     document.getElementById("bd-port").value = c.port ?? 5432;
@@ -2148,7 +2236,10 @@ async function bdCargar() {
     pass.value = "";
     pass.placeholder = d.password_set
     ? "Sin cambios" : "Contraseña necesaria";
-  } catch (e) { res.textContent = textoError(e, "No se pudo cargar la conexión con la base de datos. Inténtalo de nuevo."); }
+  } catch (e) {
+    est.innerHTML = '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">No se pudo consultar la configuración de la base de datos</span>'
+      + '<span class="mensaje-detalle">Vuelve a intentarlo en unos segundos.</span></div>';
+  }
 }
 
 function bdBody() {
@@ -2169,8 +2260,8 @@ async function bdProbar() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(bdBody()) });
     const d = await r.json();
-    res.textContent = r.ok ? "Conexión con la base de datos disponible." : (d.error ?? "No se pudo conectar con la base de datos.");
-  } catch (e) { res.textContent = textoError(e, "No se pudo conectar con la base de datos. Revisa los datos e inténtalo de nuevo."); }
+    res.textContent = r.ok ? "Conexión con la base de datos disponible." : (d.error ?? "No se pudo comprobar la conexión con la base de datos.");
+  } catch (e) { res.textContent = textoError(e, "No se pudo comprobar la conexión con la base de datos. Revisa los datos e inténtalo de nuevo."); }
 }
 
 async function bdGuardar() {
@@ -2191,7 +2282,7 @@ async function bdGuardar() {
 
 function mqttEstadoHtml(d) {
   if (d.enabled == null) {
-    return '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">No se pudo consultar la conexión MQTT</span>'
+    return '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">No se pudo consultar el estado de MQTT</span>'
          + '<span class="mensaje-detalle">Vuelve a intentarlo en unos segundos.</span></div>';
   }
   if (!d.enabled) {
@@ -2213,7 +2304,7 @@ async function mqttCargar() {
   try {
     const r = await fetchApi("/api/mqtt/estado");
     const d = await r.json();
-    if (!r.ok) { est.innerHTML = `<p class="aviso">${d.error ?? "No se pudo cargar la conexión MQTT."}</p>`; return; }
+    if (!r.ok) { est.innerHTML = mqttEstadoHtml({ enabled: null }); return; }
     est.innerHTML = mqttEstadoHtml(d);
     const c = d.config;
     document.getElementById("mqtt-host").value = c.host ?? "";
@@ -2226,7 +2317,7 @@ async function mqttCargar() {
     pass.value = "";
     pass.placeholder = d.password_set
       ? "Sin cambios" : "Contraseña necesaria";
-  } catch (e) { est.innerHTML = `<p class="aviso mal">${textoError(e, "No se pudo cargar la conexión MQTT. Inténtalo de nuevo.")}</p>`; }
+  } catch (e) { est.innerHTML = mqttEstadoHtml({ enabled: null }); }
 }
 
 function mqttBody() {
@@ -2249,8 +2340,8 @@ async function mqttProbar() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(mqttBody()) });
     const d = await r.json();
-    res.textContent = r.ok ? "Conexión MQTT disponible." : (d.error ?? "No se pudo establecer la conexión MQTT.");
-  } catch (e) { res.textContent = textoError(e, "No se pudo establecer la conexión MQTT. Revisa los datos e inténtalo de nuevo."); }
+    res.textContent = r.ok ? "Conexión MQTT disponible." : (d.error ?? "No se pudo comprobar la conexión con el servidor MQTT.");
+  } catch (e) { res.textContent = textoError(e, "No se pudo comprobar la conexión con el servidor MQTT. Revisa los datos e inténtalo de nuevo."); }
 }
 
 async function mqttGuardar() {
@@ -3051,6 +3142,20 @@ document.getElementById("bd-probar").addEventListener("click", bdProbar);
 document.getElementById("bd-guardar").addEventListener("click", bdGuardar);
 document.getElementById("mqtt-probar").addEventListener("click", mqttProbar);
 document.getElementById("mqtt-guardar").addEventListener("click", mqttGuardar);
+document.querySelectorAll(".cfg-tab").forEach((boton) => {
+  boton.addEventListener("click", () => servidorSetTab(boton.dataset.tab));
+  boton.addEventListener("keydown", (evento) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(evento.key)) return;
+    const tabs = [...document.querySelectorAll(".cfg-tab")];
+    const actual = tabs.indexOf(boton);
+    const siguiente = evento.key === "Home" ? 0
+      : evento.key === "End" ? tabs.length - 1
+      : (actual + (evento.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    evento.preventDefault();
+    tabs[siguiente].focus();
+    servidorSetTab(tabs[siguiente].dataset.tab);
+  });
+});
 
 // ----- Configurar red WiFi (NetworkManager en el Pi) -----
 
@@ -3205,7 +3310,11 @@ function debugSetTab(tab) {
   debugStop();
   dbgTab = tab;
   document.querySelectorAll(".dbg-tab").forEach((b) => {
-    b.classList.toggle("activa", b.dataset.tab === tab);
+    const activa = b.dataset.tab === tab;
+    b.classList.toggle("activa", activa);
+    b.setAttribute("aria-selected", String(activa));
+    b.tabIndex = activa ? 0 : -1;
+    if (activa) document.getElementById("dbg-panel").setAttribute("aria-labelledby", b.id);
   });
   dbgSerialCtrls();
   document.getElementById("dbg-nodo").hidden = tab !== "modbus";
@@ -3372,6 +3481,17 @@ function debugAppend(line) {
 
 document.querySelectorAll(".dbg-tab").forEach((b) => {
   b.addEventListener("click", () => debugSetTab(b.dataset.tab));
+  b.addEventListener("keydown", (evento) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(evento.key)) return;
+    const tabs = [...document.querySelectorAll(".dbg-tab")];
+    const actual = tabs.indexOf(b);
+    const siguiente = evento.key === "Home" ? 0
+      : evento.key === "End" ? tabs.length - 1
+      : (actual + (evento.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    evento.preventDefault();
+    tabs[siguiente].focus();
+    debugSetTab(tabs[siguiente].dataset.tab);
+  });
 });
 // Cambiar la fuente detiene un monitor en curso y ajusta los controles.
 document.getElementById("dbg-fuente").addEventListener("change", () => {
@@ -3848,31 +3968,32 @@ const REG32 = new Set(["uint32", "int32", "float32"]);
 
 function readRowHtml(bits) {
   const reg = bits ? "" : `
-    <select data-f="type" class="fin-s">
+    <select data-f="type" class="fin-s" aria-label="Tipo de dato">
       <option value="uint16">uint16</option><option value="int16">int16</option>
       <option value="uint32">uint32</option><option value="int32">int32</option>
       <option value="float32">float32</option>
     </select>
-    <select data-f="byte_order" class="fin-s fbo" title="Orden de bytes (solo 32 bits)">
+    <select data-f="byte_order" class="fin-s fbo" title="Orden de bytes (solo 32 bits)"
+            aria-label="Orden de bytes">
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
-    <input data-f="scale" class="fin-n" type="number" step="any" placeholder="Escala">
-    <input data-f="offset" class="fin-n" type="number" step="any" placeholder="Desplazamiento">`;
+    <input data-f="scale" class="fin-n" type="number" step="any" placeholder="Escala" aria-label="Escala">
+    <input data-f="offset" class="fin-n" type="number" step="any" placeholder="Desplazamiento" aria-label="Desplazamiento">`;
   return `<div class="frow">
     <input data-f="id" class="fin-id" placeholder="ID *" maxlength="8" aria-label="Identificador de la medida">
     <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la medida">
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
     <input data-f="count" class="fin-n" type="number" min="1" max="125" value="1" title="Cantidad" aria-label="Cantidad de registros">
     ${reg}
-    <input data-f="unit" class="fin-u" placeholder="Unidad">
+    <input data-f="unit" class="fin-u" placeholder="Unidad" aria-label="Unidad">
     <button type="button" class="frow-del" title="Eliminar medida" aria-label="Eliminar medida">−</button>
   </div>`;
 }
 
 function writeRowHtml() {
   return `<div class="frow">
-    <select data-f="function" class="fin-s">
+    <select data-f="function" class="fin-s" aria-label="Función de escritura">
       <option value="write_single_coil">Bobina</option>
       <option value="write_single_register">Registro</option>
       <option value="write_multiple_coils">Varias bobinas</option>
@@ -3882,19 +4003,19 @@ function writeRowHtml() {
     <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la salida">
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
     <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1" aria-label="Cantidad de registros">
-    <select data-f="type" class="fin-s freg">
+    <select data-f="type" class="fin-s freg" aria-label="Tipo de dato">
       <option value="">Tipo</option>
       <option value="uint16">uint16</option><option value="int16">int16</option>
       <option value="uint32">uint32</option><option value="int32">int32</option>
       <option value="float32">float32</option>
     </select>
-    <select data-f="byte_order" class="fin-s freg fbo">
+    <select data-f="byte_order" class="fin-s freg fbo" aria-label="Orden de bytes">
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
-    <input data-f="scale" class="fin-n freg" type="number" step="any" placeholder="Escala">
-    <input data-f="offset" class="fin-n freg" type="number" step="any" placeholder="Desplazamiento">
-    <input data-f="unit" class="fin-u" placeholder="Unidad">
+    <input data-f="scale" class="fin-n freg" type="number" step="any" placeholder="Escala" aria-label="Escala">
+    <input data-f="offset" class="fin-n freg" type="number" step="any" placeholder="Desplazamiento" aria-label="Desplazamiento">
+    <input data-f="unit" class="fin-u" placeholder="Unidad" aria-label="Unidad">
     <button type="button" class="frow-del" title="Eliminar salida" aria-label="Eliminar salida">−</button>
   </div>`;
 }
@@ -3918,7 +4039,7 @@ function deviceHtml(idx) {
       <label class="cfg-campo"><span>Nueva dirección Modbus</span><input data-fd="desired_slave_id" type="number" min="1" max="247" value="1"></label>
     </div>
     <details class="form-avz">
-      <summary>Avanzado del dispositivo</summary>
+      <summary>Configuración avanzada del dispositivo</summary>
       <div class="cfg-form">
         <div class="fchange" hidden>
           <label class="cfg-campo"><span>Función para cambiar la dirección</span>
@@ -5128,7 +5249,7 @@ async function formCheckFw(node) {
     formMode = "config";
     est.className = "aviso";
     est.textContent = fw.startsWith("ModuLinkr")
-      ? "Hay una actualización disponible. Instálala desde Actualizar nodos antes de continuar."
+      ? "Hay una actualización disponible. Instálala desde Actualizar firmware de nodos antes de continuar."
       : "El nodo necesita una actualización antes de poder configurarse.";
     formDestino(fw.startsWith("ModuLinkr"));
     return;
