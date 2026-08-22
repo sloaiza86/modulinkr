@@ -421,8 +421,43 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 
 /* ----- Topología ----- */
 
-.card-mapa { padding: 0.4rem; margin-bottom: 0.6rem; }
+.card-mapa { position: relative; padding: 0.4rem; margin-bottom: 0.6rem; }
 #mapa { height: 72vh; }
+.topologia-restablecer {
+  position: absolute; z-index: 2; top: 12px; right: 12px;
+  width: 40px; height: 40px; background: var(--card);
+  border: 1px solid var(--border); box-shadow: var(--sombra);
+}
+.topologia-restablecer:disabled { opacity: 0.45; cursor: default; }
+.topologia-restablecer modulinkr-icon {
+  width: 19px; height: 19px; transform: translate(-0.5px, 0.5px);
+}
+.topologia-copy { margin: 0.7rem 0 0.45rem; }
+.topologia-leyenda {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.1rem;
+  color: var(--dim); font-size: 0.82rem;
+}
+.topologia-clave { display: inline-flex; align-items: center; gap: 0.4rem; }
+.topologia-tipo {
+  display: inline-grid; place-items: center; width: 32px; height: 32px;
+  flex: 0 0 32px;
+  border-radius: 50%; color: var(--ok); background: var(--ok-suave);
+}
+.topologia-tipo.gateway, .topologia-tipo.cellular {
+  color: var(--accent); background: var(--accent-suave);
+}
+.topologia-tipo.cellular {
+  background-color: transparent;
+  background-position: center; background-repeat: no-repeat; background-size: contain;
+}
+.topologia-tipo modulinkr-icon { width: 15px; height: 15px; }
+.topologia-tipo.gateway modulinkr-icon,
+.topologia-tipo.cellular modulinkr-icon { width: 17px; height: 17px; }
+.topologia-linea {
+  display: inline-block; width: 30px; border-top: 2px solid var(--dim);
+}
+.topologia-linea.nbiot { border-color: var(--ok); }
+.topologia-linea.inactiva { border-top: 2px dashed var(--off); }
 
 /* ----- Datos ----- */
 

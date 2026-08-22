@@ -437,24 +437,61 @@ def network_state() -> dict:
 
 
 def topology() -> dict:
-    """Grafo para /api/topologia: nodos (gateway incluido como raíz) y
-    aristas hijo a padre según el último eco de BEACON de cada nodo."""
+    """Grafo para /api/topologia con la ruta activa de cada nodo.
+
+    LoRa se representa contra el gateway y NB-IoT contra la red celular. Si
+    ambas rutas dejan de estar frescas, se conserva como línea discontinua la
+    que haya recibido la comunicación más reciente. No se representa a la vez
+    una segunda ruta que ya no sea la última conocida.
+    """
     nodes = network_state()["nodes"]
     graph_nodes = [{"id": GATEWAY_ID, "label": "Gateway", "role": "gateway",
                     "online": True}]
     edges = []
+    hay_ruta_nbiot = False
     for n in nodes:
+        es_supernodo = any(n.get(campo) is not None for campo in (
+            "nbiot_flags", "nbiot_csq", "nbiot_ago_s", "mqtt_ago_s"))
+        flags = n.get("nbiot_flags")
+        via_nbiot = (
+            not n["online"]
+            and flags is not None
+            and (flags & 0x03) == 0x03
+            and n.get("nbiot_ago_s") is not None
+            and n["nbiot_ago_s"] <= 180
+            and n.get("mqtt_ago_s") is not None
+            and n["mqtt_ago_s"] <= 180
+        )
+        mqtt_ago = n.get("mqtt_ago_s")
+        lora_ago = n.get("ago_s")
+        ultima_via_nbiot = (
+            not n["online"]
+            and mqtt_ago is not None
+            and (lora_ago is None or mqtt_ago < lora_ago)
+        )
+        ruta_nbiot = via_nbiot or ultima_via_nbiot
+        hay_ruta_nbiot = hay_ruta_nbiot or ruta_nbiot
         graph_nodes.append({
             "id":     n["origin"],
             "label":  n["name"] or f"nodo {n['origin']}",
-            "role":   "node",
-            "online": n["online"],
+            "role":   "supernode" if es_supernodo else "node",
+            "online": n["online"] or via_nbiot,
+            "lora_online": n["online"],
+            "transport": "nbiot" if ruta_nbiot else "lora",
             "rssi":   n["rssi"],
             "hop":    n["hop_count"],
         })
-        if n["parent_id"] is not None:
+        if ruta_nbiot:
+            edges.append({"from": n["origin"], "to": "cellular",
+                          "online": via_nbiot, "transport": "nbiot"})
+        elif n["parent_id"] is not None:
             edges.append({"from": n["origin"], "to": n["parent_id"],
-                          "online": n["online"]})
+                          "online": n["online"], "transport": "lora"})
+    if hay_ruta_nbiot:
+        graph_nodes.insert(1, {
+            "id": "cellular", "label": "Red celular", "role": "cellular",
+            "online": True,
+        })
     return {"nodes": graph_nodes, "edges": edges}
 
 

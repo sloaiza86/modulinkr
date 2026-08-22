@@ -10,6 +10,7 @@
 const CSS = getComputedStyle(document.documentElement);
 const COLOR = {
   accent: CSS.getPropertyValue("--accent").trim(),
+  accentSoft: CSS.getPropertyValue("--accent-suave").trim(),
   ok:     CSS.getPropertyValue("--ok").trim(),
   off:    CSS.getPropertyValue("--off").trim(),
   dim:    CSS.getPropertyValue("--dim").trim(),
@@ -423,7 +424,7 @@ function estadoGateway(data) {
 }
 
 function tarjetaGateway(data) {
-  const online = data.nodes.filter((n) => n.online).length;
+  const online = data.nodes.filter((n) => nodoDisponible(n)).length;
   const total = data.nodes.length;
   const e = estadoGateway(data);
   const chips = e.chips
@@ -493,8 +494,9 @@ function chipEstado(n, ult, onlineS) {
   let cls = "gris", txt = "Sin conexión";
   // Con sesión abierta, un nodo callado no es un nodo caído.
   const mant = chipMantenimiento(n);
-  if (mant && !n.online) return mant;
-  if (n.online) {
+  const enlaceDisponible = nodoDisponible(n, ult);
+  if (mant && !enlaceDisponible) return mant;
+  if (enlaceDisponible) {
     if (ult && ult.ago_s <= datosS) {
       const canales = ult.channels ?? [];
       const malos = canales.filter((c) => c.st_code);
@@ -574,6 +576,18 @@ function chipsNodo(n, ult, onlineS) {
   return chips;
 }
 
+function nodoPorNbiot(n, ult = null) {
+  if (ult?.via_nbiot) return true;
+  const flags = n.nbiot_flags;
+  return !n.online && flags != null && (flags & 0x03) === 0x03
+    && n.nbiot_ago_s != null && n.nbiot_ago_s <= 180
+    && n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
+}
+
+function nodoDisponible(n, ult = null) {
+  return !!n.online || nodoPorNbiot(n, ult);
+}
+
 let masonryRaf = null;
 function ajustarMasonryTarjetas() {
   const cont = document.getElementById("tarjetas");
@@ -596,6 +610,11 @@ window.addEventListener("resize", programarMasonryTarjetas);
 
 function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const canales = ult ? ult.channels : [];
+  const esSupernodo = n.type === "super_node" || !!ult?.via_nbiot
+    || n.nbiot_flags != null || n.nbiot_ago_s != null || n.mqtt_ago_s != null;
+  const iconoNodo = esSupernodo
+    ? '<modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon>'
+    : iconoMdi("radio-handheld");
   const filas = canales.map((c, i) => {
     const definicion = catalogoNodo?.reads?.find((r) => r.id === c.read_id)
       ?? catalogoNodo?.reads?.[i];
@@ -616,12 +635,13 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const medida = ult
     ? `Última medida hace ${fmtAgo(ult.ago_s)}` : "Sin medidas recibidas";
   const estado = chipEstado(n, ult, onlineS);
+  const disponible = nodoDisponible(n, ult);
   const detalle = estado.cls === "on" ? ""
-    : (n.online && ult ? medida : visto);
+    : (disponible && ult ? medida : visto);
   return `
-  <modulinkr-node-card class="tarjeta-nodo${n.online ? "" : " nodo-offline"}" data-origin="${n.origin}">
+  <modulinkr-node-card class="tarjeta-nodo${disponible ? "" : " nodo-offline"}" data-origin="${n.origin}">
     <div class="tn-cabecera">
-      <div class="tn-icono ${n.online ? "" : "off"}">${iconoMdi("memory")}</div>
+      <div class="tn-icono ${disponible ? "" : "off"}">${iconoNodo}</div>
       <div class="tn-info">
         <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
         ${detalle ? `<div class="tn-sub">${detalle}</div>` : ""}
@@ -638,7 +658,7 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
 function pintarBadge(data) {
   const cabecera = document.querySelector("modulinkr-app-header");
   if (!data || !data.nodes.length) { cabecera.setNetworkStatus(0, 0); return; }
-  const online = data.nodes.filter((n) => n.online).length;
+  const online = data.nodes.filter((n) => nodoDisponible(n)).length;
   const total = data.nodes.length;
   cabecera.setNetworkStatus(online, total);
 }
@@ -962,7 +982,326 @@ document.addEventListener("keydown", (e) => {
 
 // ----- Vista de topología (vis-network, estilo mapa Zigbee2MQTT) -----
 
-let red = null;  // instancia vis.Network
+const ICONOS_TOPOLOGIA = {
+  gateway: "M20.2,5.9L21,5.1C19.6,3.7 17.8,3 16,3C14.2,3 12.4,3.7 11,5.1L11.8,5.9C13,4.8 14.5,4.2 16,4.2C17.5,4.2 19,4.8 20.2,5.9M19.3,6.7C18.4,5.8 17.2,5.3 16,5.3C14.8,5.3 13.6,5.8 12.7,6.7L13.5,7.5C14.2,6.8 15.1,6.5 16,6.5C16.9,6.5 17.8,6.8 18.5,7.5L19.3,6.7M19,13H17V9H15V13H5A2,2 0 0,0 3,15V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V15A2,2 0 0,0 19,13M8,18H6V16H8V18M11.5,18H9.5V16H11.5V18M15,18H13V16H15V18Z",
+  cellular: "M4,6V4H4.1C12.9,4 20,11.1 20,19.9V20H18V19.9C18,12.2 11.8,6 4,6M4,10V8A12,12 0 0,1 16,20H14A10,10 0 0,0 4,10M4,14V12A8,8 0 0,1 12,20H10A6,6 0 0,0 4,14M4,16A4,4 0 0,1 8,20H4V16Z",
+  node: "M9,2A1,1 0 0,0 8,3C8,8.67 8,14.33 8,20C8,21.11 8.89,22 10,22H15C16.11,22 17,21.11 17,20V9C17,7.89 16.11,7 15,7H10V3A1,1 0 0,0 9,2M10,9H15V13H10V9Z",
+  supernode: "M9,2A1,1 0 0,0 8,3C8,8.67 8,14.33 8,20C8,21.11 8.89,22 10,22H15C16.11,22 17,21.11 17,20V9C17,7.89 16.11,7 15,7H10V3A1,1 0 0,0 9,2M10,9H15V13H10V9ZM16,2A1,1 0 0,0 15,3V9H17V3A1,1 0 0,0 16,2Z",
+};
+
+let red = null;
+let nodosTopologia = null;
+let aristasTopologia = null;
+let grafoTopologia = null;
+let topologiaPersonalizada = false;
+let topologiaResizeObserver = null;
+let topologiaResizeTimer = null;
+let anchoTopologiaObservado = 0;
+let imagenCelularTopologia = null;
+let cargaImagenCelularTopologia = null;
+
+function aplicarImagenCelularEnLeyenda() {
+  const leyenda = document.querySelector(".topologia-tipo.cellular");
+  if (!leyenda || !imagenCelularTopologia) return;
+  leyenda.style.backgroundImage = `url("${imagenCelularTopologia}")`;
+}
+
+function prepararImagenCelularTopologia() {
+  if (imagenCelularTopologia) {
+    aplicarImagenCelularEnLeyenda();
+    return Promise.resolve();
+  }
+  if (cargaImagenCelularTopologia) return cargaImagenCelularTopologia;
+  cargaImagenCelularTopologia = new Promise((resolve) => {
+    const origen = new Image();
+    origen.onload = () => {
+      const lado = 208;
+      const lienzoMarca = document.createElement("canvas");
+      lienzoMarca.width = origen.naturalWidth;
+      lienzoMarca.height = origen.naturalHeight;
+      const marca = lienzoMarca.getContext("2d");
+      marca.drawImage(origen, 0, 0);
+      const pixeles = marca.getImageData(
+        0, 0, lienzoMarca.width, lienzoMarca.height).data;
+      let izquierda = lienzoMarca.width;
+      let arriba = lienzoMarca.height;
+      let derecha = -1;
+      let abajo = -1;
+      for (let y = 0; y < lienzoMarca.height; y += 1) {
+        for (let x = 0; x < lienzoMarca.width; x += 1) {
+          if (pixeles[(y * lienzoMarca.width + x) * 4 + 3] <= 8) continue;
+          izquierda = Math.min(izquierda, x);
+          arriba = Math.min(arriba, y);
+          derecha = Math.max(derecha, x);
+          abajo = Math.max(abajo, y);
+        }
+      }
+      if (derecha < izquierda || abajo < arriba) {
+        izquierda = 0;
+        arriba = 0;
+        derecha = lienzoMarca.width - 1;
+        abajo = lienzoMarca.height - 1;
+      }
+      marca.globalCompositeOperation = "source-in";
+      marca.fillStyle = COLOR.accent;
+      marca.fillRect(0, 0, lienzoMarca.width, lienzoMarca.height);
+
+      const lienzo = document.createElement("canvas");
+      lienzo.width = lado;
+      lienzo.height = lado;
+      const contexto = lienzo.getContext("2d");
+      contexto.fillStyle = COLOR.accentSoft;
+      contexto.beginPath();
+      contexto.arc(lado / 2, lado / 2, lado / 2 - 4, 0, Math.PI * 2);
+      contexto.fill();
+      contexto.imageSmoothingEnabled = true;
+      contexto.imageSmoothingQuality = "high";
+      const anchoMarca = derecha - izquierda + 1;
+      const altoMarca = abajo - arriba + 1;
+      const escala = Math.min(168 / anchoMarca, 100 / altoMarca);
+      const anchoDestino = anchoMarca * escala;
+      const altoDestino = altoMarca * escala;
+      contexto.drawImage(
+        lienzoMarca,
+        izquierda, arriba, anchoMarca, altoMarca,
+        (lado - anchoDestino) / 2,
+        (lado - altoDestino) / 2,
+        anchoDestino, altoDestino);
+      imagenCelularTopologia = lienzo.toDataURL("image/png");
+      aplicarImagenCelularEnLeyenda();
+      resolve();
+    };
+    origen.onerror = () => resolve();
+    origen.src = "/static/img/technology/nbiot-connected.png";
+  });
+  return cargaImagenCelularTopologia;
+}
+
+function imagenTopologia(rol, online) {
+  if (rol === "cellular" && imagenCelularTopologia) {
+    return imagenCelularTopologia;
+  }
+  const infraestructura = rol === "gateway" || rol === "cellular";
+  const lado = rol === "gateway" ? 56 : rol === "cellular" ? 52 : 48;
+  const icono = rol === "gateway" ? 26 : 24;
+  const color = infraestructura ? COLOR.accent : (online ? COLOR.ok : COLOR.off);
+  const opacidad = infraestructura ? 0.09 : (online ? 0.12 : 0.16);
+  const componentes = color.replace("#", "").match(/.{2}/g)
+    .map((componente) => parseInt(componente, 16));
+  const fondo = `rgb(${componentes.map((componente) =>
+    Math.round(255 + (componente - 255) * opacidad)).join(", ")})`;
+  const escala = icono / 24;
+  const margen = (lado - icono) / 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${lado} ${lado}"><circle cx="${lado / 2}" cy="${lado / 2}" r="${lado / 2 - 1}" fill="${fondo}"/><path d="${ICONOS_TOPOLOGIA[rol]}" fill="${color}" transform="translate(${margen} ${margen}) scale(${escala})"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function posicionesInicialesTopologia(g) {
+  const anchoMapa = document.getElementById("mapa")?.clientWidth || 1024;
+  const porId = new Map(g.nodes.map((n) => [n.id, n]));
+  const padres = new Map(g.edges.map((e) => [e.from, e.to]));
+  const accesos = g.nodes.filter((n) => ["gateway", "cellular"].includes(n.role))
+    .sort((a, b) => (a.role === "gateway" ? -1 : 1)
+      - (b.role === "gateway" ? -1 : 1));
+  const posiciones = new Map();
+  const separacionAccesos = anchoMapa < 600 ? 190 : anchoMapa < 900 ? 320 : 500;
+  accesos.forEach((n, indice) => posiciones.set(n.id, {
+    x: (indice - (accesos.length - 1) / 2) * separacionAccesos,
+    y: 0,
+  }));
+
+  const accesoDe = (id) => {
+    const visitados = new Set();
+    let actual = id;
+    while (porId.has(actual) && !visitados.has(actual)) {
+      visitados.add(actual);
+      const nodo = porId.get(actual);
+      if (["gateway", "cellular"].includes(nodo.role)) return nodo.id;
+      if (!padres.has(actual)) return null;
+      actual = padres.get(actual);
+    }
+    return null;
+  };
+
+  accesos.forEach((acceso) => {
+    const porNivel = new Map();
+    g.nodes.filter((n) => !["gateway", "cellular"].includes(n.role)
+      && accesoDe(n.id) === acceso.id).forEach((n) => {
+      const nivel = Math.max(1,
+        Number.isFinite(Number(n.hop)) ? Number(n.hop) : 1);
+      if (!porNivel.has(nivel)) porNivel.set(nivel, []);
+      porNivel.get(nivel).push(n);
+    });
+    const centroX = posiciones.get(acceso.id)?.x || 0;
+    const columnasMaximas = anchoMapa < 600 ? 2 : anchoMapa < 900 ? 3 : 4;
+    const separacionX = anchoMapa < 600 ? 120 : anchoMapa < 900 ? 145 : 175;
+    const separacionY = anchoMapa < 600 ? 118 : 128;
+    let filaGlobal = 0;
+    [...porNivel.entries()].sort(([a], [b]) => a - b)
+      .forEach(([, elementos]) => {
+        elementos.sort((a, b) => String(a.label).localeCompare(String(b.label), "es"));
+        const columnas = Math.min(columnasMaximas, elementos.length);
+        elementos.forEach((n, indice) => {
+          const fila = Math.floor(indice / columnas);
+          const columna = indice % columnas;
+          const elementosFila = Math.min(columnas,
+            elementos.length - fila * columnas);
+          posiciones.set(n.id, {
+            x: centroX + (columna - (elementosFila - 1) / 2) * separacionX,
+            y: 150 + (filaGlobal + fila) * separacionY,
+          });
+        });
+        filaGlobal += Math.ceil(elementos.length / columnas);
+      });
+  });
+  return posiciones;
+}
+
+function nodoVisualTopologia(n, posicion = null) {
+  const rol = ["gateway", "cellular", "supernode"].includes(n.role)
+    ? n.role : "node";
+  const item = {
+    id: n.id,
+    label: n.label,
+    shape: "image",
+    image: imagenTopologia(rol, n.online),
+    size: rol === "gateway" ? 28 : rol === "cellular" ? 26 : 24,
+    font: {
+      color: COLOR.text,
+      size: 14,
+      face: "system-ui",
+      vadjust: 8,
+      strokeWidth: 5,
+      strokeColor: "#ffffff",
+    },
+    chosen: false,
+    opacity: 1,
+  };
+  if (posicion) Object.assign(item, posicion, { fixed: { x: false, y: true } });
+  return item;
+}
+
+function aristaVisualTopologia(e) {
+  const porNbiot = e.transport === "nbiot";
+  const color = porNbiot ? COLOR.ok : e.online ? COLOR.dim : COLOR.off;
+  const opacidad = e.online ? 0.72 : 0.58;
+  const ancho = e.online ? 1.8 : 1.5;
+  return {
+    id: `${e.from}:${e.to}`,
+    from: e.from,
+    to: e.to,
+    arrows: { to: { enabled: true, scaleFactor: 0.38, type: "arrow" } },
+    arrowStrikethrough: false,
+    color: { color, hover: color, highlight: color, opacity: opacidad },
+    width: ancho,
+    dashes: e.online ? false : [7, 6],
+    smooth: false,
+    chosen: false,
+  };
+}
+
+function opcionesFisicaTopologia() {
+  const anchoMapa = document.getElementById("mapa")?.clientWidth || 1024;
+  const compacta = anchoMapa < 600;
+  const intermedia = anchoMapa < 900;
+  return {
+    enabled: true,
+    solver: "forceAtlas2Based",
+    stabilization: { enabled: true, iterations: 110, updateInterval: 25 },
+    forceAtlas2Based: {
+      gravitationalConstant: compacta ? -26 : intermedia ? -34 : -42,
+      centralGravity: compacta ? 0.006 : intermedia ? 0.004 : 0.003,
+      springLength: compacta ? 108 : intermedia ? 142 : 180,
+      springConstant: 0.052,
+      damping: 0.18,
+      avoidOverlap: 0.8,
+    },
+  };
+}
+
+function encuadrarTopologia(animar = true) {
+  if (!red || !nodosTopologia) return;
+  const anchoMapa = document.getElementById("mapa")?.clientWidth || 1024;
+  const zoomMinimo = anchoMapa < 600 ? 0.82 : anchoMapa < 900 ? 0.74 : 0.64;
+  red.fit({
+    nodes: nodosTopologia.getIds(),
+    minZoomLevel: zoomMinimo,
+    maxZoomLevel: 1,
+    animation: animar ? { duration: 420, easingFunction: "easeInOutQuad" } : false,
+  });
+}
+
+function estabilizarTopologia({ animar = true } = {}) {
+  if (!red || !nodosTopologia) return;
+  const roles = new Map((grafoTopologia?.nodes || []).map((n) => [n.id, n.role]));
+  const padres = new Map((grafoTopologia?.edges || []).map((e) => [e.from, e.to]));
+  const conectadoACelular = (id) => {
+    const visitados = new Set();
+    let actual = id;
+    while (padres.has(actual) && !visitados.has(actual)) {
+      visitados.add(actual);
+      actual = padres.get(actual);
+      if (roles.get(actual) === "cellular") return true;
+    }
+    return false;
+  };
+  nodosTopologia.update(nodosTopologia.getIds().map((id) => {
+    const infraestructura = ["gateway", "cellular"].includes(roles.get(id));
+    return {
+      id,
+      fixed: {
+        x: infraestructura || conectadoACelular(id),
+        y: true,
+      },
+    };
+  }));
+  red.setOptions({ physics: opcionesFisicaTopologia() });
+  red.once("stabilized", () => {
+    red.stopSimulation();
+    red.setOptions({ physics: { enabled: false } });
+    const posiciones = posicionesInicialesTopologia(grafoTopologia);
+    nodosTopologia.update(nodosTopologia.getIds().map((id) => ({
+      id,
+      ...posiciones.get(id),
+      fixed: { x: false, y: false },
+    })));
+    requestAnimationFrame(() => encuadrarTopologia(animar));
+  });
+  red.stabilize(140);
+}
+
+function restablecerTopologia({ animar = true } = {}) {
+  if (!red || !nodosTopologia || !grafoTopologia) return;
+  topologiaPersonalizada = false;
+  const posiciones = posicionesInicialesTopologia(grafoTopologia);
+  nodosTopologia.update(grafoTopologia.nodes.map((n) => ({
+    id: n.id,
+    ...posiciones.get(n.id),
+    fixed: { x: false, y: true },
+  })));
+  estabilizarTopologia({ animar });
+}
+
+function observarTamanoTopologia() {
+  const mapa = document.getElementById("mapa");
+  if (!mapa || topologiaResizeObserver || !("ResizeObserver" in window)) return;
+  anchoTopologiaObservado = mapa.clientWidth;
+  topologiaResizeObserver = new ResizeObserver(([entrada]) => {
+    const nuevoAncho = Math.round(entrada.contentRect.width);
+    if (Math.abs(nuevoAncho - anchoTopologiaObservado) < 12) return;
+    anchoTopologiaObservado = nuevoAncho;
+    clearTimeout(topologiaResizeTimer);
+    topologiaResizeTimer = setTimeout(() => {
+      if (!red) return;
+      if (topologiaPersonalizada) encuadrarTopologia(false);
+      else restablecerTopologia({ animar: false });
+    }, 220);
+  });
+  topologiaResizeObserver.observe(mapa);
+}
+
+document.getElementById("topologia-restablecer")?.addEventListener(
+  "click", restablecerTopologia);
 
 async function refrescarMapa() {
   let r;
@@ -971,32 +1310,64 @@ async function refrescarMapa() {
   } catch (e) { return; }
   if (!r.ok) return;
   const g = await r.json();
+  await prepararImagenCelularTopologia();
+  grafoTopologia = g;
+  const posiciones = posicionesInicialesTopologia(g);
+  const mapa = document.getElementById("mapa");
+  const equipos = g.nodes.filter((n) => !["gateway", "cellular"].includes(n.role));
+  mapa.setAttribute("aria-label", `Topología con ${equipos.length} ${equipos.length === 1 ? "equipo" : "equipos"}. ${equipos.map((n) => n.transport === "nbiot" ? `${n.label}: en línea por NB-IoT; LoRa sin conexión` : `${n.label}: ${n.online ? "en línea por LoRa" : "sin actividad reciente"}`).join(". ")}`);
 
-  const nodes = g.nodes.map((n) => ({
-    id: n.id,
-    label: n.label + (n.hop != null ? `\nhop ${n.hop}` : ""),
-    shape: n.role === "gateway" ? "hexagon" : "dot",
-    size: n.role === "gateway" ? 28 : 16,
-    color: n.role === "gateway" ? COLOR.accent : (n.online ? COLOR.ok : COLOR.off),
-    font: { color: COLOR.text },
-  }));
-  const edges = g.edges.map((e) => ({
-    from: e.from, to: e.to, arrows: "to",
-    color: { color: e.online ? COLOR.ok : COLOR.border },
-    width: e.online ? 2 : 1,
-  }));
-
-  const data = {
-    nodes: new vis.DataSet(nodes),
-    edges: new vis.DataSet(edges),
-  };
   if (red === null) {
-    red = new vis.Network(document.getElementById("mapa"), data, {
-      physics: { solver: "forceAtlas2Based", stabilization: { iterations: 120 } },
-      interaction: { hover: true },
+    nodosTopologia = new vis.DataSet(g.nodes.map((n) =>
+      nodoVisualTopologia(n, posiciones.get(n.id))));
+    aristasTopologia = new vis.DataSet(g.edges.map(aristaVisualTopologia));
+    red = new vis.Network(mapa, {
+      nodes: nodosTopologia,
+      edges: aristasTopologia,
+    }, {
+      layout: { improvedLayout: false },
+      physics: opcionesFisicaTopologia(),
+      interaction: {
+        hover: false,
+        dragNodes: true,
+        dragView: true,
+        zoomView: true,
+      },
     });
+    red.on("dragStart", ({ nodes }) => {
+      if (!nodes.length) return;
+      topologiaPersonalizada = true;
+      red.setOptions({ physics: opcionesFisicaTopologia() });
+      red.startSimulation();
+    });
+    red.on("dragEnd", ({ nodes }) => {
+      if (!nodes.length) return;
+      red.once("stabilized", () => {
+        red.stopSimulation();
+        red.setOptions({ physics: { enabled: false } });
+      });
+    });
+    document.getElementById("topologia-restablecer").disabled = false;
+    observarTamanoTopologia();
+    estabilizarTopologia();
   } else {
-    red.setData(data);
+    const idsAnteriores = new Set(nodosTopologia.getIds());
+    const idsNuevos = new Set(g.nodes.map((n) => n.id));
+    const estructuraCambiada = idsAnteriores.size !== idsNuevos.size
+      || [...idsAnteriores].some((id) => !idsNuevos.has(id));
+    nodosTopologia.remove([...idsAnteriores].filter((id) => !idsNuevos.has(id)));
+    nodosTopologia.update(g.nodes.map((n) => nodoVisualTopologia(
+      n, idsAnteriores.has(n.id) ? null : posiciones.get(n.id))));
+
+    const aristasAnteriores = new Set(aristasTopologia.getIds());
+    const nuevasAristas = g.edges.map(aristaVisualTopologia);
+    const idsAristas = new Set(nuevasAristas.map((e) => e.id));
+    aristasTopologia.remove([...aristasAnteriores]
+      .filter((id) => !idsAristas.has(id)));
+    aristasTopologia.update(nuevasAristas);
+    if (estructuraCambiada && !topologiaPersonalizada) {
+      restablecerTopologia({ animar: false });
+    }
   }
 }
 
