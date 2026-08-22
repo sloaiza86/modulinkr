@@ -1215,6 +1215,7 @@ let topologiaResizeObserver = null;
 let topologiaResizeTimer = null;
 let arrastreTopologia = null;
 let temporizadorFisicaTopologia = null;
+let fotogramaRestablecerTopologia = null;
 let anchoTopologiaObservado = 0;
 let imagenCelularTopologia = null;
 let cargaImagenCelularTopologia = null;
@@ -1586,8 +1587,120 @@ function revelarTopologia() {
   requestAnimationFrame(() => mapa?.classList.remove("topologia-preparando"));
 }
 
+function cancelarAnimacionRestablecerTopologia() {
+  if (fotogramaRestablecerTopologia !== null) {
+    cancelAnimationFrame(fotogramaRestablecerTopologia);
+    fotogramaRestablecerTopologia = null;
+  }
+  const boton = document.getElementById("topologia-restablecer");
+  if (boton) boton.disabled = red === null;
+}
+
+function animarRestablecimientoTopologia(posiciones) {
+  if (!red || !nodosTopologia) return;
+  cancelarAnimacionRestablecerTopologia();
+  detenerFisicaInteraccionTopologia();
+
+  const ids = nodosTopologia.getIds().filter((id) => posiciones.has(id));
+  const origen = red.getPositions(ids);
+  const movimientoReducido = window.matchMedia?.(
+    "(prefers-reduced-motion: reduce)").matches;
+  const duracion = movimientoReducido ? 0 : 550;
+  const boton = document.getElementById("topologia-restablecer");
+  if (boton) boton.disabled = true;
+
+  nodosTopologia.update(ids.map((id) => ({
+    id,
+    physics: false,
+    fixed: { x: true, y: true },
+  })));
+
+  const vistaOrigen = {
+    posicion: red.getViewPosition(),
+    escala: red.getScale(),
+  };
+  ids.forEach((id) => {
+    const destino = posiciones.get(id);
+    red.moveNode(id, destino.x, destino.y);
+  });
+  encuadrarTopologia(false);
+  const vistaDestino = {
+    posicion: red.getViewPosition(),
+    escala: red.getScale(),
+  };
+  ids.forEach((id) => {
+    const desde = origen[id];
+    if (desde) red.moveNode(id, desde.x, desde.y);
+  });
+  red.moveTo({
+    position: vistaOrigen.posicion,
+    scale: vistaOrigen.escala,
+    animation: false,
+  });
+
+  const finalizar = () => {
+    ids.forEach((id) => {
+      const destino = posiciones.get(id);
+      red.moveNode(id, destino.x, destino.y);
+    });
+    nodosTopologia.update(ids.map((id) => ({
+      id,
+      physics: true,
+      fixed: { x: false, y: false },
+    })));
+    fotogramaRestablecerTopologia = null;
+    if (boton) boton.disabled = false;
+    red.moveTo({
+      position: vistaDestino.posicion,
+      scale: vistaDestino.escala,
+      animation: false,
+    });
+  };
+
+  if (duracion === 0) {
+    finalizar();
+    return;
+  }
+
+  const inicio = performance.now();
+  const avanzar = (ahora) => {
+    const progreso = Math.min(1, (ahora - inicio) / duracion);
+    const suavizado = progreso < 0.5
+      ? 4 * progreso ** 3
+      : 1 - ((-2 * progreso + 2) ** 3) / 2;
+    ids.forEach((id) => {
+      const desde = origen[id];
+      const destino = posiciones.get(id);
+      if (!desde || !destino) return;
+      red.moveNode(
+        id,
+        desde.x + (destino.x - desde.x) * suavizado,
+        desde.y + (destino.y - desde.y) * suavizado,
+      );
+    });
+    red.moveTo({
+      position: {
+        x: vistaOrigen.posicion.x
+          + (vistaDestino.posicion.x - vistaOrigen.posicion.x) * suavizado,
+        y: vistaOrigen.posicion.y
+          + (vistaDestino.posicion.y - vistaOrigen.posicion.y) * suavizado,
+      },
+      scale: vistaOrigen.escala
+        + (vistaDestino.escala - vistaOrigen.escala) * suavizado,
+      animation: false,
+    });
+    if (progreso < 1) {
+      fotogramaRestablecerTopologia = requestAnimationFrame(avanzar);
+    } else {
+      finalizar();
+    }
+  };
+  fotogramaRestablecerTopologia = requestAnimationFrame(avanzar);
+}
+
 function estabilizarTopologia({ animar = true, revelar = false } = {}) {
   if (!red || !nodosTopologia) return;
+  cancelarAnimacionRestablecerTopologia();
   const roles = new Map((grafoTopologia?.nodes || []).map((n) => [n.id, n.role]));
   const padres = new Map((grafoTopologia?.edges || []).map((e) => [e.from, e.to]));
   const conectadoACelular = (id) => {
@@ -1632,6 +1745,11 @@ function restablecerTopologia({ animar = true, revelar = false } = {}) {
   if (!red || !nodosTopologia || !grafoTopologia) return;
   topologiaPersonalizada = false;
   const posiciones = posicionesInicialesTopologia(grafoTopologia);
+  if (animar && !revelar) {
+    animarRestablecimientoTopologia(posiciones);
+    return;
+  }
+  cancelarAnimacionRestablecerTopologia();
   nodosTopologia.update(grafoTopologia.nodes.map((n) => ({
     id: n.id,
     ...posiciones.get(n.id),
@@ -1675,7 +1793,7 @@ function observarTamanoTopologia() {
 }
 
 document.getElementById("topologia-restablecer")?.addEventListener(
-  "click", restablecerTopologia);
+  "click", () => restablecerTopologia());
 
 async function refrescarMapa() {
   let r;
