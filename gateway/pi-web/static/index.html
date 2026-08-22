@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=topology-legend-size-20260822">
+  <link rel="stylesheet" href="/static/style.css?v=history-dialog-layout-20260822">
 </head>
 <body>
 
@@ -20,17 +20,17 @@
     <span class="sb-titulo"><img src="/static/img/logo-texto.svg" alt="ModuLinkr"></span>
   </div>
   <nav class="sb-nav">
-    <a class="nav-item" href="#/red" data-view="red" title="Dashboard">
+    <a class="nav-item" href="#/red" data-view="red" title="Resumen de red">
       <modulinkr-icon name="mdi:view-dashboard-outline"></modulinkr-icon>
-      <span>Dashboard</span>
+      <span>Resumen de red</span>
     </a>
-    <a class="nav-item" href="#/topologia" data-view="topologia" title="Topología">
+    <a class="nav-item" href="#/topologia" data-view="topologia" title="Topología de red">
       <modulinkr-icon name="mdi:graph-outline"></modulinkr-icon>
-      <span>Topología</span>
+      <span>Topología de red</span>
     </a>
-    <a class="nav-item" href="#/datos" data-view="datos" title="Datos">
+    <a class="nav-item" href="#/datos" data-view="datos" title="Visualización de datos">
       <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
-      <span>Datos</span>
+      <span>Visualización de datos</span>
     </a>
   </nav>
   <div class="sb-pie">
@@ -57,21 +57,20 @@
        title="Volver" aria-label="Volver" hidden>
       <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
     </a>
-    <h1 id="titulo-vista" tabindex="-1">Dashboard</h1>
+    <h1 id="titulo-vista" tabindex="-1">Resumen de red</h1>
     <span id="badge-red" class="badge" hidden></span>
     <div class="header-derecha">
-      <span id="refresco"></span>
       <span id="clock"></span>
     </div>
   </modulinkr-app-header>
 
   <modulinkr-view-router>
-    <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Dashboard">
+    <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Resumen de red">
       <div id="tarjetas" class="grid-tarjetas"></div>
       <p id="red-aviso" class="aviso"></p>
     </modulinkr-view>
 
-    <modulinkr-view id="view-topologia" class="view" data-view="topologia" aria-label="Topología" hidden>
+    <modulinkr-view id="view-topologia" class="view" data-view="topologia" aria-label="Topología de red" hidden>
       <div class="card card-mapa">
         <button id="topologia-restablecer" class="icono-btn topologia-restablecer"
                 type="button" title="Restablecer disposición"
@@ -92,7 +91,7 @@
       </div>
     </modulinkr-view>
 
-    <modulinkr-view id="view-datos" class="view" data-view="datos" aria-label="Datos" hidden>
+    <modulinkr-view id="view-datos" class="view" data-view="datos" aria-label="Visualización de datos" hidden>
       <div class="datos-layout">
         <button id="medidas-panel-fondo" class="datos-panel-fondo" type="button"
                 aria-label="Cerrar selección de medidas" hidden></button>
@@ -147,6 +146,8 @@
                 </button>
               </div>
             </div>
+            <modulinkr-chart-legend id="grafico-leyenda"
+                                    aria-label="Leyenda de la gráfica"></modulinkr-chart-legend>
             <div id="grafico"></div>
             <div id="datos-vacio" class="datos-vacio" role="status">
               <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
@@ -964,30 +965,59 @@
 
 <!-- Panel lateral de detalle de nodo -->
 <div id="detalle-fondo" hidden></div>
-<modulinkr-node-detail id="detalle" backdrop="detalle-fondo" hidden>
-  <div class="detalle-cabecera">
-    <h2 id="detalle-titulo"></h2>
-    <button id="detalle-cerrar" class="icono-btn" title="Cerrar" data-close>
+<modulinkr-node-detail id="detalle" backdrop="detalle-fondo" tabindex="-1" hidden>
+  <div class="detalle-cierre">
+    <button id="detalle-cerrar" class="icono-btn" type="button"
+            title="Cerrar" aria-label="Cerrar" data-close>
       <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
+  <div class="detalle-cabecera">
+    <span id="detalle-icono" class="detalle-icono" aria-hidden="true"></span>
+    <div class="detalle-identidad">
+      <h2 id="detalle-titulo"></h2>
+      <span id="detalle-subtitulo"></span>
+    </div>
+    <div id="detalle-estados" class="detalle-estados"></div>
+  </div>
   <div id="detalle-cuerpo"></div>
+  <div id="detalle-acciones" class="detalle-acciones"></div>
 </modulinkr-node-detail>
 
 <!-- Modal de minigráfica de una medida (última hora, buffer local) -->
 <div id="modal-fondo" hidden></div>
 <modulinkr-history-dialog id="modal" backdrop="modal-fondo" hidden>
-  <div class="modal-cabecera">
-    <h2 id="modal-titulo"></h2>
-    <button id="modal-cerrar" class="icono-btn" title="Cerrar" data-close>
+  <div class="modal-cierre">
+    <button id="modal-cerrar" class="icono-btn" type="button"
+            title="Cerrar" aria-label="Cerrar" data-close>
       <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
-  <div class="modal-sub">
-    <span id="modal-cuando"></span>
-    <span class="m-actual" id="modal-valor"></span>
+  <div class="modal-cabecera">
+    <span class="modal-icono" aria-hidden="true">
+      <modulinkr-icon id="modal-icono" name="mdi:pulse"></modulinkr-icon>
+    </span>
+    <div class="modal-identidad">
+      <h2 id="modal-titulo"></h2>
+      <span id="modal-nodo"></span>
+    </div>
+    <div class="modal-resumen">
+      <span class="m-actual" id="modal-valor"></span>
+      <span id="modal-cuando"></span>
+    </div>
+  </div>
+  <div class="modal-grafico-cabecera">
+    <span>Histórico</span>
+    <span id="modal-periodo">Últimos 5 días</span>
   </div>
   <div id="modal-grafico"></div>
+  <div class="modal-acciones">
+    <a id="modal-ver-datos" href="#/datos">
+      <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
+      <span>Ver más datos</span>
+      <modulinkr-icon name="mdi:chevron-right"></modulinkr-icon>
+    </a>
+  </div>
 </modulinkr-history-dialog>
 
 <!-- El diálogo común conserva el foco dentro de la decisión activa. -->
@@ -1024,6 +1054,6 @@
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
 <script src="/static/components.js?v=topology-legend-logo-20260822"></script>
-<script src="/static/app.js?v=topology-legend-logo-20260822"></script>
+<script src="/static/app.js?v=history-dialog-layout-20260822"></script>
 </body>
 </html>

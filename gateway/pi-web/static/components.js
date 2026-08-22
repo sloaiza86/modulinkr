@@ -15,6 +15,9 @@
     static manifestPromise = null;
     static chunks = new Map();
     static paths = new Map();
+    static localPaths = new Map([
+      ["radio-handheld-dual", "M9,2A1,1 0 0,0 8,3C8,8.67 8,14.33 8,20C8,21.11 8.89,22 10,22H15C16.11,22 17,21.11 17,20V9C17,7.89 16.11,7 15,7H10V3A1,1 0 0,0 9,2M10,9H15V13H10V9ZM16,2A1,1 0 0,0 15,3V9H17V3A1,1 0 0,0 16,2Z"],
+    ]);
 
     static get observedAttributes() {
       return ["name", "label"];
@@ -61,7 +64,10 @@
     async render() {
       const renderId = ++this._renderId;
       const referencia = this.getAttribute("name") ?? "";
-      const nombre = referencia.startsWith("mdi:") ? referencia.slice(4) : "";
+      const esLocal = referencia.startsWith("modulinkr:");
+      const nombre = esLocal
+        ? referencia.slice(10)
+        : (referencia.startsWith("mdi:") ? referencia.slice(4) : "");
       const etiqueta = this.getAttribute("label");
       this.replaceChildren();
       if (etiqueta) {
@@ -76,7 +82,9 @@
       if (!nombre) return;
 
       try {
-        let camino = await ModuLinkrIcon.path(nombre);
+        let camino = esLocal
+          ? ModuLinkrIcon.localPaths.get(nombre) ?? null
+          : await ModuLinkrIcon.path(nombre);
         if (!camino) {
           this.dataset.iconError = "";
           console.warn(`No existe el icono ${referencia}`);
@@ -221,13 +229,14 @@
 
     setNetworkStatus(online, total) {
       const badge = this.querySelector("#badge-red");
-      if (!badge || !total) {
+      if (!badge || !total || online === total) {
         if (badge) badge.hidden = true;
         return;
       }
-      badge.textContent = `${online}/${total} en línea`;
-      badge.className = "badge " + (online === total
-        ? "" : (online === 0 ? "bad" : "warn"));
+      const sinConexion = Math.max(0, total - online);
+      badge.textContent = `${sinConexion} ${sinConexion === 1
+        ? "nodo sin conexión" : "nodos sin conexión"}`;
+      badge.className = "badge " + (online === 0 ? "offline" : "warn");
       badge.hidden = false;
     }
   }
@@ -499,7 +508,8 @@
             clave: String(canal.channel_id),
             texto: nodo.name ?? `Nodo ${nodo.node_id}`,
             detalle: `Nodo ${nodo.node_id}`,
-            icono: "access-point",
+            icono: nodo.node_type === "super_node"
+              ? "modulinkr:radio-handheld-dual" : "radio-handheld",
           });
         }
       }
@@ -508,7 +518,7 @@
 
     _crearIcono(nombre) {
       const icono = document.createElement("modulinkr-icon");
-      icono.setAttribute("name", `mdi:${nombre}`);
+      icono.setAttribute("name", nombre.includes(":") ? nombre : `mdi:${nombre}`);
       return icono;
     }
 
@@ -719,6 +729,130 @@
         evento.preventDefault();
         primero.focus();
       }
+    };
+  }
+
+  class ModuLinkrChartLegend extends ModuLinkrElement {
+    connectedCallback() {
+      if (this._iniciado) return;
+      this._iniciado = true;
+      this._elementos = this._elementos ?? [];
+      this._expandida = false;
+      this.addEventListener("click", this._accion);
+      this._renderizar();
+    }
+
+    disconnectedCallback() {
+      this.removeEventListener("click", this._accion);
+    }
+
+    set items(valor) {
+      this._elementos = Array.isArray(valor) ? valor : [];
+      if (this._elementos.length <= 6) this._expandida = false;
+      if (this._iniciado) this._renderizar();
+    }
+
+    get items() {
+      return this._elementos ?? [];
+    }
+
+    _crearEntrada(elemento) {
+      const boton = document.createElement("button");
+      boton.type = "button";
+      boton.className = "grafico-leyenda-entrada";
+      boton.dataset.accion = "serie";
+      boton.dataset.serie = String(elemento.id);
+      boton.setAttribute("aria-pressed", String(elemento.visible !== false));
+      boton.title = `${elemento.nodo}: ${elemento.medida}`;
+
+      const muestra = document.createElement("span");
+      muestra.className = "grafico-leyenda-muestra";
+      muestra.style.setProperty("--serie-color", elemento.color);
+      const nombre = document.createElement("span");
+      nombre.className = "grafico-leyenda-medida";
+      nombre.textContent = elemento.medida;
+      boton.append(muestra, nombre);
+      if (elemento.unidad) {
+        const unidad = document.createElement("span");
+        unidad.className = "grafico-leyenda-unidad";
+        unidad.textContent = elemento.unidad;
+        boton.appendChild(unidad);
+      }
+      return boton;
+    }
+
+    _renderizar() {
+      const elementos = this._elementos ?? [];
+      this.replaceChildren();
+      this.hidden = elementos.length === 0;
+      if (!elementos.length) return;
+
+      const resumen = document.createElement("button");
+      resumen.type = "button";
+      resumen.className = "grafico-leyenda-resumen";
+      resumen.dataset.accion = "compacta";
+      resumen.setAttribute("aria-expanded", String(this._expandida));
+      resumen.textContent = `${elementos.length} ${elementos.length === 1 ? "medida" : "medidas"}`;
+      const icono = document.createElement("modulinkr-icon");
+      icono.setAttribute("name", this._expandida ? "mdi:chevron-up" : "mdi:chevron-down");
+      resumen.appendChild(icono);
+      this.appendChild(resumen);
+
+      const cuerpo = document.createElement("div");
+      cuerpo.className = "grafico-leyenda-cuerpo";
+      cuerpo.classList.toggle("expandida", this._expandida);
+      const visibles = this._expandida ? elementos : elementos.slice(0, 6);
+      const grupos = new Map();
+      for (const elemento of visibles) {
+        if (!grupos.has(elemento.nodo)) grupos.set(elemento.nodo, []);
+        grupos.get(elemento.nodo).push(elemento);
+      }
+      for (const [nodo, entradas] of grupos) {
+        const grupo = document.createElement("section");
+        grupo.className = "grafico-leyenda-grupo";
+        const titulo = document.createElement("span");
+        titulo.className = "grafico-leyenda-nodo";
+        titulo.textContent = nodo;
+        const lista = document.createElement("div");
+        lista.className = "grafico-leyenda-lista";
+        entradas.forEach((entrada) => lista.appendChild(this._crearEntrada(entrada)));
+        grupo.append(titulo, lista);
+        cuerpo.appendChild(grupo);
+      }
+
+      const restantes = elementos.length - visibles.length;
+      if (restantes > 0) {
+        const mas = document.createElement("button");
+        mas.type = "button";
+        mas.className = "grafico-leyenda-mas";
+        mas.dataset.accion = "expandir";
+        mas.textContent = `Ver ${restantes} ${restantes === 1 ? "medida más" : "medidas más"}`;
+        cuerpo.appendChild(mas);
+      } else if (elementos.length > 6) {
+        const menos = document.createElement("button");
+        menos.type = "button";
+        menos.className = "grafico-leyenda-mas";
+        menos.dataset.accion = "expandir";
+        menos.textContent = "Ver menos";
+        cuerpo.appendChild(menos);
+      }
+      this.appendChild(cuerpo);
+    }
+
+    _accion = (evento) => {
+      const boton = evento.target.closest("button[data-accion]");
+      if (!boton || !this.contains(boton)) return;
+      if (boton.dataset.accion === "serie") {
+        const elemento = this._elementos.find((item) => String(item.id) === boton.dataset.serie);
+        if (!elemento) return;
+        this.emit("modulinkr-chart-series-toggle", {
+          id: elemento.id,
+          visible: elemento.visible === false,
+        });
+        return;
+      }
+      this._expandida = !this._expandida;
+      this._renderizar();
     };
   }
 
@@ -1274,6 +1408,29 @@
       this.setAttribute("role", "dialog");
       this.setAttribute("aria-modal", "true");
       this.setAttribute("aria-labelledby", "detalle-titulo");
+      this._hideTimer = null;
+      this._previousFocus = null;
+    }
+
+    show() {
+      clearTimeout(this._hideTimer);
+      this._previousFocus = document.activeElement;
+      this.hidden = false;
+      if (this._backdrop) this._backdrop.hidden = false;
+      requestAnimationFrame(() => {
+        this.classList.add("abierto");
+        this.focus({ preventScroll: true });
+      });
+    }
+
+    hide() {
+      this.classList.remove("abierto");
+      if (this._backdrop) this._backdrop.hidden = true;
+      this._hideTimer = window.setTimeout(() => {
+        this.hidden = true;
+        this._previousFocus?.focus?.({ preventScroll: true });
+        this._previousFocus = null;
+      }, 220);
     }
   }
 
@@ -1340,6 +1497,7 @@
     "modulinkr-node-card": ModuLinkrNodeCard,
     "modulinkr-measurement": ModuLinkrMeasurement,
     "modulinkr-measure-picker": ModuLinkrMeasurePicker,
+    "modulinkr-chart-legend": ModuLinkrChartLegend,
     "modulinkr-period-selector": ModuLinkrPeriodSelector,
     "modulinkr-node-detail": ModuLinkrNodeDetail,
     "modulinkr-history-dialog": ModuLinkrHistoryDialog,

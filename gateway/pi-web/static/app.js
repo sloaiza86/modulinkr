@@ -17,6 +17,15 @@ const COLOR = {
   text:   CSS.getPropertyValue("--text").trim(),
   border: CSS.getPropertyValue("--border").trim(),
 };
+const FUENTE_GRAFICO = getComputedStyle(document.body).fontFamily;
+const COLORES_GRAFICO = [
+  "#0756eb", "#6f42c1", "#00838f", "#b83280",
+  "#1b78a6", "#5548c8", "#2a6f62", "#805ad5",
+];
+
+function fmtEje(valor) {
+  return Number(valor).toLocaleString("es-ES", { maximumFractionDigits: 2 });
+}
 
 // Icono MDI por nombre de medida, con pulso como genérico.
 function iconoMedida(id) {
@@ -35,6 +44,12 @@ function iconoMedida(id) {
 }
 function iconoMdi(nombre, cls = "") {
   return `<modulinkr-icon name="mdi:${nombre}"${cls ? ` class="${cls}"` : ""}></modulinkr-icon>`;
+}
+
+function htmlSeguro(valor) {
+  return String(valor ?? "").replace(/[&<>"']/g, (caracter) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[caracter]);
 }
 
 function chipConexion(c) {
@@ -324,7 +339,7 @@ function sparkline(serie, w = 64, h = 22) {
 
 // ----- Navegación: sidebar contraible y rutas por hash -----
 
-const TITULOS = { red: "Dashboard", topologia: "Topología", datos: "Datos",
+const TITULOS = { red: "Resumen de red", topologia: "Topología de red", datos: "Visualización de datos",
                   configuracion: "Configuración" };
 let vistaNavegada = null;
 
@@ -373,7 +388,10 @@ function navegar() {
   document.querySelector("modulinkr-view-router").show(v);
   document.body.classList.toggle("en-configuracion", v === "configuracion");
   if (v !== "configuracion") actualizarCabecera(TITULOS[v]);
-  if (v === "topologia") refrescarMapa();
+  if (v === "topologia") {
+    prepararTopologiaAlMostrar();
+    refrescarMapa();
+  }
   if (v === "datos" && catalogo === null) cargarCatalogo();
   if (v === "configuracion") cfgRuta();
   vistaNavegada = v;
@@ -385,7 +403,6 @@ window.addEventListener("hashchange", () => {
 
 // ----- Vista de red: tarjetas por nodo -----
 
-let ultimoRefresco = null;   // epoch ms del último repintado con éxito
 let cacheEstado = null;      // última respuesta de /api/red/estado
 let cacheUltimos = null;     // última respuesta de /api/red/ultimos
 let cacheCatalogosRed = null;
@@ -447,7 +464,7 @@ function tarjetaGateway(data) {
       </div>
       <div class="sensor fila-info">
         ${iconoMdi("pulse")}
-        <span class="s-nombre">Uso de radio, última hora</span>
+        <span class="s-nombre">Duty cycle, última hora</span>
         <span class="s-valor">${chipDuty(data.gateway_duty_1h)}</span>
       </div>
     </div>
@@ -629,22 +646,18 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
         : `<span class="s-valor">${fmtValor(c.value)}${c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""}</span>`}
     </modulinkr-measurement>`;
   }).join("");
-  // Dos tiempos distintos: la última trama oída por LoRa (de
-  // node_status, incluye beacons) y la última telemetría con valores.
-  const visto = `Última actividad hace ${fmtAgo(n.ago_s)}`;
+  // La cabecera muestra siempre la edad de la última telemetría. El estado de
+  // los enlaces se mantiene separado en los indicadores de conectividad.
   const medida = ult
     ? `Última medida hace ${fmtAgo(ult.ago_s)}` : "Sin medidas recibidas";
-  const estado = chipEstado(n, ult, onlineS);
   const disponible = nodoDisponible(n, ult);
-  const detalle = estado.cls === "on" ? ""
-    : (disponible && ult ? medida : visto);
   return `
   <modulinkr-node-card class="tarjeta-nodo${disponible ? "" : " nodo-offline"}" data-origin="${n.origin}">
     <div class="tn-cabecera">
       <div class="tn-icono ${disponible ? "" : "off"}">${iconoNodo}</div>
       <div class="tn-info">
         <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
-        ${detalle ? `<div class="tn-sub">${detalle}</div>` : ""}
+        <div class="tn-sub">${medida}</div>
       </div>
       <div class="tn-estados">${chipsNodo(n, ult, onlineS)
         .map(chipConexion).join("")}</div>
@@ -691,7 +704,10 @@ async function refrescarRed() {
 
   cacheEstado = estado;
   cacheUltimos = ultimos;
-  ultimoRefresco = Date.now();
+  if (catalogo !== null && actualizarTiposCatalogo()) {
+    selectorMedidas.catalog = catalogo;
+    selectorMedidas.value = { selection: [...seleccion], mode: modo };
+  }
   pintarBadge(estado);
 
   if (estado.nodes.length) {
@@ -727,16 +743,43 @@ const MODAL_DIAS = 5;    // ventana del histórico del modal
 let modalSel = null;     // {origin, canal} de la medida abierta
 let modalChart = null;   // instancia de ECharts del modal
 let modalToken = 0;      // invalida respuestas tardías al cambiar de medida
+let modalCanalId = null;
+let modalConsulta = null;
+let modalRangoVisible = null;
+let modalZoomAplicado = false;
 
-function pintarModalCabecera() {
+function datosModal() {
+  if (modalSel === null) return null;
   const nodo = cacheUltimos?.nodes.find((x) => x.origin === modalSel.origin);
   const c = nodo?.channels[modalSel.canal];
-  if (!c) return;
-  const n = cacheEstado?.nodes.find((x) => x.origin === modalSel.origin);
-  document.getElementById("modal-titulo").textContent =
-    `${c.read_id} · ${n?.name ?? "nodo " + modalSel.origin}`;
-  document.getElementById("modal-cuando").textContent =
-    "Última lectura: hace " + fmtAgo(nodo.ago_s);
+  if (!c) return null;
+  const estadoNodo = cacheEstado?.nodes.find((x) => x.origin === modalSel.origin);
+  const catalogoDatos = catalogo?.find((x) => x.node_id === modalSel.origin);
+  const canalDatos = catalogoDatos?.channels.find((x) => x.read_id === c.read_id);
+  const catalogoRed = cacheCatalogosRed?.find((x) => x.origin === modalSel.origin);
+  const canalRed = catalogoRed?.reads?.find((x) => x.id === c.read_id);
+  return {
+    nodo,
+    c,
+    estadoNodo,
+    canalDatos,
+    nombre: canalDatos?.name || canalRed?.name || nombreMedida(c),
+  };
+}
+
+function pintarModalCabecera() {
+  const datos = datosModal();
+  if (!datos) return;
+  const { nodo, c, estadoNodo, nombre } = datos;
+  document.getElementById("modal-titulo").textContent = nombre;
+  document.getElementById("modal-nodo").textContent =
+    estadoNodo?.name ?? "Nodo " + modalSel.origin;
+  document.getElementById("modal-icono").setAttribute(
+    "name", `mdi:${iconoMedida(c.read_id)}`);
+  const ultima = c.st_code && c.value_ago_s != null
+    ? `Última lectura válida hace ${fmtAgo(c.value_ago_s)}`
+    : `Última lectura hace ${fmtAgo(nodo.ago_s)}`;
+  document.getElementById("modal-cuando").textContent = ultima;
   document.getElementById("modal-valor").innerHTML = c.st_code
     ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
     : fmtValor(c.value) +
@@ -760,12 +803,44 @@ function fmtHora(d) {
   return d.toLocaleTimeString("es-ES", opcHora({ hour: "2-digit", minute: "2-digit" }));
 }
 
-function opcionesModal(puntos, unit) {
+function pintarModalPeriodo() {
+  const etiqueta = document.getElementById("modal-periodo");
+  if (!modalZoomAplicado || modalRangoVisible === null) {
+    etiqueta.textContent = `Últimos ${MODAL_DIAS} días`;
+    return;
+  }
+  etiqueta.textContent = `${fmtDia(modalRangoVisible.desde)}, ${fmtHora(modalRangoVisible.desde)}`
+    + ` a ${fmtDia(modalRangoVisible.hasta)}, ${fmtHora(modalRangoVisible.hasta)}`;
+}
+
+function actualizarRangoModal(evento) {
+  if (modalConsulta === null) return;
+  const zoom = evento.batch?.[0] ?? evento;
+  const inicio = Number(zoom.start ?? 0);
+  const fin = Number(zoom.end ?? 100);
+  const duracion = modalConsulta.hasta.getTime() - modalConsulta.desde.getTime();
+  const inicioValor = Number(zoom.startValue);
+  const finValor = Number(zoom.endValue);
+  const desde = Number.isFinite(inicioValor)
+    ? new Date(inicioValor)
+    : new Date(modalConsulta.desde.getTime() + duracion * inicio / 100);
+  const hasta = Number.isFinite(finValor)
+    ? new Date(finValor)
+    : new Date(modalConsulta.desde.getTime() + duracion * fin / 100);
+  if (!Number.isFinite(desde.getTime()) || !Number.isFinite(hasta.getTime()) || hasta <= desde) return;
+  modalZoomAplicado = inicio > 0.05 || fin < 99.95;
+  modalRangoVisible = { desde, hasta };
+  pintarModalPeriodo();
+}
+
+function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
   return {
     backgroundColor: "transparent",
-    grid: { left: 52, right: 16, top: 30, bottom: 64 },
+    textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.dim },
+    grid: { left: 52, right: 16, top: 38, bottom: 64 },
     tooltip: {
-      trigger: "axis",
+      trigger: "axis", confine: true,
+      textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.text },
       formatter: (ps) => {
         const [t, v] = ps[0].value;
         const d = new Date(t);
@@ -776,7 +851,8 @@ function opcionesModal(puntos, unit) {
     xAxis: {
       type: "time",
       axisLabel: {
-        color: COLOR.dim,
+        color: COLOR.dim, fontFamily: FUENTE_GRAFICO, fontSize: 12,
+        margin: 10, hideOverlap: true,
         formatter: (val) => {
           const d = new Date(val);
           if (d.getHours() === 0 && d.getMinutes() === 0) {
@@ -784,15 +860,23 @@ function opcionesModal(puntos, unit) {
           }
           return fmtHora(d);
         },
-        rich: { dia: { fontWeight: "bold", color: COLOR.text } },
+        rich: { dia: { fontFamily: FUENTE_GRAFICO, fontSize: 12,
+          fontWeight: 600, color: COLOR.text } },
       },
+      axisLine: { lineStyle: { color: COLOR.border } },
+      axisTick: { lineStyle: { color: COLOR.border } },
     },
     yAxis: {
       // scale: el eje de magnitud se recalcula con el rango visible; la
       // unidad se rotula en la cabecera del eje.
       type: "value", scale: true, name: unit,
-      nameTextStyle: { color: COLOR.dim },
-      axisLabel: { color: COLOR.dim },
+      nameLocation: "end", nameGap: 8,
+      nameTextStyle: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO,
+        fontSize: 12, fontWeight: 500 },
+      axisLabel: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO,
+        fontSize: 12, margin: 8, align: "right", formatter: fmtEje },
+      axisLine: { show: true, lineStyle: { color: COLOR.border } },
+      axisTick: { lineStyle: { color: COLOR.border } },
       splitLine: { lineStyle: { color: COLOR.border } },
     },
     dataZoom: [
@@ -800,12 +884,14 @@ function opcionesModal(puntos, unit) {
       { type: "inside", zoomOnMouseWheel: true, moveOnMouseWheel: false },
       // Barra de desplazamiento por el tiempo.
       { type: "slider", height: 22, bottom: 10,
-        borderColor: COLOR.border, textStyle: { color: COLOR.dim } },
+        borderColor: COLOR.border,
+        textStyle: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO, fontSize: 11 } },
     ],
     series: [{
       type: "line", showSymbol: false, smooth: 0.2,
-      lineStyle: { color: COLOR.accent, width: 2 },
-      areaStyle: { color: COLOR.accent, opacity: 0.08 },
+      lineStyle: { color: colorSerie, width: 2 },
+      itemStyle: { color: colorSerie },
+      areaStyle: { color: colorSerie, opacity: 0.08 },
       data: puntos,
     }],
   };
@@ -814,6 +900,13 @@ function opcionesModal(puntos, unit) {
 async function cargarModalGrafica() {
   const token = ++modalToken;
   const cont = document.getElementById("modal-grafico");
+  const enlaceDatos = document.getElementById("modal-ver-datos");
+  modalCanalId = null;
+  modalConsulta = null;
+  modalRangoVisible = null;
+  modalZoomAplicado = false;
+  enlaceDatos.setAttribute("aria-disabled", "true");
+  pintarModalPeriodo();
   if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
   if (typeof echarts === "undefined") {
     cont.innerHTML = '<p class="modal-vacio">No se puede mostrar el histórico en este navegador.</p>';
@@ -831,13 +924,21 @@ async function cargarModalGrafica() {
   // pestaña Datos (se carga aquí si aún no se abrió).
   try {
     if (catalogo === null) await cargarCatalogo();
+    if (token !== modalToken || modalSel === null) return;
+    pintarModalCabecera();
     const cn = catalogo?.find((x) => x.node_id === modalSel.origin);
     const canal = cn?.channels.find((x) => x.read_id === c.read_id);
     if (canal) {
+      const hasta = new Date();
+      const desde = new Date(hasta.getTime() - MODAL_DIAS * 86400 * 1000);
+      modalCanalId = canal.channel_id;
+      modalConsulta = { desde, hasta };
+      modalRangoVisible = { desde: new Date(desde), hasta: new Date(hasta) };
+      enlaceDatos.setAttribute("aria-disabled", "false");
       const q = new URLSearchParams({
         channels: String(canal.channel_id),
-        desde: new Date(Date.now() - MODAL_DIAS * 86400 * 1000).toISOString(),
-        hasta: new Date().toISOString(),
+        desde: desde.toISOString(),
+        hasta: hasta.toISOString(),
         max_puntos: "1000",
       });
       const r = await fetchApi("/api/datos/series?" + q);
@@ -865,7 +966,10 @@ async function cargarModalGrafica() {
   }
   cont.innerHTML = "";
   modalChart = echarts.init(cont);
-  modalChart.setOption(opcionesModal(puntos, unidad(c?.unit)));
+  modalChart.setOption(opcionesModal(
+    puntos, unidad(c?.unit), colorDeCanal(modalCanalId)
+  ));
+  modalChart.on("datazoom", actualizarRangoModal);
 }
 
 function abrirModal(origin, canal) {
@@ -876,12 +980,40 @@ function abrirModal(origin, canal) {
 }
 function cerrarModal() {
   modalSel = null;
+  modalCanalId = null;
+  modalConsulta = null;
+  modalRangoVisible = null;
+  modalZoomAplicado = false;
   modalToken++;
   if (modalChart !== null) { modalChart.dispose(); modalChart = null; }
   document.getElementById("modal").hide();
 }
+
+function verModalEnDatos(evento) {
+  evento.preventDefault();
+  if (modalCanalId === null || modalRangoVisible === null) return;
+  const canalId = modalCanalId;
+  const periodo = {
+    preset: "",
+    mode: "custom",
+    start: modalRangoVisible.desde.toISOString(),
+    end: modalRangoVisible.hasta.toISOString(),
+  };
+  seleccion = new Set([canalId]);
+  modo = "nodo";
+  selectorPeriodo.value = periodo;
+  selectorMedidas.value = { selection: [canalId], mode: modo };
+  document.getElementById("vistas-guardadas").value = "";
+  actualizarBotonMedidas();
+  cerrarModal();
+  location.hash = "#/datos";
+  requestAnimationFrame(programarGrafico);
+}
+
 document.getElementById("modal").addEventListener(
   "modulinkr-close-request", cerrarModal);
+document.getElementById("modal-ver-datos").addEventListener("click", verModalEnDatos);
+window.addEventListener("resize", () => modalChart?.resize({ animation: { duration: 0 } }));
 
 // ----- Panel de detalle de nodo -----
 
@@ -889,52 +1021,103 @@ function filaDet(k, v) {
   return `<div class="det-fila"><span class="k">${k}</span><span>${v}</span></div>`;
 }
 
+function esSupernodo(n, ult = null) {
+  return n?.type === "super_node" || !!ult?.via_nbiot
+    || n?.nbiot_flags != null || n?.nbiot_ago_s != null || n?.mqtt_ago_s != null;
+}
+
+function nombreCanalDetalle(origin, canal, indice) {
+  const datos = catalogo?.find((n) => Number(n.node_id) === Number(origin));
+  const definicionDatos = datos?.channels.find((c) => c.read_id === canal.read_id)
+    ?? datos?.channels[indice];
+  const red = cacheCatalogosRed?.find((n) => Number(n.origin) === Number(origin));
+  const definicionRed = red?.reads?.find((c) => c.id === canal.read_id)
+    ?? red?.reads?.[indice];
+  return definicionDatos?.name || definicionRed?.name || nombreMedida(canal);
+}
+
+function medidaDetalle(origin, canal, indice) {
+  const nombre = nombreCanalDetalle(origin, canal, indice);
+  const valorConFallo = canal.value == null
+    ? htmlSeguro(motivoFallo(canal))
+    : `${htmlSeguro(fmtValor(canal.value))}${canal.unit
+      ? ` <span class="s-unidad">${htmlSeguro(unidad(canal.unit))}</span>` : ""}`;
+  const valor = canal.st_code
+    ? `<span class="s-fallo" title="${htmlSeguro(tituloFallo(canal))}">${valorConFallo}</span>`
+    : `${htmlSeguro(fmtValor(canal.value))}${canal.unit
+      ? ` <span>${htmlSeguro(unidad(canal.unit))}</span>` : ""}`;
+  return `<button class="detalle-medida" type="button" data-origin="${origin}"
+                  data-canal="${indice}" aria-label="Abrir histórico de ${htmlSeguro(nombre)}">
+    <span class="detalle-medida-icono" aria-hidden="true">${iconoMdi(iconoMedida(canal.read_id))}</span>
+    <span class="detalle-medida-nombre">${htmlSeguro(nombre)}</span>
+    <span class="detalle-medida-valor">${valor}</span>
+  </button>`;
+}
+
 function pintarDetalle(origin) {
   const cuerpo = document.getElementById("detalle-cuerpo");
+  const diagnosticoAbierto = cuerpo.querySelector(".detalle-diagnostico")?.open ?? false;
+  const desplazamiento = cuerpo.scrollTop;
   const titulo = document.getElementById("detalle-titulo");
+  const subtitulo = document.getElementById("detalle-subtitulo");
+  const icono = document.getElementById("detalle-icono");
+  const estados = document.getElementById("detalle-estados");
+  const acciones = document.getElementById("detalle-acciones");
 
   if (origin === 255) {
     titulo.textContent = "Gateway";
-    cuerpo.innerHTML = `<div class="det-grupo"><h3>Radio</h3>
-      ${filaDet("Uso de radio, última hora", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
+    subtitulo.textContent = "Coordinador de la red";
+    icono.innerHTML = iconoMdi("radio-tower");
+    estados.innerHTML = cacheEstado
+      ? estadoGateway(cacheEstado).chips.map(chipConexion).join("") : "";
+    cuerpo.innerHTML = `<div class="det-grupo"><h3>Radio LoRa</h3>
+      ${filaDet("Duty cycle, última hora", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
       ${filaDet("Límite permitido", "10 %")}
     </div>
     <p class="leyenda">Límite aplicable a la banda de radio configurada.</p>`;
+    acciones.innerHTML = `<a class="detalle-accion" href="#/topologia" data-detalle-accion="topologia">
+      ${iconoMdi("graph-outline")}<span>Ver topología</span>${iconoMdi("chevron-right")}
+    </a>`;
     return;
   }
 
   const n = cacheEstado?.nodes.find((x) => x.origin === origin);
   if (!n) return;
   const u = cacheUltimos?.nodes.find((x) => x.origin === origin);
-  titulo.textContent = n.name ?? "nodo " + n.origin;
+  const supernodo = esSupernodo(n, u);
+  titulo.textContent = n.name ?? (supernodo ? "Supernodo " : "Nodo ") + n.origin;
+  subtitulo.textContent = `${supernodo ? "Supernodo" : "Nodo"} ${n.origin}`;
+  icono.innerHTML = supernodo
+    ? '<modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon>'
+    : iconoMdi("radio-handheld");
+  estados.innerHTML = chipsNodo(n, u, cacheEstado?.online_s ?? 60)
+    .map(chipConexion).join("");
 
-  const sensores = (u?.channels ?? []).map((c) =>
-    filaDet(c.read_id, c.st_code
-      ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
-      : fmtValor(c.value) + (c.unit ? " " + unidad(c.unit) : ""))).join("");
+  const sensores = (u?.channels ?? [])
+    .map((canal, indice) => medidaDetalle(origin, canal, indice)).join("");
+  const estado = chipEstado(n, u, cacheEstado?.online_s ?? 60);
 
   cuerpo.innerHTML = `
-    <div class="det-grupo"><h3>Estado</h3>
-      ${filaDet("Identificador", n.origin)}
-      ${filaDet("Estado", (() => {
-        const e = chipEstado(n, u, cacheEstado?.online_s ?? 60);
-        return `<span class="chip ${e.cls}">${e.txt}</span>`;
-      })())}
+    <div class="det-grupo"><h3>Información</h3>
+      ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
       ${filaDet("Última actividad", "Hace " + fmtAgo(n.ago_s))}
-      ${filaDet("Versión", n.fw_version ?? "")}
+      ${filaDet("Versión", htmlSeguro(n.fw_version ?? ""))}
     </div>
-    <div class="det-grupo"><h3>Radio</h3>
+    ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>
+      <div class="detalle-medidas">${sensores}</div></div>` : ""}
+    <div class="det-grupo"><h3>Radio LoRa</h3>
       ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
       ${filaDet("SNR", fmtNum(n.snr) + " dB")}
-      ${filaDet("Padre", nombrePadre(n.parent_id))}
+      ${filaDet("Padre", htmlSeguro(nombrePadre(n.parent_id)))}
       ${filaDet("Saltos", n.hop_count ?? "")}
-      ${filaDet("Uso de radio, última hora", chipDuty(n.duty_1h))}
+      ${filaDet("Duty cycle, última hora", chipDuty(n.duty_1h))}
     </div>
-    ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>${sensores}</div>` : ""}
-    ${bloqueSalud(n.health)}
-    <div class="det-grupo">
-      <a href="#/datos" onclick="document.getElementById('detalle-cerrar').click()">Ver histórico</a>
-    </div>`;
+    ${bloqueSalud(n.health)}`;
+  const diagnostico = cuerpo.querySelector(".detalle-diagnostico");
+  if (diagnostico) diagnostico.open = diagnosticoAbierto;
+  cuerpo.scrollTop = desplazamiento;
+  acciones.innerHTML = `<button class="detalle-accion" type="button" data-detalle-accion="datos"
+      data-origin="${origin}">${iconoMdi("chart-line")}<span>Ver más datos</span>${iconoMdi("chevron-right")}</button>`;
 }
 
 // Salud del nodo, del NODE_HEALTH (§16.1). Los contadores llegaban al gateway
@@ -948,25 +1131,43 @@ function pintarDetalle(origin) {
 // ATZ ya es serio, y un reinicio del nodo es el último recurso.
 function bloqueSalud(h) {
   if (!h) {
-    return `<div class="det-grupo"><h3>Diagnóstico</h3>
-      ${filaDet("Estado", "Aún no hay información de diagnóstico")}</div>`;
+    return `<details class="detalle-diagnostico"><summary>Diagnóstico</summary>
+      <div class="detalle-diagnostico-contenido">
+        ${filaDet("Estado", "Aún no hay información de diagnóstico")}
+      </div></details>`;
   }
   const escalera = `${h.probes} comprobaciones · ${h.reinits} recuperaciones `
                  + `· ${h.resets} restablecimientos · ${h.reboots} reinicios`;
-  return `<div class="det-grupo"><h3>Diagnóstico</h3>
+  return `<details class="detalle-diagnostico"><summary>Diagnóstico</summary>
+    <div class="detalle-diagnostico-contenido">
     ${filaDet("Último fallo", h.fault
-        ? `<span class="chip ambar">${h.fault_name}</span>`
-        : `<span class="chip on">${h.fault_name}</span>`)}
+        ? `<span class="chip ambar">${htmlSeguro(h.fault_name)}</span>`
+        : `<span class="chip on">${htmlSeguro(h.fault_name)}</span>`)}
     ${filaDet("Arranques", h.boots)}
-    ${filaDet("Causa del último", h.reset_name)}
-    ${filaDet("Recuperaciones", escalera)}
+    ${filaDet("Causa del último", htmlSeguro(h.reset_name))}
+    ${filaDet("Recuperaciones", htmlSeguro(escalera))}
     ${filaDet("Reportado", "hace " + fmtAgo(h.ago_s))}
-  </div>`;
+    </div></details>`;
+}
+
+async function verNodoEnDatos(origin) {
+  if (catalogo === null) await cargarCatalogo();
+  const nodo = catalogo?.find((item) => Number(item.node_id) === Number(origin));
+  const canales = nodo?.channels?.map((canal) => canal.channel_id) ?? [];
+  seleccion = new Set(canales);
+  modo = "nodo";
+  selectorMedidas.value = { selection: canales, mode: modo };
+  document.getElementById("vistas-guardadas").value = "";
+  actualizarBotonMedidas();
+  cerrarDetalle();
+  location.hash = "#/datos";
+  requestAnimationFrame(programarGrafico);
 }
 
 function abrirDetalle(origin) {
   detalleOrigen = origin;
   pintarDetalle(origin);
+  document.getElementById("detalle-cuerpo").scrollTop = 0;
   document.getElementById("detalle").show();
 }
 function cerrarDetalle() {
@@ -975,6 +1176,22 @@ function cerrarDetalle() {
 }
 document.getElementById("detalle").addEventListener(
   "modulinkr-close-request", cerrarDetalle);
+document.getElementById("detalle-cuerpo").addEventListener("click", (evento) => {
+  const medida = evento.target.closest(".detalle-medida");
+  if (!medida) return;
+  cerrarDetalle();
+  abrirModal(Number(medida.dataset.origin), Number(medida.dataset.canal));
+});
+document.getElementById("detalle-acciones").addEventListener("click", (evento) => {
+  const accion = evento.target.closest("[data-detalle-accion]");
+  if (!accion) return;
+  if (accion.dataset.detalleAccion === "datos") {
+    evento.preventDefault();
+    verNodoEnDatos(Number(accion.dataset.origin));
+  } else {
+    cerrarDetalle();
+  }
+});
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (modalSel !== null) cerrarModal(); else cerrarDetalle();
@@ -996,6 +1213,8 @@ let grafoTopologia = null;
 let topologiaPersonalizada = false;
 let topologiaResizeObserver = null;
 let topologiaResizeTimer = null;
+let arrastreTopologia = null;
+let temporizadorFisicaTopologia = null;
 let anchoTopologiaObservado = 0;
 let imagenCelularTopologia = null;
 let cargaImagenCelularTopologia = null;
@@ -1176,6 +1395,7 @@ function nodoVisualTopologia(n, posicion = null) {
     },
     chosen: false,
     opacity: 1,
+    mass: rol === "gateway" ? 4 : rol === "cellular" ? 3.5 : 1,
   };
   if (posicion) Object.assign(item, posicion, { fixed: { x: false, y: true } });
   return item;
@@ -1219,6 +1439,136 @@ function opcionesFisicaTopologia() {
   };
 }
 
+function opcionesFisicaInteraccionTopologia() {
+  const anchoMapa = document.getElementById("mapa")?.clientWidth || 1024;
+  const compacta = anchoMapa < 600;
+  const intermedia = anchoMapa < 900;
+  return {
+    enabled: true,
+    solver: "forceAtlas2Based",
+    stabilization: { enabled: false },
+    maxVelocity: 4,
+    minVelocity: 0.15,
+    timestep: 0.3,
+    forceAtlas2Based: {
+      gravitationalConstant: compacta ? -5 : intermedia ? -6 : -7,
+      centralGravity: 0,
+      springLength: compacta ? 62 : intermedia ? 70 : 78,
+      springConstant: 0.06,
+      damping: 0.46,
+      avoidOverlap: 1,
+    },
+  };
+}
+
+function detenerFisicaInteraccionTopologia() {
+  if (temporizadorFisicaTopologia !== null) {
+    clearTimeout(temporizadorFisicaTopologia);
+    temporizadorFisicaTopologia = null;
+  }
+  if (!red || !nodosTopologia) return;
+  red.stopSimulation();
+  red.setOptions({ physics: { enabled: false } });
+  nodosTopologia.update(nodosTopologia.getIds().map((id) => ({
+    id,
+    physics: true,
+    fixed: { x: false, y: false },
+  })));
+}
+
+function iniciarArrastreTopologia(id) {
+  if (!red || !id) return;
+  detenerFisicaInteraccionTopologia();
+  const vecinos = red.getConnectedNodes(id);
+  arrastreTopologia = {
+    id,
+    inicio: red.getPositions([id])[id],
+    anterior: red.getPositions([id])[id],
+    vecinos,
+    fisicos: new Set(),
+    fisicaActiva: false,
+  };
+}
+
+function activarFisicaArrastreTopologia(id) {
+  if (!red || !nodosTopologia || !arrastreTopologia
+      || arrastreTopologia.id !== id) return;
+  const actual = red.getPositions([id])[id];
+  const inicio = arrastreTopologia.inicio;
+  if (!arrastreTopologia.fisicaActiva
+      && Math.hypot(actual.x - inicio.x, actual.y - inicio.y) < 5) return;
+
+  const ids = nodosTopologia.getIds();
+  const posiciones = red.getPositions(ids);
+  const anterior = arrastreTopologia.anterior || actual;
+  const movimiento = { x: actual.x - anterior.x, y: actual.y - anterior.y };
+  const fisicos = new Set(arrastreTopologia.fisicos || []);
+  const roles = new Map((grafoTopologia?.nodes || []).map((n) => [n.id, n.role]));
+
+  // La conexión directa acompaña el gesto de forma apenas perceptible. No se
+  // arrastra toda la rama: solo se desplaza el extremo unido al equipo.
+  arrastreTopologia.vecinos.forEach((vecino) => {
+    const p = posiciones[vecino];
+    if (!p) return;
+    const infraestructura = ["gateway", "cellular"].includes(roles.get(vecino));
+    const factor = infraestructura ? 0.025 : 0.05;
+    red.moveNode(vecino, p.x + movimiento.x * factor, p.y + movimiento.y * factor);
+  });
+
+  // Cuando dos equipos se acercan demasiado, el que ya estaba colocado cede
+  // suavemente. Así se evita la superposición sin imponer una separación larga.
+  const distanciaMinima = 116;
+  ids.forEach((candidato) => {
+    if (candidato === id) return;
+    const p = red.getPositions([candidato])[candidato];
+    if (!p) return;
+    let dx = p.x - actual.x;
+    let dy = p.y - actual.y;
+    let distancia = Math.hypot(dx, dy);
+    if (distancia >= distanciaMinima) return;
+    if (distancia < 1) {
+      dx = movimiento.x ? -movimiento.x : 1;
+      dy = movimiento.y ? -movimiento.y : 0;
+      distancia = Math.hypot(dx, dy) || 1;
+    }
+    const correccion = distanciaMinima - distancia;
+    red.moveNode(candidato,
+      p.x + dx / distancia * correccion,
+      p.y + dy / distancia * correccion);
+    fisicos.add(candidato);
+  });
+
+  arrastreTopologia.fisicos = fisicos;
+  arrastreTopologia.anterior = actual;
+  arrastreTopologia.fisicaActiva = true;
+}
+
+function terminarArrastreTopologia(id) {
+  if (!red || !arrastreTopologia || arrastreTopologia.id !== id) {
+    arrastreTopologia = null;
+    return;
+  }
+  const fisicaActiva = arrastreTopologia.fisicaActiva;
+  const fisicos = arrastreTopologia.fisicos || new Set();
+  arrastreTopologia = null;
+  if (!fisicaActiva) return;
+
+  // Se conserva exactamente la posición elegida mientras el entorno termina
+  // de separarse. Después se liberan todos los equipos sin moverlos de nuevo.
+  nodosTopologia.update(nodosTopologia.getIds().map((nodoId) => ({
+    id: nodoId,
+    physics: fisicos.has(nodoId),
+    fixed: fisicos.has(nodoId)
+      ? { x: false, y: false }
+      : { x: true, y: true },
+  })));
+  red.setOptions({ physics: opcionesFisicaInteraccionTopologia() });
+  red.startSimulation();
+  temporizadorFisicaTopologia = setTimeout(() => {
+    detenerFisicaInteraccionTopologia();
+  }, 380);
+}
+
 function encuadrarTopologia(animar = true) {
   if (!red || !nodosTopologia) return;
   const anchoMapa = document.getElementById("mapa")?.clientWidth || 1024;
@@ -1231,7 +1581,12 @@ function encuadrarTopologia(animar = true) {
   });
 }
 
-function estabilizarTopologia({ animar = true } = {}) {
+function revelarTopologia() {
+  const mapa = document.getElementById("mapa");
+  requestAnimationFrame(() => mapa?.classList.remove("topologia-preparando"));
+}
+
+function estabilizarTopologia({ animar = true, revelar = false } = {}) {
   if (!red || !nodosTopologia) return;
   const roles = new Map((grafoTopologia?.nodes || []).map((n) => [n.id, n.role]));
   const padres = new Map((grafoTopologia?.edges || []).map((e) => [e.from, e.to]));
@@ -1265,12 +1620,15 @@ function estabilizarTopologia({ animar = true } = {}) {
       ...posiciones.get(id),
       fixed: { x: false, y: false },
     })));
-    requestAnimationFrame(() => encuadrarTopologia(animar));
+    requestAnimationFrame(() => {
+      encuadrarTopologia(revelar ? false : animar);
+      if (revelar) revelarTopologia();
+    });
   });
   red.stabilize(140);
 }
 
-function restablecerTopologia({ animar = true } = {}) {
+function restablecerTopologia({ animar = true, revelar = false } = {}) {
   if (!red || !nodosTopologia || !grafoTopologia) return;
   topologiaPersonalizada = false;
   const posiciones = posicionesInicialesTopologia(grafoTopologia);
@@ -1279,7 +1637,23 @@ function restablecerTopologia({ animar = true } = {}) {
     ...posiciones.get(n.id),
     fixed: { x: false, y: true },
   })));
-  estabilizarTopologia({ animar });
+  estabilizarTopologia({ animar, revelar });
+}
+
+function prepararTopologiaAlMostrar() {
+  const mapa = document.getElementById("mapa");
+  if (!mapa) return;
+  mapa.classList.add("topologia-preparando");
+  if (!red) return;
+  requestAnimationFrame(() => {
+    red.redraw();
+    if (topologiaPersonalizada) {
+      encuadrarTopologia(false);
+      revelarTopologia();
+    } else {
+      restablecerTopologia({ animar: false, revelar: true });
+    }
+  });
 }
 
 function observarTamanoTopologia() {
@@ -1318,6 +1692,7 @@ async function refrescarMapa() {
   mapa.setAttribute("aria-label", `Topología con ${equipos.length} ${equipos.length === 1 ? "equipo" : "equipos"}. ${equipos.map((n) => n.transport === "nbiot" ? `${n.label}: en línea por NB-IoT; LoRa sin conexión` : `${n.label}: ${n.online ? "en línea por LoRa" : "sin actividad reciente"}`).join(". ")}`);
 
   if (red === null) {
+    mapa.classList.add("topologia-preparando");
     nodosTopologia = new vis.DataSet(g.nodes.map((n) =>
       nodoVisualTopologia(n, posiciones.get(n.id))));
     aristasTopologia = new vis.DataSet(g.edges.map(aristaVisualTopologia));
@@ -1337,19 +1712,19 @@ async function refrescarMapa() {
     red.on("dragStart", ({ nodes }) => {
       if (!nodes.length) return;
       topologiaPersonalizada = true;
-      red.setOptions({ physics: opcionesFisicaTopologia() });
-      red.startSimulation();
+      iniciarArrastreTopologia(nodes[0]);
+    });
+    red.on("dragging", ({ nodes }) => {
+      if (!nodes.length) return;
+      activarFisicaArrastreTopologia(nodes[0]);
     });
     red.on("dragEnd", ({ nodes }) => {
       if (!nodes.length) return;
-      red.once("stabilized", () => {
-        red.stopSimulation();
-        red.setOptions({ physics: { enabled: false } });
-      });
+      terminarArrastreTopologia(nodes[0]);
     });
     document.getElementById("topologia-restablecer").disabled = false;
     observarTamanoTopologia();
-    estabilizarTopologia();
+    estabilizarTopologia({ animar: false, revelar: true });
   } else {
     const idsAnteriores = new Set(nodosTopologia.getIds());
     const idsNuevos = new Set(g.nodes.map((n) => n.id));
@@ -1387,10 +1762,13 @@ let catalogo = null;          // respuesta de /api/datos/nodos
 let seleccion = new Set();    // channel_ids marcados
 let modo = "nodo";            // "nodo" | "medida"
 const metaCanal = new Map();  // channel_id -> {node_id, node_name, read_id, unit}
+const colorPorCanal = new Map();
+const seriesOcultas = new Set();
 const selectorPeriodo = document.getElementById("selector-periodo");
 const selectorMedidas = document.getElementById("selector-medidas");
 const botonMedidas = document.getElementById("btn-medidas");
 const estadoVacioDatos = document.getElementById("datos-vacio");
+const leyendaGrafico = document.getElementById("grafico-leyenda");
 
 function mostrarEstadoVacioDatos(mostrar) {
   if (estadoVacioDatos) estadoVacioDatos.hidden = !mostrar;
@@ -1433,6 +1811,36 @@ function nombreMedida(c) {
   return nombre.charAt(0).toUpperCase() + nombre.slice(1);
 }
 
+function colorDeCanal(channelId) {
+  const clave = String(channelId ?? "");
+  if (colorPorCanal.has(clave)) return colorPorCanal.get(clave);
+  let hash = 0;
+  for (const caracter of clave) hash = (hash * 31 + caracter.charCodeAt(0)) >>> 0;
+  return COLORES_GRAFICO[hash % COLORES_GRAFICO.length];
+}
+
+function elementosLeyenda(series) {
+  return series.map((serie) => {
+    const clave = String(serie.channel_id);
+    const meta = metaCanal.get(serie.channel_id) ?? metaCanal.get(clave) ?? {};
+    const medida = meta.name || meta.read_id
+      ? nombreMedida(meta)
+      : String(serie.name ?? etiquetaCanal(serie.channel_id)).split("/").pop();
+    return {
+      id: serie.channel_id,
+      nodo: meta.node_name ?? `Nodo ${meta.node_id ?? ""}`.trim(),
+      medida,
+      unidad: unidad(serie.unit ?? meta.unit),
+      color: colorDeCanal(clave),
+      visible: !seriesOcultas.has(clave),
+    };
+  });
+}
+
+function actualizarLeyendaGrafico(series) {
+  if (leyendaGrafico) leyendaGrafico.items = elementosLeyenda(series);
+}
+
 async function cargarCatalogo() {
   let r;
   try {
@@ -1447,6 +1855,7 @@ async function cargarCatalogo() {
     return;
   }
   catalogo = await r.json();
+  actualizarTiposCatalogo();
   metaCanal.clear();
   for (const n of catalogo) {
     for (const c of n.channels) {
@@ -1456,10 +1865,32 @@ async function cargarCatalogo() {
       });
     }
   }
+  colorPorCanal.clear();
+  [...metaCanal.keys()].map(String).sort((a, b) => a.localeCompare(b, "es", { numeric: true }))
+    .forEach((clave, indice) => {
+      colorPorCanal.set(clave, COLORES_GRAFICO[indice % COLORES_GRAFICO.length]);
+    });
   selectorMedidas.catalog = catalogo;
   selectorMedidas.value = { selection: [...seleccion], mode: modo };
   actualizarBotonMedidas();
   renderVistas();
+}
+
+function actualizarTiposCatalogo() {
+  if (!catalogo) return false;
+  let cambiado = false;
+  for (const nodo of catalogo) {
+    const estado = cacheEstado?.nodes.find((item) =>
+      Number(item.origin) === Number(nodo.node_id));
+    const ultimos = cacheUltimos?.nodes.find((item) =>
+      Number(item.origin) === Number(nodo.node_id));
+    const tipo = estado && esSupernodo(estado, ultimos) ? "super_node" : "node";
+    if (nodo.node_type !== tipo) {
+      nodo.node_type = tipo;
+      cambiado = true;
+    }
+  }
+  return cambiado;
 }
 
 function actualizarBotonMedidas() {
@@ -1564,44 +1995,95 @@ function rango() {
 
 const EJE_Y = {
   type: "value", scale: true,
-  axisLabel: { color: COLOR.dim },
+  axisLabel: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO, fontSize: 12,
+    margin: 8, hideOverlap: true, formatter: fmtEje },
+  axisLine: { show: true, lineStyle: { color: COLOR.border } },
+  axisTick: { lineStyle: { color: COLOR.border } },
   splitLine: { lineStyle: { color: COLOR.border } },
-  nameTextStyle: { color: COLOR.dim },
+  nameLocation: "end", nameGap: 8,
+  nameTextStyle: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO,
+    fontSize: 12, fontWeight: 500 },
 };
-const EJE_X = { type: "time", axisLabel: { color: COLOR.dim } };
+const EJE_X = {
+  type: "time",
+  axisLabel: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO,
+    fontSize: 12, margin: 10, hideOverlap: true },
+  axisLine: { lineStyle: { color: COLOR.border } },
+  axisTick: { lineStyle: { color: COLOR.border } },
+};
+
+function tooltipGrafico(parametros) {
+  const lista = Array.isArray(parametros) ? parametros : [parametros];
+  const contenedor = document.createElement("div");
+  contenedor.className = "grafico-tooltip";
+  const instante = Number(lista[0]?.value?.[0]);
+  if (Number.isFinite(instante)) {
+    const fecha = document.createElement("strong");
+    const valorFecha = new Date(instante);
+    fecha.textContent = `${fmtDia(valorFecha)} · ${fmtHora(valorFecha)}`;
+    contenedor.appendChild(fecha);
+  }
+  for (const parametro of lista) {
+    const meta = metaCanal.get(parametro.seriesId)
+      ?? metaCanal.get(Number(parametro.seriesId)) ?? {};
+    const fila = document.createElement("div");
+    fila.className = "grafico-tooltip-fila";
+    const muestra = document.createElement("span");
+    muestra.className = "grafico-tooltip-muestra";
+    muestra.style.backgroundColor = parametro.color;
+    const textos = document.createElement("span");
+    textos.className = "grafico-tooltip-textos";
+    const medida = document.createElement("span");
+    medida.textContent = nombreMedida(meta.read_id == null ? { name: parametro.seriesName } : meta);
+    const nodo = document.createElement("small");
+    nodo.textContent = meta.node_name ?? "";
+    textos.append(medida, nodo);
+    const valor = document.createElement("b");
+    const numero = Array.isArray(parametro.value) ? parametro.value[1] : parametro.value;
+    valor.textContent = `${fmtValor(numero)}${meta.unit ? ` ${unidad(meta.unit)}` : ""}`;
+    fila.append(muestra, textos, valor);
+    contenedor.appendChild(fila);
+  }
+  return contenedor;
+}
 
 function opcionesGrafico(series) {
   const unidades = [...new Set(series.map((s) => s.unit ?? ""))];
   const compacto = graficoEsCompacto();
   const linea = (s) => ({
-    name: etiquetaCanal(s.channel_id),
+    id: String(s.channel_id), name: etiquetaCanal(s.channel_id),
     type: "line", showSymbol: false, sampling: "lttb",
+    lineStyle: { color: colorDeCanal(s.channel_id), width: 2 },
+    itemStyle: { color: colorDeCanal(s.channel_id) },
     data: s.points.map(([t, v]) => [t * 1000, v]),
   });
-  const leyenda = {
-    type: "scroll", left: compacto ? 8 : "center", right: compacto ? 8 : 16,
-    top: 8, itemWidth: 16, itemHeight: 10,
-    textStyle: { color: COLOR.text },
-  };
+  const seleccionLeyenda = Object.fromEntries(series.map((serie) => [
+    etiquetaCanal(serie.channel_id), !seriesOcultas.has(String(serie.channel_id)),
+  ]));
+  const leyenda = { show: false, selected: seleccionLeyenda };
   const zoom = [
     { type: "inside" },
-    { type: "slider", height: compacto ? 18 : 22, bottom: 8 },
+    { type: "slider", height: compacto ? 18 : 22, bottom: 8,
+      textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 11, color: COLOR.dim } },
   ];
 
   if (unidades.length <= 2) {
     // 1-2 unidades: un panel, eje izquierdo y (si toca) derecho.
     return {
       backgroundColor: "transparent",
-      tooltip: { trigger: "axis", confine: true },
+      textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.dim },
+      tooltip: { trigger: "axis", confine: true, formatter: tooltipGrafico,
+        textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.text } },
       legend: leyenda,
       grid: {
         left: compacto ? 48 : 60,
         right: unidades.length === 2 ? (compacto ? 48 : 60) : (compacto ? 14 : 24),
-        top: compacto ? 54 : 48, bottom: compacto ? 54 : 60, containLabel: true,
+        top: compacto ? 26 : 24, bottom: compacto ? 54 : 60, containLabel: true,
       },
       xAxis: EJE_X,
       yAxis: unidades.map((u, i) => ({
-        ...EJE_Y, name: u, position: i === 0 ? "left" : "right",
+        ...EJE_Y, name: unidad(u), position: i === 0 ? "left" : "right",
+        axisLabel: { ...EJE_Y.axisLabel, align: i === 0 ? "right" : "left" },
       })),
       dataZoom: zoom,
       series: series.map((s) => ({
@@ -1611,23 +2093,38 @@ function opcionesGrafico(series) {
   }
 
   // 3+ unidades: un panel por unidad, eje X compartido (zoom enlazado).
-  const alto = Math.floor(84 / unidades.length);  // % útiles bajo la leyenda
+  const inicio = compacto ? 9 : 8;
+  const disponible = compacto ? 75 : 76;
+  const alto = disponible / unidades.length;
+  const margenIzquierdo = compacto ? 54 : 72;
+  const margenDerecho = compacto ? 14 : 24;
   return {
     backgroundColor: "transparent",
-    tooltip: { trigger: "axis", confine: true },
+    textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.dim },
+    tooltip: { trigger: "axis", confine: true, formatter: tooltipGrafico,
+      textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.text } },
     legend: leyenda,
     axisPointer: { link: [{ xAxisIndex: "all" }] },
     grid: unidades.map((u, i) => ({
-      left: compacto ? 48 : 70, right: compacto ? 16 : 30,
-      top: `${12 + i * alto}%`, height: `${alto - 7}%`, containLabel: true,
+      left: margenIzquierdo, right: margenDerecho,
+      top: `${inicio + i * alto}%`, height: `${alto - 5}%`, containLabel: false,
     })),
-    xAxis: unidades.map((u, i) => ({ ...EJE_X, gridIndex: i })),
-    yAxis: unidades.map((u, i) => ({ ...EJE_Y, name: u, gridIndex: i })),
+    xAxis: unidades.map((u, i) => ({
+      ...EJE_X, gridIndex: i,
+      axisLabel: { ...EJE_X.axisLabel, show: i === unidades.length - 1 },
+      axisLine: { ...EJE_X.axisLine, show: i === unidades.length - 1 },
+      axisTick: { ...EJE_X.axisTick, show: i === unidades.length - 1 },
+    })),
+    yAxis: unidades.map((u, i) => ({
+      ...EJE_Y, name: unidad(u), nameGap: 7, gridIndex: i,
+      axisLabel: { ...EJE_Y.axisLabel, align: "right", margin: 8 },
+    })),
     dataZoom: [
       { type: "inside", xAxisIndex: unidades.map((u, i) => i) },
       {
         type: "slider", xAxisIndex: unidades.map((u, i) => i),
         height: compacto ? 18 : 22, bottom: 8,
+        textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 11, color: COLOR.dim },
       },
     ],
     series: series.map((s) => {
@@ -1646,6 +2143,7 @@ function programarGrafico() {
     solicitudGrafico += 1;
     seriesGraficoActuales = [];
     if (chart) chart.clear();
+    actualizarLeyendaGrafico([]);
     mostrarEstadoVacioDatos(true);
     document.getElementById("datos-aviso").textContent = "";
     selectorPeriodo.loading = false;
@@ -1688,6 +2186,11 @@ async function graficar() {
       ? "No hay lecturas en el periodo seleccionado. Cambia el periodo y vuelve a intentarlo." : "";
 
     seriesGraficoActuales = data.series;
+    const idsPresentes = new Set(data.series.map((serie) => String(serie.channel_id)));
+    [...seriesOcultas].forEach((id) => {
+      if (!idsPresentes.has(id)) seriesOcultas.delete(id);
+    });
+    actualizarLeyendaGrafico(data.series);
     graficoCompacto = graficoEsCompacto();
     asegurarGrafico().setOption(opcionesGrafico(data.series), true);
   } catch (e) {
@@ -1721,6 +2224,15 @@ selectorMedidas.addEventListener("modulinkr-measures-apply", (evento) => {
   modo = evento.detail.mode;
   actualizarBotonMedidas();
   if (cambio) programarGrafico();
+});
+leyendaGrafico?.addEventListener("modulinkr-chart-series-toggle", (evento) => {
+  const id = String(evento.detail.id);
+  if (evento.detail.visible) seriesOcultas.delete(id);
+  else seriesOcultas.add(id);
+  actualizarLeyendaGrafico(seriesGraficoActuales);
+  if (chart && seriesGraficoActuales.length) {
+    chart.setOption(opcionesGrafico(seriesGraficoActuales), true);
+  }
 });
 botonMedidas.addEventListener("click", () => selectorMedidas.open());
 document.getElementById("btn-guardar-vista").addEventListener("click", vistaGuardar);
@@ -2491,6 +3003,7 @@ async function cargarAjustes() {
     const a = await r.json();
     ZONA_HORARIA = (a.timezone && a.timezone !== "auto") ? a.timezone : null;
   } catch (e) { /* visor sin backend de ajustes: zona automática */ }
+  actualizarReloj();
 }
 
 // Zonas IANA que el navegador conoce; si no expone el catálogo, una lista
@@ -4355,18 +4868,20 @@ function readRowHtml(bits) {
   </div>`;
 }
 
-function writeRowHtml() {
+const MB_WRITES = [
+  { key: "coils", label: "Bobinas", bits: true,
+    single: "write_single_coil", multiple: "write_multiple_coils" },
+  { key: "holding_registers", label: "Registros de retención", bits: false,
+    single: "write_single_register", multiple: "write_multiple_registers" },
+];
+
+function writeRowHtml(bits) {
   return `<div class="frow">
-    <select data-f="function" class="fin-s" aria-label="Función de escritura">
-      <option value="write_single_coil">Bobina</option>
-      <option value="write_single_register">Registro</option>
-      <option value="write_multiple_coils">Varias bobinas</option>
-      <option value="write_multiple_registers">Varios registros</option>
-    </select>
     <input data-f="id" class="fin-id" placeholder="ID *" maxlength="8" aria-label="Identificador de la salida">
     <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la salida">
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
-    <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1" aria-label="Cantidad de registros">
+    <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1"
+           title="Cantidad" aria-label="${bits ? "Cantidad de bobinas" : "Cantidad de registros"}">
     <select data-f="type" class="fin-s freg" aria-label="Tipo de dato">
       <option value="">Tipo</option>
       <option value="uint16">uint16</option><option value="int16">int16</option>
@@ -4386,12 +4901,22 @@ function writeRowHtml() {
 
 function deviceHtml(idx) {
   const reads = MB_READS.map((c) => `
-    <div class="fread" data-fn="${c.key}">
-      <div class="fread-head"><span>${c.label}</span>
+    <details class="fread fdata-group" data-fn="${c.key}">
+      <summary><span>${c.label}</span><span class="fdata-count">0 medidas</span></summary>
+      <div class="fdata-body">
+        <div class="frows"></div>
         <button type="button" class="fread-add" data-bits="${c.bits ? 1 : 0}">Añadir medida</button>
       </div>
-      <div class="frows"></div>
-    </div>`).join("");
+    </details>`).join("");
+  const writes = MB_WRITES.map((c) => `
+    <details class="fwrite fdata-group" data-key="${c.key}" data-bits="${c.bits ? 1 : 0}"
+             data-single="${c.single}" data-multiple="${c.multiple}">
+      <summary><span>${c.label}</span><span class="fdata-count">0 acciones</span></summary>
+      <div class="fdata-body">
+        <div class="fwrites"></div>
+        <button type="button" class="fwrite-add" data-bits="${c.bits ? 1 : 0}">Añadir acción</button>
+      </div>
+    </details>`).join("");
   return `<div class="fdev">
     <div class="fdev-head"><strong>Dispositivo ${idx}</strong>
       <button type="button" class="fdev-del" title="Eliminar dispositivo">Eliminar dispositivo</button>
@@ -4412,19 +4937,51 @@ function deviceHtml(idx) {
           <label class="cfg-campo"><span>Registro de cambio</span><input data-fd="change_address" type="number" min="0" max="65535" placeholder="Opcional"></label>
         </div>
         <label class="cfg-campo"><span>Modo de lectura</span>
-          <select data-fd="read_mode"><option value="grouped">Agrupada</option><option value="individual">Individual</option></select>
+          <select data-fd="read_mode"><option value="grouped">Agrupada (recomendada)</option><option value="individual">Individual</option></select>
         </label>
-        <label class="cfg-campo"><span>Pausa entre lecturas (ms)</span><input data-fd="inter_read_ms" type="number" min="0" max="5000" value="250"></label>
+        <label class="cfg-campo"><span>Pausa entre transacciones (ms)</span>
+          <input data-fd="inter_read_ms" type="number" min="0" max="5000" value="250">
+          <small class="fread-mode-help">Se aplica cuando las lecturas requieren más de una transacción.</small>
+        </label>
       </div>
     </details>
-    <div class="freads">${reads}</div>
-    <div class="fwrite-block">
-      <div class="fread-head"><span>Salidas</span>
-        <button type="button" class="fwrite-add">Añadir salida</button>
-      </div>
-      <div class="fwrites"></div>
-    </div>
+    <section class="fdata-section">
+      <div class="fdata-section-head"><strong>Lecturas</strong><span>Medidas recibidas desde el dispositivo.</span></div>
+      <div class="freads">${reads}</div>
+    </section>
+    <section class="fdata-section fwrite-block">
+      <div class="fdata-section-head"><strong>Escrituras</strong><span>Acciones disponibles cuando el nodo admita escrituras.</span></div>
+      <div class="fwrites-groups">${writes}</div>
+    </section>
   </div>`;
+}
+
+function fDataGroupUpdate(group, openPopulated = false) {
+  if (!group) return;
+  const rows = group.querySelectorAll(":scope > .fdata-body > .frows > .frow, :scope > .fdata-body > .fwrites > .frow");
+  const count = rows.length;
+  const isWrite = group.classList.contains("fwrite");
+  const label = count === 1
+    ? (isWrite ? "1 acción" : "1 medida")
+    : `${count} ${isWrite ? "acciones" : "medidas"}`;
+  const out = group.querySelector(":scope > summary .fdata-count");
+  if (out) out.textContent = label;
+  if (openPopulated && count > 0) group.open = true;
+}
+
+function fDataGroupsUpdate(scope, openPopulated = false) {
+  if (!scope) return;
+  scope.querySelectorAll(".fdata-group").forEach((group) => fDataGroupUpdate(group, openPopulated));
+}
+
+function fReadModeHelp(dev) {
+  if (!dev) return;
+  const mode = dev.querySelector('[data-fd="read_mode"]');
+  const help = dev.querySelector(".fread-mode-help");
+  if (!mode || !help) return;
+  help.textContent = mode.value === "individual"
+    ? "Se aplica entre cada lectura."
+    : "Se aplica cuando las lecturas requieren más de una transacción.";
 }
 
 function formRenumber() {
@@ -4622,13 +5179,16 @@ function marcarCampo(id, malo) {
   if (el) el.classList.toggle("campo-mal", !!malo);
 }
 
-// Marca en rojo los campos con problema de cada fila de lectura/escritura
-// Modbus, con las mismas reglas que fValidate. fnBloque llega para las
-// lecturas (la función la fija el bloque); en escrituras va en la fila.
+// Marca en rojo los campos con problema de cada fila de lectura o escritura
+// Modbus, con las mismas reglas que fValidate. El tipo de datos del bloque
+// determina la función que corresponde a cada fila.
 function marcarFila(row, fnBloque) {
   const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
   const set = (f, malo) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.classList.toggle("campo-mal", malo); };
-  const fn = fnBloque || g("function");
+  const group = row.closest(".fwrite");
+  const fn = group
+    ? (Number(g("count") || 1) > 1 ? group.dataset.multiple : group.dataset.single)
+    : fnBloque;
   const id = g("id");
   set("id", !(id.length >= 2 && id.length <= 8));
   set("name", !g("name"));
@@ -4650,8 +5210,9 @@ function formMarcarDevices() {
     dev.querySelectorAll(".fread").forEach((blk) => {
       blk.querySelectorAll(".frows > .frow").forEach((row) => marcarFila(row, blk.dataset.fn));
     });
-    const fw = dev.querySelector(".fwrites");
-    if (fw) fw.querySelectorAll(":scope > .frow").forEach((row) => marcarFila(row, null));
+    dev.querySelectorAll(".fwrite").forEach((blk) => {
+      blk.querySelectorAll(".fwrites > .frow").forEach((row) => marcarFila(row, null));
+    });
   });
 }
 
@@ -4814,26 +5375,16 @@ function formNetUnlock(cfg) {
   formLive();
 }
 
-// Principio general: un campo que no aplica se oculta. En una fila de
-// lectura/escritura, byte_order solo para tipos de 32 bits; en escrituras,
-// los campos de registro desaparecen con una función de bobina y count solo
-// aparece en las funciones múltiples.
+// Un campo que no aplica se oculta. byte_order solo aparece para tipos de
+// 32 bits y los campos de registro no se muestran en las bobinas.
 function fRowVis(row) {
   if (!row) return;
-  const fnEl = row.querySelector('[data-f="function"]');   // solo escrituras
   const typeEl = row.querySelector('[data-f="type"]');
   const boEl = row.querySelector('[data-f="byte_order"]');
-  const isWrite = !!fnEl;
-  let bits = false;
-  if (isWrite) {
-    const fn = fnEl.value;
-    bits = fn === "write_single_coil" || fn === "write_multiple_coils";
+  const writeGroup = row.closest(".fwrite");
+  const bits = writeGroup ? writeGroup.dataset.bits === "1" : false;
+  if (writeGroup) {
     row.querySelectorAll(".freg").forEach((el) => { el.style.display = bits ? "none" : ""; });
-    const countEl = row.querySelector(".fcount");
-    if (countEl) {
-      const multi = fn === "write_multiple_coils" || fn === "write_multiple_registers";
-      countEl.style.display = multi ? "" : "none";
-    }
   }
   if (boEl) {
     const t = typeEl ? typeEl.value : "";
@@ -4851,13 +5402,14 @@ function fDevVis(dev) {
 
 // ----- Recolección del DOM a un objeto plano -----
 
-function fRows(container, funcFromBlock) {
+function fRows(container, funcFromBlock, multipleFromBlock = "") {
   if (!container) return [];
   return [...container.querySelectorAll(":scope > .frow")].map((row) => {
     const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
+    const count = g("count");
     return {
-      function: funcFromBlock || g("function"),
-      id: g("id"), name: g("name"), address: g("address"), count: g("count"),
+      function: multipleFromBlock && Number(count || 1) > 1 ? multipleFromBlock : funcFromBlock,
+      id: g("id"), name: g("name"), address: g("address"), count,
       type: g("type"), byte_order: g("byte_order"), scale: g("scale"),
       offset: g("offset"), unit: g("unit"),
     };
@@ -4873,7 +5425,10 @@ function collectForm() {
     dev.querySelectorAll(".fread").forEach((blk) => {
       reads = reads.concat(fRows(blk.querySelector(".frows"), blk.dataset.fn));
     });
-    const writes = fRows(dev.querySelector(".fwrites"), null);
+    let writes = [];
+    dev.querySelectorAll(".fwrite").forEach((blk) => {
+      writes = writes.concat(fRows(blk.querySelector(".fwrites"), blk.dataset.single, blk.dataset.multiple));
+    });
     return {
       name: g("name"), description: g("description"),
       default_slave_id: g("default_slave_id"), desired_slave_id: g("desired_slave_id"),
@@ -5098,11 +5653,15 @@ function fillForm(cfg) {
       fillRow(rows.lastElementChild, rd);
     });
     (dev.writes || []).forEach((wr) => {
-      const rows = card.querySelector(".fwrites");
-      rows.insertAdjacentHTML("beforeend", writeRowHtml());
+      const group = card.querySelector(`.fwrite[data-single="${wr.function}"], .fwrite[data-multiple="${wr.function}"]`);
+      if (!group) return;
+      const rows = group.querySelector(".fwrites");
+      rows.insertAdjacentHTML("beforeend", writeRowHtml(group.dataset.bits === "1"));
       fillRow(rows.lastElementChild, wr);
     });
     fDevVis(card);
+    fReadModeHelp(card);
+    fDataGroupsUpdate(card, true);
   });
 }
 
@@ -5870,26 +6429,39 @@ document.getElementById("f-add-device").addEventListener("click", () => {
 });
 document.getElementById("f-devices").addEventListener("click", (e) => {
   const t = e.target;
-  if (t.classList.contains("frow-del")) { t.closest(".frow").remove(); return; }
+  if (t.classList.contains("frow-del")) {
+    const group = t.closest(".fdata-group");
+    t.closest(".frow").remove();
+    fDataGroupUpdate(group);
+    formLive();
+    return;
+  }
   if (t.classList.contains("fdev-del")) { t.closest(".fdev").remove(); formRenumber(); return; }
   if (t.classList.contains("fread-add")) {
-    const rows = t.closest(".fread").querySelector(".frows");
+    const group = t.closest(".fread");
+    const rows = group.querySelector(".frows");
     rows.insertAdjacentHTML("beforeend", readRowHtml(t.dataset.bits === "1"));
     fRowVis(rows.lastElementChild);
+    fDataGroupUpdate(group, true);
+    formLive();
     return;
   }
   if (t.classList.contains("fwrite-add")) {
-    const rows = t.closest(".fwrite-block").querySelector(".fwrites");
-    rows.insertAdjacentHTML("beforeend", writeRowHtml());
+    const group = t.closest(".fwrite");
+    const rows = group.querySelector(".fwrites");
+    rows.insertAdjacentHTML("beforeend", writeRowHtml(t.dataset.bits === "1"));
     fRowVis(rows.lastElementChild);
+    fDataGroupUpdate(group, true);
+    formLive();
   }
 });
-// Visibilidad condicional: cambia el tipo o la función de una fila, o el
-// slave_id de un dispositivo, y aparecen/desaparecen los campos que aplican.
+// Visibilidad condicional: cambia el tipo de una fila, el modo de lectura o
+// el slave_id de un dispositivo, y se actualizan los campos que corresponden.
 document.getElementById("f-devices").addEventListener("change", (e) => {
   const f = e.target.getAttribute && e.target.getAttribute("data-f");
-  if (f === "type" || f === "function") { fRowVis(e.target.closest(".frow")); return; }
+  if (f === "type") { fRowVis(e.target.closest(".frow")); return; }
   const fd = e.target.getAttribute && e.target.getAttribute("data-fd");
+  if (fd === "read_mode") fReadModeHelp(e.target.closest(".fdev"));
   if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
 });
 document.getElementById("f-devices").addEventListener("input", (e) => {
@@ -5983,12 +6555,12 @@ document.addEventListener("visibilitychange", () => {
   // Al volver a la pestaña se refresca al momento, sin esperar al sondeo.
   if (!document.hidden) { refrescarRed(); if (vistaActual() === "topologia") refrescarMapa(); }
 });
-setInterval(() => {
-  document.getElementById("clock").textContent =
-    new Date().toLocaleTimeString("es-ES", opcHora({}));
-  const ind = document.getElementById("refresco");
-  if (ultimoRefresco !== null) {
-    ind.textContent = "actualizado hace " +
-      fmtAgo((Date.now() - ultimoRefresco) / 1000);
-  }
-}, 1000);
+function actualizarReloj() {
+  document.getElementById("clock").textContent = new Date().toLocaleString(
+    "es-ES", opcHora({
+      weekday: "long", day: "numeric", month: "long", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    }));
+}
+actualizarReloj();
+setInterval(actualizarReloj, 30000);
