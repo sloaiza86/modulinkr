@@ -46,6 +46,14 @@ Config por variables de entorno (/etc/modulinkr/web.env en el Pi):
                           el servicio se da por caído (ver netstatus.py)
   MODULINKR_WEB_SETTINGS  ruta del JSON de preferencias del visor (zona
                           horaria). Vacía = junto al buffer.db (settingsapi.py)
+  MODULINKR_AI_PROVIDER   proveedor del asistente (openai u
+                          openai_compatible)
+  MODULINKR_AI_MODEL      identificador exacto del modelo
+  MODULINKR_AI_BASE_URL   URL base HTTPS del proveedor
+  MODULINKR_AI_API_KEY_B64 credencial codificada, nunca expuesta por la API
+  MODULINKR_AI_VERIFIED_SHA256 huella de la configuración comprobada
+  MODULINKR_AI_ALLOW_INSECURE_DEV (default 0) permite el asistente sin
+                          autenticación ni HTTPS solo para desarrollo local
 
 Arranque manual (banco):
   uvicorn web_service:app --host 0.0.0.0 --port 8080
@@ -256,6 +264,10 @@ import radioapi  # noqa: E402
 
 import settingsapi  # noqa: E402
 
+# ----- Módulo: configuración del proveedor de IA -----
+
+import aiapi  # noqa: E402
+
 # ----- Módulos: configuración de MQTT y base de datos (acciones sudo) -----
 
 import mqttapi  # noqa: E402
@@ -295,6 +307,7 @@ app.include_router(dataapi.router, dependencies=[Depends(require_auth)])
 app.include_router(configapi.router, dependencies=[Depends(require_auth)])
 app.include_router(radioapi.router, dependencies=[Depends(require_auth)])
 app.include_router(settingsapi.router, dependencies=[Depends(require_auth)])
+app.include_router(aiapi.router, dependencies=[Depends(require_auth)])
 app.include_router(mqttapi.router, dependencies=[Depends(require_auth)])
 app.include_router(netapi.router, dependencies=[Depends(require_auth)])
 app.include_router(dbapi.router, dependencies=[Depends(require_auth)])

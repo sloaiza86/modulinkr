@@ -352,6 +352,7 @@ const RUTAS_CONFIG = {
   "radio":         { panel: "cfg-radio",    titulo: "Radio LoRa local",        volver: "#/configuracion" },
   "red-lora":      { panel: "cfg-red-lora", titulo: "Parámetros de red LoRa",  volver: "#/configuracion" },
   "servidor":      { panel: "cfg-servidor", titulo: "Servidor",                volver: "#/configuracion" },
+  "ia":            { panel: "cfg-ia",       titulo: "Asistente de IA",         volver: "#/configuracion" },
   "wifi":          { panel: "cfg-wifi",     titulo: "Red Wi-Fi",               volver: "#/configuracion" },
   "zona":          { panel: "cfg-zona",     titulo: "Zona horaria",            volver: "#/configuracion" },
   // Se mantienen las rutas anteriores para no romper marcadores guardados.
@@ -2406,6 +2407,7 @@ function cfgRuta() {
   // Al salir de depuración se corta el stream SSE abierto.
   if (sub === "depuracion") debugInit(); else debugStop();
   if (sub === "zona") tzCargar();
+  if (sub === "ia") iaCargar();
   if (sub === "servidor") servidorSetTab(servidorTab);
   if (sub === "bd") servidorSetTab("bd");
   if (sub === "mqtt") servidorSetTab("mqtt");
@@ -3190,6 +3192,118 @@ async function tzGuardar() {
     refrescarRed();
   } catch (e) {
     res.textContent = textoError(e);
+  }
+}
+
+// ----- Configuración: proveedor del asistente de IA -----
+
+const IA_OPENAI_URL = "https://api.openai.com/v1";
+let iaCompatibleUrl = "";
+let iaSecurityReady = false;
+
+function iaEstadoHtml(d) {
+  if (!d.security_ready) {
+    return '<div class="mensaje mensaje-advertencia"><span class="mensaje-titulo">Asistente desactivado</span>'
+      + '<span class="mensaje-detalle">La configuración requiere inicio de sesión y HTTPS.</span></div>';
+  }
+  if (!d.provider_configured) {
+    return '<div class="mensaje mensaje-info"><span class="mensaje-titulo">Configuración pendiente</span>'
+      + '<span class="mensaje-detalle">Indica el modelo y guarda los cambios.</span></div>';
+  }
+  if (!d.credential_configured) {
+    return '<div class="mensaje mensaje-info"><span class="mensaje-titulo">Falta la clave API</span>'
+      + '<span class="mensaje-detalle">Introduce una credencial para completar la configuración.</span></div>';
+  }
+  if (!d.connection_tested) {
+    return '<div class="mensaje mensaje-info"><span class="mensaje-titulo">Configuración pendiente de comprobación</span>'
+      + '<span class="mensaje-detalle">Guárdala para verificar la credencial y el acceso al modelo.</span></div>';
+  }
+  return '<div class="mensaje mensaje-exito"><span class="mensaje-titulo">Proveedor verificado</span>'
+    + '<span class="mensaje-detalle">La credencial y el modelo respondieron correctamente.</span></div>';
+}
+
+function iaProveedorCambiar(conservar = true) {
+  const provider = document.getElementById("ia-provider").value;
+  const baseUrl = document.getElementById("ia-base-url");
+  if (provider === "openai") {
+    if (conservar && baseUrl.value && baseUrl.value !== IA_OPENAI_URL) {
+      iaCompatibleUrl = baseUrl.value;
+    }
+    baseUrl.value = IA_OPENAI_URL;
+    baseUrl.disabled = true;
+    return;
+  }
+  baseUrl.disabled = false;
+  if (baseUrl.value === IA_OPENAI_URL) baseUrl.value = iaCompatibleUrl;
+}
+
+async function iaCargar() {
+  const result = document.getElementById("ia-resultado");
+  const state = document.getElementById("ia-estado");
+  const save = document.getElementById("ia-guardar");
+  result.textContent = "";
+  state.innerHTML = '<p class="aviso">Cargando estado...</p>';
+  iaSecurityReady = false;
+  save.disabled = true;
+  try {
+    const response = await fetchApi("/api/ia/estado");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "estado no disponible");
+    modbusAiAvailabilityFromState(data);
+    state.innerHTML = iaEstadoHtml(data);
+    const config = data.config ?? {};
+    document.getElementById("ia-provider").value = config.provider ?? "openai";
+    document.getElementById("ia-model").value = config.model ?? "";
+    document.getElementById("ia-base-url").value = config.base_url ?? IA_OPENAI_URL;
+    iaCompatibleUrl = config.provider === "openai_compatible"
+      ? (config.base_url ?? "") : "";
+    iaProveedorCambiar(false);
+    const apiKey = document.getElementById("ia-api-key");
+    apiKey.value = "";
+    apiKey.placeholder = data.credential_configured
+      ? "Sin cambios" : "Clave necesaria";
+    iaSecurityReady = !!data.security_ready;
+    save.disabled = !iaSecurityReady;
+  } catch (error) {
+    state.innerHTML = '<div class="mensaje mensaje-desconocido"><span class="mensaje-titulo">No se pudo consultar la configuración de IA</span>'
+      + '<span class="mensaje-detalle">Vuelve a intentarlo en unos segundos.</span></div>';
+  }
+}
+
+function iaBody() {
+  return {
+    provider: document.getElementById("ia-provider").value,
+    model: document.getElementById("ia-model").value.trim(),
+    base_url: document.getElementById("ia-base-url").value.trim(),
+    api_key: document.getElementById("ia-api-key").value,
+  };
+}
+
+async function iaGuardar() {
+  const result = document.getElementById("ia-resultado");
+  const save = document.getElementById("ia-guardar");
+  result.textContent = "Comprobando el proveedor...";
+  save.disabled = true;
+  try {
+    const response = await fetchApi("/api/ia/guardar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(iaBody()) });
+    const data = await response.json();
+    if (!response.ok) {
+      result.textContent = data.error ?? "No se pudo guardar la configuración de IA.";
+      return;
+    }
+    document.getElementById("ia-api-key").value = "";
+    document.getElementById("ia-api-key").placeholder = data.credential_configured
+      ? "Sin cambios" : "Clave necesaria";
+    document.getElementById("ia-estado").innerHTML = iaEstadoHtml(data);
+    modbusAiAvailabilityFromState(data);
+    result.textContent = "Proveedor comprobado y configuración guardada.";
+  } catch (error) {
+    result.textContent = textoError(
+      error, "No se pudo guardar la configuración de IA. Inténtalo de nuevo.");
+  } finally {
+    save.disabled = !iaSecurityReady;
   }
 }
 
@@ -4133,6 +4247,8 @@ document.getElementById("radio-aplicar").addEventListener("click", radioAplicarP
 document.getElementById("radio-flash").addEventListener("click", radioFlash);
 document.getElementById("tz-detectar").addEventListener("click", tzDetectar);
 document.getElementById("tz-guardar").addEventListener("click", tzGuardar);
+document.getElementById("ia-provider").addEventListener("change", () => iaProveedorCambiar(true));
+document.getElementById("ia-guardar").addEventListener("click", iaGuardar);
 document.getElementById("bd-probar").addEventListener("click", bdProbar);
 document.getElementById("bd-guardar").addEventListener("click", bdGuardar);
 document.getElementById("mqtt-probar").addEventListener("click", mqttProbar);
@@ -4952,6 +5068,59 @@ let formDestinoListo = false;
 // vez.
 let formModo = null;
 
+const MODBUS_AI_CHECKING = "Comprobando la configuración del asistente de IA.";
+const MODBUS_AI_UNCONFIGURED = "El asistente de IA no está configurado. Configúralo en Configuración > Asistente de IA para habilitarlo.";
+let modbusAiAvailability = { ready: false, message: MODBUS_AI_CHECKING };
+
+function modbusAiApplyAvailability(scope = document) {
+  const buttons = scope.matches?.(".fdev-ai")
+    ? [scope] : scope.querySelectorAll(".fdev-ai");
+  buttons.forEach((button) => {
+    button.setAttribute("aria-disabled", String(!modbusAiAvailability.ready));
+    button.title = modbusAiAvailability.ready
+      ? "Abrir asistente de configuración Modbus" : modbusAiAvailability.message;
+    button.dataset.unavailableMessage = modbusAiAvailability.ready
+      ? "" : modbusAiAvailability.message;
+    button.setAttribute("aria-label", modbusAiAvailability.ready
+      ? "Configurar con IA"
+      : `Configurar con IA. ${modbusAiAvailability.message}`);
+  });
+}
+
+function modbusAiSetAvailability(ready, message = "") {
+  modbusAiAvailability = {
+    ready: !!ready,
+    message: ready ? "" : (message || MODBUS_AI_UNCONFIGURED),
+  };
+  modbusAiApplyAvailability();
+}
+
+function modbusAiAvailabilityFromState(state) {
+  if (state?.configuration_complete && state?.security_ready) {
+    modbusAiSetAvailability(true);
+    return;
+  }
+  if (state && !state.security_ready) {
+    modbusAiSetAvailability(false, state.blocked_reason
+      || "El asistente de IA requiere inicio de sesión y HTTPS para habilitarse.");
+    return;
+  }
+  modbusAiSetAvailability(false, MODBUS_AI_UNCONFIGURED);
+}
+
+async function modbusAiRefreshAvailability() {
+  modbusAiSetAvailability(false, MODBUS_AI_CHECKING);
+  try {
+    const response = await fetchApi("/api/ia/estado");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "estado no disponible");
+    modbusAiAvailabilityFromState(data);
+  } catch (error) {
+    modbusAiSetAvailability(false,
+      "No se pudo comprobar la configuración del asistente de IA. Vuelve a intentarlo en unos segundos.");
+  }
+}
+
 // Clases de lectura Modbus (orden del array reads[] = orden de telemetría).
 const MB_READS = [
   { key: "read_discrete_inputs",   label: "Entradas discretas",     bits: true },
@@ -4960,16 +5129,21 @@ const MB_READS = [
   { key: "read_holding_registers", label: "Registros de retención", bits: false },
 ];
 const REG32 = new Set(["uint32", "int32", "float32"]);
+const REG_COUNT = new Map([
+  ["uint16", 1], ["int16", 1], ["uint32", 2], ["int32", 2], ["float32", 2],
+]);
 
 function readRowHtml(bits) {
   const reg = bits ? "" : `
     <select data-f="type" class="fin-s" aria-label="Tipo de dato">
+      <option value="">Tipo</option>
       <option value="uint16">uint16</option><option value="int16">int16</option>
       <option value="uint32">uint32</option><option value="int32">int32</option>
       <option value="float32">float32</option>
     </select>
     <select data-f="byte_order" class="fin-s fbo" title="Orden de bytes (solo 32 bits)"
             aria-label="Orden de bytes">
+      <option value="">Orden</option>
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
@@ -4994,9 +5168,15 @@ const MB_WRITES = [
 ];
 
 function writeRowHtml(bits) {
+  const functions = bits
+    ? `<option value="write_single_coil">Escribir una bobina</option>
+       <option value="write_multiple_coils">Escribir varias bobinas</option>`
+    : `<option value="write_single_register">Escribir un registro</option>
+       <option value="write_multiple_registers">Escribir varios registros</option>`;
   return `<div class="frow">
     <input data-f="id" class="fin-id" placeholder="ID *" maxlength="8" aria-label="Identificador de la salida">
     <input data-f="name" class="fin" placeholder="Nombre *" aria-label="Nombre de la salida">
+    <select data-f="function" class="fin-s ffn" aria-label="Función de escritura">${functions}</select>
     <input data-f="address" class="fin-n" type="number" min="0" max="65535" placeholder="Dirección" aria-label="Dirección Modbus">
     <input data-f="count" class="fin-n fcount" type="number" min="1" max="125" value="1"
            title="Cantidad" aria-label="${bits ? "Cantidad de bobinas" : "Cantidad de registros"}">
@@ -5007,6 +5187,7 @@ function writeRowHtml(bits) {
       <option value="float32">float32</option>
     </select>
     <select data-f="byte_order" class="fin-s freg fbo" aria-label="Orden de bytes">
+      <option value="">Orden</option>
       <option value="ABCD">ABCD</option><option value="BADC">BADC</option>
       <option value="CDAB">CDAB</option><option value="DCBA">DCBA</option>
     </select>
@@ -5037,7 +5218,13 @@ function deviceHtml(idx) {
     </details>`).join("");
   return `<div class="fdev">
     <div class="fdev-head"><strong>Dispositivo ${idx}</strong>
-      <button type="button" class="fdev-del" title="Eliminar dispositivo">Eliminar dispositivo</button>
+      <div class="fdev-actions">
+        <button type="button" class="fdev-ai" title="${MODBUS_AI_CHECKING}"
+                aria-label="Configurar con IA. ${MODBUS_AI_CHECKING}"
+                aria-disabled="true" aria-haspopup="dialog"
+                aria-controls="modbus-ai-dialog">Configurar con IA</button>
+        <button type="button" class="fdev-del" title="Eliminar dispositivo">Eliminar dispositivo</button>
+      </div>
     </div>
     <div class="cfg-form">
       <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input data-fd="name" placeholder="Sensor ambiental"></label>
@@ -5125,6 +5312,7 @@ function formInit() {
   formLockRed();
   formNbiotVis();
   formCargarNodos();
+  modbusAiRefreshAvailability();
   formSetModo(null);
 }
 
@@ -5298,22 +5486,26 @@ function marcarCampo(id, malo) {
 }
 
 // Marca en rojo los campos con problema de cada fila de lectura o escritura
-// Modbus, con las mismas reglas que fValidate. El tipo de datos del bloque
-// determina la función que corresponde a cada fila.
+// Modbus, con las mismas reglas que fValidate. Las lecturas toman la función
+// del bloque y las escrituras conservan la función seleccionada en cada fila.
 function marcarFila(row, fnBloque) {
   const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
   const set = (f, malo) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.classList.toggle("campo-mal", malo); };
   const group = row.closest(".fwrite");
-  const fn = group
-    ? (Number(g("count") || 1) > 1 ? group.dataset.multiple : group.dataset.single)
-    : fnBloque;
+  const fn = group ? g("function") : fnBloque;
   const id = g("id");
   set("id", !(id.length >= 2 && id.length <= 8));
   set("name", !g("name"));
   const a = Number(g("address")); set("address", !(a >= 0 && a <= 65535));
+  const count = Number(g("count"));
+  set("count", !(Number.isInteger(count) && count >= 1 && count <= 125));
   const bits = ["read_coils", "read_discrete_inputs",
                 "write_single_coil", "write_multiple_coils"].includes(fn);
+  set("function", !!group && !fn);
   set("type", !bits && !g("type"));
+  set("byte_order", !bits && REG32.has(g("type")) && !g("byte_order"));
+  row.querySelectorAll('[data-ai-pending="true"]').forEach((field) =>
+    field.classList.add("campo-mal"));
 }
 
 // Recorre el DOM de los dispositivos y marca nombre, slave ids y cada fila.
@@ -5331,6 +5523,8 @@ function formMarcarDevices() {
     dev.querySelectorAll(".fwrite").forEach((blk) => {
       blk.querySelectorAll(".fwrites > .frow").forEach((row) => marcarFila(row, null));
     });
+    dev.querySelectorAll('[data-ai-pending="true"]').forEach((field) =>
+      field.classList.add("campo-mal"));
   });
 }
 
@@ -5520,16 +5714,18 @@ function fDevVis(dev) {
 
 // ----- Recolección del DOM a un objeto plano -----
 
-function fRows(container, funcFromBlock, multipleFromBlock = "") {
+function fRows(container, funcFromBlock = "") {
   if (!container) return [];
   return [...container.querySelectorAll(":scope > .frow")].map((row) => {
     const g = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value.trim() : ""; };
     const count = g("count");
+    const pendingFields = [...row.querySelectorAll('[data-f][data-ai-pending="true"]')]
+      .map((field) => field.dataset.f);
     return {
-      function: multipleFromBlock && Number(count || 1) > 1 ? multipleFromBlock : funcFromBlock,
+      function: g("function") || funcFromBlock,
       id: g("id"), name: g("name"), address: g("address"), count,
       type: g("type"), byte_order: g("byte_order"), scale: g("scale"),
-      offset: g("offset"), unit: g("unit"),
+      offset: g("offset"), unit: g("unit"), pending_fields: pendingFields,
     };
   });
 }
@@ -5539,20 +5735,22 @@ function collectForm() {
   const gc = (id) => document.getElementById(id).checked;
   const devices = [...document.querySelectorAll("#f-devices > .fdev")].map((dev) => {
     const g = (f) => { const el = dev.querySelector(`[data-fd="${f}"]`); return el ? el.value.trim() : ""; };
+    const pendingFields = [...dev.querySelectorAll('[data-fd][data-ai-pending="true"]')]
+      .map((field) => field.dataset.fd);
     let reads = [];
     dev.querySelectorAll(".fread").forEach((blk) => {
       reads = reads.concat(fRows(blk.querySelector(".frows"), blk.dataset.fn));
     });
     let writes = [];
     dev.querySelectorAll(".fwrite").forEach((blk) => {
-      writes = writes.concat(fRows(blk.querySelector(".fwrites"), blk.dataset.single, blk.dataset.multiple));
+      writes = writes.concat(fRows(blk.querySelector(".fwrites")));
     });
     return {
       name: g("name"), description: g("description"),
       default_slave_id: g("default_slave_id"), desired_slave_id: g("desired_slave_id"),
       change_function: g("change_function"), change_address: g("change_address"),
       read_mode: g("read_mode"), inter_read_ms: g("inter_read_ms"),
-      reads, writes,
+      reads, writes, pending_fields: pendingFields,
     };
   });
   return {
@@ -5586,13 +5784,15 @@ function fNum(v, def) {
 function buildRW(r) {
   const bits = ["read_coils", "read_discrete_inputs",
                 "write_single_coil", "write_multiple_coils"].includes(r.function);
+  const pending = new Set(r.pending_fields || []);
   const o = { id: r.id || "", name: r.name || "", function: r.function,
-              address: fNum(r.address, 0) };
+              address: pending.has("address") ? null : fNum(r.address, 0) };
   const count = fNum(r.count, 1);
-  if (count !== 1) o.count = count;
+  if (pending.has("count")) o.count = null;
+  else if (count !== 1) o.count = count;
   if (!bits) {
     if (r.type) o.type = r.type;
-    if (r.type && REG32.has(r.type)) o.byte_order = r.byte_order || "ABCD";
+    if (r.type && REG32.has(r.type) && r.byte_order) o.byte_order = r.byte_order;
     const sc = fNum(r.scale, 1); if (r.scale !== "" && sc !== 1) o.scale = sc;
     const of = fNum(r.offset, 0); if (r.offset !== "" && of !== 0) o.offset = of;
   }
@@ -5700,21 +5900,57 @@ function fValidate(f) {
   if (!f.modbus.devices.length) e.push("añade al menos un dispositivo Modbus");
   f.modbus.devices.forEach((d, i) => {
     const p = `dispositivo ${i + 1}: `;
+    const devicePending = new Set(d.pending_fields || []);
     if (!d.name) e.push(p + "indica el nombre");
     const ds = Number(d.default_slave_id), de = Number(d.desired_slave_id);
     if (!(ds >= 1 && ds <= 247)) e.push(p + "la dirección actual debe estar entre 1 y 247");
     if (!(de >= 1 && de <= 247)) e.push(p + "la nueva dirección debe estar entre 1 y 247");
-    if (ds !== de && !d.change_function) e.push(p + "selecciona cómo cambiar la dirección Modbus");
+    if (ds !== de && !d.change_function && !devicePending.has("change_function"))
+      e.push(p + "selecciona cómo cambiar la dirección Modbus");
     if (!d.reads.length) e.push(p + "añade al menos una medida");
     [...d.reads, ...d.writes].forEach((r) => {
       const rp = p + (r.id || "medida sin identificar") + ": ";
+      const aiPending = new Set(r.pending_fields || []);
       if (!r.id || r.id.length < 2 || r.id.length > 8) e.push(rp + "el identificador debe tener entre 2 y 8 caracteres");
-      if (!r.name) e.push(rp + "indica el nombre");
-      const a = Number(r.address); if (!(a >= 0 && a <= 65535)) e.push(rp + "la dirección debe estar entre 0 y 65535");
+      if (!r.name && !aiPending.has("name")) e.push(rp + "indica el nombre");
+      const a = Number(r.address);
+      if (!(a >= 0 && a <= 65535) && !aiPending.has("address"))
+        e.push(rp + "la dirección debe estar entre 0 y 65535");
+      const count = Number(r.count || 1);
+      if ((!Number.isInteger(count) || count < 1 || count > 125) && !aiPending.has("count"))
+        e.push(rp + "la cantidad debe estar entre 1 y 125");
+      else if (Number.isInteger(a) && a + count > 65536)
+        e.push(rp + "el rango supera la dirección 65535");
       const bits = ["read_coils", "read_discrete_inputs", "write_single_coil",
                     "write_multiple_coils"].includes(r.function);
-      if (!bits && !r.type) e.push(rp + "selecciona el tipo de dato");
-      if (!bits && REG32.has(r.type) && Number(r.count || 1) !== 2) e.push(rp + "los valores de 32 bits requieren dos registros");
+      if (!bits && !r.type && !aiPending.has("type")) e.push(rp + "selecciona el tipo de dato");
+      if (!bits && REG32.has(r.type) && !r.byte_order && !aiPending.has("byte_order"))
+        e.push(rp + "selecciona el orden de bytes");
+      if (!bits && REG_COUNT.has(r.type) && count !== REG_COUNT.get(r.type)
+          && !aiPending.has("count"))
+        e.push(rp + `el tipo ${r.type} requiere ${REG_COUNT.get(r.type)} ${REG_COUNT.get(r.type) === 1 ? "registro" : "registros"}`);
+      if (["write_single_coil", "write_single_register"].includes(r.function)
+          && count !== 1 && !aiPending.has("count"))
+        e.push(rp + "una escritura simple utiliza una cantidad de 1");
+      aiPending.forEach((field) => {
+        const labels = {
+          name: "confirma el nombre propuesto por la IA",
+          address: "confirma la dirección propuesta por la IA",
+          count: "confirma la cantidad propuesta por la IA",
+          type: "confirma el tipo de dato propuesto por la IA",
+          byte_order: "confirma el orden de bytes propuesto por la IA",
+        };
+        if (labels[field]) e.push(rp + labels[field]);
+      });
+    });
+    devicePending.forEach((field) => {
+      const labels = {
+        change_function: "confirma cómo cambiar la dirección Modbus",
+        change_address: "confirma el registro de cambio de dirección",
+        read_mode: "confirma el modo de lectura",
+        inter_read_ms: "confirma la pausa entre transacciones",
+      };
+      if (labels[field]) e.push(p + labels[field]);
     });
   });
   return e;
@@ -5755,6 +5991,7 @@ function fillForm(cfg) {
   (mb.devices || []).forEach((dev, i) => {
     cont.insertAdjacentHTML("beforeend", deviceHtml(i + 1));
     const card = cont.lastElementChild;
+    modbusAiApplyAvailability(card);
     const sd = (f, v) => { const el = card.querySelector(`[data-fd="${f}"]`); if (el != null && v != null) el.value = v; };
     const addr = dev.addressing || {};
     sd("name", dev.name); sd("description", dev.description);
@@ -5781,6 +6018,145 @@ function fillForm(cfg) {
     fReadModeHelp(card);
     fDataGroupsUpdate(card, true);
   });
+}
+
+// ----- Aplicación de propuestas validadas del asistente Modbus -----
+
+function modbusAiContext(device) {
+  const form = collectForm();
+  const devices = [...document.querySelectorAll("#f-devices > .fdev")];
+  const index = devices.indexOf(device);
+  return {
+    bus: {
+      baudrate: fNum(form.modbus.baudrate, 9600),
+      parity: form.modbus.parity,
+      stopbits: fNum(form.modbus.stopbits, 1),
+    },
+    device: index >= 0 ? form.modbus.devices[index] : {},
+  };
+}
+
+function modbusAiSet(scope, selector, value) {
+  if (value == null) return;
+  const field = scope.querySelector(selector);
+  if (field) {
+    field.value = String(value);
+    modbusAiResolvePending(field);
+  }
+}
+
+function modbusAiRemoveExisting(device, id) {
+  device.querySelectorAll(".frow").forEach((row) => {
+    const current = row.querySelector('[data-f="id"]')?.value.trim();
+    if (current !== id) return;
+    const group = row.closest(".fdata-group");
+    row.remove();
+    fDataGroupUpdate(group);
+  });
+}
+
+function modbusAiMarkPending(field, label) {
+  if (!field) return;
+  if (field.dataset.aiPending !== "true") {
+    field.dataset.aiPendingHadTitle = field.hasAttribute("title") ? "true" : "false";
+    field.dataset.aiPendingTitle = field.getAttribute("title") || "";
+  }
+  if (field.tagName === "SELECT"
+      && ![...field.options].some((option) => option.value === "")) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Seleccionar";
+    field.prepend(option);
+  }
+  field.value = "";
+  field.dataset.aiPending = "true";
+  field.classList.add("campo-mal");
+  field.title = `Dato no confirmado por la IA: ${label}.`;
+}
+
+function modbusAiResolvePending(field) {
+  if (field?.dataset?.aiPending !== "true" || !String(field.value || "").trim()) return;
+  delete field.dataset.aiPending;
+  field.classList.remove("campo-mal");
+  if (field.dataset.aiPendingHadTitle === "true") {
+    field.title = field.dataset.aiPendingTitle || "";
+  } else {
+    field.removeAttribute("title");
+  }
+  delete field.dataset.aiPendingHadTitle;
+  delete field.dataset.aiPendingTitle;
+}
+
+function modbusAiPendingLabel(field) {
+  return ({
+    name: "nombre",
+    address: "dirección Modbus",
+    count: "cantidad",
+    type: "tipo de dato",
+    byte_order: "orden de bytes",
+    change_function: "función para cambiar la dirección",
+    change_address: "registro de cambio de dirección",
+    read_mode: "modo de lectura",
+    inter_read_ms: "pausa entre transacciones",
+  })[field] || field;
+}
+
+function modbusAiAddEntry(device, entry, kind, pending = []) {
+  modbusAiRemoveExisting(device, entry.id);
+  let group;
+  let rows;
+  if (kind === "reads") {
+    group = device.querySelector(`.fread[data-fn="${entry.function}"]`);
+    if (!group) throw new Error(`La función de lectura ${entry.function} no existe en el formulario.`);
+    rows = group.querySelector(".frows");
+    const bits = ["read_coils", "read_discrete_inputs"].includes(entry.function);
+    rows.insertAdjacentHTML("beforeend", readRowHtml(bits));
+  } else {
+    group = device.querySelector(
+      `.fwrite[data-single="${entry.function}"], .fwrite[data-multiple="${entry.function}"]`);
+    if (!group) throw new Error(`La función de escritura ${entry.function} no existe en el formulario.`);
+    rows = group.querySelector(".fwrites");
+    rows.insertAdjacentHTML("beforeend", writeRowHtml(group.dataset.bits === "1"));
+  }
+  const row = rows.lastElementChild;
+  fillRow(row, entry);
+  pending.forEach((item) => {
+    const field = String(item.field || "").split(".").at(-1);
+    modbusAiMarkPending(
+      row.querySelector(`[data-f="${field}"]`), modbusAiPendingLabel(field));
+  });
+  fRowVis(row);
+  fDataGroupUpdate(group, true);
+}
+
+function modbusAiApplyProposal(device, proposal) {
+  if (!device || !device.isConnected) {
+    throw new Error("El dispositivo abierto ya no existe en el formulario.");
+  }
+  // Los parámetros comunes de la línea y las direcciones actual y deseada se
+  // conservan. El asistente de un dispositivo no decide esos valores.
+  const data = proposal.device || {};
+  [
+    "name", "description", "change_function", "change_address",
+    "read_mode", "inter_read_ms",
+  ].forEach((field) => modbusAiSet(device, `[data-fd="${field}"]`, data[field]));
+  const pending = proposal.pending || [];
+  pending.forEach((item) => {
+    const match = String(item.field || "").match(/^device\.(.+)$/);
+    if (!match) return;
+    modbusAiMarkPending(
+      device.querySelector(`[data-fd="${match[1]}"]`), modbusAiPendingLabel(match[1]));
+  });
+  (proposal.reads || []).forEach((entry) => modbusAiAddEntry(
+    device, entry, "reads", pending.filter((item) =>
+      String(item.field || "").startsWith(`reads.${entry.id}.`))));
+  (proposal.writes || []).forEach((entry) => modbusAiAddEntry(
+    device, entry, "writes", pending.filter((item) =>
+      String(item.field || "").startsWith(`writes.${entry.id}.`))));
+  fDevVis(device);
+  fReadModeHelp(device);
+  fDataGroupsUpdate(device, true);
+  formLive();
 }
 
 // ----- Asistente con el nodo en este equipo (Web Serial) -----
@@ -6544,9 +6920,18 @@ document.getElementById("f-add-device").addEventListener("click", () => {
   const cont = document.getElementById("f-devices");
   cont.insertAdjacentHTML("beforeend",
     deviceHtml(cont.querySelectorAll(".fdev").length + 1));
+  modbusAiApplyAvailability(cont.lastElementChild);
 });
 document.getElementById("f-devices").addEventListener("click", (e) => {
   const t = e.target;
+  if (t.classList.contains("fdev-ai")) {
+    if (t.getAttribute("aria-disabled") === "true") {
+      toast(t.dataset.unavailableMessage || MODBUS_AI_UNCONFIGURED);
+      return;
+    }
+    document.getElementById("modbus-ai-assistant").open(t.closest(".fdev"));
+    return;
+  }
   if (t.classList.contains("frow-del")) {
     const group = t.closest(".fdata-group");
     t.closest(".frow").remove();
@@ -6576,6 +6961,7 @@ document.getElementById("f-devices").addEventListener("click", (e) => {
 // Visibilidad condicional: cambia el tipo de una fila, el modo de lectura o
 // el slave_id de un dispositivo, y se actualizan los campos que corresponden.
 document.getElementById("f-devices").addEventListener("change", (e) => {
+  modbusAiResolvePending(e.target);
   const f = e.target.getAttribute && e.target.getAttribute("data-f");
   if (f === "type") { fRowVis(e.target.closest(".frow")); return; }
   const fd = e.target.getAttribute && e.target.getAttribute("data-fd");
@@ -6583,9 +6969,33 @@ document.getElementById("f-devices").addEventListener("change", (e) => {
   if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
 });
 document.getElementById("f-devices").addEventListener("input", (e) => {
+  modbusAiResolvePending(e.target);
   const fd = e.target.getAttribute && e.target.getAttribute("data-fd");
   if (fd === "default_slave_id" || fd === "desired_slave_id") fDevVis(e.target.closest(".fdev"));
 });
+document.getElementById("modbus-ai-assistant").addEventListener(
+  "modulinkr-modbus-ai-context", (event) => {
+    event.detail.context = modbusAiContext(event.detail.device);
+  });
+document.getElementById("modbus-ai-assistant").addEventListener(
+  "modulinkr-modbus-ai-apply", (event) => {
+    try {
+      modbusAiApplyProposal(event.detail.device, event.detail.proposal);
+      event.detail.applied = true;
+      const reads = event.detail.proposal.reads.length;
+      const writes = event.detail.proposal.writes.length;
+      const pending = event.detail.proposal.pending?.length || 0;
+      if (event.detail.mode === "confirmed") {
+        toast(`Se cargó solo lo confirmado: ${reads} lecturas y ${writes} escrituras. Los datos sin confirmar quedaron fuera.`);
+      } else if (pending) {
+        toast(`Propuesta cargada: ${reads} lecturas y ${writes} escrituras. Revisa ${pending} ${pending === 1 ? "campo marcado" : "campos marcados"}.`);
+      } else {
+        toast(`Formulario actualizado: ${reads} lecturas y ${writes} escrituras.`);
+      }
+    } catch (error) {
+      event.detail.error = error?.message || "No se pudo actualizar el formulario.";
+    }
+  });
 document.getElementById("f-type").addEventListener("change", formNbiotVis);
 // Validación en vivo: cualquier input/change del asistente la dispara, y con
 // ella se regenera la caja de revisión. El propio textarea no la dispara: es
