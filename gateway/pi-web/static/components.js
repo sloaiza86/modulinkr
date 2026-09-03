@@ -1418,7 +1418,9 @@
       this._dialogo.returnValue = "";
       this._proposal = null;
       this._catalogProposal = null;
-      this._catalogIdentity = "";
+      this._discovery = null;
+      this._selectedTargetId = null;
+      this._sectionsExtracted = false;
       this._validation = null;
       this._sourceData = null;
       this._webQueries = new Set();
@@ -1433,6 +1435,9 @@
       fileName.textContent = "Ningún archivo seleccionado";
       fileName.title = "";
       this.querySelector("#mbai-candidates-container").replaceChildren();
+      this.querySelector("#mbai-candidates-container").hidden = true;
+      this.querySelector("#mbai-sections-container").replaceChildren();
+      this.querySelector("#mbai-targets-container").replaceChildren();
       this.querySelector("#mbai-source-summary").replaceChildren();
       this.querySelector("#mbai-evidence-content").replaceChildren();
       this.querySelector("#mbai-review-summary").replaceChildren();
@@ -1496,6 +1501,14 @@
             : "El PDF supera el límite de 10 MB.")
           : "El PDF se enviará al proveedor configurado cuando continúes. No se guardará en el gateway; el proveedor aplicará su política de datos.";
       }
+      if (evento.target.matches('input[name="mbai-target"]')) {
+        this._selectTarget(evento.target.value);
+      }
+      if (evento.target.matches('input[name="mbai-section"]')) {
+        const checked = this.querySelectorAll(
+          'input[name="mbai-section"]:checked');
+        if (checked.length > 8) evento.target.checked = false;
+      }
       this._actualizarControles();
     }
 
@@ -1512,23 +1525,28 @@
         return;
       }
       if (this._paso === 1) {
-        await this._solicitarPropuesta(null, null);
+        await this._solicitarDescubrimiento();
         this._prepararConfirmacion();
         this._mostrarPaso(2);
         return;
       }
       if (this._paso === 2) {
-        if (this._identityChanged()) {
-          const identity = this._confirmedIdentity();
-          await this._solicitarPropuesta(null, identity);
-          this._catalogIdentity = this._identityKey(identity);
-          this._renderSourceSummary();
-        }
-        this._renderCandidates();
+        this._renderSections();
         this._mostrarPaso(3);
         return;
       }
       if (this._paso === 3) {
+        if (!this._sectionsExtracted) {
+          await this._solicitarExtraccion();
+          this._renderCandidates();
+          this._sectionsExtracted = true;
+          this.querySelector("#mbai-sections-container").hidden = true;
+          this.querySelector("#mbai-candidates-container").hidden = false;
+          this.querySelector("#mbai-parameters-intro").textContent =
+            "Selecciona las lecturas y escrituras que quieres cargar.";
+          this._mostrarPaso(3);
+          return;
+        }
         await this._prepararSeleccion();
         this._mostrarPaso(4);
       }
@@ -1536,20 +1554,149 @@
 
     _prepararConfirmacion() {
       const origen = this.querySelector('input[name="mbai-source"]:checked')?.value;
-      const fabricante = this.querySelector("#mbai-confirm-manufacturer");
-      const modelo = this.querySelector("#mbai-confirm-model");
       const nota = this.querySelector("#mbai-confirm-note");
-      const identity = this._proposal?.identity || {};
-      fabricante.value = identity.manufacturer
-        || (origen === "identity" ? this.querySelector("#mbai-source-manufacturer").value.trim() : "");
-      modelo.value = identity.model
-        || (origen === "identity" ? this.querySelector("#mbai-source-model").value.trim() : "");
-      this.querySelector("#mbai-confirm-revision").value = identity.revision || "";
-      this._catalogIdentity = this._identityKey(this._confirmedIdentity());
-      nota.textContent = origen === "identity"
-        ? "La investigación ha localizado esta identidad. Confírmala antes de elegir parámetros."
-        : "La identidad se ha extraído del manual. Confírmala antes de elegir parámetros.";
+      const targets = this._discovery?.targets || [];
+      this._renderTargets();
+      if (targets.length === 1) this._selectTarget(targets[0].id);
+      else this._selectTarget(null);
+      const scopeLabels = {
+        single_model: "un único modelo",
+        product_family: "una familia con varias variantes",
+        multi_device_system: "varios dispositivos físicos",
+        ambiguous: "un alcance que requiere confirmación",
+      };
+      const scope = scopeLabels[this._discovery?.document_scope]
+        || "uno o varios dispositivos";
+      nota.textContent = targets.length > 1
+        ? `La fuente describe ${scope}. Selecciona el dispositivo exacto antes de buscar parámetros.`
+        : (origen === "identity"
+          ? "La investigación localizó este dispositivo. Confírmalo antes de buscar parámetros."
+          : "El dispositivo se extrajo del manual. Confírmalo antes de buscar parámetros.");
       this._renderSourceSummary();
+    }
+
+    _renderTargets() {
+      const container = this.querySelector("#mbai-targets-container");
+      container.replaceChildren();
+      const targets = this._discovery?.targets || [];
+      if (!targets.length) return;
+      const fieldset = document.createElement("fieldset");
+      fieldset.className = "mbai-candidates mbai-targets";
+      const legend = document.createElement("legend");
+      legend.textContent = targets.length === 1
+        ? "Dispositivo localizado" : "Dispositivos localizados";
+      fieldset.appendChild(legend);
+      targets.forEach((target) => {
+        const label = document.createElement("label");
+        label.className = "mbai-candidate";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = "mbai-target";
+        input.value = target.id;
+        const text = document.createElement("span");
+        const strong = document.createElement("strong");
+        strong.textContent = target.label;
+        const small = document.createElement("small");
+        const revision = target.revision ? `, ${target.revision}` : "";
+        small.textContent = target.description
+          || `${target.manufacturer} ${target.model}${revision}`;
+        text.append(strong, small);
+        label.append(input, text);
+        fieldset.appendChild(label);
+      });
+      container.appendChild(fieldset);
+    }
+
+    _selectTarget(targetId) {
+      const target = (this._discovery?.targets || [])
+        .find((item) => item.id === targetId) || null;
+      this._selectedTargetId = target?.id || null;
+      this.querySelector("#mbai-confirm-manufacturer").value =
+        target?.manufacturer || "";
+      this.querySelector("#mbai-confirm-model").value = target?.model || "";
+      this.querySelector("#mbai-confirm-revision").value = target?.revision || "";
+      this._proposal = null;
+      this._catalogProposal = null;
+      this._validation = null;
+      this._sectionsExtracted = false;
+      this.querySelector("#mbai-sections-container").replaceChildren();
+      this.querySelector("#mbai-sections-container").hidden = false;
+      this.querySelector("#mbai-candidates-container").replaceChildren();
+      this.querySelector("#mbai-candidates-container").hidden = true;
+      this.querySelector("#mbai-parameters-intro").textContent =
+        "Selecciona los grupos del manual que quieres analizar.";
+    }
+
+    _selectedTarget() {
+      return (this._discovery?.targets || [])
+        .find((item) => item.id === this._selectedTargetId) || null;
+    }
+
+    _renderSections() {
+      const container = this.querySelector("#mbai-sections-container");
+      container.replaceChildren();
+      container.hidden = false;
+      this.querySelector("#mbai-candidates-container").hidden = true;
+      this._sectionsExtracted = false;
+      const sections = (this._discovery?.sections || []).filter((item) =>
+        item.applicability === "catalog"
+        && item.target_ids.includes(this._selectedTargetId));
+      const fieldset = document.createElement("fieldset");
+      fieldset.className = "mbai-candidates";
+      const legend = document.createElement("legend");
+      legend.textContent = "Grupos disponibles";
+      fieldset.appendChild(legend);
+      const categoryLabels = {
+        measurement: "Mediciones",
+        status: "Estados",
+        operational_control: "Controles",
+        metadata: "Identificación",
+        communication: "Comunicación",
+        other: "Otros",
+      };
+      let selectedByDefault = 0;
+      sections.forEach((section) => {
+        const label = document.createElement("label");
+        label.className = "mbai-candidate";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = "mbai-section";
+        input.value = section.id;
+        const operational = [
+          "measurement", "status", "operational_control",
+        ].includes(section.category);
+        input.checked = operational && selectedByDefault < 8;
+        if (input.checked) selectedByDefault += 1;
+        const text = document.createElement("span");
+        const strong = document.createElement("strong");
+        strong.textContent = section.title;
+        const small = document.createElement("small");
+        small.textContent = categoryLabels[section.category] || "Otros";
+        text.append(strong, small);
+        label.append(input, text);
+        fieldset.appendChild(label);
+      });
+      if (sections.length) container.appendChild(fieldset);
+      else {
+        const empty = document.createElement("div");
+        empty.className = "mensaje mensaje-advertencia mbai-message";
+        empty.textContent =
+          "No se localizaron grupos aplicables para el dispositivo seleccionado.";
+        container.appendChild(empty);
+      }
+      this._actualizarControles();
+    }
+
+    _selectedSectionIds() {
+      return [...this.querySelectorAll('input[name="mbai-section"]:checked')]
+        .map((input) => input.value);
+    }
+
+    _sectionSelectionIssue() {
+      if (this._sectionsExtracted) return null;
+      const selectedIds = new Set(this._selectedSectionIds());
+      if (selectedIds.size > 8) return "Selecciona como máximo ocho grupos.";
+      return null;
     }
 
     _mostrarPaso(paso) {
@@ -1565,12 +1712,14 @@
       this._volver.hidden = paso === 1;
       if (paso === 4) {
         const hasCorrections = this._loadablePending().length > 0;
-        this._siguiente.textContent = hasCorrections
-          ? "Cargar y corregir" : "Cargar en el formulario";
+        this._siguiente.textContent = "Cargar en el formulario";
         this._aplicarConfirmado.hidden = !(hasCorrections
           && this._hasApplicableChanges(this._applicationProposal(true)));
       } else {
-        this._siguiente.textContent = paso === 1 ? "Analizar" : "Continuar";
+        this._siguiente.textContent = paso === 1
+          ? "Analizar"
+          : (paso === 3 && !this._sectionsExtracted
+            ? "Buscar parámetros" : "Continuar");
         this._aplicarConfirmado.hidden = true;
       }
       this._actualizarControles();
@@ -1587,21 +1736,24 @@
           return Boolean(file && file.size <= 10 * 1024 * 1024);
         }
         if (origen === "identity") {
-          return Boolean(this.querySelector("#mbai-source-manufacturer").value.trim()
-            && this.querySelector("#mbai-source-model").value.trim());
+          return Boolean(this.querySelector("#mbai-source-model").value.trim());
         }
         return false;
       }
       if (this._paso === 2) {
-        return Boolean(this.querySelector("#mbai-confirm-manufacturer").value.trim()
-          && this.querySelector("#mbai-confirm-model").value.trim()
-          && this._catalogHasEntries(this._catalogProposal));
+        return Boolean(this._selectedTarget()
+          && this.querySelector("#mbai-confirm-manufacturer").value.trim()
+          && this.querySelector("#mbai-confirm-model").value.trim());
       }
       if (this._paso === 3) {
-        return Boolean(this._catalogHasEntries(this._catalogProposal)
-          && this.querySelector('input[name="mbai-candidate"]:checked'));
+        return this._sectionsExtracted
+          ? Boolean(this._catalogHasEntries(this._catalogProposal)
+            && this.querySelector('input[name="mbai-candidate"]:checked'))
+          : this._selectedSectionIds().length > 0
+            && !this._sectionSelectionIssue();
       }
-      return this._hasApplicableChanges(this._applicationProposal(false));
+      return this._validation?.ready === true
+        && this._hasApplicableChanges(this._applicationProposal(false));
     }
 
     _actualizarControles() {
@@ -1612,30 +1764,40 @@
       if (this._paso === 1) {
         const origen = this.querySelector('input[name="mbai-source"]:checked')?.value;
         if (!this._configReady) return;
-        this._requisito.textContent = origen
-          ? (valido ? "Información preparada para continuar."
-            : "Completa los datos de la opción seleccionada.")
-          : "Selecciona cómo identificar el dispositivo.";
+        this._requisito.textContent = !origen
+          ? "Selecciona cómo identificar el dispositivo."
+          : (valido
+            ? "Información preparada para continuar."
+            : (origen === "identity"
+              ? "Indica el modelo exacto del dispositivo."
+              : "Selecciona el manual del dispositivo."));
       } else if (this._paso === 2) {
         const hasIdentity = Boolean(
           this.querySelector("#mbai-confirm-manufacturer").value.trim()
           && this.querySelector("#mbai-confirm-model").value.trim());
-        this._requisito.textContent = !hasIdentity
-          ? "Indica el fabricante y el modelo exactos."
-          : (this._identityChanged()
-            ? "La identidad cambió. Se verificará antes de mostrar los parámetros."
-            : (valido ? "Dispositivo preparado para confirmar."
-              : "No se obtuvo un catálogo Modbus que pueda utilizarse."));
+        this._requisito.textContent = !this._selectedTarget()
+          ? "Selecciona el dispositivo exacto descrito por la fuente."
+          : (!hasIdentity
+            ? "No se pudo confirmar el fabricante y el modelo exactos."
+            : "Dispositivo preparado para confirmar.");
       } else if (this._paso === 3) {
-        this._requisito.textContent = valido
-          ? "Selección preparada para continuar."
-          : "Selecciona al menos una lectura o escritura.";
+        const sectionIssue = this._sectionSelectionIssue();
+        this._requisito.textContent = this._sectionsExtracted
+          ? (valido
+            ? "Selección preparada para continuar."
+            : "Selecciona al menos una lectura o escritura.")
+          : (sectionIssue || (valido
+            ? `${this._selectedSectionIds().length} grupos preparados para analizar.`
+            : "Selecciona al menos un grupo para analizar."));
       } else {
         const corrections = this._loadablePending().length;
-        this._requisito.textContent = !valido
-          ? "No hay datos que puedan cargarse en el formulario."
-          : (corrections
-            ? "Los datos no confirmados se cargarán vacíos y quedarán marcados para corregirlos."
+        const confirmed = this._hasApplicableChanges(this._applicationProposal(true));
+        this._requisito.textContent = corrections
+          ? (confirmed
+            ? "La propuesta completa está bloqueada. Solo pueden cargarse por separado los parámetros confirmados."
+            : "La propuesta está bloqueada porque faltan datos obligatorios.")
+          : (!valido
+            ? "No hay datos completos que puedan cargarse en el formulario."
             : "Todo lo seleccionado quedó confirmado y está listo para cargar.");
       }
     }
@@ -1727,23 +1889,12 @@
     }
 
     _confirmedIdentity() {
-      if (!this._proposal) return null;
+      if (!this._selectedTarget()) return null;
       return {
         manufacturer: this.querySelector("#mbai-confirm-manufacturer").value.trim() || null,
         model: this.querySelector("#mbai-confirm-model").value.trim() || null,
         revision: this.querySelector("#mbai-confirm-revision").value.trim() || null,
       };
-    }
-
-    _identityKey(identity) {
-      return ["manufacturer", "model", "revision"].map((field) =>
-        String(identity?.[field] || "").trim().toLocaleLowerCase("es"))
-        .join("\u0000");
-    }
-
-    _identityChanged() {
-      return Boolean(this._catalogIdentity
-        && this._identityKey(this._confirmedIdentity()) !== this._catalogIdentity);
     }
 
     _catalogHasEntries(proposal) {
@@ -1752,14 +1903,14 @@
         && proposal.reads.length + proposal.writes.length > 0);
     }
 
-    _assertProposalResponse(data, initial) {
+    _assertProposalResponse(data) {
       const proposal = data?.proposal;
       if (!proposal || !Array.isArray(proposal.reads)
           || !Array.isArray(proposal.writes)) {
         throw new Error(
           "No se pudo completar el análisis con seguridad. No se cargó ningún dato.");
       }
-      if (initial && !this._catalogHasEntries(proposal)) {
+      if (!this._catalogHasEntries(proposal)) {
         throw new Error(
           "No se obtuvo un catálogo Modbus fiable con la información disponible. No se cargó ningún dato. Revisa el manual o vuelve a analizarlo.");
       }
@@ -1771,12 +1922,17 @@
       return detail.context || {};
     }
 
-    async _requestBody(previous = null, confirmedIdentity = undefined) {
+    async _requestBody(operation, previous = null) {
       return {
+        operation,
         source: await this._sourceRequest(),
-        confirmed_identity: confirmedIdentity === undefined
-          ? this._confirmedIdentity() : confirmedIdentity,
+        confirmed_identity: operation === "extract"
+          ? this._confirmedIdentity() : null,
         current: this._currentContext(),
+        discovery: operation === "extract" ? this._discovery : null,
+        target_id: operation === "extract" ? this._selectedTargetId : null,
+        selected_sections: operation === "extract"
+          ? this._selectedSectionIds() : [],
         previous_proposal: previous,
         selected: previous ? {
           reads: previous.reads.map((entry) => entry.id),
@@ -1787,22 +1943,53 @@
       };
     }
 
-    async _solicitarPropuesta(previous = null, confirmedIdentity = undefined) {
-      this._setBusy(true, previous
-        ? (this._webQueries.size
-          ? "Investigando automáticamente los datos seleccionados y contrastando las fuentes..."
-          : "Completando los parámetros seleccionados y contrastando las fuentes...")
-        : "Analizando la documentación y verificando el mapa Modbus...");
+    async _solicitarDescubrimiento() {
+      this._setBusy(true,
+        "Revisando el alcance del documento y localizando dispositivos y secciones Modbus...");
       try {
         const data = await this._api(
           "/api/ia/modbus/proponer",
-          await this._requestBody(previous, confirmedIdentity));
-        this._assertProposalResponse(data, !previous);
+          await this._requestBody("discover"));
+        if (!data?.discovery || !Array.isArray(data.discovery.targets)
+            || !Array.isArray(data.discovery.sections)
+            || !data.discovery.targets.length) {
+          throw new Error(
+            "No se pudo identificar con seguridad qué dispositivo describe la fuente.");
+        }
+        this._discovery = data.discovery;
+      } finally {
+        this._setBusy(false);
+      }
+    }
+
+    async _solicitarExtraccion() {
+      this._setBusy(true,
+        "Extrayendo los parámetros del dispositivo y los grupos seleccionados...");
+      try {
+        const data = await this._api(
+          "/api/ia/modbus/proponer",
+          await this._requestBody("extract"));
+        this._assertProposalResponse(data);
         this._proposal = data.proposal;
         this._validation = data;
-        if (!previous) {
-          this._catalogProposal = JSON.parse(JSON.stringify(data.proposal));
-        }
+        this._catalogProposal = JSON.parse(JSON.stringify(data.proposal));
+        this._webQueries.clear();
+      } finally {
+        this._setBusy(false);
+      }
+    }
+
+    async _solicitarPropuesta(previous) {
+      this._setBusy(true, this._webQueries.size
+        ? "Investigando automáticamente los datos seleccionados y contrastando las fuentes..."
+        : "Completando los parámetros seleccionados y contrastando las fuentes...");
+      try {
+        const data = await this._api(
+          "/api/ia/modbus/proponer",
+          await this._requestBody("refine", previous));
+        this._assertProposalResponse(data);
+        this._proposal = data.proposal;
+        this._validation = data;
         this._webQueries.clear();
       } finally {
         this._setBusy(false);
@@ -1832,17 +2019,32 @@
     async _prepararSeleccion() {
       const selection = this._filterProposal();
       this._proposal = selection;
-      this._webQueries = new Set((selection.pending || [])
-        .filter((item) => item.can_research_web && item.web_query)
-        .map((item) => item.web_query));
-      await this._solicitarPropuesta(selection);
+      const pending = selection.pending || [];
+      if (pending.length) {
+        this._webQueries = new Set(pending
+          .filter((item) => item.can_research_web && item.web_query)
+          .map((item) => item.web_query));
+        await this._solicitarPropuesta(selection);
+      } else {
+        this._webQueries.clear();
+        this._setBusy(true, "Validando localmente los parámetros seleccionados...");
+        try {
+          const data = await this._api(
+            "/api/ia/modbus/validar", { proposal: selection });
+          this._assertProposalResponse(data);
+          this._proposal = data.proposal;
+          this._validation = data;
+        } finally {
+          this._setBusy(false);
+        }
+      }
       this._renderReview();
     }
 
     _renderSourceSummary() {
       const container = this.querySelector("#mbai-source-summary");
       container.replaceChildren();
-      const sources = this._uniqueSources();
+      const sources = this._discovery?.sources || [];
       if (!sources.length) return;
       const title = document.createElement("strong");
       title.textContent = sources.length === 1 ? "Fuente utilizada" : "Fuentes utilizadas";
@@ -2107,6 +2309,11 @@
     }
 
     _aplicarPropuesta(confirmedOnly) {
+      if (!confirmedOnly && this._validation?.ready !== true) {
+        throw new Error(
+          "La propuesta contiene datos obligatorios sin confirmar y no puede cargarse."
+        );
+      }
       const proposal = this._applicationProposal(confirmedOnly);
       if (!this._hasApplicableChanges(proposal)) {
         throw new Error("No hay datos confirmados que puedan cargarse en el formulario.");
@@ -2208,7 +2415,7 @@
     _renderReviewItems() {
       const container = this.querySelector("#mbai-review-items");
       container.replaceChildren();
-      const proposal = this._applicationProposal(false);
+      const proposal = this._applicationProposal(true);
       ["reads", "writes"].forEach((kind) => {
         (proposal?.[kind] || []).forEach((entry) =>
           container.appendChild(this._reviewEntryCard(kind, entry)));
@@ -2321,10 +2528,10 @@
     _renderReviewSummary() {
       const container = this.querySelector("#mbai-review-summary");
       container.replaceChildren();
-      const proposal = this._applicationProposal(false);
+      const proposal = this._applicationProposal(true);
       const reads = proposal?.reads?.length || 0;
       const writes = proposal?.writes?.length || 0;
-      const corrections = proposal?.pending?.length || 0;
+      const corrections = this._loadablePending().length;
       const excluded = this._reviewUnsupported().length + this._unloadableEntries().length;
       const applicable = this._hasApplicableChanges(proposal);
       container.className = `mbai-review-summary${!applicable ? " blocked" : (corrections ? " warning" : "")}`;
@@ -2334,8 +2541,11 @@
         title.textContent = "No hay datos que puedan cargarse";
         detail.textContent = "La revisión explica debajo qué elementos quedaron fuera y por qué.";
       } else if (corrections) {
-        title.textContent = `${corrections} ${corrections === 1 ? "dato necesita" : "datos necesitan"} corrección`;
-        detail.textContent = `${reads} ${reads === 1 ? "lectura" : "lecturas"} y ${writes} ${writes === 1 ? "escritura" : "escrituras"} se cargarán. Los campos sin confirmar quedarán vacíos y marcados.`;
+        title.textContent = "La propuesta completa está bloqueada";
+        detail.textContent = `${corrections} ${corrections === 1 ? "dato obligatorio no está confirmado" : "datos obligatorios no están confirmados"}. No se cargará ningún campo vacío.`;
+        if (reads || writes) {
+          detail.textContent += ` ${reads} ${reads === 1 ? "lectura confirmada" : "lecturas confirmadas"} y ${writes} ${writes === 1 ? "escritura confirmada" : "escrituras confirmadas"} pueden cargarse por separado.`;
+        }
       } else {
         title.textContent = "Propuesta lista para cargar";
         detail.textContent = `${reads} ${reads === 1 ? "lectura" : "lecturas"} y ${writes} ${writes === 1 ? "escritura" : "escrituras"} se cargarán en el formulario.`;

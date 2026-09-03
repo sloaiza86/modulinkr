@@ -6129,9 +6129,43 @@ function modbusAiAddEntry(device, entry, kind, pending = []) {
   fDataGroupUpdate(group, true);
 }
 
+function modbusAiApplicationIssues(proposal) {
+  const issues = [];
+  if (!proposal || typeof proposal !== "object") return ["propuesta ausente"];
+  if (Array.isArray(proposal.pending) && proposal.pending.length) {
+    issues.push("quedan datos obligatorios sin confirmar");
+  }
+  ["reads", "writes"].forEach((kind) => {
+    (proposal[kind] || []).forEach((entry, index) => {
+      const path = `${kind}[${index}]`;
+      ["id", "name", "function", "address", "count"].forEach((field) => {
+        if (entry?.[field] == null || entry[field] === "") {
+          issues.push(`${path}.${field} está vacío`);
+        }
+      });
+      const bitFunction = [
+        "read_coils", "read_discrete_inputs",
+        "write_single_coil", "write_multiple_coils",
+      ].includes(entry?.function);
+      if (!bitFunction && !entry?.type) issues.push(`${path}.type está vacío`);
+      if (["uint32", "int32", "float32"].includes(entry?.type)
+          && !entry?.byte_order) {
+        issues.push(`${path}.byte_order está vacío`);
+      }
+    });
+  });
+  return issues;
+}
+
 function modbusAiApplyProposal(device, proposal) {
   if (!device || !device.isConnected) {
     throw new Error("El dispositivo abierto ya no existe en el formulario.");
+  }
+  const issues = modbusAiApplicationIssues(proposal);
+  if (issues.length) {
+    throw new Error(
+      `La propuesta contiene datos obligatorios incompletos: ${issues.slice(0, 3).join("; ")}.`
+    );
   }
   // Los parámetros comunes de la línea y las direcciones actual y deseada se
   // conservan. El asistente de un dispositivo no decide esos valores.

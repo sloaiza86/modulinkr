@@ -65,6 +65,14 @@ class DialogStructureTests(unittest.TestCase):
         self.assertIn(".mbai-file-button", self.styles)
         self.assertIn(".mbai-file-input:focus-visible", self.styles)
 
+    def test_identity_search_requires_only_the_model(self):
+        self.assertIn("Fabricante (opcional)", self.html)
+        start = self.components.index("    _pasoValido() {")
+        end = self.components.index("if (this._paso === 2)", start)
+        validation = self.components[start:end]
+        self.assertIn('#mbai-source-model', validation)
+        self.assertNotIn('#mbai-source-manufacturer', validation)
+
     def test_dialog_has_four_steps_and_navigation(self):
         steps = re.findall(r'data-mbai-step="([1-4])"', self.html)
         progress = re.findall(r'data-mbai-progress="([1-4])"', self.html)
@@ -98,6 +106,8 @@ class DialogStructureTests(unittest.TestCase):
         self.assertIn("formLive();", self.app)
 
     def test_candidates_and_final_review_are_dynamic_and_safely_rendered(self):
+        self.assertIn('id="mbai-targets-container"', self.html)
+        self.assertIn('id="mbai-sections-container"', self.html)
         self.assertIn('id="mbai-candidates-container"', self.html)
         self.assertIn('id="mbai-review-items"', self.html)
         self.assertIn('id="mbai-review-correction-list"', self.html)
@@ -107,15 +117,19 @@ class DialogStructureTests(unittest.TestCase):
         component = self.components[start:end]
         self.assertIn("document.createElement", component)
         self.assertIn("textContent = copy.question", component)
-        self.assertIn("this._webQueries = new Set((selection.pending || [])", component)
+        self.assertIn("if (pending.length)", component)
+        self.assertIn("this._webQueries = new Set(pending", component)
+        self.assertIn('"/api/ia/modbus/validar", { proposal: selection }', component)
         self.assertIn("answers: []", component)
+        self.assertNotIn("parámetros estimados", component)
+        self.assertNotIn("Reduce los grupos a 32 o menos", component)
         self.assertNotIn("innerHTML", component)
 
     def test_initial_catalog_is_guarded_before_it_changes_dialog_state(self):
         start = self.components.index("class ModuLinkrModbusAiAssistant")
         end = self.components.index("class ModuLinkrOverlay", start)
         component = self.components[start:end]
-        guard = component.index("this._assertProposalResponse(data, !previous);")
+        guard = component.index("this._assertProposalResponse(data);")
         assignment = component.index("this._proposal = data.proposal;", guard)
         self.assertLess(guard, assignment)
         self.assertIn("proposal.reads.length + proposal.writes.length > 0",
@@ -126,16 +140,18 @@ class DialogStructureTests(unittest.TestCase):
             component,
         )
 
-    def test_changed_identity_is_reanalysed_before_candidates_are_rendered(self):
+    def test_target_and_sections_are_selected_before_candidates_are_rendered(self):
         start = self.components.index("class ModuLinkrModbusAiAssistant")
         end = self.components.index("class ModuLinkrOverlay", start)
         component = self.components[start:end]
         step = component.index('if (this._paso === 2) {')
-        render = component.index("this._renderCandidates();", step)
-        fragment = component[step:render]
-        self.assertIn("this._identityChanged()", fragment)
-        self.assertIn("await this._solicitarPropuesta(null, identity);", fragment)
-        self.assertIn("confirmed_identity: confirmedIdentity === undefined",
+        extraction = component.index("await this._solicitarExtraccion();", step)
+        fragment = component[step:extraction]
+        self.assertIn("this._renderSections();", fragment)
+        self.assertIn("!this._sectionsExtracted", fragment)
+        self.assertIn('operation === "extract" ? this._discovery : null',
+                      component)
+        self.assertIn('operation === "extract" ? this._selectedTargetId : null',
                       component)
 
     def test_only_reads_or_writes_can_be_applied(self):
@@ -147,6 +163,18 @@ class DialogStructureTests(unittest.TestCase):
         for metadata in ("name", "description", "change_function",
                          "change_address", "read_mode", "inter_read_ms"):
             self.assertNotIn(f'"{metadata}"', guard)
+
+    def test_incomplete_proposals_never_reach_the_form(self):
+        self.assertNotIn("Cargar y corregir", self.components)
+        self.assertNotIn("se cargarán vacíos", self.components)
+        self.assertNotIn("cargarlos vacíos", self.html)
+        self.assertIn("this._validation?.ready === true", self.components)
+        self.assertIn("modbusAiApplicationIssues(proposal)", self.app)
+        self.assertIn("quedan datos obligatorios sin confirmar", self.app)
+        apply_start = self.app.index("function modbusAiApplyProposal")
+        mutation = self.app.index("modbusAiSet(", apply_start)
+        guard = self.app.index("modbusAiApplicationIssues(proposal)", apply_start)
+        self.assertLess(guard, mutation)
 
     def test_assistant_copy_has_no_development_or_simulator_messages(self):
         html_start = self.html.index('<modulinkr-modbus-ai-assistant')
@@ -160,7 +188,7 @@ class DialogStructureTests(unittest.TestCase):
             self.assertNotIn(forbidden, assistant)
 
     def test_assets_share_the_dialog_cache_version(self):
-        version = "modbus-ai-guard-20260824"
+        version = "modbus-ai-flow-20260902"
         self.assertEqual(3, self.html.count(version))
         self.assertIn(".mbai-dialog", self.styles)
         self.assertIn('"modulinkr-modbus-ai-assistant"', self.components)

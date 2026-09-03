@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=modbus-ai-guard-20260824">
+  <link rel="stylesheet" href="/static/style.css?v=modbus-ai-flow-20260902">
 </head>
 <body>
 
@@ -1139,7 +1139,7 @@
 
           <div class="mbai-source-panel" data-mbai-source-panel="identity" hidden>
             <div class="cfg-form">
-              <label class="cfg-campo"><span>Fabricante</span><input id="mbai-source-manufacturer" type="text" maxlength="80" autocomplete="organization" placeholder="Ejemplo: Schneider Electric"></label>
+              <label class="cfg-campo"><span>Fabricante (opcional)</span><input id="mbai-source-manufacturer" type="text" maxlength="80" autocomplete="organization" placeholder="Indícalo solo si lo conoces"></label>
               <label class="cfg-campo"><span>Modelo</span><input id="mbai-source-model" type="text" maxlength="80" placeholder="Modelo exacto"></label>
             </div>
           </div>
@@ -1149,10 +1149,11 @@
           <p class="mbai-step-count">Paso 2 de 4</p>
           <h3 id="mbai-step-2-title" tabindex="-1">Confirma el dispositivo</h3>
           <p id="mbai-confirm-note" class="mbai-intro"></p>
+          <div id="mbai-targets-container"></div>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Fabricante</span><input id="mbai-confirm-manufacturer" type="text" maxlength="80"></label>
-            <label class="cfg-campo"><span>Modelo</span><input id="mbai-confirm-model" type="text" maxlength="80"></label>
-            <label class="cfg-campo"><span>Variante o revisión</span><input id="mbai-confirm-revision" type="text" maxlength="80" placeholder="Opcional"></label>
+            <label class="cfg-campo"><span>Fabricante</span><input id="mbai-confirm-manufacturer" type="text" maxlength="80" readonly></label>
+            <label class="cfg-campo"><span>Modelo</span><input id="mbai-confirm-model" type="text" maxlength="80" readonly></label>
+            <label class="cfg-campo"><span>Variante o revisión</span><input id="mbai-confirm-revision" type="text" maxlength="80" placeholder="No indicada" readonly></label>
           </div>
           <div class="mensaje mensaje-info mbai-message">
             <span class="mensaje-titulo">La variante importa</span>
@@ -1164,26 +1165,27 @@
         <section data-mbai-step="3" aria-labelledby="mbai-step-3-title" hidden>
           <p class="mbai-step-count">Paso 3 de 4</p>
           <h3 id="mbai-step-3-title" tabindex="-1">Elige qué quieres configurar</h3>
-          <p class="mbai-intro">Selecciona las lecturas y escrituras que quieres cargar.</p>
-          <div id="mbai-candidates-container"></div>
+          <p id="mbai-parameters-intro" class="mbai-intro">Selecciona los grupos del manual que quieres analizar.</p>
+          <div id="mbai-sections-container"></div>
+          <div id="mbai-candidates-container" hidden></div>
         </section>
 
         <section data-mbai-step="4" aria-labelledby="mbai-step-4-title" hidden>
           <p class="mbai-step-count">Paso 4 de 4</p>
           <h3 id="mbai-step-4-title" tabindex="-1">Revisa la propuesta</h3>
-          <p class="mbai-intro">La IA revisó los datos seleccionados y, cuando faltaba evidencia, intentó contrastarlos en la web. Revisa qué se cargará, qué tendrás que corregir y qué quedará fuera.</p>
+          <p class="mbai-intro">La IA revisó los datos seleccionados y, cuando faltaba evidencia, intentó contrastarlos en la web. Revisa qué está confirmado y qué quedará fuera.</p>
 
           <div id="mbai-review-summary" class="mbai-review-summary" aria-live="polite"></div>
 
           <section class="mbai-review-section" aria-labelledby="mbai-review-load-title">
-            <h4 id="mbai-review-load-title">Se cargará en el formulario</h4>
+            <h4 id="mbai-review-load-title">Parámetros confirmados</h4>
             <div id="mbai-review-items" class="mbai-review-list"></div>
           </section>
 
           <section id="mbai-review-corrections" class="mbai-review-section mbai-review-corrections"
                    aria-labelledby="mbai-review-corrections-title" hidden>
             <h4 id="mbai-review-corrections-title">Necesita corrección</h4>
-            <p>La IA no pudo confirmar estos datos. Puedes cargarlos vacíos y corregirlos en el formulario, o cargar solo los parámetros ya confirmados.</p>
+            <p>La IA no pudo confirmar estos datos obligatorios. Los parámetros afectados no se cargarán. Si existen otros parámetros completos, puedes cargarlos por separado.</p>
             <div id="mbai-review-correction-list" class="mbai-review-list"></div>
           </section>
 
@@ -1251,7 +1253,7 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=modbus-ai-guard-20260824"></script>
-<script src="/static/app.js?v=modbus-ai-guard-20260824"></script>
+<script src="/static/components.js?v=modbus-ai-flow-20260902"></script>
+<script src="/static/app.js?v=modbus-ai-flow-20260902"></script>
 </body>
 </html>
