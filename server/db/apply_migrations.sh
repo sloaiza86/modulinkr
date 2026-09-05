@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --db)  DB="$2"; shift 2 ;;
         --dir) MIG_DIR="$2"; shift 2 ;;
-        *) echo "Argumento no reconocido: $1" >&2; exit 2 ;;
+        *) echo "[ERROR] Argumento no reconocido: $1" >&2; exit 2 ;;
     esac
 done
 
@@ -52,13 +52,13 @@ for f in $(printf '%s\n' "$MIG_DIR"/*.sql | sort); do
 
     if [ -n "$prev" ]; then
         if [ "$prev" != "$sum" ]; then
-            echo "AVISO: '$name' ya aplicada pero su contenido cambió (checksum distinto)." >&2
-            echo "       Las migraciones son inmutables; crear una nueva en vez de editar." >&2
+            echo "[AVISO] La migración '$name' ya está aplicada, pero su checksum ha cambiado." >&2
+            echo "[AVISO] Las migraciones son inmutables. Crea una migración nueva en lugar de editarla." >&2
         fi
         continue
     fi
 
-    echo "Aplicando $name ..."
+    echo "[INFO] Aplicando $name..."
     # Se pasa por stdin, no con -f: psql corre como el usuario 'postgres' y no
     # podría leer archivos bajo /home. Quien redirige es el proceso que corre
     # el instalador (root), con acceso al archivo.
@@ -69,7 +69,7 @@ for f in $(printf '%s\n' "$MIG_DIR"/*.sql | sort); do
 done
 
 if [ "$applied" -eq 0 ]; then
-    echo "Sin migraciones pendientes. La base ya está al día."
+    echo "[ OK ] No hay migraciones pendientes. La base de datos está actualizada."
 else
-    echo "Migraciones aplicadas: $applied."
+    echo "[ OK ] Migraciones aplicadas: $applied"
 fi

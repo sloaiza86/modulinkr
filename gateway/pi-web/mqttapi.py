@@ -153,7 +153,7 @@ async def guardar(request: Request):
 
     ok, out = _sudo_stdin(SET_MQTT_SH, stdin, timeout_s=40)
     if not ok:
-        LOG.warning("guardar MQTT fallido: %s", out)
+        LOG.warning("event=mqtt_config.save_failed detail=%s", out)
         return _err(502, out)
 
     # Sombra no secreta para el formulario (sin la contraseña).
@@ -164,8 +164,8 @@ async def guardar(request: Request):
     try:
         settingsapi.set_section(SHADOW, shadow)
     except OSError as e:
-        LOG.warning("sombra MQTT no guardada: %s", e)
-    LOG.info("MQTT reconfigurado (host=%s tls=%s)", cfg["host"], cfg["tls"])
+        LOG.warning("event=mqtt_config.shadow_save_failed error=%s", e)
+    LOG.info("event=mqtt_config.updated host=%s tls=%s", cfg["host"], cfg["tls"])
     return {"ok": True, "output": out}
 
 

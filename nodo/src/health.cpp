@@ -81,17 +81,17 @@ bool save(const Record& r) {
 
 const char* resetReasonName(uint8_t reason) {
     switch (static_cast<esp_reset_reason_t>(reason)) {
-        case ESP_RST_POWERON:  return "encendido";
-        case ESP_RST_EXT:      return "reset externo";
+        case ESP_RST_POWERON:  return "power_on";
+        case ESP_RST_EXT:      return "external_reset";
         case ESP_RST_SW:       return "software";
-        case ESP_RST_PANIC:    return "panico";
-        case ESP_RST_INT_WDT:  return "watchdog de interrupcion";
-        case ESP_RST_TASK_WDT: return "watchdog de tarea";
+        case ESP_RST_PANIC:    return "panic";
+        case ESP_RST_INT_WDT:  return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
         case ESP_RST_WDT:      return "watchdog";
         case ESP_RST_BROWNOUT: return "brownout";
         case ESP_RST_SDIO:     return "sdio";
         case ESP_RST_DEEPSLEEP:return "deep sleep";
-        default:               return "desconocida";
+        default:               return "unknown";
     }
 }
 

@@ -24,7 +24,7 @@ OUT="$DIR/../pi-service/heltec-radio.bin"
 
 for f in bootloader.bin partitions.bin firmware.bin; do
     if [ ! -f "$BUILD/$f" ]; then
-        echo "Falta $BUILD/$f. Compilar primero en VS Code (PlatformIO)." >&2
+        echo "[ERROR] Falta $BUILD/$f. Compila primero en VS Code con PlatformIO." >&2
         exit 1
     fi
 done
@@ -32,7 +32,7 @@ done
 BOOT_APP0="$(find "$HOME/.platformio/packages" -path "*arduinoespressif32*" \
              -name boot_app0.bin 2>/dev/null | head -1)"
 if [ -z "$BOOT_APP0" ]; then
-    echo "boot_app0.bin no encontrado en ~/.platformio/packages" >&2
+    echo "[ERROR] No se encontró boot_app0.bin en ~/.platformio/packages." >&2
     exit 1
 fi
 
@@ -48,7 +48,7 @@ if [ -n "$ESPTOOL_PY" ] && [ -x "$PIO_PYTHON" ]; then
 elif command -v esptool.py >/dev/null 2>&1; then
     ESPTOOL=(esptool.py)
 else
-    echo "esptool no encontrado (ni en PlatformIO ni en el PATH)" >&2
+    echo "[ERROR] No se encontró esptool en PlatformIO ni en PATH." >&2
     exit 1
 fi
 
@@ -59,6 +59,6 @@ fi
     0x10000 "$BUILD/firmware.bin"
 
 echo
-echo "Generado: $OUT"
+echo "[ OK ] Archivo generado: $OUT"
 ls -lh "$OUT" | awk '{print "  tamaño:", $5}'
 (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") | awk '{print "  sha256:", $1}'

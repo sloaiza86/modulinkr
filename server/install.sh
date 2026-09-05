@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
         --components) COMPONENTS="$2"; shift 2 ;;
         -y|--yes)     ASSUME_YES=1; shift ;;
         -h|--help)    usage 0 ;;
-        *) echo "Argumento no reconocido: $1" >&2; usage 2 ;;
+        *) echo "[ERROR] Argumento no reconocido: $1" >&2; usage 2 ;;
     esac
 done
 
@@ -61,7 +61,7 @@ EOF
 menu() {
     [ -n "$COMPONENTS" ] && return 0
     if [ "$ASSUME_YES" = "1" ]; then COMPONENTS="all"; return 0; fi
-    echo "¿Qué se desea instalar?"
+    echo "Selecciona los componentes que quieres instalar:"
     echo "  1) broker    Mosquitto MQTT con TLS"
     echo "  2) database  PostgreSQL 16 y esquema de telemetría"
     echo "  3) consumer  Servicio de ingesta MQTT a PostgreSQL"

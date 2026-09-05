@@ -44,23 +44,23 @@ def process_health(db, topic_id: int, payload: dict, stats: dict) -> None:
     schema = str(payload.get("schema_version", ""))
     if not schema.startswith(SCHEMA_MAJOR + "."):
         stats["hlt_bad"] += 1
-        LOG.warning("health descartado: schema_version=%r", schema)
+        LOG.warning("event=health.rejected reason=unsupported_schema schema_version=%r", schema)
         return
 
     node_id = payload.get("node_id")
     if not isinstance(node_id, int) or not 1 <= node_id <= 254:
         stats["hlt_bad"] += 1
-        LOG.warning("health descartado: node_id=%r invalido", node_id)
+        LOG.warning("event=health.rejected reason=invalid_node_id node_id=%r", node_id)
         return
     if node_id != topic_id:
         # El topic manda para las ACL, pero el payload es el dato: se procesa
         # y se deja constancia, igual que en el register.
-        LOG.warning("health: node_id=%d no coincide con el topic (%d)",
+        LOG.warning("event=health.rejected reason=topic_node_mismatch node_id=%d topic_node_id=%d",
                     node_id, topic_id)
 
     fault = str(payload.get("fault") or "desconocido")
     if fault not in KNOWN_FAULTS:
-        LOG.warning("health: fault=%r no reconocido (origin=%d)", fault, node_id)
+        LOG.warning("event=health.rejected reason=unknown_fault fault=%r origin=%d", fault, node_id)
 
     rec = payload.get("recoveries") or {}
     radio = payload.get("radio") or {}
@@ -99,7 +99,7 @@ def process_health(db, topic_id: int, payload: dict, stats: dict) -> None:
 
     if inserted:
         stats["hlt_ok"] += 1
-        LOG.info("health origin=%d fallo=%s arranques=%d L1=%d L2=%d L3=%d L4=%d",
+        LOG.info("event=health.stored origin=%d fault=%s boots=%d l1=%d l2=%d l3=%d l4=%d",
                  node_id, fault, _counter(payload.get("boots")),
                  _counter(rec.get("probe")), _counter(rec.get("reinit")),
                  _counter(rec.get("reset")), _counter(rec.get("reboot")))

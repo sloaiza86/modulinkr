@@ -136,7 +136,7 @@ db_apply_tuning() {
     install -d "$confd"
     {
         echo "# Generado por el instalador de ModuLinkr. Ajuste para VM de poca RAM."
-        echo "# Editar aquí, no en postgresql.conf. Reejecutar el instalador lo regenera."
+        echo "# Editar aquí, no en postgresql.conf. El instalador regenera este archivo al ejecutarse de nuevo."
         # TimescaleDB debe precargarse en el arranque para poder crear la
         # extensión (shared_preload_libraries se lee solo al iniciar Postgres).
         [ "$ENABLE_TIMESCALEDB" = "1" ] && echo "shared_preload_libraries = 'timescaledb'"

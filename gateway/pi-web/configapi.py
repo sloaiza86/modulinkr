@@ -222,11 +222,11 @@ async def detectar(request: Request):
         target = targets[0]
         with _open(target) as ser:
             ident = _hello(ser)
-        LOG.info("nodo detectado en %s: %s", target, ident)
+        LOG.info("event=node.detected port=%s identity=%s", target, ident)
         return {"port": target, "node": ident}
     except (serial.SerialException, TimeoutError, ValueError,
             json.JSONDecodeError) as e:
-        LOG.warning("deteccion fallida: %s", e)
+        LOG.warning("event=node.detection_failed error=%s", e)
         return _err(502, str(e))
     finally:
         _serial_lock.release()
@@ -273,7 +273,7 @@ async def borrar(request: Request):
             _send(ser, "CFG.DEL")
             resp = _read_response(ser, "CFG:OK")
         if resp.startswith("CFG:OK"):
-            LOG.info("config borrado en %s (nodo %s)", port,
+            LOG.info("event=node_config.deleted port=%s origin=%s", port,
                      ident.get("node_id", "?"))
             return {"ok": True, "port": port, "node": ident,
                     "detail": _node_msg(resp)}
@@ -325,7 +325,7 @@ async def subir(request: Request):
             ser.flush()
             resp = _read_response(ser, "CFG:OK")
         if resp.startswith("CFG:OK"):
-            LOG.info("config subido a %s (nodo %s, %d B)", port,
+            LOG.info("event=node_config.uploaded port=%s origin=%s bytes=%d", port,
                      ident.get("node_id", "?"), len(payload))
             return {"ok": True, "port": port, "node": ident,
                     "detail": _node_msg(resp)}
@@ -390,7 +390,7 @@ def red_params():
         return out
     ok, txt = _sudo([str(GET_NET_SH)], timeout_s=15)
     if not ok:
-        LOG.warning("get_net.sh fallido: %s", txt)
+        LOG.warning("event=gateway_config.read_failed detail=%s", txt)
         return out
     env = {}
     for line in txt.splitlines():
@@ -466,13 +466,13 @@ async def flash(request: Request):
     if not _serial_lock.acquire(blocking=False):
         return _busy()
     try:
-        LOG.info("flasheo del nodo iniciado en %s", port)
+        LOG.info("event=node.flash_started port=%s", port)
         ok, out = _sudo([str(FLASH_NODO_SH), port], timeout_s=FLASH_TIMEOUT_S)
         cola = "\n".join(out.splitlines()[-15:])   # esptool imprime mucho
         if not ok:
-            LOG.warning("flasheo del nodo fallido: %s", cola)
+            LOG.warning("event=node.flash_failed detail=%s", cola)
             return _err(502, cola)
-        LOG.info("flasheo del nodo completado")
+        LOG.info("event=node.flash_completed")
         return {"ok": True, "port": port, "output": cola}
     finally:
         _serial_lock.release()

@@ -106,12 +106,12 @@ async def puerto(request: Request):
     try:
         ok, out = _sudo([str(SET_PORT_SH), port], timeout_s=30)
         if not ok:
-            LOG.warning("cambio de puerto fallido: %s", out)
+            LOG.warning("event=radio.port_change_failed detail=%s", out)
             return _err(502, out)
         # La exclusión del comisionamiento sigue al puerto nuevo sin
         # reiniciar el visor.
         configapi.GATEWAY_PORT = port
-        LOG.info("puerto del Heltec fijado a %s", port)
+        LOG.info("event=radio.port_configured port=%s", port)
         return {"ok": True, "port": port, "output": out}
     finally:
         configapi._serial_lock.release()
@@ -132,14 +132,14 @@ async def flash(_request: Request):
     if not configapi._serial_lock.acquire(blocking=False):
         return _err(409, "otra operación serie está en curso; reintentar")
     try:
-        LOG.info("flasheo de la radio iniciado")
+        LOG.info("event=radio.flash_started")
         ok, out = _sudo([str(FLASH_SH)], timeout_s=FLASH_TIMEOUT_S)
         # Solo el tramo final: esptool imprime barras de progreso largas.
         cola = "\n".join(out.splitlines()[-15:])
         if not ok:
-            LOG.warning("flasheo fallido: %s", cola)
+            LOG.warning("event=radio.flash_failed detail=%s", cola)
             return _err(502, cola)
-        LOG.info("flasheo completado")
+        LOG.info("event=radio.flash_completed")
         return {"ok": True, "output": cola}
     finally:
         configapi._serial_lock.release()

@@ -23,7 +23,7 @@ gw_load_env() {
     [ -f "$GW_ENV_FILE" ] || return 0
     # shellcheck disable=SC1090
     set -a; . "$GW_ENV_FILE"; set +a
-    log "Config previa cargada desde $GW_ENV_FILE (reejecución)"
+    log "Configuración anterior cargada desde $GW_ENV_FILE"
 }
 
 # gw_port_label PATH: etiqueta legible de un puerto. Si es un enlace de
@@ -53,7 +53,7 @@ gw_pick_serial_port() {
     fi
 
     if [ "${#cands[@]}" -eq 0 ]; then
-        warn "No se detectó ningún puerto USB. ¿Está conectado el Heltec?"
+        warn "No se detectó ningún puerto serie. Conecta el Heltec y vuelve a intentarlo."
         gw_ask_required MODULINKR_PORT "Ruta del puerto serie del Heltec" "/dev/ttyUSB0"
         return 0
     fi
@@ -66,13 +66,13 @@ gw_pick_serial_port() {
         echo "Se detectó un puerto USB-serie:"
         printf "  %s\n" "$(gw_port_label "${cands[0]}")"
         local r
-        read -r -p "¿Es este el Heltec? [S/n]: " r || true
+        read -r -p "¿Usar este puerto para el Heltec? [S/n]: " r || true
         case "${r:-s}" in
             [nN]*) gw_ask_required MODULINKR_PORT "Escribe la ruta del puerto del Heltec" "" ;;
             *)     MODULINKR_PORT="${cands[0]}" ;;
         esac
     else
-        echo "Se detectaron varios puertos USB-serie. Indica cuál es el Heltec:"
+        echo "Se detectaron varios puertos serie. Selecciona el Heltec:"
         local i=1; for c in "${cands[@]}"; do printf "  %d) %s\n" "$i" "$(gw_port_label "$c")"; i=$((i+1)); done
         local choice
         read -r -p "Selección [1]: " choice || true
@@ -91,7 +91,7 @@ gw_ask_key() {
     cur="${MODULINKR_SEC_KEY:-}"
     if [ -n "$cur" ]; then
         printf '%s' "$cur" | grep -Eq '^[0-9A-Fa-f]{32}$' \
-            || die "MODULINKR_SEC_KEY guardada no es hexadecimal de 32 caracteres. Corrige $GW_ENV_FILE."
+            || die "La clave MODULINKR_SEC_KEY guardada no contiene 32 caracteres hexadecimales. Corrige $GW_ENV_FILE."
         MODULINKR_SEC_ENABLED=1
         ok "Clave de red reutilizada de la configuración previa"
         return 0
@@ -100,7 +100,7 @@ gw_ask_key() {
         MODULINKR_SEC_ENABLED=0; MODULINKR_SEC_KEY=""; return 0
     fi
     echo "Cifrado de radio (AES-CCM): protege las tramas LoRa entre gateway y nodos."
-    read -r -p "¿Activar el cifrado de radio? (igual en gateway y nodos) [S/n]: " r || true
+    read -r -p "¿Activar el cifrado de radio en el gateway y los nodos? [S/n]: " r || true
     case "${r:-s}" in
         [nN]*) MODULINKR_SEC_ENABLED=0; MODULINKR_SEC_KEY=""
                warn "Cifrado de radio desactivado."
@@ -129,7 +129,7 @@ gw_ask_required() {
     ask "$__var" "$prompt" "$def"
     eval "cur=\${$__var:-}"
     while [ -z "$cur" ]; do
-        [ "${ASSUME_YES:-0}" = "1" ] && die "Falta '$__var' (obligatorio). Defínelo en el config."
+        [ "${ASSUME_YES:-0}" = "1" ] && die "Falta '$__var' en el modo no interactivo. Defínelo en el archivo de configuración."
         warn "Este dato es obligatorio."
         read -r -p "$prompt: " cur || true
         eval "$__var=\"\$cur\""
@@ -147,7 +147,7 @@ gw_ask_tls() {
     else
         local r
         echo "Cifrado: TLS protege todo el tráfico MQTT. En el puerto 8883 es lo habitual."
-        read -r -p "¿Cifrar la conexión con TLS? [S/n]: " r || true
+        read -r -p "¿Activar TLS para la conexión MQTT? [S/n]: " r || true
         case "${r:-s}" in [nN]*) MODULINKR_MQTT_TLS=0 ;; *) MODULINKR_MQTT_TLS=1 ;; esac
     fi
 
@@ -168,7 +168,7 @@ gw_ask_tls() {
     case "${opt:-1}" in
         2) gw_ask_required MODULINKR_MQTT_CAFILE "Ruta del certificado del broker (.crt o .pem)" ;;
         3) MODULINKR_MQTT_TLS_INSECURE=1
-           warn "La identidad del broker no se comprobará. Usar solo en pruebas." ;;
+           warn "La identidad del broker no se comprobará. Utiliza esta opción solo en pruebas." ;;
         *) : ;;
     esac
     export MODULINKR_MQTT_CAFILE MODULINKR_MQTT_TLS_INSECURE
@@ -194,11 +194,11 @@ gather_gateway() {
     # binario (make_dist.sh) acompaña al pi-service.
     GW_FLASH_HELTEC=0
     if [ -f "$APP_DIR/heltec-radio.bin" ]; then
-        if confirm "¿Instalar el firmware de la radio Heltec (heltec-radio.bin)?" "n"; then
+        if confirm "¿Instalar el firmware de la radio Heltec?" "n"; then
             GW_FLASH_HELTEC=1
         fi
     fi
-    ask MODULINKR_NETWORK_ID "Identificador de red, debe coincidir con los nodos" "1"
+    ask MODULINKR_NETWORK_ID "Identificador de red (debe coincidir con los nodos)" "1"
     gw_ask_key
 
     step "Broker MQTT"
@@ -215,7 +215,7 @@ gather_gateway() {
 # en el Pi (el venv las verá con --system-site-packages).
 gw_install_packages() {
     step "Dependencias del sistema"
-    echo "Instalando paquetes del sistema. Puede tardar unos minutos la primera vez."
+    echo "Instalando paquetes del sistema. La primera instalación puede tardar unos minutos."
     export DEBIAN_FRONTEND=noninteractive
     run apt-get update
     run apt-get install -y python3 python3-venv python3-pip \
@@ -230,13 +230,13 @@ gw_setup_venv() {
         # --system-site-packages: el venv ve pyserial y cryptography de apt
         # (evita compilar cryptography en el Pi) y añade paho-mqtt encima.
         run sudo -u "$GW_USER" -H python3 -m venv --system-site-packages "$GW_VENV"
-        ok "Venv creado en $GW_VENV"
+        ok "Entorno Python creado en $GW_VENV"
     else
-        ok "Venv ya existe en $GW_VENV (se reutiliza)"
+        ok "Entorno Python reutilizado en $GW_VENV"
     fi
     run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install --upgrade pip
     run sudo -u "$GW_USER" -H "$GW_VENV/bin/pip" install paho-mqtt pyserial esptool
-    ok "paho-mqtt y esptool instalados en el venv"
+    ok "paho-mqtt y esptool instalados en el entorno Python"
 }
 
 # gw_write_env: escribe la config y los secretos en un archivo solo-root.
@@ -245,7 +245,7 @@ gw_write_env() {
     install -d -m 700 "$MODULINKR_ETC"
     umask 077
     {
-        echo "# Config del gateway ModuLinkr. Generado por el instalador."
+        echo "# Configuración del gateway ModuLinkr. Generada por el instalador."
         echo "# Solo root. No versionar (está en .gitignore)."
         echo "MODULINKR_PORT=$MODULINKR_PORT"
         echo "MODULINKR_NETWORK_ID=$MODULINKR_NETWORK_ID"
@@ -315,7 +315,7 @@ gw_enable() {
     if systemctl is-active --quiet modulinkr-gateway; then
         ok "modulinkr-gateway activo"
     else
-        warn "El servicio no quedó activo; revisar: journalctl -u modulinkr-gateway -n 40"
+        warn "El servicio no quedó activo. Revisa el registro con: journalctl -u modulinkr-gateway -n 40"
     fi
 }
 
@@ -340,7 +340,7 @@ install_gateway() {
     gw_enable
     step "Gateway listo"
     log "App: $APP_DIR   venv: $GW_VENV   usuario: $GW_USER"
-    log "Config y secretos: $GW_ENV_FILE"
+    log "Configuración y secretos: $GW_ENV_FILE"
     if [ -n "${MODULINKR_MQTT_HOST:-}" ]; then
         log "Broker: $MODULINKR_MQTT_HOST:${MODULINKR_MQTT_PORT:-8883} (usuario '${MODULINKR_MQTT_USER:-}')"
     else

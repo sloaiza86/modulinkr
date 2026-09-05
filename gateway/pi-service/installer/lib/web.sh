@@ -31,7 +31,7 @@ web_load_env() {
     if [ -f "$WEB_ENV_FILE" ]; then
         # shellcheck disable=SC1090
         . "$WEB_ENV_FILE"
-        ok "Config previa del visor cargada de $WEB_ENV_FILE"
+        ok "Configuración anterior del visor cargada desde $WEB_ENV_FILE"
     fi
 }
 
@@ -73,22 +73,22 @@ web_setup_venv() {
     step "Entorno Python del visor"
     if [ ! -d "$WEB_VENV" ]; then
         run sudo -u "$GW_USER" -H python3 -m venv "$WEB_VENV"
-        ok "Venv creado en $WEB_VENV"
+        ok "Entorno Python creado en $WEB_VENV"
     else
-        ok "Venv ya existe en $WEB_VENV (se reutiliza)"
+        ok "Entorno Python reutilizado en $WEB_VENV"
     fi
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install --upgrade pip
     run sudo -u "$GW_USER" -H "$WEB_VENV/bin/pip" install \
         fastapi uvicorn psycopg2-binary pyserial paho-mqtt
-    ok "fastapi, uvicorn, psycopg2, pyserial y paho-mqtt en el venv del visor"
+    ok "Dependencias instaladas en el entorno Python del visor"
 }
 
 web_fetch_vendor() {
-    step "Assets del frontend"
+    step "Recursos del visor"
     # Con Internet se (re)descargan a la versión fijada; sin Internet se
     # acepta lo ya presente (instalación previa) y solo se avisa si falta.
     if sudo -u "$GW_USER" -H bash "$WEB_DIR/get_vendor.sh"; then
-        ok "Assets descargados a static/vendor"
+        ok "Recursos descargados en static/vendor"
     elif [ -f "$WEB_DIR/static/vendor/vis-network.min.js" ] && \
          [ -f "$WEB_DIR/static/vendor/echarts.min.js" ] && \
          [ -f "$WEB_DIR/static/vendor/esptool-bundle.js" ] && \
@@ -96,10 +96,10 @@ web_fetch_vendor() {
          [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css" ] && \
          [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js" ] && \
          [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js" ]; then
-        warn "Sin descarga (¿sin Internet?); se usan los assets ya presentes"
+        warn "No se pudieron descargar los recursos. Se utilizan los archivos ya presentes."
     else
-        warn "Assets incompletos: algunas funciones del visor no estarán disponibles."
-        warn "Reejecutar $WEB_DIR/get_vendor.sh con Internet."
+        warn "Los recursos no están completos. Algunas funciones del visor no estarán disponibles."
+        warn "Vuelve a ejecutar $WEB_DIR/get_vendor.sh con conexión a Internet."
     fi
 }
 
@@ -115,7 +115,7 @@ web_make_cert() {
         return 0
     fi
     if ! command -v openssl >/dev/null 2>&1; then
-        warn "openssl no está: el visor no arrancará con TLS. Instalar openssl y reejecutar."
+        warn "OpenSSL no está instalado. Instálalo y vuelve a ejecutar el instalador para activar TLS."
         return 0
     fi
     run sudo -u "$GW_USER" -H mkdir -p "$WEB_TLS_DIR"
@@ -143,7 +143,7 @@ web_write_env() {
     install -d -m 700 "$MODULINKR_ETC"
     umask 077
     {
-        echo "# Config del visor web ModuLinkr. Generado por el instalador."
+        echo "# Configuración del visor web ModuLinkr. Generada por el instalador."
         echo "# Solo root. No versionar."
         echo "MODULINKR_DB=$MODULINKR_DB"
         echo "MODULINKR_WEB_PORT=$MODULINKR_WEB_PORT"
@@ -255,7 +255,7 @@ web_enable() {
         ok "modulinkr-web activo en el puerto $MODULINKR_WEB_PORT"
         log "Visor: https://$(hostname).local:$MODULINKR_WEB_PORT"
     else
-        warn "El visor no quedó activo; revisar: journalctl -u modulinkr-web -n 40"
+        warn "El visor no quedó activo. Revisa el registro con: journalctl -u modulinkr-web -n 40"
     fi
 }
 

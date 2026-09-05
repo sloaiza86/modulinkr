@@ -43,7 +43,7 @@ class Db:
                 connect_timeout=10,
             )
             self._conn.autocommit = False
-            LOG.info("PostgreSQL conectado (%s@%s/%s)",
+            LOG.info("event=postgres.connected user=%s host=%s database=%s",
                      self.user, self.host, self.name)
         return self._conn
 

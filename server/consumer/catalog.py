@@ -84,18 +84,18 @@ def process_register(db, topic_id: int, payload: dict, stats: dict) -> None:
     schema = str(payload.get("schema_version", ""))
     if not schema.startswith(SCHEMA_MAJOR + "."):
         stats["reg_bad"] += 1
-        LOG.warning("register descartado: schema_version=%r", schema)
+        LOG.warning("event=register.rejected reason=unsupported_schema schema_version=%r", schema)
         return
 
     node_id = payload.get("node_id")
     if not isinstance(node_id, int) or not 1 <= node_id <= 254:
         stats["reg_bad"] += 1
-        LOG.warning("register descartado: node_id=%r invalido", node_id)
+        LOG.warning("event=register.rejected reason=invalid_node_id node_id=%r", node_id)
         return
     if node_id != topic_id:
         # El topic manda para las ACL, pero el payload es el dato; se
         # procesa y se deja constancia de la incoherencia.
-        LOG.warning("register: node_id=%d no coincide con el topic (%d)",
+        LOG.warning("event=register.topic_node_mismatch node_id=%d topic_node_id=%d",
                     node_id, topic_id)
 
     # Variante en custodia (§10.4): decodificar el blob crudo.
@@ -104,13 +104,13 @@ def process_register(db, topic_id: int, payload: dict, stats: dict) -> None:
             blob = base64.b64decode(payload["raw_catalog"], validate=True)
         except Exception:                            # noqa: BLE001
             stats["reg_bad"] += 1
-            LOG.warning("register en custodia descartado: base64 invalido "
-                        "(origin=%d via=%s)", node_id, payload.get("via"))
+            LOG.warning("event=register.rejected reason=invalid_base64 origin=%d via=%s",
+                        node_id, payload.get("via"))
             return
         cat = parse_catalog(blob)
         if "error" in cat:
             stats["reg_bad"] += 1
-            LOG.warning("register en custodia descartado: %s (origin=%d)",
+            LOG.warning("event=register.rejected reason=invalid_catalog error=%s origin=%d",
                         cat["error"], node_id)
             return
         name  = cat["node_name"]
@@ -121,14 +121,14 @@ def process_register(db, topic_id: int, payload: dict, stats: dict) -> None:
 
     if not isinstance(reads, list):
         stats["reg_bad"] += 1
-        LOG.warning("register descartado: reads ausente (origin=%d)", node_id)
+        LOG.warning("event=register.rejected reason=missing_reads origin=%d", node_id)
         return
     announced = []
     for r in reads:
         rid, rname, runit = r.get("id"), r.get("name"), r.get("unit")
         if not rid or not rname:
             stats["reg_bad"] += 1
-            LOG.warning("register descartado: read sin id/name (origin=%d)", node_id)
+            LOG.warning("event=register.rejected reason=invalid_read origin=%d", node_id)
             return
         announced.append((str(rid), str(rname), str(runit) if runit else None))
 
@@ -149,7 +149,7 @@ def process_register(db, topic_id: int, payload: dict, stats: dict) -> None:
         current = [(r[0], r[1], r[2]) for r in cur.fetchall()]
 
         if current == announced:
-            LOG.info("register origin=%d sin cambios (%d canal(es))",
+            LOG.info("event=register.unchanged origin=%d channels=%d",
                      node_id, len(current))
         else:
             # Decisión A (db-schema.md, 12-jul-2026): serie nueva siempre.
@@ -181,14 +181,14 @@ def process_register(db, topic_id: int, payload: dict, stats: dict) -> None:
                            VALUES (%s, %s, %s, %s, %s)""",
                         (node_id, rid, rname, runit, pos))
             stats["reg_synced"] += 1
-            LOG.info("register origin=%d: %d canal(es) cerrado(s), %d creado(s)",
+            LOG.info("event=register.updated origin=%d channels_closed=%d channels_created=%d",
                      node_id, len(current), len(announced))
 
         # Reintento de materialización de la cuarentena de este origen.
         n_ok = _materialize_quarantine(cur, node_id)
         if n_ok:
             stats["materialized"] += n_ok
-            LOG.info("cuarentena origin=%d: %d muestra(s) materializada(s)",
+            LOG.info("event=quarantine.materialized origin=%d samples=%d",
                      node_id, n_ok)
 
     conn.commit()

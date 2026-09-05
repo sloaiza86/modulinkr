@@ -10,14 +10,14 @@ PORT="${1:-}"
 GW_ENV=/etc/modulinkr/gateway.env
 WEB_ENV=/etc/modulinkr/web.env
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-[ -n "$PORT" ] || { echo "Uso: set_lora_port.sh <puerto>" >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+[ -n "$PORT" ] || { echo "[ERROR] Uso: set_lora_port.sh <puerto>" >&2; exit 1; }
 case "$PORT" in
     /dev/serial/by-id/*|/dev/ttyUSB*|/dev/ttyACM*) ;;
-    *) echo "Puerto no admitido: $PORT" >&2; exit 1 ;;
+    *) echo "[ERROR] Puerto no admitido: $PORT" >&2; exit 1 ;;
 esac
-[ -e "$PORT" ] || { echo "El puerto $PORT no existe." >&2; exit 1; }
-[ -f "$GW_ENV" ] || { echo "No existe $GW_ENV (¿instalador ejecutado?)." >&2; exit 1; }
+[ -e "$PORT" ] || { echo "[ERROR] El puerto $PORT no existe." >&2; exit 1; }
+[ -f "$GW_ENV" ] || { echo "[ERROR] No existe $GW_ENV. Ejecuta primero el instalador." >&2; exit 1; }
 
 if grep -q '^MODULINKR_PORT=' "$GW_ENV"; then
     sed -i "s|^MODULINKR_PORT=.*|MODULINKR_PORT=$PORT|" "$GW_ENV"
@@ -35,7 +35,7 @@ fi
 
 systemctl restart modulinkr-gateway 2>/dev/null || true
 
-echo "puerto: $PORT"
-echo "gateway.env: MODULINKR_PORT actualizado"
-[ -f "$WEB_ENV" ] && echo "web.env: MODULINKR_GATEWAY_PORT actualizado"
-echo "servicio: modulinkr-gateway reiniciado"
+echo "[ OK ] Puerto serie configurado: $PORT"
+echo "[ OK ] gateway.env: MODULINKR_PORT actualizado"
+[ -f "$WEB_ENV" ] && echo "[ OK ] web.env: MODULINKR_GATEWAY_PORT actualizado"
+echo "[ OK ] Servicio reiniciado: modulinkr-gateway"

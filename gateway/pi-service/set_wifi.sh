@@ -13,8 +13,8 @@
 #            este script no escribe la contraseña en ningún archivo propio.
 set -euo pipefail
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
-command -v nmcli >/dev/null 2>&1 || { echo "nmcli no está (NetworkManager)." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
+command -v nmcli >/dev/null 2>&1 || { echo "[ERROR] nmcli no está disponible. Instala NetworkManager." >&2; exit 1; }
 
 MODE="${1:-}"
 case "$MODE" in
@@ -27,7 +27,7 @@ case "$MODE" in
         # espacios; el SSID puede llevarlos.
         IFS= read -r SSID || true
         IFS= read -r PASS || true
-        [ -n "${SSID:-}" ] || { echo "SSID vacío." >&2; exit 1; }
+        [ -n "${SSID:-}" ] || { echo "[ERROR] El SSID no puede quedar vacío." >&2; exit 1; }
         if [ -n "${PASS:-}" ]; then
             printf '%s\n' "$PASS" | nmcli --ask device wifi connect "$SSID"
         else
@@ -35,7 +35,7 @@ case "$MODE" in
         fi
         ;;
     *)
-        echo "Uso: set_wifi.sh {scan|connect}" >&2
+        echo "[ERROR] Uso: set_wifi.sh {scan|connect}" >&2
         exit 1
         ;;
 esac

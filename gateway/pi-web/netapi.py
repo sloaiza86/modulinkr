@@ -161,9 +161,9 @@ async def guardar(request: Request):
     stdin = "\n".join(lines) + "\n"
     ok, out = _sudo_stdin(SET_NET_SH, stdin, timeout_s=40)
     if not ok:
-        LOG.warning("guardar red fallido: %s", out)
+        LOG.warning("event=network_config.save_failed detail=%s", out)
         return _err(502, out)
-    LOG.info("red LoRa reconfigurada (network_id=%s freq=%s sf=%s bw=%s)",
+    LOG.info("event=network_config.updated network_id=%s frequency_hz=%s sf=%s bandwidth_khz=%s",
              body.get("network_id"), body.get("frequency_hz"),
              body.get("sf"), body.get("bw_khz"))
     return {"ok": True, "output": out}
@@ -372,10 +372,10 @@ async def migracion_crear(request: Request):
                     (mig_id, o, time.time()))
             c.commit()
     except sqlite3.Error as e:
-        LOG.warning("migracion %d: no se pudo sembrar el reparto: %s", mig_id, e)
+        LOG.warning("event=network_migration.seed_failed id=%d error=%s", mig_id, e)
         nodos = []
 
-    LOG.info("migracion de red %d programada para epoch %d (%s), reparto a %s",
+    LOG.info("event=network_migration.scheduled id=%d apply_at_epoch=%d local_time=%s targets=%s",
              mig_id, apply_at, nuevo, nodos or "nadie")
     return {"id": mig_id, "apply_at": apply_at, "recov_until": recov_until,
             "old_profile": viejo, "new_profile": nuevo, "reparto": nodos}
@@ -504,7 +504,7 @@ def migracion_saltar(body: dict = Body(default={})):
             c.commit()
     except sqlite3.Error as e:
         return _err(503, f"buffer no disponible: {e}")
-    LOG.warning("migracion %d: el operador ordena saltar sin los que faltan",
+    LOG.warning("event=network_migration.force_switch_requested id=%d",
                 fila[0])
     return {"id": fila[0], "saltar_igual": True}
 
@@ -543,7 +543,7 @@ def migracion_rescatar(body: dict = Body(default={})):
             c.commit()
     except sqlite3.Error as e:
         return _err(503, f"buffer no disponible: {e}")
-    LOG.info("migracion %d: rescate %s", fila[0],
+    LOG.info("event=network_migration.rescue id=%d detail=%s", fila[0],
              "cortado" if cortar else f"durante {segundos} s")
     return {"id": fila[0], "rescate_hasta": hasta,
             "segundos": 0 if cortar else segundos}
@@ -587,7 +587,7 @@ def migracion_cerrar(body: dict = Body(default={})):
         return _err(503, f"buffer no disponible: {e}")
 
     if abortar:
-        LOG.info("migracion de red %d abortada antes del salto", mig_id)
+        LOG.info("event=network_migration.aborted id=%d state=before_switch", mig_id)
         return {"ok": True, "id": mig_id, "state": "abortada"}
 
     nuevo = json.loads(nuevo_json)
@@ -606,10 +606,10 @@ def migracion_cerrar(body: dict = Body(default={})):
         # La operación queda cerrada igualmente: el servicio ya está en los
         # parámetros nuevos y volver atrás aquí sería peor. Lo que falta es
         # dejarlo escrito, y eso se dice para que se arregle a mano.
-        LOG.warning("migracion %d cerrada pero gateway.env NO actualizado: %s",
+        LOG.warning("event=network_migration.closed id=%d gateway_config_updated=false detail=%s",
                     mig_id, out)
         return _err(502, f"operación cerrada, pero gateway.env no se pudo "
                          f"actualizar: {out}. El servicio sigue en los "
                          f"parámetros nuevos hasta que se reinicie.")
-    LOG.info("migracion de red %d cerrada y fijada en gateway.env", mig_id)
+    LOG.info("event=network_migration.closed id=%d gateway_config_updated=true", mig_id)
     return {"ok": True, "id": mig_id, "state": "cerrada", "output": out}

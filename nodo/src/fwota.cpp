@@ -172,11 +172,10 @@ void begin(const char* running_version) {
     running_ = (running_version != nullptr) ? running_version : "";
     part_ = esp_ota_get_next_update_partition(nullptr);
     if (part_ == nullptr) {
-        Serial.println(F("[fwota]  sin particion OTA de destino: "
-                         "la actualizacion por radio no esta disponible"));
+        Serial.println(F("[fwota]  target_partition_missing radio_update_available=false"));
         return;
     }
-    Serial.printf("[fwota]  destino %s, %u kB\n",
+    Serial.printf("[fwota]  target_partition=%s size_kb=%u\n",
                   part_->label, static_cast<unsigned>(part_->size / 1024));
 
     // Se abre directamente, sin preguntar si está. `exists()` del core está
@@ -199,12 +198,11 @@ void begin(const char* running_version) {
     if (std::strlen(hex) == 64) hexToBytes(hex, sha_, sizeof(sha_));
 
     if (xfer_ != 0 && total_ != 0) {
-        Serial.printf("[fwota]  transferencia a medias recuperada: "
-                      "%u/%u B (%u%%)%s\n",
+        Serial.printf("[fwota]  transfer_recovered bytes=%u/%u progress_pct=%u%s\n",
                       static_cast<unsigned>(flushed_),
                       static_cast<unsigned>(total_),
                       static_cast<unsigned>(100ull * flushed_ / total_),
-                      ready_ ? ", completa y verificada" : "");
+                      ready_ ? " verified=true" : "");
     }
 }
 
@@ -221,7 +219,7 @@ State onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
     // pasa: decide el operador, que sabe más que esta comparación.
     if (version != nullptr && *version != '\0' && *running_ != '\0' &&
         cmpVersion(version, running_) < 0) {
-        Serial.printf("[fwota]  oferta %s rechazada: el nodo ya lleva %s\n",
+        Serial.printf("[fwota]  offer_rejected version=%s reason=already_installed current_version=%s\n",
                       version, running_);
         return State::REJECTED;
     }
@@ -233,7 +231,7 @@ State onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
         if (ready_) return State::READY;
         if (!ensureBuf()) return State::ERROR;
         failed_ = false;
-        Serial.printf("[fwota]  reanudando en %u/%u B\n",
+        Serial.printf("[fwota]  resumed offset=%u total_bytes=%u\n",
                       static_cast<unsigned>(flushed_),
                       static_cast<unsigned>(total_));
         return State::ACCEPTED;
@@ -250,7 +248,7 @@ State onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
     since_stat_ = 0;
     std::memcpy(sha_, sha, sizeof(sha_));
     saveProgress();
-    Serial.printf("[fwota]  imagen %s aceptada: %u B, xfer=%08lX\n",
+    Serial.printf("[fwota]  image_accepted version=%s bytes=%u transfer_id=%08lX\n",
                   version ? version : "?", static_cast<unsigned>(total_),
                   static_cast<unsigned long>(xfer_));
     return State::ACCEPTED;
@@ -287,7 +285,7 @@ State onData(uint32_t xfer, uint32_t offset, const uint8_t* data, size_t len) {
         len  -= n;
         if (staged_ == kSector && !flush()) {
             failed_ = true;
-            Serial.println(F("[fwota]  fallo escribiendo en la particion"));
+            Serial.println(F("[fwota]  partition_write_failed"));
             return State::ERROR;
         }
     }
@@ -297,13 +295,13 @@ State onData(uint32_t xfer, uint32_t offset, const uint8_t* data, size_t len) {
         if (!flush()) { failed_ = true; return State::ERROR; }
         freeBuf();
         if (!verify()) {
-            Serial.println(F("[fwota]  imagen completa pero el sha256 no cuadra"));
+            Serial.println(F("[fwota]  image_verification_failed reason=sha256_mismatch"));
             reset();
             return State::ERROR;
         }
         ready_ = true;
         saveProgress();
-        Serial.printf("[fwota]  imagen completa y verificada: %u B\n",
+        Serial.printf("[fwota]  image_verified bytes=%u\n",
                       static_cast<unsigned>(total_));
         return State::READY;
     }
@@ -377,7 +375,7 @@ Result install(uint32_t xfer, const uint8_t sha[32]) {
     if (!verify()) return Result::SHA_MISMATCH;
     if (esp_ota_set_boot_partition(part_) != ESP_OK) return Result::SET_FAILED;
     clearProgress();
-    Serial.printf("[fwota]  arranque marcado en %s; reiniciando\n", part_->label);
+    Serial.printf("[fwota]  boot_partition=%s restarting=true\n", part_->label);
     return Result::INSTALLING;
 }
 
@@ -408,7 +406,7 @@ void expireIfIdle(uint32_t now_ms) {
     // llegado a flash: menos de un sector, que el emisor reenvía al reanudar
     // porque el número que se le contesta es el que sí está escrito.
     freeBuf();
-    Serial.printf("[fwota]  transferencia en pausa, %u/%u B a salvo en flash\n",
+    Serial.printf("[fwota]  transfer_paused bytes_written=%u total_bytes=%u\n",
                   static_cast<unsigned>(flushed_),
                   static_cast<unsigned>(total_));
 }
@@ -424,15 +422,14 @@ bool pendingVerify() {
 bool confirmRunning() {
     if (!pendingVerify()) return true;
     const bool ok = esp_ota_mark_app_valid_cancel_rollback() == ESP_OK;
-    Serial.println(ok ? F("[fwota]  imagen confirmada: no se revertira")
-                      : F("[fwota]  no se pudo confirmar la imagen"));
+    Serial.println(ok ? F("[fwota]  image_confirmed rollback=false")
+                      : F("[fwota]  image_confirmation_failed"));
     return ok;
 }
 
 bool rollbackRunning() {
     if (!pendingVerify()) return false;
-    Serial.println(F("[fwota]  la imagen nueva no se registro: volviendo "
-                     "a la anterior"));
+    Serial.println(F("[fwota]  image_not_confirmed action=rollback"));
     Serial.flush();
     // No retorna: reinicia arrancando la partición anterior.
     esp_ota_mark_app_invalid_rollback_and_reboot();

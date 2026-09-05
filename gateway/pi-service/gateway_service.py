@@ -526,13 +526,13 @@ class GatewayService:
             key_hex = os.environ.get("MODULINKR_SEC_KEY", "")
             if len(key_hex) != 2 * protocol.KEY_BYTES:
                 raise SystemExit(
-                    "MODULINKR_SEC_ENABLED=1 exige MODULINKR_SEC_KEY con "
-                    f"{2 * protocol.KEY_BYTES} caracteres hex (regla 15 de "
+                    "MODULINKR_SEC_ENABLED=1 requires MODULINKR_SEC_KEY with "
+                    f"{2 * protocol.KEY_BYTES} hexadecimal characters (rule 15 in "
                     "node-config.md)")
             try:
                 self.sec_key = bytes.fromhex(key_hex)
             except ValueError:
-                raise SystemExit("MODULINKR_SEC_KEY no es hexadecimal valido")
+                raise SystemExit("MODULINKR_SEC_KEY is not valid hexadecimal")
         # Salt de sesión para el sec_ts sin hora (spec §14.4): rango
         # [1, SEC_SALT_MAX), regenerado en cada arranque del servicio.
         self.sec_salt = random.randrange(1, protocol.SEC_SALT_MAX)
@@ -673,12 +673,11 @@ class GatewayService:
         if ok != self._clock_synced_prev:
             self._clock_synced_prev = ok
             if ok:
-                LOG.info("reloj sincronizado: se reparte hora a la red (epoch=%d)",
+                LOG.info("event=clock.synchronized epoch=%d action=distribute_time",
                          int(time.time()))
             else:
-                LOG.warning("reloj SIN sincronizar: beacon y WELCOME van con "
-                            "epoch=0 y el sobre con salt, hasta que el NTP "
-                            "cuadre la hora")
+                LOG.warning("event=clock.unsynchronized beacon_epoch=0 "
+                            "security_salt=true action=wait_for_ntp_sync")
         return ok
 
     def _gw_epoch(self) -> int:
@@ -772,8 +771,8 @@ class GatewayService:
         }
         self.buf.config_push_state(push_id, "sending",
                                    f"{len(chunks)} fragmentos, {len(data)} B")
-        LOG.info("config-push origin=%d inicio: %d B en %d fragmentos, "
-                 "%.2f s por trama, hasta %d por ventana%s, xfer=%08X",
+        LOG.info("event=config_push.started origin=%d bytes=%d fragments=%d "
+                 "airtime_s=%.2f fragments_per_window=%d%s transfer_id=%08X",
                  origin, len(data), len(chunks), gap_s, burst_max,
                  f" (via relay {self._config_hop(origin)})" if hay_relay else "",
                  self.cfg_tx["xfer"])
@@ -806,7 +805,7 @@ class GatewayService:
             self._probe_req, pend["para_que"],
             self._next_gw_seq(), self.net_id, self.max_ttl,
             self.sec_key, self._gw_sec_ts()))
-        LOG.info("sondeo al nodo %d para %s (req=%d)", pend["origin"],
+        LOG.info("event=node.poll_sent origin=%d purpose=%s request_id=%d", pend["origin"],
                  protocol.PROBE_NOMBRES.get(pend["para_que"], pend["para_que"]),
                  self._probe_req)
 
@@ -822,7 +821,7 @@ class GatewayService:
         self.buf.probe_state(
             v["id"], "done", 1 if listo else 0, motivo,
             "puede" if listo else parsed.get("probe_motivo_name", "ocupado"))
-        LOG.info("sondeo al nodo %d: %s%s", v["origin"],
+        LOG.info("event=node.poll_result origin=%d result=%s%s", v["origin"],
                  "puede" if listo else "ocupado",
                  "" if listo else f" ({parsed.get('probe_motivo_name')})")
         self._probe_vivo = None
@@ -1005,7 +1004,7 @@ class GatewayService:
                                    f"faltan {len(t['pending'])} fragmentos "
                                    f"tras {CFG_MAX_ROUNDS} rondas")
                 return
-            LOG.info("config-push origin=%d ronda %d: faltan %s",
+            LOG.info("event=config_push.round origin=%d round=%d missing=%s",
                      t["origin"], t["rounds"], sorted(t["pending"]))
             t["phase"] = "sending"
             t["sent_all"] = set()
@@ -1050,8 +1049,8 @@ class GatewayService:
         if not self.duty.fits(now, t["toa_ms"]):
             if not t.get("duty_avisado"):
                 t["duty_avisado"] = True
-                LOG.warning("config-push origin=%d en pausa: aire al %.1f %% "
-                            "del presupuesto", t["origin"], self.duty.used_pct(now))
+                LOG.warning("event=config_push.paused origin=%d reason=duty_cycle used_pct=%.1f",
+                            t["origin"], self.duty.used_pct(now))
             t["next_ms"] = now + 30.0
             return
         t["duty_avisado"] = False
@@ -1077,7 +1076,7 @@ class GatewayService:
             self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         t["burst"] += 1
-        LOG.info("config-push origin=%d fragmento %d/%d (%d B) %d/%d de ventana",
+        LOG.info("event=config_push.fragment origin=%d fragment=%d total=%d bytes=%d window_fragment=%d window_total=%d",
                  t["origin"], idx, len(t["chunks"]), len(chunk),
                  t["burst"], t["burst_max"])
         # No se retira de pendientes al enviarlo: lo retira el mapa del
@@ -1101,7 +1100,7 @@ class GatewayService:
                 origin, CFG_GET_MAX_TRIES * CFG_GET_RETRY_S),
         }
         self.buf.config_read_state(read_id, "reading", detail="pidiendo al nodo")
-        LOG.info("config-read origin=%d inicio, req=%08X",
+        LOG.info("event=config_read.started origin=%d request_id=%08X",
                  origin, self.cfg_rx["req"])
 
     def config_read_tick(self, now: float) -> None:
@@ -1155,7 +1154,7 @@ class GatewayService:
             self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         r["next_ms"] = now + CFG_GET_RETRY_S
-        LOG.info("config-get origin=%d intento %d, ya tengo %d fragmento(s)",
+        LOG.info("event=config_read.request origin=%d attempt=%d fragments_received=%d",
                  r["origin"], r["tries"], len(r["frags"]))
 
     def config_on_data(self, parsed: dict) -> None:
@@ -1166,7 +1165,7 @@ class GatewayService:
         r["total"] = parsed["cfg_total"]
         r["frags"][parsed["cfg_idx"]] = (parsed["cfg_offset"],
                                          bytes(parsed["cfg_chunk"]))
-        LOG.info("config-data origin=%s fragmento %d/%d (%d B)",
+        LOG.info("event=config_read.fragment origin=%s fragment=%d total=%d bytes=%d",
                  protocol.addr_name(parsed["origin_id"]),
                  parsed["cfg_idx"], r["total"], len(parsed["cfg_chunk"]))
 
@@ -1197,7 +1196,7 @@ class GatewayService:
             return
         self.buf.config_read_state(self.cfg_rx["read_id"], state,
                                    config=config, detail=detail)
-        LOG.info("config-read origin=%d terminado: %s (%s)",
+        LOG.info("event=config_read.completed origin=%d state=%s detail=%s",
                  self.cfg_rx["origin"], state, detail)
         self.cfg_rx = None
 
@@ -1243,8 +1242,8 @@ class GatewayService:
             intervalo = QUIET_INTERVALO_SUPUESTO_S
         tope_red = int(QUIET_OUTBOX_UTILES * intervalo)
         if duration_s > tope_red:
-            LOG.info("quiet: %d s recortados a %d s, que es lo que aguanta la "
-                     "outbox del nodo que muestrea cada %.0f s",
+            LOG.info("event=quiet_window.clamped requested_s=%d applied_s=%d "
+                     "sample_period_s=%.0f",
                      duration_s, tope_red, intervalo)
             duration_s = max(1, tope_red)
 
@@ -1254,14 +1253,14 @@ class GatewayService:
             "next_ms": 0.0,
             "anuncios": 0,
         }
-        LOG.info("quiet: ventana de %d s programada para dentro de %.0f s",
+        LOG.info("event=quiet_window.scheduled duration_s=%d starts_in_s=%.0f",
                  duration_s, aviso_s)
         return {"desde": self.quiet["desde"], "duracion_s": duration_s,
                 "empieza_en_s": int(aviso_s)}
 
     def quiet_cancel(self) -> None:
         if self.quiet is not None:
-            LOG.info("quiet: ventana cancelada")
+            LOG.info("event=quiet_window.cancelled")
         self.quiet = None
 
     def quiet_activa(self, now_epoch: int | None = None) -> bool:
@@ -1300,7 +1299,7 @@ class GatewayService:
         t = int(time.time())
         fin = self.quiet["desde"] + self.quiet["dur"]
         if t >= fin:
-            LOG.info("quiet: ventana terminada tras %d anuncios",
+            LOG.info("event=quiet_window.completed announcements=%d",
                      self.quiet["anuncios"])
             self.quiet = None
             return
@@ -1387,8 +1386,8 @@ class GatewayService:
             self.buf.fw_push_state(row["id"], "sending",
                                    f"{row['version']}, {row['total_len']} B, "
                                    f"desde {row['written']} B")
-        LOG.info("fw-push origin=%d %s: %d B, retomando en %d B, "
-                 "%.2f s por trama, hasta %d por ventana%s, xfer=%08X",
+        LOG.info("event=firmware_push.started origin=%d version=%s bytes=%d resume_offset=%d "
+                 "airtime_s=%.2f fragments_per_window=%d%s transfer_id=%08X",
                  row["origin"], row["version"], row["total_len"],
                  row["written"], gap_s, burst_max,
                  f" (via relay {self._config_hop(row['origin'])})"
@@ -1481,13 +1480,13 @@ class GatewayService:
         op["state"] = "offering"
         self.buf.bcast_state(op["id"], "offering",
                              f"anunciando durante {BCAST_OFFER_LEAD_S:.0f} s")
-        LOG.info("fw-bcast %d: %s, %d B, %d originales en %d bloques",
+        LOG.info("event=firmware_broadcast.started id=%d version=%s bytes=%d source_fragments=%d blocks=%d",
                  op["id"], op["version"], op["total_len"], n_orig,
                  self.bcast["n_blocks"])
         # El hueco se registra porque ahora es un valor calculado y no una
         # constante: sin verlo en el log no hay forma de saber con qué separación
         # corrió una tanda, que es justo el número que se está midiendo.
-        LOG.info("fw-bcast %d: aire %d ms/fragmento, hueco %.0f ms%s",
+        LOG.info("event=firmware_broadcast.timing id=%d airtime_ms=%d gap_ms=%.0f%s",
                  op["id"], self.bcast["toa_ms"], self.bcast["gap_s"] * 1000.0,
                  " (forzado)" if BCAST_GAP_FORZADO_S > 0 else "")
 
@@ -1556,8 +1555,8 @@ class GatewayService:
         if not self._fw_en_ventana(op):
             if not b.get("fuera_avisado"):
                 b["fuera_avisado"] = True
-                LOG.info("fw-bcast %d en pausa: fuera de la ventana de "
-                         "%02d:00 a %02d:00", op["id"],
+                LOG.info("event=firmware_broadcast.paused id=%d reason=outside_window "
+                         "window_start=%02d:00 window_end=%02d:00", op["id"],
                          op["hour_from"], op["hour_to"])
                 self.buf.bcast_state(
                     op["id"], op["state"],
@@ -1566,7 +1565,7 @@ class GatewayService:
             return
         if b.get("fuera_avisado"):
             b["fuera_avisado"] = False
-            LOG.info("fw-bcast %d: dentro de la ventana, se reanuda", op["id"])
+            LOG.info("event=firmware_broadcast.resumed id=%d reason=inside_window", op["id"])
 
         # Cancelación desde el visor. El visor no habla por radio: escribe el
         # estado en la base, así que hay que ir a mirarlo. Cada pocos segundos
@@ -1580,7 +1579,7 @@ class GatewayService:
             except sqlite3.Error:
                 fila = None
             if fila is not None and fila[0] == "cancelled":
-                LOG.info("fw-bcast %d: cancelada desde el visor", op["id"])
+                LOG.info("event=firmware_broadcast.cancelled id=%d source=web", op["id"])
                 self.bcast = None
                 self.bcast_img = None
                 return
@@ -1700,8 +1699,8 @@ class GatewayService:
         # vuelta, con la operación ocupando el canal y sin una línea que lo
         # contase. Se suelta y se dice: una operación que nadie sabe atender es
         # una operación muerta, y muerta y ocupando sitio es lo peor de todo.
-        LOG.warning("fw-bcast %d: estado desconocido '%s', se suelta la "
-                    "operacion para no bloquear el canal", op["id"], est)
+        LOG.warning("event=firmware_broadcast.released id=%d reason=unknown_state state=%s",
+                    op["id"], est)
         self.buf.bcast_state(op["id"], "failed",
                              f"estado interno inesperado: {est}")
         self.bcast = None
@@ -1735,15 +1734,15 @@ class GatewayService:
         ord_c     = self.tx_ord_control - b["marca_ord_c"]
         air_c     = self.heltec_control - b["marca_air_c"]
         segundos  = now - b["t0"]
-        LOG.info("fw-bcast %d: %d ordenes escritas, %d emitidas por el Heltec "
-                 "(%d sin salir), %.0f s, %.0f ms/orden",
+        LOG.info("event=firmware_broadcast.summary id=%d commands_written=%d commands_sent=%d "
+                 "commands_pending=%d elapsed_s=%.0f ms_per_command=%.0f",
                  b["op"]["id"], ordenadas, emitidas, ordenadas - emitidas,
                  segundos, 1000.0 * segundos / max(ordenadas, 1))
         # Y el desglose que decide el caso del beacon perdido: si el control se
         # escribe y no sale, el problema es el enlace con el Heltec; si sale y
         # el nodo no lo oye, el problema está en el aire o en el receptor.
-        LOG.info("fw-bcast %d: de ellas, control (beacon, ACK, WELCOME): "
-                 "%d escritas, %d emitidas, %d sin salir",
+        LOG.info("event=firmware_broadcast.control_summary id=%d commands_written=%d "
+                 "commands_sent=%d commands_pending=%d",
                  b["op"]["id"], ord_c, air_c, ord_c - air_c)
         b["marca_ord"] = self.tx_ordenadas
         b["marca_air"] = self.heltec_emitidas
@@ -1771,7 +1770,7 @@ class GatewayService:
             # solo la trama del mapa, no la entrega.
             b["rondas"] = b.get("rondas", 0) + 1
             if b["rondas"] < BCAST_POLL_RONDAS:
-                LOG.info("fw-bcast %d: sin respuesta al mapa, ronda %d de %d",
+                LOG.info("event=firmware_broadcast.map_retry id=%d round=%d total_rounds=%d",
                          op["id"], b["rondas"] + 1, BCAST_POLL_RONDAS)
                 b["poll"] = ([op["target"]] if op.get("target")
                              else self._bcast_nodos())
@@ -1782,7 +1781,7 @@ class GatewayService:
                                  f"{BCAST_POLL_RONDAS} rondas")
             self.bcast = None
             self.bcast_img = None
-            LOG.warning("fw-bcast %d: nadie respondio, abandonada", op["id"])
+            LOG.warning("event=firmware_broadcast.abandoned id=%d reason=no_responses", op["id"])
             return
         b["rondas"] = 0
         self.buf.bcast_progress(op["id"], op["total_len"])
@@ -1807,7 +1806,7 @@ class GatewayService:
                                  pass_no=pase)
             self.bcast = None
             self.bcast_img = None
-            LOG.info("fw-bcast %d: completa en %d nodo(s) tras %d pasada(s)",
+            LOG.info("event=firmware_broadcast.complete id=%d nodes=%d passes=%d",
                      op["id"], len(mapas), pase)
             return
 
@@ -1822,8 +1821,8 @@ class GatewayService:
                 f"sin respuesta de: {lista}", pass_no=pase)
             self.bcast = None
             self.bcast_img = None
-            LOG.warning("fw-bcast %d: completa en %d nodo(s), pero %d no "
-                        "contestaron al mapa (%s): hay que mirarlos uno a uno",
+            LOG.warning("event=firmware_broadcast.partial id=%d complete_nodes=%d "
+                        "nodes_without_map=%d missing_nodes=%s",
                         op["id"], len(mapas), len(mudos), lista)
             return
         if pase >= BCAST_MAX_PASSES:
@@ -1845,8 +1844,8 @@ class GatewayService:
         self.buf.bcast_state(op["id"], "repairing",
                              f"pasada {pase + 1}: {len(union)} fragmento(s)",
                              pass_no=pase)
-        LOG.info("fw-bcast %d: faltan %d fragmentos entre %d nodo(s), se "
-                 "reemite la union", op["id"], len(union), len(mapas))
+        LOG.info("event=firmware_broadcast.retransmit id=%d missing_fragments=%d nodes=%d",
+                 op["id"], len(union), len(mapas))
 
     def bcast_install_tick(self, now: float) -> None:
         """Atiende la orden de instalar de un envío dirigido (§20.12).
@@ -1876,7 +1875,7 @@ class GatewayService:
             self._next_gw_seq(), self.net_id, self.max_ttl,
             self.sec_key, self._gw_sec_ts()))
         self.buf.bcast_state(bid, "installing", "orden enviada al nodo")
-        LOG.info("fw-bcast %d: orden de instalar al nodo %d (xfer=%08X)",
+        LOG.info("event=firmware_broadcast.install_sent id=%d origin=%d transfer_id=%08X",
                  bid, destino, xfer)
 
     def _bcast_install_caducada(self, now: float) -> None:
@@ -1910,8 +1909,8 @@ class GatewayService:
                 "instalada (confirmada por la version que anuncia el nodo)"
                 if ok else
                 f"sin veredicto del nodo tras {BCAST_INSTALL_VEREDICTO_S:.0f} s")
-            LOG.warning("fw-bcast %d: el nodo %d no dio veredicto; version "
-                        "anunciada %s, se pidio %s", bid, destino,
+            LOG.warning("event=firmware_broadcast.verdict_timeout id=%d origin=%d "
+                        "reported_version=%s requested_version=%s", bid, destino,
                         corriendo or "?", pedida or "?")
 
     def bcast_difusion_install_tick(self, now: float) -> None:
@@ -1937,7 +1936,7 @@ class GatewayService:
             self.max_ttl, self.sec_key, self._gw_sec_ts()))
         self.buf.bcast_install_state(fila["id"], "installing",
                                      "orden enviada al nodo")
-        LOG.info("fw-bcast: orden de instalar %s al nodo %d (xfer=%08X)",
+        LOG.info("event=firmware_broadcast.install_sent version=%s origin=%d transfer_id=%08X",
                  fila["version"], fila["origin"], fila["xfer"])
 
     def bcast_difusion_result(self, parsed: dict) -> bool:
@@ -1957,8 +1956,8 @@ class GatewayService:
         self.buf.bcast_install_state(
             fila["id"], "done" if ok else "failed",
             f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
-        LOG.info("fw-bcast: veredicto del nodo %d tras instalar: %s",
-                 parsed["origin_id"], detalle or "sin detalle")
+        LOG.info("event=firmware_broadcast.verdict origin=%d detail=%s",
+                 parsed["origin_id"], detalle or "no_detail")
         return True
 
     def bcast_on_result(self, parsed: dict) -> bool:
@@ -1991,14 +1990,14 @@ class GatewayService:
         if parsed.get("fw_status") == protocol.FW_INSTALLING:
             # Aviso previo al reinicio, no veredicto: la operación sigue viva
             # esperando lo que diga el nodo cuando vuelva a arrancar.
-            LOG.info("fw-bcast %d: el nodo %d va a reiniciar para instalar",
+            LOG.info("event=firmware_broadcast.node_restarting id=%d origin=%d",
                      bid, parsed["origin_id"])
             return True
         ok = parsed.get("fw_status") == protocol.FW_CONFIRMED
         self.buf.bcast_state(bid, "done" if ok else "failed",
                              f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
-        LOG.info("fw-bcast %d: veredicto del nodo %d: %s",
-                 bid, parsed["origin_id"], detalle or "sin detalle")
+        LOG.info("event=firmware_broadcast.verdict id=%d origin=%d detail=%s",
+                 bid, parsed["origin_id"], detalle or "no_detail")
         return True
 
     def bcast_on_status(self, parsed: dict) -> bool:
@@ -2019,7 +2018,7 @@ class GatewayService:
         if estado == protocol.FW_REJECTED:
             self.buf.bcast_state(b["op"]["id"], "failed",
                                  f"el nodo {b['dest']} rechazó la imagen")
-            LOG.info("fw-bcast %d: el nodo %d rechazo la oferta",
+            LOG.info("event=firmware_broadcast.offer_rejected id=%d origin=%d",
                      b["op"]["id"], b["dest"])
             self.bcast = None
             self.bcast_img = None
@@ -2033,7 +2032,7 @@ class GatewayService:
 
         if not b["acept"]:
             b["acept"] = True
-            LOG.info("fw-bcast %d: el nodo %d acepta, empezando",
+            LOG.info("event=firmware_broadcast.offer_accepted id=%d origin=%d",
                      b["op"]["id"], b["dest"])
         return True
 
@@ -2062,7 +2061,7 @@ class GatewayService:
                      or not ((completo[i >> 3] >> (i & 7)) & 1))
         self.buf.bcast_map_set(self.bcast["op"]["id"], origen, completo, faltan)
         del self.bcast["mapa_rx"][origen]
-        LOG.info("fw-bcast mapa de origen=%d: faltan %d de %d",
+        LOG.info("event=firmware_broadcast.map_received origin=%d missing=%d total=%d",
                  origen, faltan, n)
         # Contestó antes de que venciera su espera: se pasa al siguiente sin
         # gastar el resto del plazo, que con veinte nodos son minutos.
@@ -2093,8 +2092,8 @@ class GatewayService:
         if now - t.get("chk", 0.0) >= 5.0:
             t["chk"] = now
             if self.buf.fw_push_state_of(t["push_id"]) == "cancelled":
-                LOG.info("fw-push origin=%d cancelada desde el visor, "
-                         "%d B quedan escritos en el nodo",
+                LOG.info("event=firmware_push.cancelled origin=%d source=web "
+                         "bytes_written=%d",
                          t["origin"], t["written"])
                 self.fw_tx = None
                 return
@@ -2118,8 +2117,8 @@ class GatewayService:
         if not self._fw_en_ventana(t):
             if not t["fuera_avisado"]:
                 t["fuera_avisado"] = True
-                LOG.info("fw-push origin=%d en pausa: fuera de la ventana "
-                         "de %02d:00 a %02d:00", t["origin"],
+                LOG.info("event=firmware_push.paused origin=%d reason=outside_window "
+                         "window_start=%02d:00 window_end=%02d:00", t["origin"],
                          t["hour_from"], t["hour_to"])
             t["next_ms"] = now + 300.0
             t["last_news"] = now      # esperar no cuenta como no responder
@@ -2143,7 +2142,7 @@ class GatewayService:
             self._tx(frame)
             t["tries"] += 1
             t["next_ms"] = now + FW_OFFER_RETRY_S
-            LOG.info("fw-push origin=%d oferta %s (intento %d)",
+            LOG.info("event=firmware_push.offer origin=%d version=%s attempt=%d",
                      t["origin"], t["version"], t["tries"])
             return
 
@@ -2157,8 +2156,8 @@ class GatewayService:
         if t.get("mudos", 0) >= FW_SIN_NOTICIAS_MAX:
             if not t.get("mudo_avisado"):
                 t["mudo_avisado"] = True
-                LOG.info("fw-push origin=%d en pausa: %d fragmentos sin "
-                         "noticias del nodo, se espera a que hable",
+                LOG.info("event=firmware_push.paused origin=%d reason=node_silent "
+                         "fragments_without_response=%d",
                          t["origin"], t["mudos"])
             t["next_ms"] = now + 2.0
             return
@@ -2172,8 +2171,8 @@ class GatewayService:
         if not self.duty.fits(now, t["toa_ms"], headroom_ms=reserva):
             if not t["duty_avisado"]:
                 t["duty_avisado"] = True
-                LOG.info("fw-push origin=%d en pausa: aire al %.1f %% y el "
-                         "resto queda reservado para la red",
+                LOG.info("event=firmware_push.paused origin=%d reason=duty_cycle "
+                         "used_pct=%.1f",
                          t["origin"], self.duty.used_pct(now))
             t["next_ms"] = now + 60.0
             t["last_news"] = now
@@ -2242,7 +2241,7 @@ class GatewayService:
         escritos = parsed["fw_written"]
         t["last_news"] = time.monotonic()
         if t.get("mudo_avisado"):
-            LOG.info("fw-push origin=%d vuelve a hablar, se reanuda", t["origin"])
+            LOG.info("event=firmware_push.resumed origin=%d reason=node_reachable", t["origin"])
         t["mudos"] = 0
         t["mudo_avisado"] = False
 
@@ -2258,7 +2257,7 @@ class GatewayService:
             t["phase"] = "sending"
             t["written"] = escritos
             t["tries"] = 0
-            LOG.info("fw-push origin=%d oferta aceptada, empezando en %d B",
+            LOG.info("event=firmware_push.offer_accepted origin=%d resume_offset=%d",
                      t["origin"], escritos)
             self.buf.fw_push_state(t["push_id"], "sending",
                                    f"aceptada, desde {escritos} B", escritos)
@@ -2270,20 +2269,20 @@ class GatewayService:
             self.buf.fw_push_state(t["push_id"], "ready",
                                    "imagen completa y verificada en el nodo",
                                    t["total_len"])
-            LOG.info("fw-push origin=%d IMAGEN LISTA: esperando la orden "
-                     "de instalar", t["origin"])
+            LOG.info("event=firmware_push.image_ready origin=%d action=wait_for_install",
+                     t["origin"])
             return
 
         # Hueco, o simple informe de progreso. En los dos casos el número del
         # nodo manda sobre el del gateway: es el que está escrito de verdad.
         if escritos < t["written"]:
-            LOG.info("fw-push origin=%d rebobinando de %d a %d B",
+            LOG.info("event=firmware_push.rewinding origin=%d from_offset=%d to_offset=%d",
                      t["origin"], t["written"], escritos)
         t["written"] = escritos
         self.buf.fw_push_progress(t["push_id"], escritos)
         if estado != protocol.FW_GAP:
             pct = 100.0 * escritos / t["total_len"] if t["total_len"] else 0.0
-            LOG.info("fw-push origin=%d %d/%d B (%.1f %%), aire al %.1f %%",
+            LOG.info("event=firmware_push.progress origin=%d bytes_written=%d total_bytes=%d progress_pct=%.1f airtime_pct=%.1f",
                      t["origin"], escritos, t["total_len"], pct,
                      self.duty.used_pct(time.monotonic()))
 
@@ -2301,7 +2300,7 @@ class GatewayService:
         t["phase"] = "installing"
         t["last_news"] = time.monotonic()
         self.buf.fw_push_state(push_id, "installing", "orden enviada al nodo")
-        LOG.info("fw-install origin=%d xfer=%08X", t["origin"], t["xfer"])
+        LOG.info("event=firmware_install.sent origin=%d transfer_id=%08X", t["origin"], t["xfer"])
         return True
 
     def fw_on_result(self, parsed: dict) -> None:
@@ -2311,7 +2310,7 @@ class GatewayService:
         if t is None:
             return
         detalle = f"{parsed['fw_status_name']}: {parsed['fw_detail']}".strip(": ")
-        LOG.info("fw-result origin=%s %s",
+        LOG.info("event=firmware_result.received origin=%s result=%s",
                  protocol.addr_name(parsed["origin_id"]), detalle)
         self.fw_finish("done" if parsed["fw_status"] == 0 else "failed", detalle)
 
@@ -2320,7 +2319,7 @@ class GatewayService:
             return
         self.buf.fw_push_state(self.fw_tx["push_id"], state, detail,
                                self.fw_tx["written"])
-        LOG.info("fw-push origin=%d terminado: %s (%s)",
+        LOG.info("event=firmware_push.completed origin=%d state=%s detail=%s",
                  self.fw_tx["origin"], state, detail)
         self.fw_tx = None
 
@@ -2333,7 +2332,7 @@ class GatewayService:
         mask = parsed["cfg_mask"]
         t["pending"] = {i for i in range(len(t["chunks"]))
                         if not (mask >> i) & 1}
-        LOG.info("config-ack origin=%s mapa=%08X faltan=%s",
+        LOG.info("event=config_push.ack origin=%s bitmap=%08X missing=%s",
                  protocol.addr_name(parsed["origin_id"]), mask,
                  sorted(t["pending"]) or "nada")
         if not t["pending"] and t["phase"] != "committing":
@@ -2358,7 +2357,7 @@ class GatewayService:
         if t is None or parsed["cfg_xfer"] != t["xfer"]:
             return
         detalle = f"{parsed['cfg_status_name']}: {parsed['cfg_detail']}".strip(": ")
-        LOG.info("config-result origin=%s %s",
+        LOG.info("event=config_result.received origin=%s result=%s",
                  protocol.addr_name(parsed["origin_id"]), detalle)
         self.config_finish("done" if parsed["cfg_status"] == 0 else "failed",
                            detalle)
@@ -2394,14 +2393,14 @@ class GatewayService:
             self.buf.config_push_state(
                 pid, "failed",
                 f"sin resultado del nodo tras {CFG_VEREDICTO_S:.0f} s")
-            LOG.warning("config-push %d al nodo %d: sin resultado, se cierra",
+            LOG.warning("event=config_push.closed id=%d origin=%d reason=result_timeout",
                         pid, origen)
 
     def config_finish(self, state: str, detail: str) -> None:
         if self.cfg_tx is None:
             return
         self.buf.config_push_state(self.cfg_tx["push_id"], state, detail)
-        LOG.info("config-push origin=%d terminado: %s (%s)",
+        LOG.info("event=config_push.completed origin=%d state=%s detail=%s",
                  self.cfg_tx["origin"], state, detail)
         self.cfg_tx = None
 
@@ -2438,14 +2437,14 @@ class GatewayService:
                     self.heltec_control += 1
             elif s.startswith("[tx] err"):
                 self.heltec_err += 1
-                LOG.warning("heltec rechazo una emision: %s", s)
-            LOG.debug("heltec: %s", s)
+                LOG.warning("event=radio.tx_rejected detail=%s", s)
+            LOG.debug("event=radio.message detail=%s", s)
             return
 
         try:
             frame = bytes.fromhex(m.group("hex"))
         except ValueError:
-            LOG.warning("hex invalido: %s", line.strip())
+            LOG.warning("event=radio.frame_rejected reason=invalid_hex line=%s", line.strip())
             return
 
         rssi = float(m.group("rssi"))
@@ -2461,11 +2460,11 @@ class GatewayService:
             self.n_drop += 1
             if parsed.get("mic_fail"):
                 self.n_micfail += 1
-                LOG.warning("drop MIC invalido origin=%s seq=%s (micfail=%d)",
+                LOG.warning("event=frame.dropped reason=invalid_mic origin=%s seq=%s mic_failures=%d",
                             protocol.addr_name(parsed.get("origin_id", 0)),
                             parsed.get("seq", "?"), self.n_micfail)
             else:
-                LOG.warning("drop: %s (hex=%s)", parsed["error"], m.group("hex"))
+                LOG.warning("event=frame.dropped reason=%s hex=%s", parsed["error"], m.group("hex"))
             return
 
         # Estado de red para el visor (pi-web/README.md §4): toda trama
@@ -2484,7 +2483,7 @@ class GatewayService:
         # 6-jul-2026, ver bitacora y mac.md).
         if parsed["hop_dst"] != protocol.ADDR_GATEWAY:
             self.n_overheard += 1
-            LOG.debug("overheard (no dirigida a este salto) hop_dst=%s origin=%s seq=%d",
+            LOG.debug("event=frame.overheard hop_dst=%s origin=%s seq=%d",
                       protocol.addr_name(parsed["hop_dst"]),
                       protocol.addr_name(parsed["origin_id"]), parsed["seq"])
             return
@@ -2507,8 +2506,8 @@ class GatewayService:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 modo = protocol.MB_DEBUG_NAMES.get(
                     self.mb_debug.get(parsed["origin_id"]), "?")
-                LOG.info("modbus-debug origin=%s modo=%s dev=%d status=%s exc=%d "
-                         "req=%s resp=%s purgados=%s total=%d resyncs=%d",
+                LOG.info("modbus-debug origin=%s mode=%s device=%d status=%s exception=%d "
+                         "request=%s response=%s purged=%s purged_total=%d resyncs=%d",
                          protocol.addr_name(parsed["origin_id"]), modo,
                          parsed["mb_dev"], parsed["mb_status_name"],
                          parsed["mb_exception"],
@@ -2528,8 +2527,8 @@ class GatewayService:
         # recuperaciones de radio de cada nodo.
         if ft == protocol.FRAME_NODE_HEALTH:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                LOG.info("node-health origin=%s fallo=%s arranques=%d "
-                         "reset=%d L1=%d L2=%d L3=%d L4=%d "
+                LOG.info("event=node_health.received origin=%s fault=%s boots=%d "
+                         "reset=%d l1=%d l2=%d l3=%d l4=%d "
                          "psend=%d done=%d rx=%d mb_debug=%s",
                          protocol.addr_name(parsed["origin_id"]),
                          parsed["hl_fault_name"], parsed["hl_boots"],
@@ -2627,13 +2626,13 @@ class GatewayService:
         # El gateway solo confirma TELEMETRY/HEARTBEAT con destino final él.
         if ft not in (protocol.FRAME_TELEMETRY, protocol.FRAME_HEARTBEAT):
             self.n_notconf += 1
-            LOG.debug("rx no confirmable type=%s origin=%s seq=%d",
+            LOG.debug("event=frame.unconfirmed reason=type type=%s origin=%s seq=%d",
                       parsed["frame_type_name"],
                       protocol.addr_name(parsed["origin_id"]), parsed["seq"])
             return
         if parsed["dest_id"] != protocol.ADDR_GATEWAY:
             self.n_notconf += 1
-            LOG.debug("rx no dirigida al gateway dest=%s",
+            LOG.debug("event=frame.not_for_gateway destination=%s",
                       protocol.addr_name(parsed["dest_id"]))
             return
 
@@ -2643,8 +2642,8 @@ class GatewayService:
             # saque de su cola y lo delate en log.
             if parsed.get("ts_zero"):
                 self.n_drop += 1
-                LOG.warning("drop TELEMETRY ts=0 origin=%s seq=%d (firmware "
-                            "desactualizado o bug de reloj)",
+                LOG.warning("event=telemetry.dropped reason=invalid_timestamp "
+                            "origin=%s seq=%d suspected_cause=firmware_or_clock",
                             protocol.addr_name(parsed["origin_id"]),
                             parsed["seq"])
                 self.send_ack(parsed["origin_id"], parsed["hop_src"],
@@ -2657,7 +2656,7 @@ class GatewayService:
             is_new = self.buf.accept(parsed, rssi, snr)
             if not is_new:
                 self.n_dup += 1
-                LOG.info("dup origin=%s ts=%d seq=%d (dups=%d)",
+                LOG.info("event=telemetry.duplicate origin=%s ts=%d seq=%d duplicates=%d",
                          protocol.addr_name(parsed["origin_id"]),
                          parsed.get("ts", 0), parsed["seq"], self.n_dup)
 
@@ -2708,7 +2707,7 @@ class GatewayService:
         last = self.recent_acks.get(key)
         if last is not None and (now - last) < self.ack_window_s:
             self.n_acksup += 1
-            LOG.debug("ack suprimido (multi-camino) origin=%s seq=%d dt=%dms",
+            LOG.debug("event=ack.suppressed reason=multipath origin=%s seq=%d age_ms=%d",
                       protocol.addr_name(parsed["origin_id"]), parsed["seq"],
                       int((now - last) * 1000))
             return
@@ -2796,7 +2795,7 @@ class GatewayService:
         part["frags"][idx] = bytes(parsed["catalog_frag"])
 
         if len(part["frags"]) < total:
-            LOG.info("register frag %d/%d origin=%s (esperando resto)",
+            LOG.info("event=register.fragment fragment=%d total=%d origin=%s state=waiting",
                      idx + 1, total, protocol.addr_name(origin))
             return
 
@@ -2806,7 +2805,7 @@ class GatewayService:
 
         if "error" in catalog:
             self.n_reg += 1
-            LOG.warning("register origin=%s catalogo malformado: %s",
+            LOG.warning("event=register.rejected origin=%s reason=malformed_catalog error=%s",
                         protocol.addr_name(origin), catalog["error"])
             self.send_welcome(origin, hop_src, protocol.ACK_DECODE_ERROR)
             return
@@ -2859,7 +2858,7 @@ class GatewayService:
             self.ser.reset_input_buffer()
             return True
         except serial.SerialException as e:
-            LOG.warning("no se pudo abrir %s: %s", self.port, e)
+            LOG.warning("event=radio.open_failed port=%s error=%s", self.port, e)
             self.ser = None
             return False
 
@@ -3000,12 +2999,12 @@ class GatewayService:
                 self.mig["state"] = "saltada"
             self._apply_profile(self.mig["new_profile"])
             self.mig_mundo = "nuevo"
-            LOG.warning("migracion de red %d: reanudada YA SALTADA, radio en "
-                        "los parametros nuevos (recuperacion hasta epoch %d)",
+            LOG.warning("event=network_migration.resumed id=%d state=switched "
+                        "recovery_until_epoch=%d",
                         self.mig["id"], self.mig["recov_until"])
         else:
-            LOG.warning("migracion de red %d: salto programado para epoch %d "
-                        "(faltan %d s)", self.mig["id"], self.mig["apply_at"],
+            LOG.warning("event=network_migration.scheduled id=%d apply_at_epoch=%d "
+                        "starts_in_s=%d", self.mig["id"], self.mig["apply_at"],
                         self.mig["apply_at"] - ahora)
 
     @staticmethod
@@ -3134,7 +3133,7 @@ class GatewayService:
             self.buf.reparto_state(self.mig["id"], f["origin"], "leyendo",
                                    read_id=cur.lastrowid,
                                    detail="leyendo su config")
-            LOG.info("migracion %d: repartiendo al nodo %d", self.mig["id"],
+            LOG.info("event=network_migration.distributing id=%d origin=%d", self.mig["id"],
                      f["origin"])
             return
 
@@ -3171,8 +3170,8 @@ class GatewayService:
             self.mig = self.buf.migration_active() if self.buf else None
             if self.mig is None:
                 return
-            LOG.warning("migracion de red %d recogida en caliente: salto en "
-                        "epoch %d", self.mig["id"], self.mig["apply_at"])
+            LOG.warning("event=network_migration.loaded id=%d state=scheduled apply_at_epoch=%d",
+                        self.mig["id"], self.mig["apply_at"])
 
         # Sin hora de confianza no se salta. El salto es un instante acordado
         # con toda la malla, y ejecutarlo contra un reloj que no vale es la
@@ -3213,7 +3212,7 @@ class GatewayService:
             self.buf.migration_state(self.mig["id"], "saltada",
                                      f"salto ejecutado en epoch {ahora}")
             self.mig["state"] = "saltada"
-            LOG.warning("migracion de red %d: SALTO ejecutado, radio en "
+            LOG.warning("event=network_migration.switched id=%d "
                         "network_id=%d freq=%d sf=%d bw=%d",
                         self.mig["id"], self.net_id, self.freq_hz,
                         self.sf, self.bw_khz)
@@ -3228,7 +3227,7 @@ class GatewayService:
                 self.mig_mundo = "nuevo"
             self.buf.migration_state(self.mig["id"], "cerrada",
                                      "vencido el plazo de recuperación")
-            LOG.warning("migracion de red %d: recuperacion terminada",
+            LOG.warning("event=network_migration.recovery_completed id=%d",
                         self.mig["id"])
             self.mig = None
             return
@@ -3262,9 +3261,9 @@ class GatewayService:
             # media ventana. El rezagado está escuchando sin padre, así que
             # este beacon es exactamente lo que necesita para volver.
             self.send_beacon()
-        LOG.info("migracion de red %d: radio en los parametros %ss%s",
-                 self.mig["id"], toca,
-                 f" (rescate hasta epoch {int(rescate)})" if toca == "viejo"
+        LOG.info("event=network_migration.radio_configured id=%d parameter_set=%s%s",
+                 self.mig["id"], "old" if toca == "viejo" else "new",
+                 f" rescue_until_epoch={int(rescate)}" if toca == "viejo"
                  else "")
 
     def migration_note_rx(self, origin: int) -> None:
@@ -3299,7 +3298,7 @@ class GatewayService:
         # ciego hasta el siguiente arranque de cada nodo.
         self.mb_debug = self.buf.mb_debug_all()
         if self.mb_debug:
-            LOG.info("modo de depuracion Modbus conocido de %d nodo(s)",
+            LOG.info("event=modbus_debug.state_loaded nodes=%d",
                      len(self.mb_debug))
 
         # Operación de cambio de parámetros de red a medias, si la hay. Va
@@ -3307,10 +3306,10 @@ class GatewayService:
         # estaba parado, la primera trama que salga tiene que ir con los
         # parámetros nuevos y no con los de gateway.env.
         self.migration_load()
-        LOG.info("buffer en %s (max %d), network_id=%d, beacon cada %.0f s, stats cada %.0f s",
+        LOG.info("event=service.started buffer=%s buffer_max=%d network_id=%d beacon_interval_s=%.0f stats_interval_s=%.0f",
                  self.db_path, self.buf_max, self.net_id, self.beacon_s, self.stats_s)
-        LOG.info("seguridad interfaz aire (v2.2): %s",
-                 "AES-CCM activa" if self.sec_key else "desactivada (en claro)")
+        LOG.info("event=radio_security.configured version=2.2 mode=%s",
+                 "aes-ccm" if self.sec_key else "plaintext")
 
         # Publicador MQTT hacia el broker cloud. Drena el buffer (telemetría
         # y catálogos) marcando published=1 solo tras el PUBACK. Si no hay
@@ -3344,7 +3343,7 @@ class GatewayService:
                             self.mqtt.drain()
                         time.sleep(1.0)
                         continue
-                    LOG.info("radio abierta en %s @ %d baud", self.port, self.baud)
+                    LOG.info("event=radio.opened port=%s baud=%d", self.port, self.baud)
                     rx_buf = b""
                     last_beacon = 0.0   # beacon inmediato al recuperar la radio
                     last_oled   = 0.0   # y estado inmediato a la pantalla
@@ -3435,7 +3434,7 @@ class GatewayService:
                     # puerto para volver a la fase de reintento de apertura.
                     # OSError cubre el ENODEV/ENXIO que asoma cuando el
                     # /dev/ttyUSB* se evapora en pleno acceso.
-                    LOG.warning("radio desconectada (%s): reintentando", e)
+                    LOG.warning("event=radio.disconnected error=%s retry=true", e)
                     self._heartbeat(lora_link=False)
                     try:
                         self.ser.close()
@@ -3443,7 +3442,7 @@ class GatewayService:
                         pass
                     self.ser = None
         except KeyboardInterrupt:
-            LOG.info("interrumpido por usuario")
+            LOG.info("event=service.stopping reason=keyboard_interrupt")
             self.report_stats()
             return 0
         finally:
@@ -3457,10 +3456,11 @@ class GatewayService:
 
 def main() -> int:
     level = logging.DEBUG if "-v" in sys.argv else logging.INFO
+    logging.Formatter.converter = time.gmtime
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
+        format="%(asctime)sZ %(levelname)-8s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
     )
     return GatewayService().run()
 

@@ -56,5 +56,5 @@ fetch_npm_package "webawesome" \
     "https://registry.npmjs.org/@awesome.me/webawesome/-/webawesome-$WEB_AWESOME_VERSION.tgz" \
     "$DIR/webawesome-$WEB_AWESOME_VERSION"
 
-echo "assets en $DIR:"
-find "$DIR" -maxdepth 1 -mindepth 1 -print | sort
+echo "[ OK ] Recursos descargados en $DIR:"
+ls -lh "$DIR"

@@ -69,8 +69,10 @@ from fastapi.staticfiles import StaticFiles
 import netstatus
 
 LOG = logging.getLogger("modulinkr.web")
+logging.Formatter.converter = time.gmtime
 logging.basicConfig(level=os.environ.get("MODULINKR_LOG_LEVEL", "INFO"),
-                    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+                    format="%(asctime)sZ %(levelname)-8s %(name)s %(message)s",
+                    datefmt="%Y-%m-%dT%H:%M:%S")
 
 WEB_USER   = os.environ.get("MODULINKR_WEB_USER", "")
 WEB_PASS   = os.environ.get("MODULINKR_WEB_PASS", "")
@@ -88,8 +90,7 @@ COOKIE    = "modulinkr_s"
 
 if WEB_USER and not WEB_SECRET:
     WEB_SECRET = secrets.token_hex(32)
-    LOG.warning("MODULINKR_WEB_SECRET vacia: clave efimera, las sesiones "
-                "caducan al reiniciar el servicio")
+    LOG.warning("event=web.session_secret_ephemeral reason=missing_configured_secret")
 
 
 # ----- Sesión: cookie firmada, sin estado en el servidor -----
@@ -158,9 +159,9 @@ async def login(request: Request):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(COOKIE, _session_new(), max_age=SESSION_S,
                         httponly=True, samesite="lax", secure=COOKIE_SECURE)
-        LOG.info("login correcto de %r", user)
+        LOG.info("event=auth.login_succeeded user=%r", user)
         return resp
-    LOG.warning("login fallido de %r", user)
+    LOG.warning("event=auth.login_failed user=%r", user)
     return RedirectResponse("/login?e=1", status_code=303)
 
 
@@ -194,7 +195,7 @@ def red_estado():
         return {"online_s": netstatus.ONLINE_S, **netstatus.network_state()}
     except Exception as e:                           # noqa: BLE001
         # buffer.db ausente o gateway sin arrancar: la web informa, no cae.
-        LOG.warning("estado de red no disponible: %s", e)
+        LOG.warning("event=network_status.unavailable error=%s", e)
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
@@ -206,7 +207,7 @@ def red_ultimos():
     try:
         return netstatus.last_values()
     except Exception as e:                           # noqa: BLE001
-        LOG.warning("ultimos valores no disponibles: %s", e)
+        LOG.warning("event=latest_values.unavailable error=%s", e)
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
@@ -221,7 +222,7 @@ def topologia():
     try:
         return netstatus.topology()
     except Exception as e:                           # noqa: BLE001
-        LOG.warning("topologia no disponible: %s", e)
+        LOG.warning("event=topology.unavailable error=%s", e)
         return JSONResponse(status_code=503,
                             content={"error": f"buffer no disponible: {e}"})
 
@@ -316,6 +317,6 @@ def index(request: Request):
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 if not WEB_USER:
-    LOG.warning("MODULINKR_WEB_USER vacio: visor SIN autenticacion (solo banco)")
-LOG.info("visor listo; buffer=%s online_s=%.0f", netstatus.DB_PATH,
+    LOG.warning("event=auth.disabled reason=missing_user environment=test_bench")
+LOG.info("event=web.ready buffer=%s online_s=%.0f", netstatus.DB_PATH,
          netstatus.ONLINE_S)

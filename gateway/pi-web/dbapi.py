@@ -112,7 +112,7 @@ async def guardar(request: Request):
 
     ok, out = _sudo_stdin(SET_DB_SH, stdin, timeout_s=20)
     if not ok:
-        LOG.warning("guardar BD fallido: %s", out)
+        LOG.warning("event=database_config.save_failed detail=%s", out)
         return _err(502, out)
 
     # Recarga en caliente: la próxima conexión de dataapi usa los valores
@@ -125,7 +125,7 @@ async def guardar(request: Request):
         dataapi.PG_PASS = cfg["password"]
     # El caché del último valor bueno apuntaba a la conexión anterior.
     dataapi._lgv_cache.clear()
-    LOG.info("base de datos reconfigurada (host=%s db=%s user=%s)",
+    LOG.info("event=database_config.updated host=%s database=%s user=%s",
              cfg["host"], cfg["db"], cfg["user"])
     return {"ok": True, "output": out}
 

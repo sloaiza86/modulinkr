@@ -68,7 +68,7 @@ def _conn():
             user=PG_USER, password=PG_PASS,
             sslmode="require", connect_timeout=5)
     except Exception as e:                           # noqa: BLE001
-        LOG.warning("PostgreSQL remoto no disponible: %s", e)
+        LOG.warning("event=postgres.unavailable error=%s", e)
         raise HTTPException(503, f"base remota no disponible: {e}") from e
 
 
@@ -142,7 +142,7 @@ def last_good_cloud(node_id: int) -> dict:
     except HTTPException:
         pass                                          # sin PG configurado o caído
     except Exception as e:                            # noqa: BLE001
-        LOG.warning("last_good_cloud(%d): %s", node_id, e)
+        LOG.warning("event=postgres.last_good_failed origin=%d error=%s", node_id, e)
     _lgv_cache[node_id] = (now, out)
     return out
 

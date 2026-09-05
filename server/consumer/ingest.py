@@ -34,13 +34,13 @@ def ingest_message(db, publisher: int, payload: dict, stats: dict) -> None:
     schema = str(payload.get("schema_version", ""))
     if not schema.startswith(SCHEMA_MAJOR + "."):
         stats["msg_bad"] += 1
-        LOG.warning("mensaje descartado: schema_version=%r no soportado", schema)
+        LOG.warning("event=telemetry.rejected reason=unsupported_schema schema_version=%r", schema)
         return
 
     samples = payload.get("samples")
     if not isinstance(samples, list):
         stats["msg_bad"] += 1
-        LOG.warning("mensaje descartado: samples ausente o no es lista")
+        LOG.warning("event=telemetry.rejected reason=invalid_samples")
         return
 
     debug = payload.get("debug") or {}
@@ -48,10 +48,10 @@ def ingest_message(db, publisher: int, payload: dict, stats: dict) -> None:
         # Vacío solo es válido como ping de test (batch-format.md §8 regla 3).
         if debug.get("trigger") == "test":
             stats["msg_test"] += 1
-            LOG.info("ping de test de publisher=%d", publisher)
+            LOG.info("event=telemetry.test_ping publisher=%d", publisher)
         else:
             stats["msg_bad"] += 1
-            LOG.warning("mensaje descartado: samples vacio sin trigger test")
+            LOG.warning("event=telemetry.rejected reason=empty_samples")
         return
 
     _validate_debug(publisher, debug)
@@ -77,16 +77,16 @@ def _validate_debug(publisher: int, debug: dict) -> None:
         return
     trig = debug.get("trigger")
     if trig is not None and trig not in TRIGGERS:
-        LOG.warning("debug.trigger=%r fuera del enum (publisher=%d)", trig, publisher)
+        LOG.warning("event=telemetry.debug_invalid trigger=%r publisher=%d", trig, publisher)
     if trig == "gateway" and publisher != 255:
-        LOG.warning("debug.trigger=gateway con publisher=%d", publisher)
+        LOG.warning("event=telemetry.debug_invalid trigger=gateway publisher=%d", publisher)
 
 
 def _ingest_sample_checked(cur, s: dict, source: str, stats: dict):
     """Valida los campos de una sample (reglas 4-7 de §8) y la ingesta.
     Devuelve la clave del contador a incrementar, o None si ya conto."""
     if not isinstance(s, dict):
-        LOG.warning("sample descartada: no es objeto")
+        LOG.warning("event=sample.rejected reason=not_object")
         return "sample_bad"
 
     origin = s.get("origin")
@@ -95,14 +95,14 @@ def _ingest_sample_checked(cur, s: dict, source: str, stats: dict):
     v      = s.get("v")
 
     if not isinstance(origin, int) or not 1 <= origin <= 254:
-        LOG.warning("sample descartada: origin=%r invalido", origin)
+        LOG.warning("event=sample.rejected reason=invalid_origin origin=%r", origin)
         return "sample_bad"
     if not isinstance(seq, int) or not 0 <= seq <= 65535:
-        LOG.warning("sample descartada: seq=%r invalido (origin=%d)", seq, origin)
+        LOG.warning("event=sample.rejected reason=invalid_seq seq=%r origin=%d", seq, origin)
         return "sample_bad"
     # v3.0: no existe semantica "sin hora"; ts nulo o 0 es dato malformado.
     if not isinstance(ts, int) or ts <= 0:
-        LOG.warning("sample descartada: ts=%r invalido (origin=%d seq=%s)",
+        LOG.warning("event=sample.rejected reason=invalid_timestamp ts=%r origin=%d seq=%s",
                     ts, origin, seq)
         return "sample_bad"
     # v3.2 (batch-format.md §4): una posición de v puede ser null (lectura
@@ -111,7 +111,7 @@ def _ingest_sample_checked(cur, s: dict, source: str, stats: dict):
             not all(x is None or
                     (isinstance(x, (int, float)) and not isinstance(x, bool))
                     for x in v)):
-        LOG.warning("sample descartada: v invalido (origin=%d seq=%d)", origin, seq)
+        LOG.warning("event=sample.rejected reason=invalid_values origin=%d seq=%d", origin, seq)
         return "sample_bad"
 
     # st (v3.2, regla 8 de §8): diagnóstico, no dato. Se valida best-effort
@@ -119,7 +119,7 @@ def _ingest_sample_checked(cur, s: dict, source: str, stats: dict):
     st = s.get("st")
     if st is not None and (not isinstance(st, list) or len(st) != len(v) or
                            not all(isinstance(x, int) for x in st)):
-        LOG.warning("sample: st invalido, ignorado (origin=%d seq=%d)", origin, seq)
+        LOG.warning("event=sample.status_ignored reason=invalid_status origin=%d seq=%d", origin, seq)
 
     return ingest_sample(cur, origin, seq, ts,
                          [None if x is None else float(x) for x in v], source)
@@ -152,7 +152,7 @@ def ingest_sample(cur, origin: int, seq: int, ts: int, v: list, source: str):
             """INSERT INTO quarantine (origin, ts, seq, source, v, reason)
                VALUES (%s, to_timestamp(%s), %s, %s, %s::jsonb, %s)""",
             (origin, ts, seq, source, json.dumps(v), reason))
-        LOG.warning("cuarentena origin=%d seq=%d ts=%d reason=%s",
+        LOG.warning("event=sample.quarantined origin=%d seq=%d ts=%d reason=%s",
                     origin, seq, ts, reason)
         return "quarantined"
 

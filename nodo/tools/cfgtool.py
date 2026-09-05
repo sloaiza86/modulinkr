@@ -67,7 +67,7 @@ def read_response(ser: serial.Serial, timeout_s: float = RESP_TIMEOUT_S) -> str:
                     return text
         else:
             time.sleep(0.02)
-    raise TimeoutError("sin respuesta CFG: del nodo")
+    raise TimeoutError("el nodo no respondió con una línea CFG:")
 
 
 def send_line(ser: serial.Serial, line: str) -> None:
@@ -78,7 +78,7 @@ def send_line(ser: serial.Serial, line: str) -> None:
 def cmd_list(_args: argparse.Namespace) -> int:
     ports = list_ports.comports()
     if not ports:
-        print("sin puertos serie")
+        print("[AVISO] No se detectaron puertos serie.")
         return 1
     for p in ports:
         vidpid = f"{p.vid:04x}:{p.pid:04x}" if p.vid is not None else "----:----"
@@ -168,7 +168,7 @@ def main() -> int:
     try:
         return handlers[args.cmd](args)
     except (serial.SerialException, TimeoutError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        print(f"[ERROR] {e}", file=sys.stderr)
         return 1
 
 

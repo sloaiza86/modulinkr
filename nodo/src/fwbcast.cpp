@@ -241,9 +241,9 @@ void handoverIfComplete() {
     if (entregada_ || map_ == nullptr || n_orig_ == 0 || got_ < n_orig_) return;
     entregada_ = true;
     const bool ok = fwota::adoptCompleted(xfer_, total_len_, sha_);
-    Serial.printf("[fwbc]  imagen completa (%u originales): %s\n", n_orig_,
-                  ok ? "sha256 correcto, lista para instalar"
-                     : "sha256 NO cuadra, se descarta");
+    Serial.printf("[fwbc]  image_complete source_fragments=%u result=%s\n", n_orig_,
+                  ok ? "verified"
+                     : "sha256_mismatch");
 
     // Se suelta la memoria del bloque, que ya no hace falta, pero NO el mapa
     // ni el identificador: con ellos el nodo puede seguir contestando "no me
@@ -326,7 +326,7 @@ void begin(const char* running_version) {
     n_blocks_ = static_cast<uint16_t>((n_orig_ + k_ - 1) / k_);
     if (!allocMap() || !loadMap()) { xfer_ = 0; freeAll(); clearState(); return; }
 
-    Serial.printf("[fwbc]  reanudada xfer=%08lX %u/%u originales\n",
+    Serial.printf("[fwbc]  resumed transfer_id=%08lX source_fragments=%u/%u\n",
                   static_cast<unsigned long>(xfer_), got_, n_orig_);
     // Si ya estaba entera, se vuelve a entregar al instalador y se conserva el
     // mapa para poder contestar una pregunta del emisor tras el reinicio.
@@ -366,14 +366,14 @@ Offer onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
     // y este es el único momento en que se puede pagar ese rato.
     const esp_err_t e = esp_partition_erase_range(part_, 0, part_->size);
     if (e != ESP_OK) {
-        Serial.printf("[fwbc]  borrado de la particion FALLO (%d)\n",
+        Serial.printf("[fwbc]  partition_erase_failed error=%d\n",
                       static_cast<int>(e));
         xfer_ = 0; freeAll(); return Offer::ERROR;
     }
     saveState();
     saveMap();
     last_ms_ = millis();
-    Serial.printf("[fwbc]  oferta aceptada xfer=%08lX %lu B, %u originales, "
+    Serial.printf("[fwbc]  offer_accepted transfer_id=%08lX bytes=%lu source_fragments=%u "
                   "K=%u R=%u\n", static_cast<unsigned long>(xfer_),
                   static_cast<unsigned long>(total_len_), n_orig_, k_, r_);
     return Offer::ACCEPTED;
@@ -449,7 +449,7 @@ void closeBlock() {
     if (rango < m) {
         // Sistema dependiente: se resuelve lo que se pueda y el resto lo recoge
         // la reparación. No es un error, es el caso previsto en §20.4.
-        Serial.printf("[fwbc]  bloque %u: %u huecos, %u ecuaciones, rango %u\n",
+        Serial.printf("[fwbc]  block=%u missing=%u equations=%u rank=%u\n",
                       b, m, n_eq, rango);
     }
     uint8_t recuperados = 0;
@@ -466,8 +466,8 @@ void closeBlock() {
         }
     }
     if (recuperados) {
-        Serial.printf("[fwbc]  bloque %u: %u de %u huecos rellenados con las "
-                      "mezclas\n", b, recuperados, m);
+        Serial.printf("[fwbc]  block=%u recovered=%u missing=%u source=parity\n",
+                      b, recuperados, m);
     }
     saveMap();
     handoverIfComplete();
@@ -550,7 +550,7 @@ void expireIfIdle(uint32_t now_ms) {
     // rellenar huecos, y tirarlas sin usarlas sería regalar aire ya gastado.
     closeBlock();
     freeRam();
-    Serial.printf("[fwbc]  parada: memoria liberada, %u/%u originales en flash\n",
+    Serial.printf("[fwbc]  stopped memory_released=true source_fragments=%u/%u\n",
                   got_, n_orig_);
 }
 
