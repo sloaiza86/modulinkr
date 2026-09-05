@@ -94,6 +94,18 @@ def proposal():
 
 
 class ContractTests(unittest.TestCase):
+    def test_rejects_multiple_alternative_units(self):
+        value = proposal()
+        value["reads"][0]["unit"] = "°C o °F"
+
+        with self.assertRaises(ProposalValidationError) as raised:
+            validate_proposal(value)
+
+        self.assertIn(
+            "$.reads[0].unit: debe indicar una sola unidad efectiva",
+            raised.exception.errors,
+        )
+
     def assert_invalid(self, value, fragment):
         with self.assertRaises(ProposalValidationError) as caught:
             validate_proposal(value)

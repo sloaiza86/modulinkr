@@ -528,8 +528,12 @@ def _entries(value: Any, path: str, errors: List[str], source_ids: Set[str],
                         nullable=True)
         _number(item.get("offset"), f"{item_path}.offset", errors,
                 nullable=True)
-        _text(item.get("unit"), f"{item_path}.unit", errors, 8, nullable=True,
-              minimum=0)
+        unit = _text(item.get("unit"), f"{item_path}.unit", errors, 8,
+                     nullable=True, minimum=0)
+        if (isinstance(unit, str)
+                and re.search(r"\s+(?:o|or)\s+", unit, re.IGNORECASE)):
+            errors.append(
+                f"{item_path}.unit: debe indicar una sola unidad efectiva")
         _evidence(item.get("evidence"), f"{item_path}.evidence", errors,
                   source_ids)
         if is_write:

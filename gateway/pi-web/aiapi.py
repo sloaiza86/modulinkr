@@ -270,6 +270,11 @@ async def modbus_proponer(request: Request):
             exc.technical_detail or str(exc),
         )
         return _err(502, str(exc))
-    LOG.info("consulta Modbus IA completada (ready=%s pendientes=%d)",
-             result["ready"], len(result["proposal"]["pending"]))
+    if "proposal" in result:
+        LOG.info("consulta Modbus IA completada (ready=%s pendientes=%d)",
+                 result["ready"], len(result["proposal"]["pending"]))
+    else:
+        discovery = result["discovery"]
+        LOG.info("descubrimiento Modbus IA completado (dispositivos=%d secciones=%d)",
+                 len(discovery["targets"]), len(discovery["sections"]))
     return {"ok": True, **result}
