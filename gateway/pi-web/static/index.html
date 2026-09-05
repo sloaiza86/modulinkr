@@ -5,291 +5,425 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
+  <link rel="stylesheet" href="/static/style.css?v=history-dialog-layout-20260822">
 </head>
 <body>
 
-<aside id="sidebar">
+<modulinkr-sidebar id="sidebar">
   <div class="sb-cabecera">
-    <button id="btn-menu" class="icono-btn" title="Contraer menú">
-      <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    <button id="btn-menu" class="icono-btn" type="button"
+            title="Contraer menú" aria-label="Contraer menú"
+            aria-controls="sidebar" aria-expanded="true">
+      <modulinkr-icon name="mdi:menu"></modulinkr-icon>
     </button>
     <span class="sb-titulo"><img src="/static/img/logo-texto.svg" alt="ModuLinkr"></span>
   </div>
   <nav class="sb-nav">
-    <a class="nav-item" href="#/red" data-view="red" title="Red">
-      <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
-      <span>Red</span>
+    <a class="nav-item" href="#/red" data-view="red" title="Resumen de red">
+      <modulinkr-icon name="mdi:view-dashboard-outline"></modulinkr-icon>
+      <span>Resumen de red</span>
     </a>
-    <a class="nav-item" href="#/topologia" data-view="topologia" title="Topología">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="4" r="2.6"/><circle cx="5" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6"/><line x1="12" y1="6.6" x2="5.8" y2="16.8"/><line x1="12" y1="6.6" x2="18.2" y2="16.8"/></svg>
-      <span>Topología</span>
+    <a class="nav-item" href="#/topologia" data-view="topologia" title="Topología de red">
+      <modulinkr-icon name="mdi:graph-outline"></modulinkr-icon>
+      <span>Topología de red</span>
     </a>
-    <a class="nav-item" href="#/datos" data-view="datos" title="Datos">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="14"/></svg>
-      <span>Datos</span>
+    <a class="nav-item" href="#/datos" data-view="datos" title="Visualización de datos">
+      <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
+      <span>Visualización de datos</span>
     </a>
   </nav>
   <div class="sb-pie">
     <a class="nav-item" href="#/configuracion" data-view="configuracion" title="Configuración">
-      <svg viewBox="0 0 24 24"><line x1="5" y1="4" x2="5" y2="10"/><circle cx="5" cy="13" r="2.4"/><line x1="5" y1="15.4" x2="5" y2="20"/><line x1="12" y1="4" x2="12" y2="6"/><circle cx="12" cy="9" r="2.4"/><line x1="12" y1="11.4" x2="12" y2="20"/><line x1="19" y1="4" x2="19" y2="13"/><circle cx="19" cy="16" r="2.4"/><line x1="19" y1="18.4" x2="19" y2="20"/></svg>
+      <modulinkr-icon name="mdi:tune-variant"></modulinkr-icon>
       <span>Configuración</span>
     </a>
-    <a class="nav-item" id="btn-logout" href="/logout" title="Salir">
-      <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-      <span>Salir</span>
+    <a class="nav-item" id="btn-logout" href="/logout" title="Cerrar sesión">
+      <modulinkr-icon name="mdi:logout"></modulinkr-icon>
+      <span>Cerrar sesión</span>
     </a>
   </div>
-</aside>
+</modulinkr-sidebar>
+<button id="sidebar-fondo" type="button" aria-label="Cerrar menú" hidden></button>
 
-<div id="contenido">
-  <header>
-    <h1 id="titulo-vista">Red</h1>
+<modulinkr-app id="contenido">
+  <modulinkr-app-header>
+    <button id="btn-menu-movil" class="icono-btn" type="button"
+            title="Abrir menú" aria-label="Abrir menú" aria-controls="sidebar"
+            aria-expanded="false">
+      <modulinkr-icon name="mdi:menu"></modulinkr-icon>
+    </button>
+    <a id="config-volver" class="header-volver" href="#/configuracion"
+       title="Volver" aria-label="Volver" hidden>
+      <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
+    </a>
+    <h1 id="titulo-vista" tabindex="-1">Resumen de red</h1>
     <span id="badge-red" class="badge" hidden></span>
     <div class="header-derecha">
-      <span id="refresco"></span>
       <span id="clock"></span>
     </div>
-  </header>
+  </modulinkr-app-header>
 
-  <main>
-    <section id="view-red" class="view">
+  <modulinkr-view-router>
+    <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Resumen de red">
       <div id="tarjetas" class="grid-tarjetas"></div>
       <p id="red-aviso" class="aviso"></p>
-    </section>
+    </modulinkr-view>
 
-    <section id="view-topologia" class="view" hidden>
-      <div class="card card-mapa"><div id="mapa"></div></div>
-      <p class="leyenda">Arista: hijo a padre (último eco de BEACON). Azul: gateway. Verde: en línea. Gris: sin tramas recientes.</p>
-    </section>
-
-    <section id="view-datos" class="view" hidden>
-      <div id="datos-controles" class="card">
-        <div id="selector-cabecera">
-          <input type="search" id="filtro" placeholder="Filtrar nodos o medidas...">
-          <div class="modo">
-            <button class="modo-btn active" data-modo="nodo">Por nodo</button>
-            <button class="modo-btn" data-modo="medida">Por medida</button>
-          </div>
-          <div class="vistas">
-            <select id="vistas-guardadas"><option value="">Vistas guardadas...</option></select>
-            <button id="btn-guardar-vista" title="Guardar la selección actual">Guardar</button>
-            <button id="btn-borrar-vista" title="Borrar la vista elegida">Borrar</button>
-          </div>
-        </div>
-        <div id="selector-canales"><p class="aviso">Cargando catálogo...</p></div>
-        <div class="rango">
-          <label>Desde <input type="datetime-local" id="desde"></label>
-          <label>Hasta <input type="datetime-local" id="hasta"></label>
-          <button id="btn-graficar">Graficar</button>
-          <button id="btn-csv">Exportar CSV</button>
-        </div>
+    <modulinkr-view id="view-topologia" class="view" data-view="topologia" aria-label="Topología de red" hidden>
+      <div class="card card-mapa">
+        <button id="topologia-restablecer" class="icono-btn topologia-restablecer"
+                type="button" title="Restablecer disposición"
+                aria-label="Restablecer disposición" disabled>
+          <modulinkr-icon name="mdi:restore"></modulinkr-icon>
+        </button>
+        <div id="mapa" role="img" aria-label="Topología de la red"></div>
       </div>
-      <div id="grafico" class="card"></div>
-      <p id="datos-aviso" class="aviso"></p>
-    </section>
+      <p class="leyenda topologia-copy">Las conexiones muestran la ruta activa de cada equipo. LoRa enlaza con el gateway y NB-IoT con la red celular. Una línea discontinua indica que no se ha detectado actividad reciente.</p>
+      <div class="topologia-leyenda" aria-label="Leyenda de la topología">
+        <span class="topologia-clave"><span class="topologia-tipo gateway"><modulinkr-icon name="mdi:router-wireless"></modulinkr-icon></span>Gateway</span>
+        <span class="topologia-clave"><span class="topologia-tipo cellular" aria-hidden="true"></span>Red celular</span>
+        <span class="topologia-clave"><span class="topologia-tipo nodo"><modulinkr-icon name="mdi:radio-handheld"></modulinkr-icon></span>Nodo</span>
+        <span class="topologia-clave"><span class="topologia-tipo supernodo"><modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon></span>Supernodo</span>
+        <span class="topologia-clave"><span class="topologia-linea"></span>En línea por LoRa</span>
+        <span class="topologia-clave"><span class="topologia-linea nbiot"></span>En línea por NB-IoT</span>
+        <span class="topologia-clave"><span class="topologia-linea inactiva"></span>Sin actividad reciente</span>
+      </div>
+    </modulinkr-view>
 
-    <section id="view-configuracion" class="view" hidden>
+    <modulinkr-view id="view-datos" class="view" data-view="datos" aria-label="Visualización de datos" hidden>
+      <div class="datos-layout">
+        <button id="medidas-panel-fondo" class="datos-panel-fondo" type="button"
+                aria-label="Cerrar selección de medidas" hidden></button>
+        <modulinkr-measure-picker id="selector-medidas" class="datos-panel card">
+          <header class="medidas-panel-cabecera">
+            <div>
+              <h2>Medidas</h2>
+              <span class="medidas-cuenta-texto" aria-live="polite">0 seleccionadas</span>
+            </div>
+            <div class="medidas-panel-acciones">
+              <button class="medidas-limpiar" type="button">Limpiar</button>
+              <button class="icono-btn medidas-panel-cerrar" type="button"
+                      title="Cerrar" aria-label="Cerrar selección de medidas">
+                <modulinkr-icon name="mdi:close"></modulinkr-icon>
+              </button>
+            </div>
+          </header>
+          <input class="medidas-buscar" type="search"
+                 placeholder="Buscar por nodo o medida" aria-label="Buscar medidas">
+          <div class="modo">
+            <button class="modo-btn active" type="button" data-modo="nodo">Por nodo</button>
+            <button class="modo-btn" type="button" data-modo="medida">Por medida</button>
+          </div>
+          <div class="medidas-resumen">
+            <button class="medidas-solo" type="button" aria-pressed="false">Solo seleccionadas</button>
+          </div>
+          <div class="medidas-catalogo">
+            <p class="aviso">Cargando medidas...</p>
+          </div>
+        </modulinkr-measure-picker>
+
+        <section class="datos-principal" aria-label="Histórico de datos">
+          <div class="datos-grafico card">
+            <div class="datos-barra">
+              <button id="btn-medidas" type="button" aria-controls="selector-medidas"
+                      aria-expanded="false">
+                <modulinkr-icon name="mdi:filter-variant"></modulinkr-icon>
+                <span>Medidas</span>
+                <span id="btn-medidas-cuenta" class="badge">0</span>
+              </button>
+              <div class="vistas">
+                <select id="vistas-guardadas" aria-label="Vistas guardadas">
+                  <option value="">Vistas guardadas</option>
+                </select>
+                <button id="btn-guardar-vista" type="button" title="Guardar vista"
+                        aria-label="Guardar la selección actual como vista">
+                  <modulinkr-icon name="mdi:content-save-outline"></modulinkr-icon>
+                </button>
+                <button id="btn-borrar-vista" type="button" title="Eliminar vista"
+                        aria-label="Eliminar la vista seleccionada">
+                  <modulinkr-icon name="mdi:delete-outline"></modulinkr-icon>
+                </button>
+              </div>
+            </div>
+            <modulinkr-chart-legend id="grafico-leyenda"
+                                    aria-label="Leyenda de la gráfica"></modulinkr-chart-legend>
+            <div id="grafico"></div>
+            <div id="datos-vacio" class="datos-vacio" role="status">
+              <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
+              <strong>Selecciona una medida</strong>
+              <span>Elige una o varias medidas para consultar sus datos.</span>
+            </div>
+            <p id="datos-aviso" class="aviso"></p>
+          </div>
+        </section>
+      </div>
+      <modulinkr-period-selector id="selector-periodo">
+        <div class="periodo-barra card">
+          <button class="periodo-abrir" type="button"
+                  aria-haspopup="dialog" aria-controls="periodo-dialogo">
+            <modulinkr-icon name="mdi:calendar" aria-hidden="true"></modulinkr-icon>
+            <span class="periodo-etiqueta">Últimas 24 horas</span>
+            <span class="periodo-carga" aria-label="Cargando datos" hidden></span>
+          </button>
+          <div class="periodo-acciones">
+            <button class="periodo-ahora" type="button">Ahora</button>
+            <button class="periodo-icono periodo-anterior" type="button"
+                    title="Periodo anterior" aria-label="Periodo anterior">
+              <modulinkr-icon name="mdi:chevron-left"></modulinkr-icon>
+            </button>
+            <button class="periodo-icono periodo-siguiente" type="button"
+                    title="Periodo siguiente" aria-label="Periodo siguiente">
+              <modulinkr-icon name="mdi:chevron-right"></modulinkr-icon>
+            </button>
+            <div class="periodo-menu">
+              <button class="periodo-icono periodo-menu-boton" type="button"
+                      title="Más opciones" aria-label="Más opciones"
+                      aria-haspopup="menu" aria-expanded="false"
+                      aria-controls="periodo-menu-lista">
+                <modulinkr-icon name="mdi:dots-vertical"></modulinkr-icon>
+              </button>
+              <div id="periodo-menu-lista" class="periodo-menu-lista"
+                   role="menu" hidden>
+                <button class="periodo-ahora-menu" type="button" role="menuitem">
+                  <modulinkr-icon name="mdi:clock-outline"></modulinkr-icon>
+                  Ahora
+                </button>
+                <button class="periodo-exportar" type="button" role="menuitem">
+                  <modulinkr-icon name="mdi:download"></modulinkr-icon>
+                  Exportar CSV
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <dialog id="periodo-dialogo" class="periodo-dialogo"
+                aria-labelledby="periodo-dialogo-titulo">
+          <h2 id="periodo-dialogo-titulo" class="solo-lector">Seleccionar periodo</h2>
+          <div class="periodo-dialogo-cuerpo">
+            <nav id="periodo-preajustes" class="periodo-preajustes"
+                 aria-label="Periodos rápidos"></nav>
+            <section class="periodo-calendario" aria-label="Intervalo personalizado">
+              <calendar-range id="periodo-calendario" months="1"
+                              first-day-of-week="1" show-outside-days>
+                <modulinkr-icon slot="previous" name="mdi:chevron-left"
+                                label="Mes anterior"></modulinkr-icon>
+                <span slot="heading" class="periodo-mes-titulo"></span>
+                <modulinkr-icon slot="next" name="mdi:chevron-right"
+                                label="Mes siguiente"></modulinkr-icon>
+                <calendar-month></calendar-month>
+              </calendar-range>
+              <div class="periodo-horas">
+                <label>Hora de inicio
+                  <input id="periodo-hora-inicio" type="time" step="60">
+                </label>
+                <label>Hora de finalización
+                  <input id="periodo-hora-fin" type="time" step="60">
+                </label>
+              </div>
+              <p class="periodo-error" role="alert" hidden></p>
+            </section>
+          </div>
+          <div class="periodo-dialogo-acciones">
+            <button class="periodo-cancelar" type="button">Cancelar</button>
+            <button class="periodo-seleccionar btn-primario" type="button">Seleccionar</button>
+          </div>
+        </dialog>
+      </modulinkr-period-selector>
+    </modulinkr-view>
+
+    <modulinkr-view id="view-configuracion" class="view" data-view="configuracion" aria-label="Configuración" hidden>
 
       <!-- Nivel 1: menú de ajustes (patrón de panel domótico) -->
-      <div class="ajustes" id="cfg-menu">
-        <div class="card lista-ajustes">
+      <div class="ajustes ajustes-inicio" id="cfg-menu">
+        <section class="ajustes-grupo" aria-labelledby="cfg-grupo-mesh">
+          <h2 id="cfg-grupo-mesh">Red Mesh</h2>
+          <div class="card lista-ajustes">
           <a class="ajuste-item" href="#/configuracion/nodo">
-            <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><line x1="10" y1="7" x2="10" y2="4"/><line x1="14" y1="7" x2="14" y2="4"/><line x1="10" y1="20" x2="10" y2="17"/><line x1="14" y1="20" x2="14" y2="17"/><line x1="7" y1="10" x2="4" y2="10"/><line x1="7" y1="14" x2="4" y2="14"/><line x1="20" y1="10" x2="17" y2="10"/><line x1="20" y1="14" x2="17" y2="14"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:radio-handheld"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar nodo</div>
-              <div class="ai-sub">Comisionamiento y configuración de los nodos de la red</div>
+              <div class="ai-titulo">Nodos</div>
+              <div class="ai-sub">Añadir, editar y actualizar nodos</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/radio">
-            <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><line x1="12" y1="21" x2="12" y2="11"/><path d="M8.5 8.5a5 5 0 0 1 7 0"/><path d="M5.6 5.6a9 9 0 0 1 12.8 0"/><circle cx="12" cy="11" r="1"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:router-wireless"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar radio LoRa</div>
-              <div class="ai-sub">Puerto serie del Heltec y actualización de su firmware</div>
+              <div class="ai-titulo">Radio LoRa local</div>
+              <div class="ai-sub">Estado, conexión y actualización del radio del gateway</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/red-lora">
-            <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:radio-tower"></modulinkr-icon>
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Parámetros de red LoRa</div>
-              <div class="ai-sub">ID de red, frecuencia, SF, BW, seguridad y TTL, compartidos por todos los nodos</div>
+              <div class="ai-sub">Configuración compartida por la red Mesh</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
-          <a class="ajuste-item" href="#/configuracion/wifi">
-            <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><path d="M4.5 9.5a12 12 0 0 1 15 0"/><path d="M7.5 12.5a8 8 0 0 1 9 0"/><path d="M10 15.5a4 4 0 0 1 4 0"/><circle cx="12" cy="18.5" r="0.6"/></svg>
+          <a class="ajuste-item" href="#/configuracion/servidor">
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:server-network"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar red WiFi</div>
-              <div class="ai-sub">Red WiFi a la que se conecta el gateway</div>
+              <div class="ai-titulo">Servidor</div>
+              <div class="ai-sub">Base de datos y conexión MQTT</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
+          </a>
+          </div>
+        </section>
+
+        <section class="ajustes-grupo" aria-labelledby="cfg-grupo-sistema">
+          <h2 id="cfg-grupo-sistema">Sistema</h2>
+          <div class="card lista-ajustes">
+          <a class="ajuste-item" href="#/configuracion/wifi">
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:wifi"></modulinkr-icon>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Red Wi-Fi</div>
+              <div class="ai-sub">Conexión inalámbrica del gateway</div>
+            </div>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/zona">
-            <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="12" x2="15" y2="13.5"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:clock-outline"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Configurar zona horaria</div>
-              <div class="ai-sub">Zona de visualización del reloj y las gráficas del visor</div>
+              <div class="ai-titulo">Zona horaria</div>
+              <div class="ai-sub">Hora utilizada en el visor y las gráficas</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
-          </a>
-          <a class="ajuste-item" href="#/configuracion/bd">
-            <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.6 3.1 3 7 3s7-1.4 7-3V6"/><path d="M5 12v6c0 1.6 3.1 3 7 3s7-1.4 7-3v-6"/></svg>
-            </div>
-            <div class="ai-texto">
-              <div class="ai-titulo">Configurar base de datos</div>
-              <div class="ai-sub">Conexión al PostgreSQL de la nube para el histórico</div>
-            </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
-          </a>
-          <a class="ajuste-item" href="#/configuracion/mqtt">
-            <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><path d="M18 18H7a4 4 0 0 1 0.6-7.96A5.5 5.5 0 0 1 18 9a4.5 4.5 0 0 1 0 9z"/><line x1="12" y1="13" x2="12" y2="17"/></svg>
-            </div>
-            <div class="ai-texto">
-              <div class="ai-titulo">Configurar MQTT</div>
-              <div class="ai-sub">Broker cloud al que el gateway publica la telemetría</div>
-            </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/depuracion">
-            <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="7 9 10 12 7 15"/><line x1="13" y1="15" x2="16.5" y2="15"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:console-line"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Herramientas de depuración</div>
-              <div class="ai-sub">Journal del gateway, serie de un nodo y tramas Modbus de debug</div>
+              <div class="ai-titulo">Diagnóstico</div>
+              <div class="ai-sub">Estado del gateway, los nodos y las lecturas</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
+          </div>
+        </section>
         </div>
-      </div>
 
       <!-- Nivel 2: Configurar nodo -->
       <div class="ajustes" id="cfg-sub-nodo" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Configurar nodo</h2>
+          <h2>Nodos</h2>
         </div>
         <div class="card lista-ajustes">
           <a class="ajuste-item" href="#/configuracion/nodo/firmware">
-            <div class="ai-icono ai-azul">
-              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="15" x2="4" y2="15"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="15" x2="22" y2="15"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:open-in-app"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Cargar firmware</div>
-              <div class="ai-sub">Flashear el firmware del nodo en un Atom conectado por USB</div>
+              <div class="ai-titulo">Actualizar firmware de nodos</div>
+              <div class="ai-sub">Instalar una actualización por cable o LoRa</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/nodo/usb">
-            <div class="ai-icono ai-naranja">
-              <svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="7"/><circle cx="12" cy="21" r="1.4"/><polyline points="12 15 7.5 12.5 7.5 9.5"/><rect x="6.3" y="6.6" width="2.4" height="2.4"/><polyline points="12 12 16.5 9.8 16.5 7.5"/><circle cx="16.5" cy="5.8" r="1.3"/><polyline points="9.5 4.5 12 7 14.5 4.5"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:usb"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Cargar nodo vía USB</div>
-              <div class="ai-sub">Subir un config.json a un Atom conectado al puerto USB del Pi</div>
+              <div class="ai-titulo">Archivo de configuración</div>
+              <div class="ai-sub">Importar, editar o exportar la configuración por USB</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
           <a class="ajuste-item" href="#/configuracion/nodo/form">
-            <div class="ai-icono ai-verde">
-              <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:form-select"></modulinkr-icon>
             </div>
             <div class="ai-texto">
-              <div class="ai-titulo">Asistente de configuración de nodo</div>
-              <div class="ai-sub">Rellenar los datos del nodo y enviarlos sin escribir el JSON a mano</div>
+              <div class="ai-titulo">Configurar nodo</div>
+              <div class="ai-sub">Añadir un nodo o editar su configuración</div>
             </div>
-            <svg class="ai-chevron" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
         </div>
       </div>
 
       <!-- Nivel 3: cargar firmware del nodo por USB -->
-      <div class="ajustes" id="cfg-fw" hidden>
+      <div class="ajustes ajustes-amplios" id="cfg-fw" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Cargar firmware</h2>
+          <h2>Actualizar firmware de nodos</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Firmware del nodo</h3>
-          <p class="aviso" id="fw-bin-info">Comprobando el binario...</p>
+          <h2>Actualización individual</h2>
+          <div class="mensaje mensaje-progreso mensaje-compacto" id="fw-bin-info" role="status" aria-live="polite">Comprobando actualizaciones...</div>
           <div class="cfg-fila">
-            <label class="cfg-campo"><span>Nodo conectado a</span>
+            <label class="cfg-campo"><span>Conexión del nodo</span>
               <select id="fw-fuente">
-                <option value="gateway">el gateway (Pi)</option>
-                <option value="local">este equipo</option>
-                <option value="lora">nada: enviar por LoRa</option>
+                <option value="gateway">USB en el gateway</option>
+                <option value="local">USB en este equipo</option>
+                <option value="lora">LoRa</option>
               </select>
             </label>
           </div>
           <div id="fw-gateway">
-            <p class="aviso">Conectar el Atom a un puerto USB del Pi y buscarlo. El
-              puerto de la radio del gateway queda excluido. El flasheo borra el
-              firmware anterior del Atom (su config.json en flash se conserva).</p>
-            <div class="cfg-fila">
-              <button id="fw-buscar" class="btn-primario">Buscar nodo</button>
-              <select id="fw-puertos" hidden></select>
+            <p class="texto-ayuda">Conecta el nodo al gateway. La configuración actual se conservará.</p>
+            <div class="cfg-fila cfg-herramientas">
+              <button id="fw-buscar">Buscar nodo</button>
+              <select id="fw-puertos" aria-label="Nodo conectado" hidden></select>
               <span id="fw-busqueda-aviso" class="aviso"></span>
             </div>
-            <div class="cfg-fila">
-              <button id="fw-flash" class="btn-primario" disabled>Flashear firmware</button>
+            <div class="cfg-fila cfg-acciones">
+              <button id="fw-flash" class="btn-primario" disabled>Actualizar nodo</button>
               <span id="fw-resultado" class="aviso"></span>
             </div>
           </div>
           <div id="fw-local" hidden>
-            <p class="aviso">Flashea el nodo conectado al USB de este ordenador
-              (Chrome o Edge de escritorio). Reescribe solo el firmware y
-              <b>conserva el config.json</b> del nodo. Al terminar se resetea
-              solo; si no arranca, desenchufa y vuelve a enchufar el nodo una
-              vez.</p>
-            <div class="cfg-fila">
-              <button id="fw-local-flash" class="btn-primario">Flashear por este equipo</button>
+            <p class="texto-ayuda">Conecta el nodo por USB a este equipo. La configuración actual se conservará.</p>
+            <div class="cfg-fila cfg-acciones">
+              <button id="fw-local-flash" class="btn-primario">Actualizar nodo</button>
               <span id="fw-local-aviso" class="aviso"></span>
             </div>
             <pre id="fw-local-log" class="dbg-consola" hidden></pre>
           </div>
           <div id="fw-lora" hidden>
-            <p class="aviso">Sube la imagen al nodo por radio, sin cable. Son
-              unos 2500 fragmentos y el gateway cede el aire a la telemetría,
-              así que va de fondo. Lo que marca el reloj es el ciclo de trabajo:
-              medido en banco sin ese límite, media hora; con el 8 % que permite
-              la norma, unas dos. La subida no toca el firmware que está
-              corriendo, se escribe en la partición dormida. Instalar es una
-              orden aparte, y solo aparece cuando el nodo tiene la imagen entera
-              y verificada.</p>
-            <div class="cfg-fila">
-              <select id="fw-lora-nodo"></select>
-              <label class="cfg-campo"><span>Desde (hora)</span>
+            <div class="mensaje mensaje-info">
+              <span class="mensaje-titulo">Actualización por LoRa</span>
+              <span class="mensaje-detalle">Tiempo estimado: dos horas. El nodo seguirá disponible hasta la instalación.</span>
+            </div>
+            <div class="cfg-form cfg-form-compacta">
+              <label class="cfg-campo"><span>Nodo</span><select id="fw-lora-nodo"></select></label>
+              <label class="cfg-campo"><span>Hora de inicio</span>
                 <input id="fw-lora-desde" type="number" min="0" max="23" value="23"></label>
-              <label class="cfg-campo"><span>Hasta (hora)</span>
+              <label class="cfg-campo"><span>Hora de fin</span>
                 <input id="fw-lora-hasta" type="number" min="0" max="23" value="6"></label>
             </div>
             <p class="aviso" id="fw-lora-riesgo"></p>
-            <div class="cfg-fila">
-              <button id="fw-lora-enviar" class="btn-primario">Enviar por LoRa</button>
-              <button id="fw-lora-cancelar" hidden>Cancelar subida</button>
-              <button id="fw-lora-instalar" hidden>Instalar en el nodo</button>
+            <div class="cfg-fila cfg-acciones">
+              <button id="fw-lora-enviar" class="btn-primario">Iniciar actualización</button>
+              <button id="fw-lora-cancelar" class="peligro-borde" hidden>Cancelar actualización</button>
+              <button id="fw-lora-instalar" hidden>Instalar actualización</button>
               <span id="fw-lora-aviso" class="aviso"></span>
             </div>
-            <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"></progress>
+            <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"
+                      aria-label="Progreso de la actualización LoRa"></progress>
           </div>
         </div>
 
@@ -297,79 +431,69 @@
              individual porque son el mismo trabajo por dos caminos, y quien
              busca "cargar firmware" tiene que encontrar los dos. -->
         <div class="card cfg-card" id="bc-card">
-          <h3>Difundir a toda la red</h3>
-          <p class="aviso">La subida de arriba manda la imagen a <b>un</b> nodo, y
-            hay que repetirla entera por cada uno. La difusión la emite <b>una
-            sola vez para todos</b>, y ese tiempo no crece con el número de
-            nodos. Se emiten además unos fragmentos de repuesto que permiten
-            rellenar huecos sin pedirlos, y al terminar cada pasada el gateway
-            pregunta a cada nodo qué le falta y reemite solo eso. Medido en
-            banco con un nodo, una imagen de 541 kB llegó entera y verificada en
-            31 minutos, en una sola pasada y sin reemisiones: los fragmentos que
-            se perdieron los rellenó el propio nodo con los de repuesto.
-            <br><br>
-            Llega a los nodos que oyen al gateway <b>directamente</b>. Uno que
-            esté a dos saltos no la recibe, y hay que subirle la imagen por el
-            camino individual. Como aquella, esto no instala nada: la orden de
-            instalar sigue siendo aparte y nodo a nodo.</p>
-          <div class="cfg-fila">
-            <button id="bc-lanzar" class="btn-primario">Difundir a toda la red</button>
-            <button id="bc-cancelar" hidden>Cancelar difusión</button>
+          <h2>Actualizar varios nodos</h2>
+          <div class="mensaje mensaje-info">
+            <span class="mensaje-titulo">Nodos disponibles</span>
+            <span class="mensaje-detalle">La actualización llegará a los nodos conectados directamente. Los demás deberán actualizarse de forma individual.</span>
+          </div>
+          <div class="cfg-fila cfg-acciones">
+            <button id="bc-lanzar" class="btn-primario">Iniciar actualización</button>
+            <button id="bc-cancelar" class="peligro-borde" hidden>Cancelar actualización</button>
             <span id="bc-aviso" class="aviso"></span>
           </div>
           <div id="bc-panel" hidden>
             <div id="bc-estado" class="mig-estado"></div>
-            <table class="tabla" id="bc-tabla">
-              <thead><tr><th>Nodo</th><th>Recibido</th><th>Faltan</th><th>Último mapa</th><th></th></tr></thead>
-              <tbody></tbody>
-            </table>
+            <div class="tabla-scroll" role="region" tabindex="0"
+                 aria-label="Progreso de actualización de los nodos">
+              <table class="tabla" id="bc-tabla">
+                <thead><tr><th>Nodo</th><th>Progreso</th><th>Pendiente</th><th>Última actualización</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Nivel 3: carga del config.json por USB -->
-      <div class="ajustes" id="cfg-usb" hidden>
+      <div class="ajustes ajustes-amplios" id="cfg-usb" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Cargar JSON vía USB</h2>
+          <h2>Archivo de configuración</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Nodo por USB</h3>
-          <p class="aviso">Elige dónde está enchufado el nodo Atom: al gateway
-            (lo maneja la Pi; el puerto del Heltec queda excluido) o a este
-            equipo (lo maneja el navegador por Web Serial, solo Chrome o Edge
-            de escritorio).</p>
+          <h2>Nodo conectado por USB</h2>
+          <p class="texto-ayuda">Selecciona dónde está conectado el nodo.</p>
           <div class="cfg-fila">
-            <label class="cfg-campo"><span>Nodo conectado a</span>
+            <label class="cfg-campo"><span>Conexión del nodo</span>
               <select id="cfg-fuente">
-                <option value="gateway">el gateway (Pi)</option>
-                <option value="local">este equipo</option>
+                <option value="gateway">USB en el gateway</option>
+                <option value="local">USB en este equipo</option>
               </select>
             </label>
           </div>
-          <div class="cfg-fila">
-            <button id="cfg-buscar" class="btn-primario">Buscar nodo</button>
-            <select id="cfg-puertos" hidden></select>
+          <div class="cfg-fila cfg-herramientas">
+            <button id="cfg-buscar">Buscar nodo</button>
+            <select id="cfg-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="cfg-busqueda-aviso" class="aviso"></span>
           </div>
-          <div id="cfg-nodo" class="cfg-nodo" hidden></div>
+          <div id="cfg-nodo" class="cfg-nodo" aria-live="polite" hidden></div>
         </div>
 
         <div class="card cfg-card" id="cfg-editor" hidden>
-          <h3>config.json</h3>
-          <div class="cfg-fila">
-            <button id="cfg-leer">Leer del nodo</button>
-            <button id="cfg-archivo-btn">Cargar archivo</button>
+          <h2>Editar configuración</h2>
+          <div class="cfg-fila cfg-herramientas">
+            <button id="cfg-leer">Importar del nodo</button>
+            <button id="cfg-archivo-btn">Importar archivo</button>
             <input type="file" id="cfg-archivo" accept=".json,application/json" hidden>
           </div>
-          <textarea id="cfg-texto" spellcheck="false"
-                    placeholder="Pegar aquí el config.json, cargarlo de un archivo o leerlo del nodo..."></textarea>
-          <div class="cfg-fila">
-            <button id="cfg-enviar" class="btn-primario">Enviar al nodo</button>
-            <button id="cfg-borrar" class="peligro-borde">Borrar config del nodo</button>
+          <textarea id="cfg-texto" aria-label="Configuración del nodo" spellcheck="false"
+                    placeholder="Pega o importa aquí la configuración"></textarea>
+          <div class="cfg-fila cfg-acciones">
+            <button id="cfg-enviar" class="btn-primario">Guardar en el nodo</button>
+            <button id="cfg-borrar" class="peligro-borde">Eliminar configuración</button>
             <span id="cfg-resultado" class="aviso"></span>
           </div>
         </div>
@@ -379,69 +503,67 @@
       <div class="ajustes" id="cfg-radio" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Configurar radio LoRa</h2>
+          <h2>Radio LoRa local</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Radio del gateway</h3>
-          <div id="radio-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
+          <h2>Estado</h2>
+          <div id="radio-estado" class="cfg-nodo" aria-live="polite"><p class="aviso">Cargando estado...</p></div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Puerto serie del Heltec</h3>
-          <p class="aviso">Cambiarlo actualiza la configuración del gateway y
-            reinicia su servicio (la radio queda fuera unos segundos).</p>
-          <div class="cfg-fila">
-            <select id="radio-puertos"></select>
-            <button id="radio-aplicar" class="btn-primario">Aplicar puerto</button>
+          <h2>Conexión</h2>
+          <p class="texto-ayuda">Selecciona la conexión utilizada por la radio.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Conexión de radio</span><select id="radio-puertos"></select></label>
+          </div>
+          <div class="cfg-fila cfg-acciones">
+            <button id="radio-aplicar" class="btn-primario">Guardar conexión</button>
           </div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Firmware de la radio</h3>
+          <h2>Actualización</h2>
           <p class="aviso" id="radio-bin-info"></p>
-          <div class="cfg-fila">
-            <button id="radio-flash" class="btn-primario">Actualizar firmware de la radio</button>
+          <div class="cfg-fila cfg-acciones">
+            <button id="radio-flash" class="btn-primario">Actualizar radio</button>
           </div>
         </div>
       </div>
 
       <!-- Nivel 2: parámetros de red LoRa (gateway.env, compartidos por todos los nodos) -->
-      <div class="ajustes" id="cfg-red-lora" hidden>
+      <div class="ajustes ajustes-amplios" id="cfg-red-lora" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
           <h2>Parámetros de red LoRa</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Identidad y radio de la red</h3>
-          <p class="aviso">Estos parámetros los comparte todo el despliegue. Al
-            guardar se reescribe la configuración del gateway y se reinicia su
-            servicio. Todos los nodos deben usar los mismos valores: tras
-            cambiarlos hay que reconfigurar los nodos con el asistente, o
-            dejarán de comunicarse con el gateway. El ID de red, la frecuencia,
-            el SF y el BW se aplican al Heltec en caliente, sin reflashear. La
-            clave de red en blanco conserva la vigente.</p>
+          <h2>Parámetros</h2>
+          <div class="mensaje mensaje-advertencia">
+            <span class="mensaje-titulo">Los nodos pueden perder la conexión</span>
+            <span class="mensaje-detalle">Para evitarlo, aplica los cambios a toda la red.</span>
+          </div>
           <div class="cfg-form">
             <label class="cfg-campo"><span>Región</span>
               <select id="r-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
             </label>
             <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="r-freq" type="number" min="100000000" max="1000000000" value="869525000"></label>
-            <label class="cfg-campo"><span>ID de red</span><input id="r-netid" type="number" min="1" max="254" value="1"></label>
-            <label class="cfg-campo"><span>SF</span><input id="r-sf" type="number" min="7" max="12" value="7"></label>
+            <label class="cfg-campo"><span>Identificador de red</span><input id="r-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Factor de dispersión (SF)</span><input id="r-sf" type="number" min="7" max="12" value="7"></label>
             <label class="cfg-campo"><span>Ancho de banda (kHz)</span>
               <select id="r-bw"><option>125</option><option>250</option><option>500</option></select>
             </label>
-            <label class="cfg-campo"><span>Max TTL</span><input id="r-ttl" type="number" min="1" max="15" value="4"></label>
-            <label class="cfg-check"><input id="r-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
-            <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="r-seckey" type="text" maxlength="32" placeholder="dejar en blanco para no cambiar"></label>
+            <label class="cfg-campo"><span>TTL máximo</span><input id="r-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-check"><input id="r-sec" type="checkbox"><span>Cifrado AES-CCM</span></label>
+            <label class="cfg-campo"><span>Clave de red</span><input id="r-seckey" type="text" maxlength="32" placeholder="Sin cambios"></label>
           </div>
-          <div class="cfg-fila">
-            <button id="r-guardar" class="btn-primario">Guardar</button>
+          <div class="cfg-fila cfg-acciones">
+            <button id="r-guardar" class="btn-primario">Guardar cambios</button>
             <span id="r-resultado" class="aviso"></span>
           </div>
         </div>
@@ -450,26 +572,17 @@
              propósito: es el mismo cambio por el camino que no pierde nodos,
              y separarlo en otra página invitaría a no encontrarlo. -->
         <div class="card cfg-card" id="mig-card">
-          <h3>Cambio coordinado (red viva)</h3>
-          <p class="aviso">Guardar ahí arriba cambia los parámetros al momento y
-            deja incomunicado a todo nodo que siga con los viejos: es lo
-            correcto en un banco, no en una red desplegada. El cambio
-            coordinado hace lo mismo sin perder a nadie y sin que tengas que
-            hacer nada más: el gateway le pide su configuración a cada nodo, le
-            cambia solo los parámetros de red y se la devuelve citada a una
-            hora; llegada esa hora saltan todos a la vez, el gateway incluido.
-            Hasta entonces no ha cambiado nada y se puede abortar sin
-            consecuencias.</p>
-          <p class="aviso">La hora la calcula el sistema con lo que cuesta
-            citar a los nodos que hay, que depende de cuántos son y de su
-            clase. Si al terminar alguno se quedó atrás, aparece un botón para
-            ir a buscarlo.</p>
+          <h2>Actualizar parámetros en toda la red</h2>
+          <div class="mensaje mensaje-info">
+            <span class="mensaje-titulo">Cambio coordinado</span>
+            <span class="mensaje-detalle">La configuración se aplicará cuando todos los nodos estén preparados.</span>
+          </div>
 
           <!-- Sin operación en curso: programarla -->
           <div id="mig-nueva">
             <p class="aviso" id="mig-estimacion"></p>
-            <div class="cfg-fila">
-              <button id="mig-programar" class="btn-primario">Programar cambio coordinado</button>
+            <div class="cfg-fila cfg-acciones">
+              <button id="mig-programar" class="btn-primario">Programar cambios</button>
               <span id="mig-resultado" class="aviso"></span>
             </div>
           </div>
@@ -477,15 +590,18 @@
           <!-- Con operación en curso: seguimiento -->
           <div id="mig-panel" hidden>
             <div id="mig-estado" class="mig-estado"></div>
-            <table class="tabla" id="mig-tabla">
-              <thead><tr><th>Nodo</th><th>Estado</th><th>Última señal</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <div class="cfg-fila">
-              <button id="mig-saltar" hidden>Saltar sin los que faltan</button>
-              <button id="mig-rescatar" hidden>Buscar rezagados</button>
-              <button id="mig-abortar">Abortar</button>
-              <button id="mig-cerrar" class="btn-primario">Cerrar operación</button>
+            <div class="tabla-scroll" role="region" tabindex="0"
+                 aria-label="Estado del cambio coordinado">
+              <table class="tabla" id="mig-tabla">
+                <thead><tr><th>Nodo</th><th>Estado</th><th>Última señal</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="cfg-fila cfg-acciones">
+              <button id="mig-saltar" hidden>Continuar con nodos disponibles</button>
+              <button id="mig-rescatar" hidden>Buscar nodos pendientes</button>
+              <button id="mig-abortar" class="peligro-borde">Cancelar cambios</button>
+              <button id="mig-cerrar" class="btn-tranquilo">Cerrar sin aplicar</button>
               <span id="mig-resultado2" class="aviso"></span>
             </div>
           </div>
@@ -496,91 +612,95 @@
       <div class="ajustes" id="cfg-zona" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Configurar zona horaria</h2>
+          <h2>Zona horaria</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Zona de visualización</h3>
-          <p class="aviso">Zona en la que el visor muestra el reloj de la cabecera
-            y las horas de las gráficas. Se guarda en el gateway y la comparten
-            todos los navegadores. La opción automática usa la zona de cada
-            navegador.</p>
-          <div class="cfg-fila">
-            <select id="tz-select"></select>
-            <button id="tz-detectar">Detectar del navegador</button>
+          <h2>Visualización</h2>
+          <p class="texto-ayuda">Zona utilizada para mostrar las fechas y horas.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Zona horaria</span><select id="tz-select"></select></label>
           </div>
-          <div class="cfg-fila">
-            <button id="tz-guardar" class="btn-primario">Guardar</button>
+          <div class="cfg-fila cfg-herramientas">
+            <button id="tz-detectar">Usar zona del navegador</button>
+          </div>
+          <div class="cfg-fila cfg-acciones">
+            <button id="tz-guardar" class="btn-primario">Guardar zona horaria</button>
             <span id="tz-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
 
-      <!-- Nivel 2: base de datos (PostgreSQL de la VM, histórico) -->
-      <div class="ajustes" id="cfg-bd" hidden>
+      <!-- Nivel 2: servicios de almacenamiento y mensajería del gateway -->
+      <div class="ajustes" id="cfg-servidor" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Configurar base de datos</h2>
+          <h2>Servidor</h2>
         </div>
 
-        <div class="card cfg-card">
-          <h3>PostgreSQL de la nube</h3>
-          <p class="aviso">Conexión de solo lectura que usa la vista de Datos para
-            el histórico. Los cambios se aplican al momento, sin reiniciar el
-            visor. Dejar la contraseña en blanco conserva la vigente.</p>
-          <div class="cfg-form">
-            <label class="cfg-campo"><span>Host</span><input id="bd-host" type="text" placeholder="modulinkr.ejemplo.com"></label>
-            <label class="cfg-campo"><span>Puerto</span><input id="bd-port" type="number" min="1" max="65535" value="5432"></label>
-            <label class="cfg-campo"><span>Base</span><input id="bd-db" type="text" value="modulinkr"></label>
-            <label class="cfg-campo"><span>Usuario</span><input id="bd-user" type="text" value="modulinkr_ro"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="bd-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
-          </div>
-          <div class="cfg-fila">
-            <button id="bd-probar">Probar conexión</button>
-            <button id="bd-guardar" class="btn-primario">Guardar</button>
-            <span id="bd-resultado" class="aviso"></span>
+        <div class="card cfg-card cfg-tabs-card">
+          <div class="cfg-tabs" role="tablist" aria-label="Servicio del gateway">
+            <button id="servidor-tab-bd" class="cfg-tab activa" role="tab"
+                    aria-selected="true" aria-controls="servidor-panel-bd"
+                    data-tab="bd">Base de datos</button>
+            <button id="servidor-tab-mqtt" class="cfg-tab" role="tab"
+                    aria-selected="false" aria-controls="servidor-panel-mqtt"
+                    tabindex="-1" data-tab="mqtt">MQTT</button>
           </div>
         </div>
-      </div>
 
-      <!-- Nivel 2: broker MQTT cloud (lo consume el servicio del gateway) -->
-      <div class="ajustes" id="cfg-mqtt" hidden>
-        <div class="ajustes-cabecera">
-          <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-          </a>
-          <h2>Configurar MQTT</h2>
-        </div>
-
-        <div class="card cfg-card">
-          <h3>Broker cloud</h3>
-          <div id="mqtt-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
-        </div>
-
-        <div class="card cfg-card">
-          <h3>Parámetros del broker</h3>
-          <p class="aviso">Al guardar se reescribe la configuración del gateway y
-            se reinicia su servicio (la telemetría cloud queda fuera unos
-            segundos). El certificado debe ser el de una CA RSA (el SIM7028 no
-            valida cadenas ECDSA). Dejar la contraseña en blanco conserva la
-            vigente.</p>
-          <div class="cfg-form">
-            <label class="cfg-campo"><span>Host</span><input id="mqtt-host" type="text" placeholder="broker.ejemplo.com"></label>
-            <label class="cfg-campo"><span>Puerto</span><input id="mqtt-port" type="number" min="1" max="65535" value="8883"></label>
-            <label class="cfg-campo"><span>Usuario</span><input id="mqtt-user" type="text"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="mqtt-pass" type="password" placeholder="dejar en blanco para no cambiar"></label>
-            <label class="cfg-campo"><span>Certificado CA</span><input id="mqtt-cafile" type="text" placeholder="/etc/modulinkr/ca.crt (opcional)"></label>
-            <label class="cfg-check"><input id="mqtt-tls" type="checkbox" checked><span>Usar TLS (cifrado)</span></label>
-            <label class="cfg-check"><input id="mqtt-insecure" type="checkbox"><span>No verificar el hostname del certificado (solo banco)</span></label>
+        <div id="servidor-panel-bd" role="tabpanel" aria-labelledby="servidor-tab-bd">
+          <div class="card cfg-card">
+            <h2>Configuración</h2>
+            <div id="bd-estado" class="cfg-nodo" aria-live="polite"><p class="aviso">Cargando estado...</p></div>
           </div>
-          <div class="cfg-fila">
-            <button id="mqtt-probar">Probar conexión</button>
-            <button id="mqtt-guardar" class="btn-primario">Guardar</button>
-            <span id="mqtt-resultado" class="aviso"></span>
+
+          <div class="card cfg-card">
+            <h2>Conexión</h2>
+            <p class="texto-ayuda">Deja la contraseña vacía para conservar la actual.</p>
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Servidor</span><input id="bd-host" type="text" placeholder="modulinkr.ejemplo.com"></label>
+              <label class="cfg-campo"><span>Puerto</span><input id="bd-port" type="number" min="1" max="65535" value="5432"></label>
+              <label class="cfg-campo"><span>Base de datos</span><input id="bd-db" type="text" value="modulinkr"></label>
+              <label class="cfg-campo"><span>Usuario</span><input id="bd-user" type="text" value="modulinkr_ro"></label>
+              <label class="cfg-campo"><span>Contraseña</span><input id="bd-pass" type="password" placeholder="Sin cambios"></label>
+            </div>
+            <div class="cfg-fila cfg-acciones">
+              <button id="bd-probar">Probar conexión</button>
+              <button id="bd-guardar" class="btn-primario">Guardar conexión</button>
+              <span id="bd-resultado" class="aviso"></span>
+            </div>
+          </div>
+        </div>
+
+        <div id="servidor-panel-mqtt" role="tabpanel"
+             aria-labelledby="servidor-tab-mqtt" hidden>
+          <div class="card cfg-card">
+            <h2>Estado</h2>
+            <div id="mqtt-estado" class="cfg-nodo" aria-live="polite"><p class="aviso">Cargando estado...</p></div>
+          </div>
+
+          <div class="card cfg-card">
+            <h2>Servidor MQTT</h2>
+            <p class="texto-ayuda">Deja la contraseña vacía para conservar la actual.</p>
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Servidor</span><input id="mqtt-host" type="text" placeholder="broker.ejemplo.com"></label>
+              <label class="cfg-campo"><span>Puerto</span><input id="mqtt-port" type="number" min="1" max="65535" value="8883"></label>
+              <label class="cfg-campo"><span>Usuario</span><input id="mqtt-user" type="text"></label>
+              <label class="cfg-campo"><span>Contraseña</span><input id="mqtt-pass" type="password" placeholder="Sin cambios"></label>
+              <label class="cfg-campo"><span>Certificado de autoridad (CA)</span><input id="mqtt-cafile" type="text" placeholder="/etc/modulinkr/ca.crt (opcional)"></label>
+              <label class="cfg-check"><input id="mqtt-tls" type="checkbox" checked><span>Usar cifrado TLS</span></label>
+              <label class="cfg-check"><input id="mqtt-insecure" type="checkbox"><span>Permitir certificados no verificados (solo para pruebas)</span></label>
+            </div>
+            <div class="cfg-fila cfg-acciones">
+              <button id="mqtt-probar">Probar conexión</button>
+              <button id="mqtt-guardar" class="btn-primario">Guardar conexión</button>
+              <span id="mqtt-resultado" class="aviso"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -589,101 +709,111 @@
       <div class="ajustes" id="cfg-wifi" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Configurar red WiFi</h2>
+          <h2>Red Wi-Fi</h2>
         </div>
 
         <div class="card cfg-card">
-          <h3>Red actual</h3>
-          <div id="wifi-estado" class="cfg-nodo"><p class="aviso">Cargando estado...</p></div>
+          <h2>Red actual</h2>
+          <div id="wifi-estado" class="cfg-nodo" aria-live="polite"><p class="aviso">Cargando estado...</p></div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Redes disponibles</h3>
-          <p class="aviso">Conectar a una red distinta cambia la IP del gateway y
-            puede cortar esta sesión si entras por ese mismo WiFi. El acceso por
-            <code>gateway.local</code> se mantiene.</p>
-          <div class="cfg-fila">
-            <button id="wifi-buscar" class="btn-primario">Buscar redes</button>
+          <h2>Redes disponibles</h2>
+          <div class="mensaje mensaje-advertencia">
+            <span class="mensaje-titulo">La conexión se interrumpirá</span>
+            <span class="mensaje-detalle">Después del cambio, abre <code>gateway.local</code> para volver a conectarte.</span>
+          </div>
+          <div class="cfg-fila cfg-herramientas">
+            <button id="wifi-buscar">Actualizar lista</button>
             <span id="wifi-buscar-info" class="aviso"></span>
           </div>
           <div id="wifi-lista" class="wifi-lista"></div>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Red</span><input id="wifi-ssid" type="text" placeholder="elige de la lista o escribe el SSID"></label>
-            <label class="cfg-campo"><span>Contraseña</span><input id="wifi-pass" type="password" placeholder="vacía si la red es abierta"></label>
+            <label class="cfg-campo"><span>Nombre de la red</span><input id="wifi-ssid" type="text" placeholder="Selecciona una red o escribe su nombre"></label>
+            <label class="cfg-campo"><span>Contraseña</span><input id="wifi-pass" type="password" placeholder="No necesaria para redes abiertas"></label>
           </div>
-          <div class="cfg-fila">
-            <button id="wifi-conectar" class="btn-primario">Conectar</button>
+          <div class="cfg-fila cfg-acciones">
+            <button id="wifi-conectar" class="btn-primario">Conectar a la red</button>
             <span id="wifi-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
 
       <!-- Nivel 2: herramientas de depuración (logs en vivo por SSE) -->
-      <div class="ajustes" id="cfg-debug" hidden>
+      <div class="ajustes ajustes-amplios" id="cfg-debug" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Herramientas de depuración</h2>
+          <h2>Diagnóstico</h2>
         </div>
 
         <div class="card cfg-card">
-          <div class="dbg-tabs">
-            <button class="dbg-tab activa" data-tab="gateway">Journal del gateway</button>
-            <button class="dbg-tab" data-tab="serial">Serie de un nodo</button>
-            <button class="dbg-tab" data-tab="modbus">Tramas Modbus</button>
+          <div class="dbg-tabs" role="tablist" aria-label="Origen del diagnóstico">
+            <button id="dbg-tab-gateway" class="dbg-tab activa" role="tab" aria-selected="true" aria-controls="dbg-panel" data-tab="gateway">Gateway</button>
+            <button id="dbg-tab-serial" class="dbg-tab" role="tab" aria-selected="false" aria-controls="dbg-panel" tabindex="-1" data-tab="serial">Nodo USB</button>
+            <button id="dbg-tab-modbus" class="dbg-tab" role="tab" aria-selected="false" aria-controls="dbg-panel" tabindex="-1" data-tab="modbus">Modbus</button>
           </div>
 
+          <div id="dbg-panel" role="tabpanel" aria-labelledby="dbg-tab-gateway">
           <div class="cfg-fila dbg-controles">
-            <select id="dbg-fuente" hidden>
-              <option value="gateway">Conectado al gateway</option>
-              <option value="local">Conectado a este equipo</option>
+            <select id="dbg-fuente" aria-label="Conexión del nodo" hidden>
+              <option value="gateway">USB en el gateway</option>
+              <option value="local">USB en este equipo</option>
             </select>
-            <select id="dbg-puerto" hidden></select>
-            <select id="dbg-nodo" hidden></select>
-            <button id="dbg-toggle" class="btn-primario">Iniciar</button>
-            <button id="dbg-limpiar">Limpiar</button>
+            <select id="dbg-puerto" aria-label="Nodo USB" hidden></select>
+            <select id="dbg-nodo" aria-label="Nodo Modbus" hidden></select>
+            <button id="dbg-toggle" class="btn-primario">Iniciar seguimiento</button>
+            <button id="dbg-limpiar" class="btn-tranquilo">Limpiar</button>
             <span id="dbg-info" class="aviso"></span>
           </div>
-          <p class="aviso" id="dbg-ayuda"></p>
+          <p class="texto-ayuda" id="dbg-ayuda"></p>
           <p class="aviso" id="dbg-modo" hidden></p>
 
           <pre id="dbg-consola" class="dbg-consola"></pre>
+          </div>
         </div>
       </div>
 
       <!-- Nivel 3: asistente de configuración de nodo -->
-      <div class="ajustes" id="cfg-form" hidden>
+      <div class="ajustes ajustes-amplios" id="cfg-form" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
           </a>
-          <h2>Asistente de configuración de nodo</h2>
+          <h2>Configurar nodo</h2>
         </div>
 
         <div class="card cfg-card" id="f-modo-card">
-          <h3>¿Qué vas a hacer?</h3>
-          <div class="cfg-fila">
-            <button id="f-modo-nuevo" class="btn-primario">Configurar nodo nuevo</button>
-            <button id="f-modo-existente" class="btn-primario">Reconfigurar nodo existente</button>
-            <span id="f-modo-aviso" class="aviso"></span>
+          <div class="selector-tareas" role="group" aria-label="Tipo de configuración">
+            <button id="f-modo-nuevo" class="opcion-tarea" aria-pressed="false">
+              <span class="opcion-tarea-titulo">Añadir nodo</span>
+              <span class="opcion-tarea-detalle">Crear la configuración inicial</span>
+            </button>
+            <button id="f-modo-existente" class="opcion-tarea" aria-pressed="false">
+              <span class="opcion-tarea-titulo">Editar nodo</span>
+              <span class="opcion-tarea-detalle">Modificar la configuración actual</span>
+            </button>
           </div>
+          <span id="f-modo-aviso" class="aviso" aria-live="polite"></span>
         </div>
 
         <div class="card cfg-card" id="f-destino-card">
-          <h3>Nodo y conexión</h3>
-          <p class="aviso" id="f-destino-nota"></p>
-          <div class="cfg-fila">
-            <select id="f-fuente">
-              <option value="gateway">Conectado al gateway</option>
-              <option value="local">Conectado a este equipo</option>
-              <option value="lora">Por LoRa (sin cable)</option>
-            </select>
-            <select id="f-lora-nodo" hidden></select>
-            <button id="f-leer" class="btn-primario">Leer del nodo</button>
-            <select id="f-leer-puertos" hidden></select>
+          <h2>Conexión del nodo</h2>
+          <p class="texto-ayuda" id="f-destino-nota"></p>
+          <div class="cfg-fila cfg-herramientas">
+            <label class="cfg-campo"><span>Conexión del nodo</span>
+              <select id="f-fuente">
+                <option value="gateway">USB en el gateway</option>
+                <option value="local">USB en este equipo</option>
+                <option value="lora">LoRa</option>
+              </select>
+            </label>
+            <select id="f-lora-nodo" aria-label="Nodo LoRa" hidden></select>
+            <button id="f-leer">Importar configuración</button>
+            <select id="f-leer-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>
           </div>
           <!-- Cómo acabó lo último que se lanzó sobre este nodo. Una operación
@@ -692,100 +822,99 @@
         </div>
 
         <div class="card cfg-card">
-          <h3>Identidad</h3>
+          <h2>Identidad</h2>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>ID del nodo <span class="req">*</span></span><input id="f-id" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Identificador <span class="req">*</span></span><input id="f-id" type="number" min="1" max="254" value="1" required aria-required="true" aria-describedby="f-id-aviso"></label>
             <label class="cfg-campo"><span>Tipo</span>
               <select id="f-type"><option value="node">Nodo</option><option value="super_node">Supernodo (con NB-IoT)</option></select>
             </label>
-            <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input id="f-name" type="text" maxlength="64" placeholder="Nodo banco TFM"></label>
-            <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="opcional"></label>
+            <label class="cfg-campo"><span>Nombre <span class="req">*</span></span><input id="f-name" type="text" maxlength="64" placeholder="Nodo de almacén" required aria-required="true"></label>
+            <label class="cfg-campo"><span>Descripción</span><input id="f-desc" type="text" maxlength="256" placeholder="Opcional"></label>
           </div>
           <p class="aviso" id="f-id-aviso"></p>
         </div>
 
         <div class="card cfg-card">
-          <h3>LoRa</h3>
-          <p class="aviso" id="f-red-nota">Los campos atenuados (aquí y en NB-IoT)
-            los fija la red del gateway: región, frecuencia, SF, ancho de banda,
-            Network ID, TTL, seguridad y el broker MQTT. Se muestran para
-            referencia y no se editan, porque cambiarlos impediría al nodo unirse
-            a la red o publicar en la misma nube.</p>
+          <h2>Conexión LoRa</h2>
+          <div class="mensaje mensaje-info" id="f-red-nota">
+            <span class="mensaje-titulo">Configuración de la red</span>
+            <span class="mensaje-detalle">Estos valores pertenecen a la red actual y no se pueden modificar aquí.</span>
+          </div>
           <div class="cfg-form">
             <label class="cfg-campo"><span>Región</span>
               <select id="f-region"><option>EU868</option><option>US915</option><option>CN470</option><option>AS923</option></select>
             </label>
             <label class="cfg-campo"><span>Frecuencia (Hz)</span><input id="f-freq" type="number" value="869525000"></label>
-            <label class="cfg-campo"><span>SF</span><input id="f-sf" type="number" min="7" max="12" value="7"></label>
+            <label class="cfg-campo"><span>Factor de dispersión (SF)</span><input id="f-sf" type="number" min="7" max="12" value="7"></label>
             <label class="cfg-campo"><span>Potencia (dBm)</span><input id="f-txpow" type="number" min="2" max="22" value="14"></label>
-            <label class="cfg-campo"><span>Network ID</span><input id="f-netid" type="number" min="1" max="254" value="1"></label>
-            <label class="cfg-campo"><span>Intervalo envío (ms)</span><input id="f-interval" type="number" min="100" value="5000"></label>
+            <label class="cfg-campo"><span>Identificador de red</span><input id="f-netid" type="number" min="1" max="254" value="1"></label>
+            <label class="cfg-campo"><span>Intervalo de envío (ms)</span><input id="f-interval" type="number" min="100" value="5000"></label>
           </div>
           <details class="form-avz">
-            <summary>Avanzado LoRa</summary>
+            <summary>Configuración avanzada de LoRa</summary>
             <div class="cfg-form">
-              <label class="cfg-campo"><span>Ancho banda (kHz)</span>
+              <label class="cfg-campo"><span>Ancho de banda (kHz)</span>
                 <select id="f-bw"><option>125</option><option>250</option><option>500</option></select>
               </label>
-              <label class="cfg-check"><input id="f-ack" type="checkbox" checked><span>Esperar ACK del gateway</span></label>
-              <label class="cfg-campo"><span>ACK timeout (ms)</span><input id="f-acktimeout" type="number" min="100" value="3000"></label>
-              <label class="cfg-campo"><span>Reintentos máx.</span><input id="f-retries" type="number" min="0" max="10" value="2"></label>
-              <label class="cfg-check"><input id="f-sec" type="checkbox"><span>Seguridad (cifrado AES-CCM)</span></label>
-              <label class="cfg-campo"><span>Clave de red (32 hex)</span><input id="f-seckey" type="text" maxlength="32" placeholder="32 caracteres hex"></label>
+              <label class="cfg-check"><input id="f-ack" type="checkbox" checked><span>Confirmación de entrega (ACK)</span></label>
+              <label class="cfg-campo"><span>Tiempo de espera del ACK (ms)</span><input id="f-acktimeout" type="number" min="100" value="3000"></label>
+              <label class="cfg-campo"><span>Reintentos máximos</span><input id="f-retries" type="number" min="0" max="10" value="2"></label>
+              <label class="cfg-check"><input id="f-sec" type="checkbox"><span>Cifrado AES-CCM</span></label>
+              <label class="cfg-campo"><span>Clave de red</span><input id="f-seckey" type="text" maxlength="32" placeholder="32 caracteres hexadecimales"></label>
             </div>
           </details>
         </div>
 
         <details class="card cfg-card form-avz">
-          <summary><h3 style="display:inline">Mesh (avanzado)</h3></summary>
+          <summary><h2>Red Mesh</h2></summary>
           <div class="cfg-form">
-            <label class="cfg-check"><input id="f-relay" type="checkbox" checked><span>Reenviar tramas de otros (relay)</span></label>
-            <label class="cfg-campo"><span>Max TTL</span><input id="f-ttl" type="number" min="1" max="15" value="4"></label>
-            <label class="cfg-campo"><span>Beacon timeout (ms)</span><input id="f-beacon" type="number" min="10000" value="90000"></label>
-            <label class="cfg-campo"><span>RSSI mín. padre</span><input id="f-minrssi" type="number" min="-120" max="0" value="-100"></label>
+            <label class="cfg-check"><input id="f-relay" type="checkbox" checked><span>Actuar como repetidor</span></label>
+            <label class="cfg-campo"><span>TTL máximo</span><input id="f-ttl" type="number" min="1" max="15" value="4"></label>
+            <label class="cfg-campo"><span>Tiempo sin baliza (ms)</span><input id="f-beacon" type="number" min="10000" value="90000"></label>
+            <label class="cfg-campo"><span>Señal mínima del nodo principal (dBm)</span><input id="f-minrssi" type="number" min="-120" max="0" value="-100"></label>
             <label class="cfg-campo"><span>Histéresis (dB)</span><input id="f-hyst" type="number" min="0" max="30" value="6"></label>
             <label class="cfg-campo"><span>Tramas perdidas</span><input id="f-missed" type="number" min="1" value="3"></label>
-            <label class="cfg-campo"><span>Espera oferta SN (ms)</span><input id="f-snwait" type="number" min="200" value="1000"></label>
+            <label class="cfg-campo"><span>Espera de oferta del supernodo (ms)</span><input id="f-snwait" type="number" min="200" value="1000"></label>
           </div>
         </details>
 
         <div class="card cfg-card" id="f-nbiot-card" hidden>
-          <h3>NB-IoT (supernodo)</h3>
+          <h2>Conexión celular del supernodo</h2>
           <div class="cfg-form">
             <label class="cfg-campo"><span>APN <span class="req">*</span></span><input id="f-apn" type="text" placeholder="nb.wlapn.com"></label>
             <label class="cfg-campo"><span>Broker MQTT</span><input id="f-mbroker" type="text" placeholder="modulinkr.ejemplo.com"></label>
             <label class="cfg-campo"><span>Puerto MQTT</span><input id="f-mport" type="number" min="1" max="65535" value="8883"></label>
-            <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>TLS (cert RSA en el broker)</span></label>
+            <label class="cfg-check"><input id="f-mtls" type="checkbox" checked><span>Cifrado TLS</span></label>
             <label class="cfg-campo"><span>Usuario MQTT</span><input id="f-muser" type="text" placeholder="opcional"></label>
-            <label class="cfg-campo"><span>Contraseña MQTT</span><input id="f-mpass" type="text" placeholder="opcional"></label>
+            <label class="cfg-campo"><span>Contraseña MQTT</span><input id="f-mpass" type="password" placeholder="Opcional"></label>
           </div>
           <details class="form-avz">
-            <summary>Avanzado NB-IoT</summary>
+            <summary>Configuración avanzada de NB-IoT</summary>
             <div class="cfg-form">
               <label class="cfg-campo"><span>Usuario APN</span><input id="f-apnuser" type="text" placeholder="opcional"></label>
-              <label class="cfg-campo"><span>Contraseña APN</span><input id="f-apnpass" type="text" placeholder="opcional"></label>
-              <label class="cfg-campo"><span>Topic telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
-              <label class="cfg-campo"><span>Topic comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
-              <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Sobre debug en la telemetría</span></label>
+              <label class="cfg-campo"><span>Contraseña APN</span><input id="f-apnpass" type="password" placeholder="Opcional"></label>
+              <label class="cfg-campo"><span>Tema MQTT de telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
+              <label class="cfg-campo"><span>Tema MQTT de comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
+              <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Incluir diagnóstico en la telemetría</span></label>
               <label class="cfg-check"><input id="f-nbrelay" type="checkbox" checked><span>Ofrecer salida celular a vecinos</span></label>
-              <label class="cfg-campo"><span>Cola custodia máx.</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
+              <label class="cfg-campo"><span>Capacidad de almacenamiento temporal</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
             </div>
           </details>
         </div>
 
         <div class="card cfg-card">
-          <h3>Modbus</h3>
+          <h2>Modbus</h2>
           <div class="cfg-form">
-            <label class="cfg-campo"><span>Baudrate</span>
+            <label class="cfg-campo"><span>Velocidad</span>
               <select id="f-baud"><option>2400</option><option>4800</option><option selected>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option></select>
             </label>
             <label class="cfg-campo"><span>Paridad</span>
               <select id="f-parity"><option value="N">Ninguna (N)</option><option value="E">Par (E)</option><option value="O">Impar (O)</option></select>
             </label>
-            <label class="cfg-campo"><span>Stop bits</span>
+            <label class="cfg-campo"><span>Bits de parada</span>
               <select id="f-stopbits"><option>1</option><option>2</option></select>
             </label>
-            <label class="cfg-campo"><span>Debug Modbus</span>
+            <label class="cfg-campo"><span>Registro de diagnóstico</span>
               <select id="f-mbdebug">
                 <option value="off" selected>Desactivado</option>
                 <option value="errors_last">Fallidas, la última por ciclo</option>
@@ -796,77 +925,108 @@
             </label>
           </div>
           <div id="f-devices"></div>
-          <div class="cfg-fila">
-            <button id="f-add-device">+ Añadir dispositivo</button>
+          <div class="cfg-fila cfg-herramientas">
+            <button id="f-add-device">Añadir dispositivo</button>
           </div>
         </div>
 
         <div class="card cfg-card">
-          <h3>Revisar y enviar</h3>
-          <p class="aviso">El config.json de abajo se regenera con cada cambio
-            del formulario y refleja exactamente lo que se enviaría. No se edita
-            a mano: para escribir JSON en crudo está la página «Cargar JSON vía
-            USB». Con el formulario sin errores se habilita el envío; el nodo lo
-            valida de nuevo y solo graba si pasa sus reglas.</p>
+          <h2>Revisar y guardar</h2>
+          <p class="texto-ayuda">Revisa los datos antes de guardar la configuración.</p>
           <p class="aviso" id="f-pendientes"></p>
-          <div class="cfg-fila">
-            <button id="f-cargar-archivo">Cargar de archivo</button>
-            <button id="f-guardar-archivo">Guardar en archivo</button>
-            <button id="f-copiar">Copiar</button>
-            <input id="f-archivo" type="file" accept=".json,application/json" hidden>
-            <span id="f-resultado" class="aviso"></span>
-          </div>
-          <textarea id="f-preview" spellcheck="false" readonly placeholder="El config.json generado aparece aquí a medida que se rellena el formulario."></textarea>
-          <div class="cfg-fila">
+          <section class="archivo-config" aria-labelledby="f-archivo-titulo">
+            <h3 id="f-archivo-titulo">Archivo de configuración</h3>
+            <div class="cfg-fila cfg-herramientas">
+              <button id="f-cargar-archivo">Importar archivo</button>
+              <button id="f-guardar-archivo">Exportar archivo</button>
+              <button id="f-copiar">Copiar contenido</button>
+              <input id="f-archivo" type="file" accept=".json,application/json" hidden>
+              <span id="f-resultado" class="aviso"></span>
+            </div>
+            <textarea id="f-preview" aria-label="Vista previa de la configuración"
+                      spellcheck="false" readonly placeholder="La configuración aparecerá aquí"></textarea>
+          </section>
+          <div class="cfg-fila cfg-herramientas">
             <button id="f-buscar" disabled>Buscar nodo</button>
-            <select id="f-puertos" hidden></select>
+            <select id="f-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="f-busqueda-aviso" class="aviso"></span>
           </div>
           <p class="aviso" id="f-fw-estado" hidden></p>
           <p class="aviso" id="f-schema-aviso" hidden></p>
-          <div class="cfg-fila">
-            <button id="f-enviar" class="btn-primario" disabled>Enviar al nodo</button>
+          <div class="cfg-fila cfg-acciones">
+            <button id="f-enviar" class="btn-primario" disabled>Guardar configuración</button>
             <span id="f-envio-aviso" class="aviso"></span>
           </div>
         </div>
       </div>
-    </section>
-  </main>
-</div>
+    </modulinkr-view>
+  </modulinkr-view-router>
+</modulinkr-app>
 
 <!-- Panel lateral de detalle de nodo -->
 <div id="detalle-fondo" hidden></div>
-<aside id="detalle" hidden>
-  <div class="detalle-cabecera">
-    <h2 id="detalle-titulo"></h2>
-    <button id="detalle-cerrar" class="icono-btn" title="Cerrar">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+<modulinkr-node-detail id="detalle" backdrop="detalle-fondo" tabindex="-1" hidden>
+  <div class="detalle-cierre">
+    <button id="detalle-cerrar" class="icono-btn" type="button"
+            title="Cerrar" aria-label="Cerrar" data-close>
+      <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
+  <div class="detalle-cabecera">
+    <span id="detalle-icono" class="detalle-icono" aria-hidden="true"></span>
+    <div class="detalle-identidad">
+      <h2 id="detalle-titulo"></h2>
+      <span id="detalle-subtitulo"></span>
+    </div>
+    <div id="detalle-estados" class="detalle-estados"></div>
+  </div>
   <div id="detalle-cuerpo"></div>
-</aside>
+  <div id="detalle-acciones" class="detalle-acciones"></div>
+</modulinkr-node-detail>
 
 <!-- Modal de minigráfica de una medida (última hora, buffer local) -->
 <div id="modal-fondo" hidden></div>
-<div id="modal" hidden>
-  <div class="modal-cabecera">
-    <h2 id="modal-titulo"></h2>
-    <button id="modal-cerrar" class="icono-btn" title="Cerrar">
-      <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+<modulinkr-history-dialog id="modal" backdrop="modal-fondo" hidden>
+  <div class="modal-cierre">
+    <button id="modal-cerrar" class="icono-btn" type="button"
+            title="Cerrar" aria-label="Cerrar" data-close>
+      <modulinkr-icon name="mdi:close"></modulinkr-icon>
     </button>
   </div>
-  <div class="modal-sub">
-    <span id="modal-cuando"></span>
-    <span class="m-actual" id="modal-valor"></span>
+  <div class="modal-cabecera">
+    <span class="modal-icono" aria-hidden="true">
+      <modulinkr-icon id="modal-icono" name="mdi:pulse"></modulinkr-icon>
+    </span>
+    <div class="modal-identidad">
+      <h2 id="modal-titulo"></h2>
+      <span id="modal-nodo"></span>
+    </div>
+    <div class="modal-resumen">
+      <span class="m-actual" id="modal-valor"></span>
+      <span id="modal-cuando"></span>
+    </div>
+  </div>
+  <div class="modal-grafico-cabecera">
+    <span>Histórico</span>
+    <span id="modal-periodo">Últimos 5 días</span>
   </div>
   <div id="modal-grafico"></div>
-</div>
+  <div class="modal-acciones">
+    <a id="modal-ver-datos" href="#/datos">
+      <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
+      <span>Ver más datos</span>
+      <modulinkr-icon name="mdi:chevron-right"></modulinkr-icon>
+    </a>
+  </div>
+</modulinkr-history-dialog>
 
-<!-- Diálogo de progreso y confirmación del comisionamiento -->
+<!-- El diálogo común conserva el foco dentro de la decisión activa. -->
 <div id="cfg-dialogo-fondo" hidden></div>
-<div id="cfg-dialogo" class="dialogo" hidden>
+<modulinkr-confirm-dialog id="cfg-dialogo" class="dialogo"
+     aria-describedby="cfg-dialogo-texto" tabindex="-1" hidden>
+  <div id="cfg-dialogo-icono" class="dialogo-icono" aria-hidden="true">i</div>
   <h3 id="cfg-dialogo-titulo"></h3>
-  <p id="cfg-dialogo-texto"></p>
+  <div id="cfg-dialogo-texto"></div>
   <div class="cfg-fila dialogo-botones">
     <button id="cfg-dialogo-cancelar" hidden>Cancelar</button>
     <!-- Tercera vía: cuando el camino correcto no es ni seguir ni cancelar,
@@ -876,9 +1036,9 @@
     <button id="cfg-dialogo-confirmar" class="peligro" hidden>Borrar</button>
     <button id="cfg-dialogo-cerrar" class="btn-primario" hidden>Cerrar</button>
   </div>
-</div>
+</modulinkr-confirm-dialog>
 
-<div id="toasts"></div>
+<modulinkr-toast-region id="toasts"></modulinkr-toast-region>
 
 <script src="/static/vendor/vis-network.min.js"></script>
 <script src="/static/vendor/echarts.min.js"></script>
@@ -890,6 +1050,10 @@
   window.ESPLoader = ESPLoader;
   window.Transport = Transport;
 </script>
-<script src="/static/app.js"></script>
+<script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
+<script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
+<script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
+<script src="/static/components.js?v=topology-legend-logo-20260822"></script>
+<script src="/static/app.js?v=topology-reset-motion-20260822"></script>
 </body>
 </html>

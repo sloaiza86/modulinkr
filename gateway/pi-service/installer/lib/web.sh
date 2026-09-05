@@ -90,10 +90,15 @@ web_fetch_vendor() {
     if sudo -u "$GW_USER" -H bash "$WEB_DIR/get_vendor.sh"; then
         ok "Assets descargados a static/vendor"
     elif [ -f "$WEB_DIR/static/vendor/vis-network.min.js" ] && \
-         [ -f "$WEB_DIR/static/vendor/echarts.min.js" ]; then
+         [ -f "$WEB_DIR/static/vendor/echarts.min.js" ] && \
+         [ -f "$WEB_DIR/static/vendor/esptool-bundle.js" ] && \
+         [ -f "$WEB_DIR/static/vendor/cally-0.9.2/dist/cally.js" ] && \
+         [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css" ] && \
+         [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js" ] && \
+         [ -f "$WEB_DIR/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js" ]; then
         warn "Sin descarga (¿sin Internet?); se usan los assets ya presentes"
     else
-        warn "Assets no disponibles: el visor arrancará pero sin mapa ni gráficos."
+        warn "Assets incompletos: algunas funciones del visor no estarán disponibles."
         warn "Reejecutar $WEB_DIR/get_vendor.sh con Internet."
     fi
 }
