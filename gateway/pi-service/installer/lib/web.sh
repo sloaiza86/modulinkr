@@ -158,6 +158,18 @@ web_write_env() {
         # para la cookie segura y para servir el cert en /cert.
         echo "MODULINKR_WEB_CERT=$WEB_CERT"
         echo "MODULINKR_WEB_KEY=$WEB_KEY"
+        # El proveedor se configura después desde el visor. La credencial se
+        # conserva si ya fue guardada en una instalación anterior.
+        echo "MODULINKR_AI_PROVIDER=${MODULINKR_AI_PROVIDER:-openai}"
+        echo "MODULINKR_AI_MODEL=${MODULINKR_AI_MODEL:-}"
+        echo "MODULINKR_AI_BASE_URL=${MODULINKR_AI_BASE_URL:-https://api.openai.com/v1}"
+        echo "MODULINKR_AI_ALLOW_INSECURE_DEV=${MODULINKR_AI_ALLOW_INSECURE_DEV:-0}"
+        if [ -n "${MODULINKR_AI_API_KEY_B64:-}" ]; then
+            echo "MODULINKR_AI_API_KEY_B64=$MODULINKR_AI_API_KEY_B64"
+        fi
+        if [ -n "${MODULINKR_AI_VERIFIED_SHA256:-}" ]; then
+            echo "MODULINKR_AI_VERIFIED_SHA256=$MODULINKR_AI_VERIFIED_SHA256"
+        fi
         # Puerto serie del Heltec: el comisionamiento por USB lo excluye
         # de la detección (abrirlo resetearía la radio del gateway).
         if [ -n "${MODULINKR_PORT:-}" ]; then
@@ -180,18 +192,19 @@ web_write_sudoers() {
     # Las páginas de configuración del visor ejecutan un puñado de acciones
     # privilegiadas acotadas. La regla protege frente a una sesión web
     # comprometida (la API no puede ejecutar otra cosa); no pretende aislar
-    # al usuario del servicio, que es dueño de los scripts. set_mqtt.sh y
-    # set_db.sh reciben los valores por stdin (sin argumentos), así que su
-    # entrada en la regla no lleva comodín.
+    # al usuario del servicio, que es dueño de los scripts. Los scripts de
+    # configuración reciben los valores por stdin, así que sus entradas en
+    # la regla no llevan comodín.
     chmod +x "$APP_DIR/set_lora_port.sh" "$APP_DIR/flash_heltec.sh" \
              "$APP_DIR/set_mqtt.sh" "$APP_DIR/set_db.sh" \
+             "$APP_DIR/set_ai.sh" \
              "$APP_DIR/flash_nodo.sh" "$APP_DIR/get_net.sh" \
              "$APP_DIR/set_net.sh" "$APP_DIR/set_wifi.sh" 2>/dev/null || true
     cat > /etc/sudoers.d/modulinkr-web <<EOF
 # Generado por el instalador de ModuLinkr. Acciones privilegiadas de las
 # páginas de configuración del visor (radio LoRa, MQTT, base de datos,
-# firmware del nodo, parámetros de red, red WiFi). No editar a mano.
-$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh, $APP_DIR/flash_nodo.sh *, $APP_DIR/get_net.sh, $APP_DIR/set_net.sh, $APP_DIR/set_wifi.sh scan, $APP_DIR/set_wifi.sh connect
+# proveedor de IA, firmware del nodo, parámetros de red, red WiFi). No editar a mano.
+$GW_USER ALL=(root) NOPASSWD: $APP_DIR/set_lora_port.sh *, $APP_DIR/flash_heltec.sh, $APP_DIR/set_mqtt.sh, $APP_DIR/set_db.sh, $APP_DIR/set_ai.sh, $APP_DIR/flash_nodo.sh *, $APP_DIR/get_net.sh, $APP_DIR/set_net.sh, $APP_DIR/set_wifi.sh scan, $APP_DIR/set_wifi.sh connect
 EOF
     chmod 440 /etc/sudoers.d/modulinkr-web
     if visudo -cf /etc/sudoers.d/modulinkr-web >/dev/null 2>&1; then

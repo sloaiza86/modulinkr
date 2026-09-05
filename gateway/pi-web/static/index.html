@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=history-dialog-layout-20260822">
+  <link rel="stylesheet" href="/static/style.css?v=modbus-ai-flow-20260902">
 </head>
 <body>
 
@@ -293,6 +293,16 @@
             <div class="ai-texto">
               <div class="ai-titulo">Red Wi-Fi</div>
               <div class="ai-sub">Conexión inalámbrica del gateway</div>
+            </div>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
+          </a>
+          <a class="ajuste-item" href="#/configuracion/ia">
+            <div class="ai-icono">
+              <modulinkr-icon name="mdi:creation-outline"></modulinkr-icon>
+            </div>
+            <div class="ai-texto">
+              <div class="ai-titulo">Asistente de IA</div>
+              <div class="ai-sub">Proveedor y modelo para configurar Modbus</div>
             </div>
             <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
@@ -629,6 +639,56 @@
           <div class="cfg-fila cfg-acciones">
             <button id="tz-guardar" class="btn-primario">Guardar zona horaria</button>
             <span id="tz-resultado" class="aviso"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nivel 2: proveedor y credencial del asistente de IA -->
+      <div class="ajustes" id="cfg-ia" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver">
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
+          </a>
+          <h2>Asistente de IA</h2>
+        </div>
+
+        <div class="card cfg-card">
+          <h2>Estado</h2>
+          <div id="ia-estado" class="cfg-nodo" aria-live="polite">
+            <p class="aviso">Cargando estado...</p>
+          </div>
+        </div>
+
+        <div class="card cfg-card">
+          <h2>Proveedor y modelo</h2>
+          <p class="texto-ayuda">La clave se guarda en el gateway y no vuelve a mostrarse. Déjala vacía para conservarla.</p>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Proveedor</span>
+              <select id="ia-provider">
+                <option value="openai">OpenAI</option>
+                <option value="openai_compatible">API compatible con OpenAI</option>
+              </select>
+            </label>
+            <label class="cfg-campo"><span>Modelo</span>
+              <input id="ia-model" type="text" maxlength="128"
+                     autocomplete="off" spellcheck="false"
+                     placeholder="Identificador exacto del modelo">
+            </label>
+            <label class="cfg-campo"><span>URL base</span>
+              <input id="ia-base-url" type="url" maxlength="2048"
+                     autocomplete="off" spellcheck="false"
+                     placeholder="https://api.proveedor.example/v1">
+            </label>
+            <label class="cfg-campo"><span>Clave API</span>
+              <input id="ia-api-key" type="password" maxlength="8192"
+                     autocomplete="new-password" spellcheck="false"
+                     placeholder="Sin cambios">
+            </label>
+          </div>
+          <p class="texto-ayuda ia-limite">La URL compatible debe ser pública y usar HTTPS. Al guardar se hará una solicitud mínima para comprobar la credencial y el acceso al modelo.</p>
+          <div class="cfg-fila cfg-acciones">
+            <button id="ia-guardar" class="btn-primario">Comprobar y guardar</button>
+            <span id="ia-resultado" class="aviso" aria-live="polite"></span>
           </div>
         </div>
       </div>
@@ -1020,6 +1080,146 @@
   </div>
 </modulinkr-history-dialog>
 
+<modulinkr-modbus-ai-assistant id="modbus-ai-assistant">
+  <dialog id="modbus-ai-dialog" class="mbai-dialog"
+          aria-labelledby="mbai-title" aria-describedby="mbai-description">
+    <div class="mbai-shell">
+      <header class="mbai-header">
+        <div class="mbai-heading">
+          <span class="mbai-icon" aria-hidden="true">
+            <modulinkr-icon name="mdi:robot-outline"></modulinkr-icon>
+          </span>
+          <div>
+            <h2 id="mbai-title">Asistente de configuración Modbus</h2>
+            <p id="mbai-device-context"></p>
+          </div>
+        </div>
+        <button type="button" class="icono-btn mbai-close"
+                data-mbai-action="cancel" title="Cerrar asistente"
+                aria-label="Cerrar asistente">
+          <modulinkr-icon name="mdi:close"></modulinkr-icon>
+        </button>
+      </header>
+
+      <ol class="mbai-progress" aria-label="Progreso del asistente">
+        <li data-mbai-progress="1" aria-current="step"><span>1</span><b>Origen</b></li>
+        <li data-mbai-progress="2"><span>2</span><b>Dispositivo</b></li>
+        <li data-mbai-progress="3"><span>3</span><b>Parámetros</b></li>
+        <li data-mbai-progress="4"><span>4</span><b>Revisión</b></li>
+      </ol>
+
+      <form id="mbai-form" class="mbai-body" novalidate>
+        <section data-mbai-step="1" aria-labelledby="mbai-step-1-title">
+          <p class="mbai-step-count">Paso 1 de 4</p>
+          <h3 id="mbai-step-1-title" tabindex="-1">¿Qué información tienes?</h3>
+          <p id="mbai-description" class="mbai-intro">El asistente utilizará esta información para localizar las lecturas y escrituras del dispositivo.</p>
+
+          <div class="mbai-source-options" role="radiogroup" aria-label="Origen de la información">
+            <label class="mbai-option">
+              <input type="radio" name="mbai-source" value="manual">
+              <span><strong>Tengo el manual</strong><small>Selecciona el PDF del fabricante.</small></span>
+            </label>
+            <label class="mbai-option">
+              <input type="radio" name="mbai-source" value="identity">
+              <span><strong>Conozco el fabricante y el modelo</strong><small>Indica los datos para buscar documentación.</small></span>
+            </label>
+          </div>
+
+          <div class="mbai-source-panel" data-mbai-source-panel="manual" hidden>
+            <div class="cfg-campo">
+              <span>Manual del dispositivo en PDF</span>
+              <div class="mbai-file-picker">
+                <input id="mbai-manual" class="mbai-file-input" type="file" accept=".pdf,application/pdf">
+                <label class="mbai-file-button" for="mbai-manual">Seleccionar PDF</label>
+                <span id="mbai-file-name" class="mbai-file-name">Ningún archivo seleccionado</span>
+              </div>
+            </div>
+            <p id="mbai-file-status" class="mbai-field-status" role="status">El PDF se enviará al proveedor configurado cuando continúes. No se guardará en el gateway; el proveedor aplicará su política de datos.</p>
+          </div>
+
+          <div class="mbai-source-panel" data-mbai-source-panel="identity" hidden>
+            <div class="cfg-form">
+              <label class="cfg-campo"><span>Fabricante (opcional)</span><input id="mbai-source-manufacturer" type="text" maxlength="80" autocomplete="organization" placeholder="Indícalo solo si lo conoces"></label>
+              <label class="cfg-campo"><span>Modelo</span><input id="mbai-source-model" type="text" maxlength="80" placeholder="Modelo exacto"></label>
+            </div>
+          </div>
+        </section>
+
+        <section data-mbai-step="2" aria-labelledby="mbai-step-2-title" hidden>
+          <p class="mbai-step-count">Paso 2 de 4</p>
+          <h3 id="mbai-step-2-title" tabindex="-1">Confirma el dispositivo</h3>
+          <p id="mbai-confirm-note" class="mbai-intro"></p>
+          <div id="mbai-targets-container"></div>
+          <div class="cfg-form">
+            <label class="cfg-campo"><span>Fabricante</span><input id="mbai-confirm-manufacturer" type="text" maxlength="80" readonly></label>
+            <label class="cfg-campo"><span>Modelo</span><input id="mbai-confirm-model" type="text" maxlength="80" readonly></label>
+            <label class="cfg-campo"><span>Variante o revisión</span><input id="mbai-confirm-revision" type="text" maxlength="80" placeholder="No indicada" readonly></label>
+          </div>
+          <div class="mensaje mensaje-info mbai-message">
+            <span class="mensaje-titulo">La variante importa</span>
+            <span class="mensaje-detalle">Un mismo modelo puede cambiar el mapa Modbus entre revisiones. Solo se propondrán datos de la variante confirmada.</span>
+          </div>
+          <div id="mbai-source-summary" class="mbai-source-summary" aria-live="polite"></div>
+        </section>
+
+        <section data-mbai-step="3" aria-labelledby="mbai-step-3-title" hidden>
+          <p class="mbai-step-count">Paso 3 de 4</p>
+          <h3 id="mbai-step-3-title" tabindex="-1">Elige qué quieres configurar</h3>
+          <p id="mbai-parameters-intro" class="mbai-intro">Selecciona los grupos del manual que quieres analizar.</p>
+          <div id="mbai-sections-container"></div>
+          <div id="mbai-candidates-container" hidden></div>
+        </section>
+
+        <section data-mbai-step="4" aria-labelledby="mbai-step-4-title" hidden>
+          <p class="mbai-step-count">Paso 4 de 4</p>
+          <h3 id="mbai-step-4-title" tabindex="-1">Revisa la propuesta</h3>
+          <p class="mbai-intro">La IA revisó los datos seleccionados y, cuando faltaba evidencia, intentó contrastarlos en la web. Revisa qué está confirmado y qué quedará fuera.</p>
+
+          <div id="mbai-review-summary" class="mbai-review-summary" aria-live="polite"></div>
+
+          <section class="mbai-review-section" aria-labelledby="mbai-review-load-title">
+            <h4 id="mbai-review-load-title">Parámetros confirmados</h4>
+            <div id="mbai-review-items" class="mbai-review-list"></div>
+          </section>
+
+          <section id="mbai-review-corrections" class="mbai-review-section mbai-review-corrections"
+                   aria-labelledby="mbai-review-corrections-title" hidden>
+            <h4 id="mbai-review-corrections-title">Necesita corrección</h4>
+            <p>La IA no pudo confirmar estos datos obligatorios. Los parámetros afectados no se cargarán. Si existen otros parámetros completos, puedes cargarlos por separado.</p>
+            <div id="mbai-review-correction-list" class="mbai-review-list"></div>
+          </section>
+
+          <section class="mbai-review-section mbai-review-preserved" aria-labelledby="mbai-review-preserved-title">
+            <h4 id="mbai-review-preserved-title">Se conservará sin cambios</h4>
+            <div id="mbai-review-preserved-list"></div>
+          </section>
+
+          <section class="mbai-review-section mbai-review-excluded" aria-labelledby="mbai-review-excluded-title">
+            <h4 id="mbai-review-excluded-title">No se cargará automáticamente</h4>
+            <p>Estos elementos quedan fuera para evitar aplicar operaciones incompletas, incompatibles o propias de la puesta en marcha.</p>
+            <div id="mbai-review-excluded-list" class="mbai-review-list"></div>
+          </section>
+
+          <details id="mbai-evidence-review" class="mbai-evidence-review">
+            <summary>Fuentes consultadas</summary>
+            <div id="mbai-evidence-content"></div>
+          </details>
+        </section>
+      </form>
+
+      <footer class="mbai-footer">
+        <p id="mbai-requirement" aria-live="polite"></p>
+        <div class="mbai-footer-actions">
+          <button type="button" data-mbai-action="cancel">Cancelar</button>
+          <button type="button" data-mbai-action="back" hidden>Volver</button>
+          <button type="button" data-mbai-action="apply-confirmed" hidden>Cargar solo lo confirmado</button>
+          <button type="button" class="btn-primario" data-mbai-action="next" disabled>Continuar</button>
+        </div>
+      </footer>
+    </div>
+  </dialog>
+</modulinkr-modbus-ai-assistant>
+
 <!-- El diálogo común conserva el foco dentro de la decisión activa. -->
 <div id="cfg-dialogo-fondo" hidden></div>
 <modulinkr-confirm-dialog id="cfg-dialogo" class="dialogo"
@@ -1053,7 +1253,7 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=topology-legend-logo-20260822"></script>
-<script src="/static/app.js?v=topology-reset-motion-20260822"></script>
+<script src="/static/components.js?v=modbus-ai-flow-20260902"></script>
+<script src="/static/app.js?v=modbus-ai-flow-20260902"></script>
 </body>
 </html>
