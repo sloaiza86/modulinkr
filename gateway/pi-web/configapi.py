@@ -28,6 +28,7 @@ import base64
 import glob
 import json
 import logging
+import firmwaremeta
 import os
 import subprocess
 import threading
@@ -370,7 +371,9 @@ def firmware_info():
             version = NODO_VER.read_text(encoding="utf-8").strip() or None
         except OSError:
             version = None
-    return {"bin": info, "version": version, "fw_name": NODE_FW_NAME,
+    return {"bin": info, "version": firmwaremeta.image_version(NODO_BIN),
+            "release_notes": firmwaremeta.release_notes("node", firmwaremeta.image_version(NODO_BIN)),
+            "legacy_version": version, "fw_name": NODE_FW_NAME,
             "flash_ready": FLASH_NODO_SH.is_file()}
 
 
@@ -440,7 +443,9 @@ def nodo_bin():
     if not NODO_BIN.is_file():
         return _err(404, "no hay nodo.bin en el gateway")
     return FileResponse(str(NODO_BIN), media_type="application/octet-stream",
-                        filename="nodo.bin")
+                        filename="nodo.bin", headers={
+                            "X-Modulinkr-Firmware-Version": firmwaremeta.image_version(NODO_BIN) or "unknown",
+                            "Cache-Control": "no-store"})
 
 
 @router.post("/flash")
@@ -466,6 +471,18 @@ async def flash(request: Request):
     if not _serial_lock.acquire(blocking=False):
         return _busy()
     try:
+        available = firmwaremeta.image_version(NODO_BIN)
+        if not available:
+            return _err(409, "No se puede identificar el firmware disponible. Vuelve a empaquetarlo.")
+        if body.get('expected_version') != available:
+            return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
+        try:
+            with _open(port) as ser:
+                installed = _hello(ser).get('version')
+        except TimeoutError:
+            installed = None
+        if firmwaremeta.comparison(installed, available) != 'different':
+            return _err(409, "No hay una actualización aplicable. Vuelve a comprobar la versión del nodo.")
         LOG.info("event=node.flash_started port=%s", port)
         ok, out = _sudo([str(FLASH_NODO_SH), port], timeout_s=FLASH_TIMEOUT_S)
         cola = "\n".join(out.splitlines()[-15:])   # esptool imprime mucho

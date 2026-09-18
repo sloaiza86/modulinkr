@@ -148,7 +148,21 @@ function valorFallo(c) {
 
 class ErrorInterfaz extends Error {}
 
-function mensajeApi(status, detalle = "") {
+const MENSAJES_LORA = {
+  lora_radio_unavailable: "No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.",
+  gateway_service_unavailable: "El servicio del gateway no está disponible. Comprueba su estado.",
+  lora_status_unknown: "No se pudo comprobar la conexión de la radio LoRa del gateway.",
+  node_no_response: "El nodo no responde por LoRa. Comprueba su alimentación y conexión.",
+  node_unavailable: "El nodo no está disponible para esta operación. Vuelve a comprobar su estado.",
+  node_status_unknown: "No se pudo comprobar la disponibilidad del nodo. Inténtalo de nuevo.",
+  config_read_busy: "Hay una importación de configuración en curso para este nodo. Espera a que termine.",
+  config_write_busy: "Hay un envío de configuración en curso para este nodo. Espera a que termine.",
+};
+
+function mensajeApi(status, detalle = "", codigo = "") {
+  if (Object.prototype.hasOwnProperty.call(MENSAJES_LORA, codigo)) return MENSAJES_LORA[codigo];
+  const configError = mensajeConfigNodo(detalle);
+  if (configError) return configError;
   const d = String(detalle).toLowerCase();
   if (status === 400) {
     if (d.includes("puerto")) return "El puerto indicado no es válido. Revisa el valor e inténtalo de nuevo.";
@@ -158,15 +172,55 @@ function mensajeApi(status, detalle = "") {
     return "Revisa los datos e inténtalo de nuevo.";
   }
   if (status === 404) return "No se ha encontrado la información solicitada. Actualiza la página e inténtalo de nuevo.";
-  if (status === 409) return "Hay otra operación en curso. Espera a que termine antes de continuar.";
+  if (status === 409) {
+    if (/otra operación.*en curso|ya hay.*en curso/.test(d)) return "Hay otra operación en curso. Espera a que termine antes de continuar.";
+    return "No se puede realizar esta operación en el estado actual.";
+  }
   if (status === 501 || status === 503) return "Esta función no está disponible en este momento. Vuelve a intentarlo más tarde.";
   if (status >= 500) return "El gateway no pudo completar la operación. Vuelve a intentarlo en unos segundos.";
   return "No se pudo completar la operación. Revisa los datos y vuelve a intentarlo.";
 }
 
+function mensajeConfigNodo(texto) {
+  const t = String(texto ?? "").trim().replace(/^(?:CFG:ERR|error:)\s*/i, "");
+  const mensajes = [
+    [/^device (?:sin name|name missing)$/i,
+      "El nombre de un dispositivo Modbus está vacío o supera los 16 bytes permitidos. Revisa los nombres; las tildes y algunos símbolos ocupan más de un byte."],
+    [/^name (?:missing or invalid|ausente o invalido) (?:in|en) '/i,
+      "El nombre de una medida o escritura está vacío o supera los 32 bytes permitidos. Revisa ese campo; las tildes y algunos símbolos ocupan más de un byte."],
+    [/^read\/write id /i,
+      "Revisa el identificador de cada medida y escritura: debe tener entre 2 y 8 caracteres y ocupar como máximo 8 bytes."],
+    [/^(?:duplicate id|id duplicado) /i,
+      "Hay identificadores repetidos. Cada medida y escritura debe tener un identificador distinto, también entre dispositivos."],
+    [/^(?:slave_id out of range|slave_id fuera de)/i,
+      "Revisa las direcciones Modbus actual y nueva de cada dispositivo: deben ser números enteros entre 1 y 247."],
+    [/^address (?:missing|out of range|ausente|fuera de)/i,
+      "Revisa la dirección de cada medida y escritura: debe ser un número entero entre 0 y 65535."],
+    [/^(?:count does not match type size|count no coincide)/i,
+      "La cantidad de registros no coincide con el tipo de dato. Revisa ambos campos en la medida o escritura."],
+    [/^byte_order /i,
+      "El orden de bytes no es válido para el tipo de dato seleccionado. Revisa ambos campos en la medida o escritura."],
+    [/^(?:too many devices|demasiados devices)/i,
+      "El nodo admite como máximo 4 dispositivos Modbus. Elimina los dispositivos adicionales antes de guardar."],
+    [/^(?:too many reads|demasiados reads|configuration read count exceeds|total de reads del config excede)/i,
+      "El nodo admite como máximo 8 medidas en total. Reduce las medidas antes de guardar."],
+    [/^(?:too many writes|demasiados writes)/i,
+      "Cada dispositivo admite como máximo 4 escrituras. Elimina las escrituras adicionales antes de guardar."],
+    [/^sha256 (?:mismatch|no coincide)/i,
+      "El nodo detectó que el contenido recibido no coincide con el enviado. Comprueba la conexión y vuelve a intentarlo."],
+    [/^(?:payload receive timeout|timeout.*payload)/i,
+      "El nodo no recibió la configuración completa dentro del plazo. Comprueba la conexión USB y vuelve a guardar."],
+    [/^(?:insufficient memory|memoria insuficiente)/i,
+      "El nodo no dispone de memoria suficiente para completar la operación. Reduce la configuración e inténtalo de nuevo."],
+  ];
+  return mensajes.find(([patron]) => patron.test(t))?.[1] || "";
+}
+
 function textoCliente(texto) {
   const original = String(texto ?? "").trim();
   if (!original) return "";
+  const configError = mensajeConfigNodo(original);
+  if (configError) return configError;
   const t = original.toLowerCase();
 
   if (/unexpected token|traceback|typeerror|syntaxerror|failed to fetch|networkerror|<!doctype|errno|sudoers|\.sh\b/.test(t)) {
@@ -240,11 +294,11 @@ async function fetchApi(url, opts) {
     }
     if (data && typeof data.error === "string") {
       console.error("Operación rechazada", url, r.status);
-      data.error = mensajeApi(r.status, data.error);
+      data.error = mensajeApi(r.status, data.error, data.code);
     }
     if (data && typeof data.detail === "string" && !r.ok) {
       console.error("Operación rechazada", url, r.status);
-      data.detail = mensajeApi(r.status, data.detail);
+      data.detail = mensajeApi(r.status, data.detail, data.code);
     }
     return data;
   };
@@ -570,25 +624,26 @@ function chipsNodo(n, ult, onlineS) {
     || n.nbiot_ago_s != null || n.mqtt_ago_s != null;
   if (tieneCelular) {
     const nbFresco = n.nbiot_ago_s != null && n.nbiot_ago_s <= 180;
-    const mqttFresco = n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
+    const nbDesconocido = n.nbiot_flags == null || (n.nbiot_flags & 0x08) !== 0;
     const reg = n.nbiot_flags != null && (n.nbiot_flags & 0x01) !== 0;
     const mqtt = n.nbiot_flags != null && (n.nbiot_flags & 0x02) !== 0;
+    const mqttDesconocido = n.nbiot_flags != null && (n.nbiot_flags & 0x04) !== 0;
 
-    chips.push(!nbFresco
-      ? { cls: "gris", txt: "NB-IoT: sin datos recientes" }
+    chips.push(!nbFresco || nbDesconocido
+      ? { cls: "gris", txt: "NB-IoT: estado desconocido" }
       : reg ? { cls: "on", txt: "NB-IoT: conectado" }
             : { cls: "gris", txt: "NB-IoT: sin conexión" });
 
-    if (!nbFresco) {
-      chips.push({ cls: "gris", txt: "MQTT: sin datos recientes" });
+    // El heartbeat comunica la consulta local del módem. No publicar medidas
+    // por el respaldo celular no implica que la sesión MQTT esté caída.
+    if (!nbFresco || nbDesconocido || mqttDesconocido) {
+      chips.push({ cls: "gris", txt: "MQTT: estado desconocido" });
     } else if (!reg) {
       chips.push({ cls: "gris", txt: "MQTT: no disponible" });
     } else if (!mqtt) {
       chips.push({ cls: "gris", txt: "MQTT: sin conexión" });
     } else {
-      chips.push(mqttFresco
-        ? { cls: "on", txt: "MQTT: conectado" }
-        : { cls: "gris", txt: "MQTT: sin datos recientes" });
+      chips.push({ cls: "on", txt: "MQTT: conectado" });
     }
   }
   return chips;
@@ -690,6 +745,7 @@ async function refrescarRed() {
         : Promise.resolve(null),
     ]);
     if (!r1.ok) {
+      formRadioActualizar(null);
       aviso.textContent = "No se pudo consultar el estado de la red. Vuelve a intentarlo.";
       return;
     }
@@ -697,6 +753,7 @@ async function refrescarRed() {
     ultimos = r2.ok ? await r2.json() : { nodes: [] };
     if (r3?.ok) cacheCatalogosRed = await r3.json();
   } catch (e) {
+    formRadioActualizar(null);
     aviso.textContent = cacheEstado
       ? "Gateway sin conexión. Se muestran los últimos datos recibidos."
       : "No se puede cargar la red porque el gateway no responde. Comprueba la conexión.";
@@ -704,6 +761,7 @@ async function refrescarRed() {
   }
 
   cacheEstado = estado;
+  formRadioActualizar(estado);
   cacheUltimos = ultimos;
   if (catalogo !== null && actualizarTiposCatalogo()) {
     selectorMedidas.catalog = catalogo;
@@ -1102,7 +1160,7 @@ function pintarDetalle(origin) {
     <div class="det-grupo"><h3>Información</h3>
       ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
       ${filaDet("Última actividad", "Hace " + fmtAgo(n.ago_s))}
-      ${filaDet("Versión", htmlSeguro(n.fw_version ?? ""))}
+      ${filaDet("Versión", htmlSeguro(fwVersionTexto(n.fw_version)))}
     </div>
     ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>
       <div class="detalle-medidas">${sensores}</div></div>` : ""}
@@ -2444,8 +2502,20 @@ function normalizarTextoDialogo(contenedor) {
 function cfgDialogo(titulo, texto, botones = {}) {
   document.getElementById("cfg-dialogo-titulo").textContent = titulo;
   const cuerpo = document.getElementById("cfg-dialogo-texto");
-  cuerpo.innerHTML = texto;
-  normalizarTextoDialogo(cuerpo);
+  if (texto.startsWith(SPIN)) {
+    // El contador cambia durante el sondeo; conservar el indicador evita
+    // reiniciar su animación cada vez que llega un estado nuevo.
+    let mensaje = cuerpo.querySelector(".cfg-progreso-texto");
+    if (!mensaje || !cuerpo.querySelector(".spin")) {
+      cuerpo.innerHTML = SPIN + '<span class="cfg-progreso-texto"></span>';
+      mensaje = cuerpo.querySelector(".cfg-progreso-texto");
+    }
+    mensaje.innerHTML = texto.slice(SPIN.length);
+    normalizarTextoDialogo(mensaje);
+  } else {
+    cuerpo.innerHTML = texto;
+    normalizarTextoDialogo(cuerpo);
+  }
   const bc = document.getElementById("cfg-dialogo-cancelar");
   const bf = document.getElementById("cfg-dialogo-confirmar");
   const bx = document.getElementById("cfg-dialogo-cerrar");
@@ -2463,18 +2533,19 @@ function cfgDialogo(titulo, texto, botones = {}) {
   bf.className = botones.confirmarPeligro === false ? "btn-primario" : "peligro";
   cfgCancelarCb = botones.onCancelar || null;
   const dialogo = document.getElementById("cfg-dialogo");
-  const peligro = botones.confirmar && botones.confirmarPeligro !== false;
+  const peligro = !!(botones.error || (botones.confirmar && botones.confirmarPeligro !== false));
   dialogo.classList.toggle("dialogo-peligro", peligro);
   document.getElementById("cfg-dialogo-icono").textContent = peligro ? "!" : "i";
   dialogo.setAttribute("aria-busy", botones.cancelar || botones.confirmar ||
     botones.cerrar || botones.otroText ? "false" : "true");
-  if (dialogo.hidden) cfgDialogoFoco = document.activeElement;
+  const abrir = dialogo.hidden;
+  if (abrir) cfgDialogoFoco = document.activeElement;
   ["sidebar", "sidebar-fondo", "contenido", "detalle"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.setAttribute("inert", "");
   });
   dialogo.show();
-  requestAnimationFrame(() => dialogo.focus());
+  if (abrir) requestAnimationFrame(() => dialogo.focus());
 }
 
 function cfgDialogoCerrar() {
@@ -2521,7 +2592,7 @@ function cfgPintarNodo(port, n) {
   } else {
     filas.push(["Estado", n.error ?? "Sin configurar"]);
   }
-  filas.push(["Versión", `${n.fw} v${n.version}`]);
+  filas.push(["Versión", `${n.fw} v${fwVersionTexto(n.version)}`]);
   filas.push(["Conexión", port.split("/").pop()]);
   const el = document.getElementById("cfg-nodo");
   el.innerHTML = `
@@ -2547,10 +2618,11 @@ function cfgPintarNodo(port, n) {
 class LocalCfg {
   constructor(port) {
     this.port = port; this.reader = null; this.writer = null;
-    this.keep = false; this.lines = []; this.loop = null;
+    this.keep = false; this.lines = []; this.loop = null; this.opened = false;
   }
   async open() {
     await this.port.open({ baudRate: 115200 });
+    this.opened = true;
     // Sin auto-reset por DTR/RTS (como el _open de la Pi); si igual resetea,
     // el sondeo de hello cubre el arranque.
     try { await this.port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) { /* */ }
@@ -2576,12 +2648,14 @@ class LocalCfg {
       try { this.reader.releaseLock(); } catch (e) { /* */ }
     }
   }
-  async close() {
+  async close(strict = false) {
+    if (!this.opened) return;
     this.keep = false;
     try { if (this.reader) await this.reader.cancel(); } catch (e) { /* */ }
     try { if (this.loop) await this.loop; } catch (e) { /* */ }
     try { if (this.writer) this.writer.releaseLock(); } catch (e) { /* */ }
-    try { await this.port.close(); } catch (e) { /* */ }
+    try { await this.port.close(); this.opened = false; }
+    catch (e) { if (strict && (this.port.readable || this.port.writable)) throw e; }
   }
   async send(line) { await this.writer.write(new TextEncoder().encode(line + "\n")); }
   async waitLine(pred, ms) {
@@ -3019,8 +3093,12 @@ document.addEventListener("keydown", (event) => {
 // Heltec y flashear su firmware) que el Pi ejecuta bajo la regla sudo
 // acotada del instalador.
 
+let radioOcupada = false;
+let radioComprobando = false;
+let radioDisponible = null;
 function radioBotones(bloquear) {
-  ["radio-aplicar", "radio-flash"].forEach((id) => {
+  radioOcupada = bloquear;
+  ["radio-aplicar", "radio-flash", "radio-recuperar", "radio-comprobar"].forEach((id) => {
     document.getElementById(id).disabled = bloquear;
   });
 }
@@ -3036,10 +3114,10 @@ async function radioCargar() {
       ? '<span class="chip on">disponible</span>'
       : '<span class="chip gris">no disponible</span>';
     const radioChip = d.port
-      ? (d.port_present ? '<span class="chip on">conectada</span>'
+      ? (d.connected ? '<span class="chip on">conectada</span>'
                         : '<span class="chip gris">sin conexión</span>')
       : '<span class="chip gris">sin configurar</span>';
-    const puerto = d.port ? d.port.split("/").pop() : "Sin configurar";
+    const puerto = d.port ? "USB en el gateway" : "Sin configurar";
     cont.innerHTML = `
       <div class="sensor fila-info">
         <span class="s-nombre">Servicio del gateway</span>
@@ -3058,17 +3136,58 @@ async function radioCargar() {
     sel.innerHTML = d.ports.length
       ? d.ports.map((p) =>
           `<option value="${p.port}"${p.gateway ? " selected" : ""}>` +
-          `${p.port.split("/").pop()}${p.gateway ? " (actual)" : ""}</option>`).join("")
+          `${htmlSeguro(p.description || "Radio USB")} · ${htmlSeguro(p.port.split("/").pop().slice(-16))}${p.gateway ? " (actual)" : ""}</option>`).join("")
       : '<option value="">No se han encontrado conexiones</option>';
 
-    document.getElementById("radio-bin-info").textContent = d.bin
-      ? "Actualización preparada."
-      : "No hay ninguna actualización preparada para la radio.";
-    document.getElementById("radio-flash").disabled = !d.bin;
+    radioFicha(d);
+    document.getElementById("radio-port-detail").textContent = d.port || "Sin configurar";
   } catch (e) {
     cont.innerHTML = `<p class="aviso mal">${textoError(e, "No se pudo cargar el estado de la radio. Actualiza la página e inténtalo de nuevo.")}</p>`;
   }
 }
+
+function radioFicha(d) {
+  if (radioOcupada) return;
+  radioDisponible = d.available_version;
+  const estado = fwComparar(d.installed_version, d.available_version);
+  fwMensaje(document.getElementById("radio-bin-info"), !d.connected ? "Sin conexión con la radio. Comprueba su conexión USB."
+    : estado === "unknown" ? "No se pudo leer la versión de la radio. Vuelve a comprobarla."
+    : fwComparacionTexto(d.installed_version, d.available_version),
+    !d.connected || estado === "unknown" ? "advertencia" : estado === "current" ? "exito" : "info");
+  document.getElementById("radio-version-instalada").textContent = fwVersionTexto(d.installed_version);
+  document.getElementById("radio-version-disponible").textContent = fwVersionTexto(d.available_version);
+  fwAccion(document.getElementById("radio-flash"), d.installed_version, d.available_version, d.connected);
+  document.getElementById("radio-recuperar").disabled = !d.available_version || !d.port_present;
+  document.getElementById("radio-comprobar").hidden = d.connected && estado !== "unknown";
+  fwNotas("radio-notas", d.release_notes);
+}
+
+async function radioComprobar() {
+  const btn = document.getElementById("radio-comprobar");
+  btn.disabled = true; radioComprobando = true;
+  fwMensaje(document.getElementById("radio-bin-info"), "Consultando la versión de la radio...", "progreso");
+  try { await new Promise(resolve => setTimeout(resolve, 5500)); await radioCargar(); }
+  finally { btn.disabled = false; radioComprobando = false; }
+}
+
+document.getElementById("radio-comprobar").addEventListener("click", radioComprobar);
+document.getElementById("radio-recuperar").addEventListener("click", () => radioFlash(true));
+
+setInterval(async () => {
+  if (document.hidden || location.hash !== "#/configuracion/radio" || radioOcupada || radioComprobando) return;
+  try {
+    const r = await fetchApi("/api/radio/estado");
+    if (!r.ok) throw new Error("No se pudo consultar la radio.");
+    radioFicha(await r.json());
+  } catch (e) {
+    if (!radioOcupada) {
+      document.getElementById("radio-flash").disabled = true;
+      document.getElementById("radio-recuperar").disabled = true;
+      document.getElementById("radio-comprobar").hidden = false;
+      fwMensaje(document.getElementById("radio-bin-info"), "No se pudo comprobar el estado de la radio. La consulta se repetirá automáticamente.", "advertencia");
+    }
+  }
+}, 5000);
 
 async function radioAplicarPuerto() {
   const sel = document.getElementById("radio-puertos");
@@ -3088,28 +3207,32 @@ async function radioAplicarPuerto() {
     cfgDialogo(T, textoError(e, "No se pudo aplicar el cambio. Inténtalo de nuevo."), { cerrar: true });
   } finally {
     radioBotones(false);
+    await radioCargar();
   }
 }
 
-async function radioFlash() {
-  const T = "Actualizar la radio";
+async function radioFlash(recovery = false) {
+  recovery = recovery === true;
+  const expected_version = radioDisponible;
+  const T = recovery ? "Recuperar la radio por USB" : "Actualizar la radio";
   cfgConfirmarCb = async () => {
     radioBotones(true);
     cfgDialogo(T, SPIN + "Instalando la actualización...");
     try {
-      const r = await fetchApi("/api/radio/flash", { method: "POST" });
+      const r = await fetchApi("/api/radio/flash", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({recovery, expected_version}) });
       const d = await r.json();
       if (!r.ok) { cfgDialogo(T, d.error ?? "No se pudo actualizar la radio. Inténtalo de nuevo.", { cerrar: true }); return; }
-      cfgDialogo(T, "Actualización instalada. La radio está disponible.", { cerrar: true });
+      cfgDialogo(T, "Firmware escrito. El gateway está reiniciando la radio; se comprobará su versión al volver a conectarse.", { cerrar: true });
       radioCargar();
     } catch (e) {
       cfgDialogo(T, textoError(e, "No se pudo actualizar la radio. Inténtalo de nuevo."), { cerrar: true });
     } finally {
       radioBotones(false);
+    await radioCargar();
     }
   };
-  cfgDialogo(T, "La red LoRa dejará de estar disponible durante aproximadamente un minuto.",
-    { cancelar: true, confirmar: true, confirmarText: "Actualizar la radio" });
+  cfgDialogo(T, (recovery ? "Se reinstalará el firmware disponible aunque no se haya podido comprobar la versión actual. " : "") + "La red LoRa dejará de estar disponible durante aproximadamente un minuto.",
+    { cancelar: true, confirmar: true, confirmarText: recovery ? "Reinstalar firmware" : "Actualizar la radio" });
 }
 
 // ----- Ajustes: zona horaria de visualización -----
@@ -4020,59 +4143,51 @@ const BC_FASE = {
   cancelled: "cancelada",
 };
 
+let bcSeleccion = new Set();
+let bcDatos = null;
+let bcOcupada = false;
+
+function bcSeleccionBoton() {
+  const btn = document.getElementById("bc-lanzar");
+  btn.disabled = bcOcupada || !bcDatos?.can_start || !bcSeleccion.size;
+  btn.textContent = bcSeleccion.size ? `Enviar actualización a ${bcSeleccion.size} ${bcSeleccion.size === 1 ? "nodo" : "nodos"}` : "Selecciona los nodos";
+}
+
 function bcPintar(d) {
-  const panel = document.getElementById("bc-panel");
-  const cancelar = document.getElementById("bc-cancelar");
-  const lanzar = document.getElementById("bc-lanzar");
-  if (!d || !d.id) {
-    panel.hidden = true;
-    cancelar.hidden = true;
-    // Sin difusión propia, el botón solo se apaga si hay un envío a un nodo
-    // ocupando el aire: las dos operaciones comparten transporte y no caben a
-    // la vez (§20.12).
-    lanzar.disabled = !!(d && d.otra_en_curso);
-    document.getElementById("bc-aviso").textContent = d && d.otra_en_curso
-      ? `El nodo ${d.otra_en_curso.nodo} se está actualizando. `
-        + "Espera a que termine para iniciar otra actualización."
-      : "";
-    return;
-  }
-  panel.hidden = false;
-  cancelar.hidden = !d.activa;
-  lanzar.disabled = !!d.activa;
-
-  const est = document.getElementById("bc-estado");
-  let html = migDato("Estado", BC_FASE[d.state] || "En curso");
-  html += migDato("Versión", d.version || "?");
-  html += migDato("En marcha desde hace", migDuracion(d.elapsed_s), "mig-cuenta");
-  est.innerHTML = html;
-
+  bcDatos = d;
+  const nodes = d.nodos || [];
+  bcSeleccion = new Set([...bcSeleccion].filter(id => nodes.some(n => n.node_id === id && n.can_send)));
+  document.getElementById("bc-panel").hidden = false;
+  document.getElementById("bc-cancelar").hidden = !d.activa;
+  document.getElementById("bc-lanzar").hidden = !d.can_start;
+  document.getElementById("bc-radio-aviso").hidden = d.radio_available !== false;
+  document.getElementById("bc-estado").innerHTML = "";
+  fwNotas("bc-notas", d.release_notes);
   const tb = document.querySelector("#bc-tabla tbody");
-  if (!d.nodos.length) {
-    // El recuento no existe hasta la primera ronda de preguntas, y decirlo
-    // evita leer la tabla vacía como "ningún nodo está recibiendo".
-    tb.innerHTML = '<tr><td colspan="5">Preparando el estado de los nodos.</td></tr>';
-    return;
+  const estados = {queued: "En cola", offering: "Preparando envío", sending: "Enviando firmware", polling: "Comprobando recepción",
+    repairing: "Completando envío", ready: "Listo para instalar", pending: "Comprobando la imagen",
+    install_req: "Comprobando la imagen", installing: "Instalando; esperando confirmación", done: "Instalación confirmada",
+    failed: "No se pudo completar", cancelled: "Envío cancelado"};
+  const rows = nodes.map(n => {
+    const estado = !n.online ? "Sin conexión" : n.comparison === "current" ? "Actualizado"
+      : (n.operation_state === "sending" && n.progress != null ? `Enviando firmware (${n.progress} %)` : estados[n.operation_state]) || (n.received ? "Listo para instalar" : n.comparison === "older" ? "Sin una versión más reciente"
+      : n.comparison === "unknown" ? "No se pudo comprobar la versión" : n.comparison === "unavailable" ? "Sin firmware disponible" : "Actualización disponible");
+    return `<tr><td>${n.can_send ? `<input type="checkbox" class="bc-elegir" data-origin="${n.node_id}" aria-label="Seleccionar ${htmlSeguro(n.name || "nodo")} (${n.node_id})" ${bcSeleccion.has(n.node_id) ? "checked" : ""}>` : ""}</td>`
+      + `<td>${htmlSeguro(n.name || "Nodo")} (${n.node_id})</td><td>${htmlSeguro(fwVersionTexto(n.installed_version))}</td><td>${htmlSeguro(fwVersionTexto(n.available_version))}</td>`
+      + `<td>${htmlSeguro(estado)}</td><td>${n.can_install ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar ${fwVersionTexto(n.available_version)}</button>` : ""}</td></tr>`;
+  }).join("") || '<tr><td colspan="6">No hay nodos registrados.</td></tr>';
+  const focus = document.activeElement?.dataset?.origin;
+  if (tb.innerHTML !== rows) {
+    tb.innerHTML = rows;
+    tb.querySelectorAll(".bc-elegir").forEach(b => b.addEventListener("change", () => {
+      const id = Number(b.dataset.origin);
+      if (b.checked) bcSeleccion.add(id); else bcSeleccion.delete(id);
+      bcSeleccionBoton();
+    }));
+    tb.querySelectorAll(".bc-instalar").forEach(b => b.addEventListener("click", () => bcInstalar(Number(b.dataset.origin))));
+    if (focus) tb.querySelector(`[data-origin="${Number(focus)}"]`)?.focus();
   }
-  // Instalar va por nodo y no de golpe, por lo mismo que en la subida
-  // individual: subir es inocuo y puede correr de noche, instalar reinicia el
-  // nodo y lo saca de la red mientras arranca. Que sean veinte no cambia eso,
-  // lo multiplica, así que se decide uno a uno mirando.
-  const puedeInstalar = d.state === "ready" || d.state === "done";
-  tb.innerHTML = d.nodos.map((n) => {
-    const clase = n.missing === 0 ? "migrado" : "rezagado";
-    const boton = (puedeInstalar && n.missing === 0)
-      ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar actualización</button>`
-      : "";
-    return `<tr><td>${n.node_id}</td>`
-         + `<td><span class="mig-pill ${clase}">${n.pct} %</span></td>`
-         + `<td>${n.missing}</td>`
-         + `<td>${new Date(n.ts * 1000).toLocaleTimeString()}</td>`
-         + `<td>${boton}</td></tr>`;
-  }).join("");
-  tb.querySelectorAll(".bc-instalar").forEach((b) => {
-    b.addEventListener("click", () => bcInstalar(Number(b.dataset.origin)));
-  });
+  bcSeleccionBoton();
 }
 
 async function bcInstalar(origin) {
@@ -4089,25 +4204,30 @@ async function bcInstalar(origin) {
   if (!seguir) { cfgDialogoCerrar(); return; }
   cfgDialogoCerrar();
   try {
-    const r = await fetchApi("/api/config/lora/firmware/difusion/instalar", {
+    const node = bcDatos?.nodos.find(n => n.node_id === origin);
+    if (!node?.can_install) return;
+    const r = await fetchApi(node.broadcast ? "/api/config/lora/firmware/difusion/instalar" : "/api/config/lora/firmware/instalar", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ origin }) });
+      body: JSON.stringify(node.broadcast ? {origin} : {id: node.job_id}) });
     const d = await r.json();
-    aviso.className = r.ok ? "aviso" : "aviso mal";
-    aviso.textContent = r.ok
-      ? `Actualización iniciada en el nodo ${origin}.`
-      : textoError(new Error(d.error || "No se ha podido iniciar la actualización."));
+    fwMensaje(aviso, r.ok ? `Instalación solicitada en el nodo ${origin}.` : textoError(new Error(d.error || "No se pudo iniciar la instalación.")), r.ok ? "info" : "error");
+    await bcRefrescar();
   } catch (e) {
-    aviso.className = "aviso mal";
-    aviso.textContent = textoError(e);
+    fwMensaje(aviso, textoError(e), "error");
   }
 }
 
 async function bcRefrescar() {
   try {
     const r = await fetchApi("/api/config/lora/firmware/difusion");
+    if (!r.ok) throw new Error("No se pudo comprobar el estado de los nodos.");
     bcPintar(await r.json());
-  } catch (e) { /* el sondeo siguiente lo reintenta */ }
+  } catch (e) {
+    bcDatos = null;
+    bcSeleccionBoton();
+    document.querySelectorAll("#bc-tabla button, #bc-tabla input").forEach(el => { el.disabled = true; });
+    fwMensaje(document.getElementById("bc-aviso"), "No se pudo comprobar el estado de los nodos. La consulta se repetirá automáticamente.", "advertencia");
+  }
 }
 
 function bcSondeoArrancar() {
@@ -4120,40 +4240,30 @@ function bcSondeoParar() {
 }
 
 async function bcLanzar() {
-  const res = document.getElementById("bc-aviso");
-  const fuera = bcFueraDeAlcance();
-  const avisoClase = fuera.length
-    ? "<p>Estos nodos deberán actualizarse individualmente: <b>"
-      + fuera.join(", ") + "</b>.</p>"
-    : "";
-  const seguir = await new Promise((resolve) => {
+  if (bcOcupada || !bcDatos?.can_start || !bcSeleccion.size) return;
+  const origins = [...bcSeleccion];
+  const expected_version = bcDatos.version;
+  const nombres = bcDatos.nodos.filter(n => origins.includes(n.node_id)).map(n => htmlSeguro(n.name || `Nodo ${n.node_id}`)).join(", ");
+  const seguir = await new Promise(resolve => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Actualizar toda la red",
-      "<p>La actualización se enviará a los nodos conectados directamente y "
-      + "tardará aproximadamente <b>dos horas</b>.</p>"
-      + avisoClase
-      + "<p>La instalación se confirmará después en cada nodo.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Iniciar actualización",
-        onCancelar: () => resolve(false) });
+    cfgDialogo("Enviar firmware por LoRa", `<p>Versión ${fwVersionTexto(bcDatos.version)} para: ${nombres}.</p>`
+      + "<p>El envío se realizará por turnos y puede tardar varias horas. La instalación se confirmará después en cada nodo.</p>",
+      {cancelar: true, confirmar: true, confirmarText: "Enviar actualización", onCancelar: () => resolve(false)});
   });
-  if (!seguir) { cfgDialogoCerrar(); return; }
   cfgDialogoCerrar();
-
-  res.className = "aviso";
-  res.textContent = "Iniciando actualización...";
+  if (!seguir) return;
+  bcOcupada = true; bcSeleccionBoton();
+  const res = document.getElementById("bc-aviso");
+  fwMensaje(res, "Guardando el envío en el gateway...", "progreso");
   try {
-    const r = await fetchApi("/api/config/lora/firmware/difundir",
-                             { method: "POST" });
+    const r = await fetchApi("/api/config/lora/firmware/seleccion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({origins, expected_version})});
     const d = await r.json();
-    if (!r.ok) {
-      res.className = "aviso mal";
-      res.textContent = d.error ?? "No se pudo iniciar la actualización.";
-      return;
-    }
-    res.className = "aviso";
-    res.textContent = `Actualización ${d.version} en curso.`;
-    bcRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
+    if (!r.ok) throw new Error(d.error || "No se pudo iniciar el envío.");
+    bcSeleccion.clear();
+    fwMensaje(res, "Envío guardado. Puedes seguir el progreso en la tabla.", "info");
+    await bcRefrescar();
+  } catch (e) { fwMensaje(res, textoError(e), "error"); }
+  finally { bcOcupada = false; bcSeleccionBoton(); }
 }
 
 async function bcCancelar() {
@@ -4161,7 +4271,7 @@ async function bcCancelar() {
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
     cfgDialogo("Cancelar la actualización",
-      "<p>Se detendrá la actualización de la red. Podrá reanudarse más adelante.</p>",
+      "<p>Se detendrán el envío en curso y los que están en cola. Las imágenes ya recibidas se conservarán.</p>",
       { cancelar: true, confirmar: true, confirmarText: "Cancelar actualización",
         onCancelar: () => resolve(false) });
   });
@@ -4171,11 +4281,9 @@ async function bcCancelar() {
     const r = await fetchApi("/api/config/lora/firmware/difusion/cancelar",
                              { method: "POST" });
     const d = await r.json();
-    res.className = r.ok ? "aviso" : "aviso mal";
-    res.textContent = r.ok ? "Actualización cancelada."
-                           : textoError(new Error(d.error));
+    fwMensaje(res, r.ok ? "Envío cancelado." : textoError(new Error(d.error)), r.ok ? "info" : "error");
     bcRefrescar();
-  } catch (e) { res.className = "aviso mal"; res.textContent = textoError(e); }
+  } catch (e) { fwMensaje(res, textoError(e), "error"); }
 }
 
 document.getElementById("bc-lanzar").addEventListener("click", bcLanzar);
@@ -4364,6 +4472,7 @@ document.getElementById("wifi-conectar").addEventListener("click", wifiConectar)
 
 let dbgEs = null;      // EventSource abierto, o null
 let dbgTab = "gateway";
+let dbgLines = [];
 // Monitor serie por Web Serial (nodo conectado a ESTE ordenador, no a la Pi).
 let dbgPort = null;    // SerialPort local abierto, o null
 let dbgReader = null;  // reader del stream de lectura
@@ -4378,7 +4487,7 @@ const DBG_AYUDA = {
 
 async function debugInit() {
   debugStop();
-  document.getElementById("dbg-consola").textContent = "";
+  debugClear();
   document.getElementById("dbg-info").textContent = "";
   try {
     const r = await fetchApi("/api/debug/puertos");
@@ -4430,7 +4539,7 @@ function debugSetTab(tab) {
   dbgSerialCtrls();
   document.getElementById("dbg-nodo").hidden = tab !== "modbus";
   document.getElementById("dbg-ayuda").textContent = DBG_AYUDA[tab];
-  document.getElementById("dbg-consola").textContent = "";
+  debugClear();
   dbgModoModbus();
 }
 
@@ -4580,15 +4689,63 @@ async function debugLocalStop() {
   if (dbgPort) { try { await dbgPort.close(); } catch (e) { /* */ } dbgPort = null; }
 }
 
+function debugRecord(line) {
+  const clean = line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, " ");
+  const structured = clean.match(/^(?:\d{4}-\d\d-\d\dT\S+|up=\d+\.\d+s)\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(\S+)\s+/);
+  const legacy = clean.match(/^\[([^\]]+)\]/);
+  return {line: clean, level: structured?.[1] || null,
+    component: structured?.[2] || (legacy ? `serial.${legacy[1]}` : "sin identificar")};
+}
+
+function debugClear() {
+  dbgLines = [];
+  document.getElementById("dbg-consola").textContent = "";
+  document.getElementById("dbg-componente").replaceChildren(new Option("Todos los componentes", ""));
+  document.getElementById("dbg-contador").textContent = "Sin registros";
+}
+
+function debugVisible(record, level, component, query) {
+  const ranks = {DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3, CRITICAL: 4};
+  return (!component || record.component === component)
+    && (!level || (record.level !== null && ranks[record.level] >= ranks[level]))
+    && (!query || record.line.toLowerCase().includes(query.toLowerCase()));
+}
+
+function debugRender(follow = false) {
+  const con = document.getElementById("dbg-consola");
+  const top = con.scrollTop;
+  const level = document.getElementById("dbg-nivel").value;
+  const component = document.getElementById("dbg-componente").value;
+  const query = document.getElementById("dbg-filtro").value.trim();
+  const visible = dbgLines.filter(record => debugVisible(record, level, component, query));
+  const fragment = document.createDocumentFragment();
+  for (const record of visible) {
+    const row = document.createElement("span");
+    row.className = "dbg-registro";
+    if (record.level) row.dataset.level = record.level;
+    row.textContent = record.line + "\n";
+    fragment.appendChild(row);
+  }
+  con.replaceChildren(fragment);
+  document.getElementById("dbg-contador").textContent = `${visible.length} de ${dbgLines.length} registros · Se conservan los últimos 800`;
+  con.scrollTop = follow ? con.scrollHeight : top;
+}
+
 function debugAppend(line) {
   const con = document.getElementById("dbg-consola");
-  const abajo = con.scrollTop + con.clientHeight >= con.scrollHeight - 4;
-  con.textContent += line + "\n";
-  const MAX = 800;   // cota de líneas para no crecer sin límite
-  const lineas = con.textContent.split("\n");
-  if (lineas.length > MAX) con.textContent = lineas.slice(-MAX).join("\n");
-  if (abajo) con.scrollTop = con.scrollHeight;
+  const follow = con.scrollTop + con.clientHeight >= con.scrollHeight - 4;
+  const record = debugRecord(line);
+  dbgLines.push(record);
+  if (dbgLines.length > 800) dbgLines.shift();
+  const components = document.getElementById("dbg-componente");
+  if (![...components.options].some(option => option.value === record.component))
+    components.add(new Option(record.component, record.component));
+  debugRender(follow);
 }
+
+document.getElementById("dbg-nivel").addEventListener("change", () => debugRender());
+document.getElementById("dbg-componente").addEventListener("change", () => debugRender());
+document.getElementById("dbg-filtro").addEventListener("input", () => debugRender());
 
 document.querySelectorAll(".dbg-tab").forEach((b) => {
   b.addEventListener("click", () => debugSetTab(b.dataset.tab));
@@ -4611,34 +4768,97 @@ document.getElementById("dbg-fuente").addEventListener("change", () => {
 });
 document.getElementById("dbg-toggle").addEventListener("click", debugToggle);
 document.getElementById("dbg-limpiar").addEventListener("click", () => {
-  document.getElementById("dbg-consola").textContent = "";
+  debugClear();
 });
 
 // ----- Configurar nodo: cargar firmware del Atom por USB -----
 
+function fwNumero(value) {
+  const m = (value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.+-]+)?$/);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+function fwComparar(instalada, disponible) {
+  const a = fwNumero(instalada), b = fwNumero(disponible);
+  if (!b) return "unavailable";
+  if (!a) return "unknown";
+  for (let i = 0; i < 3; i++) {
+    if (a[i] > b[i]) return "older";
+    if (a[i] < b[i]) return "different";
+  }
+  return "current";
+}
+
+function fwVersionTexto(version) {
+  return fwNumero(version)?.join(".") || "Sin comprobar";
+}
+
+function fwComparacionTexto(instalada, disponible) {
+  return {current: "Actualizado", older: "No hay una versión más reciente disponible.",
+    unavailable: "No hay firmware disponible en el gateway.", unknown: "No se pudo comprobar la versión instalada.",
+    different: "Actualización disponible"}[fwComparar(instalada, disponible)];
+}
+
+function fwMensaje(el, text, tipo = "info") {
+  el.className = "mensaje-slot" + (text ? ` mensaje mensaje-${tipo} mensaje-compacto` : "");
+  el.textContent = text;
+  el.setAttribute("role", tipo === "error" ? "alert" : "status");
+}
+
+function fwNotas(id, notas) {
+  const el = document.getElementById(id);
+  el.hidden = !notas?.length;
+  el.querySelector("ul").innerHTML = (notas || []).map(n => `<li>${htmlSeguro(n)}</li>`).join("");
+}
+
+let fwDisponible = null;
+let fwIdentificada = null;
+let fwLocalPort = null;
+let fwCheckToken = 0;
+let fwUsbBusy = false;
+
+function fwFicha(instalada, disponible = fwDisponible) {
+  const estado = fwComparar(instalada, disponible);
+  fwMensaje(document.getElementById("fw-bin-info"), instalada ? fwComparacionTexto(instalada, disponible) : "",
+    estado === "current" ? "exito" : estado === "unknown" ? "advertencia" : "info");
+  document.getElementById("fw-ficha").hidden = !instalada;
+  const identity = document.getElementById("fw-fuente").value === "local" ? fwLocalPort?.identity : fwIdentificada;
+  document.getElementById("fw-nombre").textContent = identity?.name || "Nodo";
+  document.getElementById("fw-version-instalada").textContent = fwVersionTexto(instalada);
+  document.getElementById("fw-version-disponible").textContent = fwVersionTexto(disponible);
+}
+
+function fwAccion(btn, instalada, disponible, identificado) {
+  const estado = fwComparar(instalada, disponible);
+  btn.hidden = estado !== "different" || !identificado;
+  btn.disabled = estado !== "different" || !identificado;
+  btn.textContent = disponible ? `Actualizar a ${fwVersionTexto(disponible)}` : "Actualizar firmware";
+}
+
 let fwPuerto = null;
 
 async function fwCargar() {
-  // Lo primero: recuperar la subida en curso, si la hay. Va antes que nada
-  // porque cambia la fuente y el nodo elegidos, y hacerlo después pisaría lo
-  // que el operador acabara de tocar.
-  fwLoraRecuperar();
-  document.getElementById("fw-resultado").textContent = "";
-  document.getElementById("fw-flash").disabled = true;
+  if (fwUsbBusy) return;
+  fwPuerto = null; fwLocalPort = null; fwIdentificada = null; fwDisponible = null;
+  fwAccion(document.getElementById("fw-flash"), null, null, false);
+  fwAccion(document.getElementById("fw-local-flash"), null, null, false);
   document.getElementById("fw-busqueda-aviso").textContent = "";
   document.getElementById("fw-puertos").hidden = true;
-  fwPuerto = null;
   const info = document.getElementById("fw-bin-info");
+  info.className = "mensaje mensaje-progreso mensaje-compacto";
+  info.textContent = "Consultando el firmware disponible...";
   try {
     const r = await fetchApi("/api/config/firmware");
-    const d = await r.json();
-    if (d.bin) {
-      info.textContent = "Actualización preparada.";
-    } else {
-      info.textContent = "No hay ninguna actualización preparada para el nodo.";
-    }
-  } catch (e) { info.textContent = textoError(e, "No se pudo comprobar si hay una actualización disponible."); }
-  fwFuenteCtrls();
+    if (!r.ok) throw new Error("No se pudo consultar el firmware disponible.");
+    const data = await r.json();
+    fwDisponible = data.version || null;
+    fwNotas("fw-notas", data.release_notes);
+    await fwFuenteCtrls();
+    await bcRefrescar();
+  } catch (e) {
+    info.className = "mensaje mensaje-error mensaje-compacto";
+    info.textContent = textoError(e);
+  }
 }
 
 // Flasheo por navegador (camino A, esptool-js): reescribe solo el firmware en
@@ -4646,306 +4866,131 @@ async function fwCargar() {
 // de esp-web-tools, que borra la flash entera). esptool-js se sirve del vendor
 // y se expone en window (ver el shim de index.html), así que funciona offline.
 
+function fwModo(modo) {
+  if (fwUsbBusy) return;
+  document.getElementById("fw-usb-card").hidden = modo !== "usb";
+  document.getElementById("bc-card").hidden = modo !== "lora";
+  document.getElementById("fw-modo-usb").setAttribute("aria-pressed", String(modo === "usb"));
+  document.getElementById("fw-modo-lora").setAttribute("aria-pressed", String(modo === "lora"));
+}
+
 function fwFuenteCtrls() {
-  const v = document.getElementById("fw-fuente").value;
-  document.getElementById("fw-gateway").hidden = v !== "gateway";
-  document.getElementById("fw-local").hidden   = v !== "local";
-  document.getElementById("fw-lora").hidden    = v !== "lora";
-  // Devuelve la promesa del poblado de la lista de nodos. Quien solo cambia de
-  // fuente puede ignorarla; quien necesita elegir un nodo CONCRETO después
-  // tiene que esperarla, porque la lista se reconstruye entera y fijar el
-  // valor antes no serviría de nada (así fallaba la recuperación de la subida
-  // en curso, que elegía un nodo y acto seguido se quedaba en blanco).
-  return v === "lora" ? fwLoraNodos() : Promise.resolve();
+  if (fwUsbBusy) return;
+  const local = document.getElementById("fw-fuente").value === "local";
+  fwCheckToken++;
+  fwFicha(local ? fwLocalPort?.identity?.version : fwIdentificada?.version);
+  fwAccion(document.getElementById("fw-flash"), fwIdentificada?.version, fwDisponible, !local && !!fwPuerto);
+  fwAccion(document.getElementById("fw-local-flash"), fwLocalPort?.identity?.version, fwDisponible, local && !!fwLocalPort);
+  document.getElementById("fw-gateway").hidden = local;
+  document.getElementById("fw-local").hidden = !local;
 }
 
-// ----- Firmware por LoRa (frame-format.md §18) -----
-//
-// La subida vive en el gateway, no en el navegador: dura horas, respeta una
-// ventana horaria y cede el aire a la telemetría. El visor solo encola, mira el
-// progreso y, cuando la imagen ya está en el nodo, pide instalarla.
-
-let fwLoraId   = null;    // transferencia en curso, id de la tabla
-let fwLoraVentanaPuesta = false;  // ventana ya devuelta al formulario
-let fwLoraTimer = null;
-
-async function fwLoraNodos() {
-  const sel = document.getElementById("fw-lora-nodo");
-  sel.innerHTML = "";
-  try {
-    const r = await fetchApi("/api/red/estado");
-    const nodes = (await r.json()).nodes || [];
-    nodes.filter((n) => n.origin >= 1 && n.origin <= 254).forEach((n) => {
-      const o = document.createElement("option");
-      o.value = n.origin;
-      o.textContent = `${n.name || "nodo"} (${n.origin})`
-        + (n.fw_version ? ` · ${n.fw_version}` : "")
-        + (n.online ? "" : " · sin señal");
-      sel.appendChild(o);
-    });
-    if (!sel.options.length) {
-      const o = document.createElement("option");
-      o.value = ""; o.textContent = "No hay nodos disponibles";
-      sel.appendChild(o);
-    }
-  } catch (e) {
-    const o = document.createElement("option");
-    o.value = ""; o.textContent = "No se pudo cargar la lista de nodos";
-    sel.appendChild(o);
-  }
-  fwLoraAvisoImagen();
-}
-
-// Qué imagen hay y qué va a costar mandarla. Se dice antes de empezar porque
-// una vez lanzada la subida ocupa el aire de la red durante horas.
-async function fwLoraAvisoImagen() {
-  const el = document.getElementById("fw-lora-riesgo");
-  try {
-    const r = await fetchApi("/api/config/lora/firmware");
-    const d = await r.json();
-    if (!d.disponible) {
-      el.className = "aviso mal";
-      el.textContent = d.error || "No hay ninguna actualización preparada.";
-      document.getElementById("fw-lora-enviar").disabled = true;
-      return;
-    }
-    el.className = "aviso";
-    el.textContent = `Actualización ${d.version} disponible.`
-      + (d.horas_8pct != null
-           ? ` Tiempo estimado: ${String(d.horas_8pct).replace(".", ",")} h.`
-           : "");
-    document.getElementById("fw-lora-enviar").disabled = false;
-  } catch (e) {
-    el.className = "aviso mal";
-    el.textContent = textoError(e, "No se pudo comprobar la actualización disponible. Inténtalo de nuevo.");
-  }
-}
-
-async function fwLoraEnviar() {
-  const aviso = document.getElementById("fw-lora-aviso");
-  const origin = Number(document.getElementById("fw-lora-nodo").value);
-  if (!origin) { aviso.className = "aviso mal"; aviso.textContent = "Selecciona un nodo."; return; }
-  const cuerpo = {
-    origin,
-    hour_from: Number(document.getElementById("fw-lora-desde").value),
-    hour_to:   Number(document.getElementById("fw-lora-hasta").value),
-  };
-  aviso.className = "aviso"; aviso.textContent = "Preparando la actualización...";
-  try {
-    const r = await fetchApi("/api/config/lora/firmware/enviar", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(cuerpo) });
-    const d = await r.json();
-    if (!r.ok) {
-      aviso.className = "aviso mal";
-      aviso.textContent = d.error || "No se pudo iniciar la actualización.";
-      // Con una ya en curso se ofrece seguirla en vez de dejar al usuario
-      // atascado: casi siempre es lo que quería.
-      if (d.id) fwLoraSeguir(d.id);
-      return;
-    }
-    fwLoraSeguir(d.id);
-  } catch (e) {
-    aviso.className = "aviso mal";
-    aviso.textContent = textoError(e, "No se pudo iniciar la actualización. Inténtalo de nuevo.");
-  }
-}
-
-// Recupera la subida en curso al entrar en la página.
-//
-// Una subida dura horas y nadie se queda con la pestaña abierta mirándola. Sin
-// esto, cerrar el navegador equivalía a perder de vista la operación: la barra
-// solo existía mientras el propio navegador la seguía, y al volver la página
-// aparecía como si no hubiera nada en marcha. El estado real vive en el
-// gateway desde el principio; solo faltaba preguntarlo.
-async function fwLoraRecuperar() {
-  try {
-    const r = await fetchApi("/api/config/lora/firmware/encurso");
-    const d = await r.json();
-    if (!r.ok || !d.activa) return;
-    // La lista de nodos se rellena sola al cambiar de fuente, así que hay que
-    // esperarla antes de elegir uno: si no, se elige sobre una lista vacía.
-    document.getElementById("fw-fuente").value = "lora";
-    await fwFuenteCtrls();
-    const sel = document.getElementById("fw-lora-nodo");
-    if (sel && d.origin) sel.value = String(d.origin);
-    fwLoraSeguir(d.id);
-  } catch (e) { /* sin respuesta: la página queda como estaba */ }
-}
-
-// Sondea el progreso. Cada diez segundos y no más rápido: la subida avanza en
-// horas, y consultarla cada segundo solo daría trabajo al Pi.
-function fwLoraSeguir(id) {
-  // Cambiar de transferencia reabre la posibilidad de devolver su ventana.
-  if (fwLoraId !== id) fwLoraVentanaPuesta = false;
-  fwLoraId = id;
-  const barra = document.getElementById("fw-lora-barra");
-  const aviso = document.getElementById("fw-lora-aviso");
-  const instalar = document.getElementById("fw-lora-instalar");
-  barra.hidden = false;
-  if (fwLoraTimer) clearInterval(fwLoraTimer);
-
-  const tick = async () => {
-    try {
-      const r = await fetchApi("/api/config/lora/firmware/estado?id=" + id);
-      const d = await r.json();
-      if (!r.ok) { aviso.textContent = d.error || "No se pudo consultar la actualización."; return; }
-      barra.value = d.pct;
-      // Los campos vuelven a la ventana con la que se LANZÓ esta subida, no a
-      // la que tuviera el formulario. Al recargar la página aparecían los
-      // valores por defecto y daban a entender que la subida corría con ellos.
-      if (d.hour_from != null && d.hour_to != null && !fwLoraVentanaPuesta) {
-        fwLoraVentanaPuesta = true;
-        document.getElementById("fw-lora-desde").value = d.hour_from;
-        document.getElementById("fw-lora-hasta").value = d.hour_to;
-      }
-      const viva = ["pending", "sending", "committing"].includes(d.state);
-      // Con una subida viva no se lanza otra: el botón se apaga en vez de
-      // dejar pulsarlo para que el Pi conteste que ya hay una en curso.
-      document.getElementById("fw-lora-enviar").disabled = viva;
-      const cerrado = d.state === "done" || d.state === "failed"
-                   || d.state === "cancelled";
-      instalar.hidden = d.state !== "ready";
-      // Cancelar solo mientras hay algo que cortar. Con la imagen ya arriba no
-      // queda emisión que parar, y lo que toca entonces es instalar o no.
-      document.getElementById("fw-lora-cancelar").hidden =
-        !["pending", "sending", "committing"].includes(d.state);
-      aviso.className = d.state === "failed" ? "aviso mal" : "aviso";
-      aviso.textContent =
-        d.state === "ready"
-          ? `Actualización ${d.version} lista para instalar.`
-          : `Actualización en curso: ${d.pct} %`
-            + (d.hour_from != null && d.hour_to != null
-                 && d.hour_from !== d.hour_to
-                 ? ` · horario ${String(d.hour_from).padStart(2, "0")}:00 a `
-                   + `${String(d.hour_to).padStart(2, "0")}:00`
-                 : "");
-      if (cerrado) {
-        clearInterval(fwLoraTimer);
-        fwLoraTimer = null;
-        instalar.hidden = true;
-        document.getElementById("fw-lora-cancelar").hidden = true;
-        document.getElementById("fw-lora-enviar").disabled = false;
-      }
-    } catch (e) { /* un sondeo fallido no rompe nada: se reintenta */ }
-  };
-  tick();
-  fwLoraTimer = setInterval(tick, 10000);
-}
-
-async function fwLoraCancelar() {
-  const aviso = document.getElementById("fw-lora-aviso");
-  if (!fwLoraId) return;
-  const seguir = await new Promise((resolve) => {
-    cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Cancelar la actualización",
-      "<p>La actualización se detendrá. El nodo seguirá disponible.</p>",
-      { cancelar: true, cancelarText: "Continuar actualización",
-        confirmar: true, confirmarText: "Cancelar actualización",
-        onCancelar: () => resolve(false) });
+function fwUsbBloquear(busy) {
+  fwUsbBusy = busy;
+  ["fw-local-buscar", "fw-buscar", "fw-fuente", "fw-puertos", "fw-modo-usb", "fw-modo-lora"].forEach(id => {
+    document.getElementById(id).disabled = busy;
   });
-  if (!seguir) { cfgDialogoCerrar(); return; }
-  cfgDialogoCerrar();
-  try {
-    const r = await fetchApi("/api/config/lora/firmware/cancelar", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: fwLoraId }) });
-    const d = await r.json();
-    aviso.className = r.ok ? "aviso" : "aviso mal";
-    aviso.textContent = r.ok
-      ? "Actualización cancelada."
-      : (d.error ?? "No se pudo cancelar la actualización.");
-  } catch (e) { aviso.className = "aviso mal"; aviso.textContent = textoError(e); }
+  if (busy) {
+    document.getElementById("fw-local-flash").disabled = true;
+    document.getElementById("fw-flash").disabled = true;
+    fwMensaje(document.getElementById("fw-bin-info"), "");
+  }
 }
 
-async function fwLoraInstalar() {
-  const aviso = document.getElementById("fw-lora-aviso");
-  if (!fwLoraId) return;
-  // Diálogo propio y no el del navegador. Era el último sitio que usaba
-  // window.confirm: se distingue a la legua del resto de la interfaz, no
-  // admite formato, y en algunos navegadores se puede silenciar sin que el
-  // operador se entere, justo en la confirmación que reinicia un nodo.
-  const seguir = await new Promise((resolve) => {
-    cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Instalar actualización",
-      "<p>El nodo dejará de estar disponible durante unos minutos. Si la actualización no se inicia correctamente, recuperará la versión anterior.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Instalar actualización",
-        confirmarPeligro: false,
-        onCancelar: () => resolve(false) });
-  });
-  if (!seguir) { cfgDialogoCerrar(); return; }
-  cfgDialogoCerrar();
-  try {
-    const r = await fetchApi("/api/config/lora/firmware/instalar", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: fwLoraId }) });
-    const d = await r.json();
-    aviso.className = r.ok ? "aviso" : "aviso mal";
-    aviso.textContent = r.ok ? "Instalación iniciada. El nodo volverá a estar disponible en unos minutos."
-                             : (d.error || "No se pudo iniciar la instalación. Inténtalo de nuevo.");
-  } catch (e) {
-    aviso.className = "aviso mal";
-    aviso.textContent = textoError(e, "No se pudo iniciar la instalación. Inténtalo de nuevo.");
-  }
+function fwUsbError(error) {
+  const msg = String(error?.message || error || "");
+  if (error?.name === "NotFoundError") return "No se ha seleccionado ningún nodo USB.";
+  if (/Failed to (?:open|execute 'open')|already open|port.*(?:open|busy)|NetworkError/i.test(msg))
+    return "No se pudo abrir el USB del nodo. Puede estar ocupado por otra pestaña o por el monitor serie. Cierra esa conexión y vuelve a identificarlo.";
+  if (/disconnect|device.*lost|disconnected/i.test(msg))
+    return "Se perdió la conexión USB con el nodo. Comprueba el cable y vuelve a identificarlo.";
+  return textoError(error, "No se pudo comunicar con el nodo. Comprueba su conexión USB.");
+}
+
+async function fwLeerUSB(port) {
+  const session = new LocalCfg(port);
+  try { await session.open(); return await session.hello(); }
+  finally { await session.close(true); }
+}
+
+function fwUsbResultado(text, tipo) {
+  fwMensaje(document.getElementById("fw-resultado"), text, tipo);
+  cfgDialogo("Actualización del nodo", htmlSeguro(text), {cerrar:true, error:tipo === "error"});
 }
 
 async function fwLocalFlash() {
+  if (fwUsbBusy) return;
   const aviso = document.getElementById("fw-local-aviso");
   const log = document.getElementById("fw-local-log");
   const btn = document.getElementById("fw-local-flash");
   if (!("serial" in navigator)) {
-    aviso.className = "aviso mal";
-    aviso.textContent = "Esta opción requiere Chrome o Edge en un equipo de escritorio.";
+
+    fwMensaje(aviso, "Esta opción requiere Chrome o Edge en un equipo de escritorio.", "error");
     return;
   }
   if (!window.ESPLoader || !window.Transport) {
-    aviso.className = "aviso mal";
-    aviso.textContent = "Esta opción no está disponible. Selecciona Gateway como método de actualización.";
+
+    fwMensaje(aviso, "Esta opción no está disponible. Selecciona Gateway como método de actualización.", "error");
     return;
   }
-  btn.disabled = true;
-  log.hidden = false; log.textContent = "";
-  aviso.className = "aviso";
+  fwUsbBloquear(true);
+  fwMensaje(document.getElementById("fw-resultado"), "");
+  log.hidden = true; log.textContent = "";
+
   const term = {
     clean: () => { log.textContent = ""; },
     writeLine: (d) => { log.textContent += d + "\n"; log.scrollTop = log.scrollHeight; },
     write: (d) => { log.textContent += d; log.scrollTop = log.scrollHeight; },
   };
   let transport = null;
+  let resultado = null;
+  let confirmed = null;
+  let wrote = false;
+  const selected = fwLocalPort;
+  const expected = fwDisponible;
+  const nombre = selected?.identity?.name || "Nodo";
   try {
-    aviso.textContent = "Selecciona el nodo...";
-    const port = await navigator.serial.requestPort();
-    transport = new window.Transport(port, false);
-    // 115200 fijo (sin subir a 460800): el puente USB del Atom no sostiene la
-    // escritura sostenida a mayor velocidad y da timeout, igual que en la Pi.
-    const loader = new window.ESPLoader({ transport, baudrate: 115200,
-                                          romBaudrate: 115200, terminal: term });
-    aviso.textContent = "Conectando con el nodo...";
-    await loader.main();
-    aviso.textContent = "Preparando la actualización...";
-    const r = await fetchApi("/api/config/nodo-bin");
-    if (!r.ok) {
-      aviso.className = "aviso mal";
-      aviso.textContent = "No hay ninguna actualización preparada para el nodo.";
+    fwMensaje(aviso, "Comprobando el nodo seleccionado...", "progreso");
+    if (!fwLocalPort || !fwDisponible) throw new Error("Identifica el nodo antes de instalar.");
+    const port = selected.port;
+    const before = await fwLeerUSB(port);
+    if (selected.identity?.node_id != null && before.node_id !== selected.identity.node_id)
+      throw new Error("El nodo conectado ha cambiado. Vuelve a identificarlo antes de actualizar.");
+    const installed = before.version;
+    if (fwComparar(installed, fwDisponible) !== "different") {
+      fwAccion(btn, installed, fwDisponible, true);
+      fwFicha(installed);
+      fwMensaje(aviso, fwComparacionTexto(installed, fwDisponible), "advertencia");
       return;
     }
+    fwMensaje(aviso, "Descargando el firmware disponible...", "progreso");
+    const r = await fetchApi("/api/config/nodo-bin");
+    if (!r.ok) throw new Error("No se pudo descargar el firmware disponible.");
+    if (r.headers.get("X-Modulinkr-Firmware-Version") !== fwDisponible)
+      throw new Error("El firmware disponible ha cambiado. Vuelve a abrir esta página antes de instalar.");
     const bytes = new Uint8Array(await r.arrayBuffer());
+    transport = new window.Transport(port, false);
+    const loader = new window.ESPLoader({ transport, baudrate: 115200,
+                                          romBaudrate: 115200, terminal: term });
+    fwMensaje(aviso, "Conectando con el nodo...", "progreso");
+    await loader.main();
     // esptool-js espera los datos como binary string (un carácter por byte).
     let data = "";
     const CH = 0x8000;
     for (let i = 0; i < bytes.length; i += CH) {
       data += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
     }
-    aviso.textContent = "Instalando la actualización...";
+    fwMensaje(aviso, "Instalando la actualización...", "progreso");
     await loader.writeFlash({
       fileArray: [{ data, address: 0 }],
       flashSize: "keep", flashMode: "keep", flashFreq: "keep",
       eraseAll: false, compress: true,
       reportProgress: (idx, written, total) => {
-        aviso.textContent = "Instalando la actualización: " + Math.round(100 * written / total) + " %";
+        fwMensaje(aviso, "Instalando la actualización: " + Math.round(100 * written / total) + " %", "progreso");
       },
     });
-    aviso.textContent = "Finalizando la actualización...";
+    wrote = true;
+    fwMensaje(aviso, "Reiniciando el nodo...", "progreso");
     try {
       if (typeof loader.hardReset === "function") {
         await loader.hardReset();
@@ -4957,45 +5002,98 @@ async function fwLocalFlash() {
         await transport.setRTS(false);
       }
     } catch (e) { /* si falla, un power-cycle arranca el firmware nuevo */ }
-    aviso.textContent = "Actualización instalada. La configuración del nodo se ha conservado.";
+    await transport.disconnect();
+    transport = null;
+    fwMensaje(aviso, "Comprobando la versión después del reinicio...", "progreso");
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const after = await fwLeerUSB(port);
+    if (selected.identity?.node_id != null && after.node_id !== selected.identity.node_id)
+      throw new Error("La respuesta USB no corresponde al nodo seleccionado.");
+    if (fwComparar(after.version, expected) !== "current")
+      throw new Error(`El nodo sigue anunciando la versión ${fwVersionTexto(after.version)}.`);
+    confirmed = {port, identity:after};
+    resultado = {text:`${nombre}: actualización completada. Versión ${fwVersionTexto(after.version)} confirmada.`, tipo:"exito"};
   } catch (e) {
-    aviso.className = "aviso mal";
-    aviso.textContent = textoError(e, "No se pudo actualizar el nodo. Revisa la conexión e inténtalo de nuevo.");
+    resultado = wrote
+      ? {text:`${nombre}: el firmware ${fwVersionTexto(expected)} se escribió por USB, pero no se pudo confirmar su arranque. Vuelve a identificar el nodo para comprobar la versión.`, tipo:"advertencia"}
+      : {text:`${nombre}: ${fwUsbError(e)}`, tipo:"error"};
   } finally {
-    try { if (transport) await transport.disconnect(); } catch (e) { /* */ }
-    btn.disabled = false;
+    try { if (transport) await transport.disconnect(); } catch (e) { /* La lectura posterior no se declara confirmada. */ }
+    fwLocalPort = confirmed;
+    fwUsbBloquear(false);
+    fwFuenteCtrls();
+    if (resultado) {
+      fwMensaje(aviso, "");
+      fwUsbResultado(resultado.text, resultado.tipo);
+    }
   }
 }
 
-// El flasheo no usa CFG (un Atom sin firmware no responde): solo elige el
-// puerto candidato, sin sondear.
+async function fwIdentificarPuerto(port) {
+  const token = ++fwCheckToken;
+  fwIdentificada = null;
+  document.getElementById("fw-flash").disabled = true;
+  const aviso = document.getElementById("fw-busqueda-aviso");
+  fwMensaje(aviso, "Consultando el firmware del nodo...", "progreso");
+  try {
+    const r = await fetchApi("/api/config/detectar", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({port})
+    });
+    const d = await r.json();
+    if (token !== fwCheckToken) return;
+    if (!r.ok) throw new Error(d.error || "No se pudo identificar el nodo.");
+    fwIdentificada = d.node;
+    fwMensaje(aviso, "");
+  } catch (e) {
+    if (token !== fwCheckToken) return;
+    fwMensaje(aviso, textoError(e, "No se pudo identificar el firmware instalado."), "error");
+  }
+  document.getElementById("fw-buscar").textContent = "Volver a identificar";
+  fwFicha(fwIdentificada?.version);
+  fwAccion(document.getElementById("fw-flash"), fwIdentificada?.version, fwDisponible, !!fwPuerto);
+}
+
 async function fwBuscar() {
   const aviso = document.getElementById("fw-busqueda-aviso");
   const sel = document.getElementById("fw-puertos");
-  aviso.textContent = "Buscando el nodo...";
+  fwPuerto = null; fwIdentificada = null;
+  document.getElementById("fw-flash").disabled = true;
+  fwMensaje(aviso, "Buscando el nodo...", "progreso");
   try {
     const r = await fetchApi("/api/config/puertos");
-    const d = await r.json();
-    const cands = (d.ports || []).filter((p) => !p.gateway);
-    if (!cands.length) {
-      aviso.textContent = "No se ha encontrado ningún nodo conectado. Revisa la conexión e inténtalo de nuevo.";
-      document.getElementById("fw-flash").disabled = true;
-      sel.hidden = true;
-      return;
-    }
-    if (cands.length === 1) {
-      fwPuerto = cands[0].port;
-      sel.hidden = true;
-      aviso.textContent = "Nodo encontrado.";
-    } else {
-      sel.innerHTML = cands.map((p) =>
-        `<option value="${p.port}">${p.port.split("/").pop()}</option>`).join("");
-      sel.hidden = false;
-      fwPuerto = sel.value;
-      aviso.textContent = "Selecciona uno de los nodos encontrados.";
-    }
-    document.getElementById("fw-flash").disabled = false;
-  } catch (e) { aviso.textContent = textoError(e, "No se pudo buscar el nodo. Revisa la conexión e inténtalo de nuevo."); }
+    if (!r.ok) throw new Error("No se pudieron consultar las conexiones USB.");
+    const cands = ((await r.json()).ports || []).filter(p => !p.gateway);
+    sel.innerHTML = cands.map(p => `<option value="${htmlSeguro(p.port)}">${htmlSeguro(p.description || p.port.split("/").pop())}</option>`).join("");
+    sel.hidden = cands.length < 2;
+    if (!cands.length) throw new Error("No se ha encontrado ningún nodo conectado. Comprueba su conexión USB.");
+    fwPuerto = cands[0].port;
+    await fwIdentificarPuerto(fwPuerto);
+  } catch (e) { fwMensaje(aviso, textoError(e), "error"); fwFicha(null); }
+}
+
+async function fwLocalBuscar() {
+  if (fwUsbBusy) return;
+  const aviso = document.getElementById("fw-local-aviso");
+  fwLocalPort = null;
+  fwFicha(null);
+  fwAccion(document.getElementById("fw-local-flash"), null, fwDisponible, false);
+  fwMensaje(document.getElementById("fw-resultado"), "");
+  fwUsbBloquear(true);
+  try {
+    if (!("serial" in navigator)) throw new Error("Esta opción requiere Chrome o Edge en un equipo de escritorio.");
+    const port = await navigator.serial.requestPort();
+    fwMensaje(aviso, "Consultando el firmware del nodo...", "progreso");
+    const identity = await fwLeerUSB(port);
+    if (!fwNumero(identity?.version)) throw new Error("No se pudo leer la versión del nodo. Vuelve a identificarlo.");
+    fwLocalPort = {port, identity};
+    fwMensaje(aviso, "");
+  } catch (e) {
+    fwMensaje(aviso, fwUsbError(e), e?.name === "NotFoundError" ? "info" : "error");
+  } finally {
+    document.getElementById("fw-local-buscar").textContent = "Volver a identificar";
+    fwUsbBloquear(false);
+    fwFuenteCtrls();
+  }
 }
 
 function fwFlash() {
@@ -5006,34 +5104,36 @@ function fwFlash() {
     return;
   }
   const T = "Actualizar el nodo";
+  const expected_version = fwDisponible;
   cfgConfirmarCb = async () => {
     document.getElementById("fw-flash").disabled = true;
     cfgDialogo(T, SPIN + "Instalando la actualización...");
     try {
       const r = await fetchApi("/api/config/flash", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ port }) });
+        body: JSON.stringify({ port, expected_version }) });
       const d = await r.json();
       if (!r.ok) { cfgDialogo(T, d.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true }); return; }
-      cfgDialogo(T, "Actualización instalada. La configuración del nodo se ha conservado.", { cerrar: true });
+      cfgDialogo(T, "Firmware escrito por USB. Busca de nuevo el nodo para confirmar la versión tras el reinicio.", { cerrar: true });
     } catch (e) {
       cfgDialogo(T, textoError(e, "No se pudo actualizar el nodo. Inténtalo de nuevo."), { cerrar: true });
     } finally {
-      document.getElementById("fw-flash").disabled = false;
+      fwIdentificada = null;
+      document.getElementById("fw-flash").disabled = true;
     }
   };
   cfgDialogo(T, "La actualización tardará aproximadamente un minuto. La configuración actual del nodo se conservará.",
     { cancelar: true, confirmar: true, confirmarText: "Actualizar el nodo" });
 }
 
+document.getElementById("fw-modo-lora").addEventListener("click", () => fwModo("lora"));
+document.getElementById("fw-modo-usb").addEventListener("click", () => fwModo("usb"));
+document.getElementById("fw-local-buscar").addEventListener("click", fwLocalBuscar);
 document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
 document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
-document.getElementById("fw-lora-enviar").addEventListener("click", fwLoraEnviar);
-document.getElementById("fw-lora-cancelar").addEventListener("click", fwLoraCancelar);
-document.getElementById("fw-lora-instalar").addEventListener("click", fwLoraInstalar);
 document.getElementById("fw-local-flash").addEventListener("click", fwLocalFlash);
-document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; });
+document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; fwIdentificarPuerto(fwPuerto); });
 
 // ----- Configurar nodo: formulario que arma el config.json -----
 
@@ -5058,6 +5158,8 @@ let schemasPorNodo = new Map();  // origin -> cadena declarada al registrarse
 // radio. Es contexto de la sesión y no lo tumba una edición del formulario;
 // solo lo tumba cambiar de fuente, porque ahí el destino deja de existir.
 let formDestinoListo = false;
+let formRadioEstado = null;
+let formLecturaLoraEnCurso = false;
 // Rama del asistente: null (sin elegir), "nuevo" o "existente".
 //
 // El asistente entraba directamente al formulario y pedía el nodo dos veces:
@@ -5477,7 +5579,7 @@ function formDestino(listo) {
   // dice por qué está apagado, y el motivo es justo lo que hay que leer.
   schemaAviso(schemasDestino);
   enviar.disabled = !formDestinoListo
-                    || fValidate(collectForm()).length > 0;
+                    || fValidate(collectForm()).length > 0 || !!formRadioMotivo();
 }
 
 function marcarCampo(id, malo) {
@@ -5494,8 +5596,9 @@ function marcarFila(row, fnBloque) {
   const group = row.closest(".fwrite");
   const fn = group ? g("function") : fnBloque;
   const id = g("id");
-  set("id", !(id.length >= 2 && id.length <= 8));
-  set("name", !g("name"));
+  set("id", id.length < 2 || !!formTextoError(id, "el identificador", 8));
+  set("name", !!formTextoError(g("name"), "el nombre", 32));
+  set("unit", !!formTextoError(g("unit"), "la unidad", 8, false));
   const a = Number(g("address")); set("address", !(a >= 0 && a <= 65535));
   const count = Number(g("count"));
   set("count", !(Number.isInteger(count) && count >= 1 && count <= 125));
@@ -5512,7 +5615,8 @@ function marcarFila(row, fnBloque) {
 function formMarcarDevices() {
   document.querySelectorAll("#f-devices > .fdev").forEach((dev) => {
     const nombre = dev.querySelector('[data-fd="name"]');
-    if (nombre) nombre.classList.toggle("campo-mal", !nombre.value.trim());
+    if (nombre) nombre.classList.toggle("campo-mal",
+      !!formTextoError(nombre.value.trim(), "el nombre", 16));
     ["default_slave_id", "desired_slave_id"].forEach((f) => {
       const el = dev.querySelector(`[data-fd="${f}"]`);
       if (el) { const v = Number(el.value); el.classList.toggle("campo-mal", !(v >= 1 && v <= 247)); }
@@ -5559,7 +5663,7 @@ function formLive() {
   }
 
   marcarCampo("f-id", !(id >= 1 && id <= 254) || idEnUso);
-  marcarCampo("f-name", !form.node.name);
+  marcarCampo("f-name", !!formTextoError(form.node.name, "el nombre del nodo", 32));
   const sf = Number(form.lora.sf); marcarCampo("f-sf", !(sf >= 7 && sf <= 12));
   const tx = Number(form.lora.tx_power_dbm); marcarCampo("f-txpow", !(tx >= 2 && tx <= 22));
   marcarCampo("f-interval", !(Number(form.lora.send_interval_ms) >= 100));
@@ -5597,7 +5701,9 @@ function formLive() {
   // o la lista de nodos (por radio), y que sobrevive a las ediciones: cambiar
   // un campo no desconecta el nodo que ya se encontró.
   document.getElementById("f-buscar").disabled = errs.length > 0;
-  document.getElementById("f-enviar").disabled = errs.length > 0 || !formDestinoListo;
+  document.getElementById("f-enviar").disabled = errs.length > 0 || !formDestinoListo
+    || !!formRadioMotivo();
+  if (formFuenteLora()) formRadioPintar();
 }
 
 // Campos fijados por la red del gateway: se muestran (referencia) pero no
@@ -5883,11 +5989,24 @@ function buildConfig(f) {
 
 // ----- Validación de todos los campos contra el schema -----
 
+function formTextoError(valor, campo, limite, obligatorio = true) {
+  const texto = String(valor ?? "");
+  if (!texto.trim()) return obligatorio ? `indica ${campo}` : "";
+  const bytes = new TextEncoder().encode(texto).length;
+  return bytes > limite
+    ? `${campo} ocupa ${bytes} bytes y admite como máximo ${limite}. Acórtalo; las tildes y algunos símbolos ocupan más de un byte`
+    : "";
+}
+
 function fValidate(f) {
   const e = [];
+  const texto = (valor, campo, limite, prefijo = "", obligatorio = true) => {
+    const error = formTextoError(valor, campo, limite, obligatorio);
+    if (error) e.push(prefijo + error);
+  };
   const id = Number(f.node.id);
   if (!(id >= 1 && id <= 254)) e.push("el identificador debe estar entre 1 y 254");
-  if (!f.node.name) e.push("indica el nombre del nodo");
+  texto(f.node.name, "el nombre del nodo", 32);
   const sf = Number(f.lora.sf); if (!(sf >= 7 && sf <= 12)) e.push("el factor de dispersión debe estar entre 7 y 12");
   const tx = Number(f.lora.tx_power_dbm); if (!(tx >= 2 && tx <= 22)) e.push("la potencia debe estar entre 2 y 22 dBm");
   if (!(Number(f.lora.send_interval_ms) >= 100)) e.push("el intervalo de envío debe ser de al menos 100 ms");
@@ -5898,21 +6017,32 @@ function fValidate(f) {
     if (!f.nbiot.mqtt_broker) e.push("indica el servidor MQTT del supernodo");
   }
   if (!f.modbus.devices.length) e.push("añade al menos un dispositivo Modbus");
+  if (f.modbus.devices.length > 4) e.push("el nodo admite como máximo 4 dispositivos Modbus");
+  if (f.modbus.devices.reduce((total, d) => total + d.reads.length, 0) > 8)
+    e.push("el nodo admite como máximo 8 medidas en total, sumando todos los dispositivos");
+  const identificadores = new Set();
   f.modbus.devices.forEach((d, i) => {
     const p = `dispositivo ${i + 1}: `;
     const devicePending = new Set(d.pending_fields || []);
-    if (!d.name) e.push(p + "indica el nombre");
+    texto(d.name, "el nombre", 16, p);
     const ds = Number(d.default_slave_id), de = Number(d.desired_slave_id);
     if (!(ds >= 1 && ds <= 247)) e.push(p + "la dirección actual debe estar entre 1 y 247");
     if (!(de >= 1 && de <= 247)) e.push(p + "la nueva dirección debe estar entre 1 y 247");
     if (ds !== de && !d.change_function && !devicePending.has("change_function"))
       e.push(p + "selecciona cómo cambiar la dirección Modbus");
     if (!d.reads.length) e.push(p + "añade al menos una medida");
-    [...d.reads, ...d.writes].forEach((r) => {
-      const rp = p + (r.id || "medida sin identificar") + ": ";
+    if (d.writes.length > 4) e.push(p + "admite como máximo 4 escrituras");
+    [...d.reads, ...d.writes].forEach((r, index) => {
+      const tipo = index < d.reads.length ? "medida" : "escritura";
+      const numero = index < d.reads.length ? index + 1 : index - d.reads.length + 1;
+      const rp = p + `${tipo} ${r.id || numero}: `;
       const aiPending = new Set(r.pending_fields || []);
-      if (!r.id || r.id.length < 2 || r.id.length > 8) e.push(rp + "el identificador debe tener entre 2 y 8 caracteres");
-      if (!r.name && !aiPending.has("name")) e.push(rp + "indica el nombre");
+      if (!r.id || r.id.length < 2) e.push(rp + "el identificador debe tener entre 2 y 8 caracteres");
+      else texto(r.id, "el identificador", 8, rp);
+      if (r.id && identificadores.has(r.id)) e.push(rp + "el identificador ya se utiliza en otra medida o escritura. Elige uno distinto");
+      if (r.id) identificadores.add(r.id);
+      if (!aiPending.has("name") || r.name) texto(r.name, "el nombre", 32, rp);
+      texto(r.unit, "la unidad", 8, rp, false);
       const a = Number(r.address);
       if (!(a >= 0 && a <= 65535) && !aiPending.has("address"))
         e.push(rp + "la dirección debe estar entre 0 y 65535");
@@ -6217,6 +6347,32 @@ function formFuenteLora() {
   return !!(s && s.value === "lora");
 }
 
+function formRadioMotivo() {
+  if (!formFuenteLora()) return "";
+  if (formRadioEstado?.service_online === false) return MENSAJES_LORA.gateway_service_unavailable;
+  if (formRadioEstado?.service_online !== true || formRadioEstado?.lora_link == null) {
+    return MENSAJES_LORA.lora_status_unknown;
+  }
+  return formRadioEstado.lora_link ? "" : MENSAJES_LORA.lora_radio_unavailable;
+}
+
+function formRadioActualizar(estado) {
+  formRadioEstado = estado;
+  if (formFuenteLora()) formRadioPintar();
+}
+
+function formRadioPintar() {
+  const aviso = document.getElementById("f-radio-aviso");
+  const motivo = formRadioMotivo();
+  if (aviso) {
+    aviso.hidden = !motivo;
+    aviso.textContent = motivo;
+  }
+  const leer = document.getElementById("f-leer");
+  if (leer) leer.disabled = formLecturaLoraEnCurso || !!motivo;
+  formDestino(formDestinoListo);
+}
+
 // Campos cuyo cambio puede dejar el nodo incomunicado. El asistente los
 // tiene bloqueados a los valores de la red, así que en condiciones normales
 // no divergen; el aviso existe para el caso en que se hayan desbloqueado por
@@ -6250,14 +6406,16 @@ async function formLoraNodos() {
   sel.innerHTML = "";
   try {
     const r = await fetchApi("/api/red/estado");
-    const nodes = (await r.json()).nodes || [];
+    const data = await r.json();
+    formRadioActualizar(r.ok ? data : null);
+    const nodes = data.nodes || [];
     fwPorNodo = new Map(nodes.filter((n) => n.fw_version)
       .map((n) => [Number(n.origin), n.fw_version]));
     nodes.filter((n) => n.origin >= 1 && n.origin <= 254).forEach((n) => {
       const o = document.createElement("option");
       o.value = n.origin;
       o.textContent = `${n.name || "nodo"} (${n.origin})`
-        + (n.fw_version ? ` · ${n.fw_version}` : "")
+        + (n.fw_version ? ` · ${fwVersionTexto(n.fw_version)}` : "")
         + (n.online ? "" : " · sin señal");
       sel.appendChild(o);
     });
@@ -6267,6 +6425,7 @@ async function formLoraNodos() {
       sel.appendChild(o);
     }
   } catch (e) {
+    formRadioActualizar(null);
     const o = document.createElement("option");
     o.value = ""; o.textContent = "Red no disponible";
     sel.appendChild(o);
@@ -6283,9 +6442,11 @@ async function formLoraNodos() {
 // aplicaría, seguiría registrándose y la ventana de prueba lo confirmaría:
 // quedaría vivo, en línea y midiendo nada.
 async function fLeerLora(aviso) {
+  if (formRadioMotivo()) { formRadioPintar(); return; }
   const origin = Number(document.getElementById("f-lora-nodo").value);
   if (!origin) { aviso.textContent = "Selecciona un nodo antes de continuar."; return; }
 
+  formLecturaLoraEnCurso = true;
   document.getElementById("f-leer").disabled = true;
   aviso.textContent = "Cargando la configuración del nodo...";
   try {
@@ -6327,7 +6488,8 @@ async function fLeerLora(aviso) {
   } catch (e) {
     aviso.textContent = textoError(e, "No se pudo cargar la configuración del nodo. Inténtalo de nuevo.");
   } finally {
-    document.getElementById("f-leer").disabled = false;
+    formLecturaLoraEnCurso = false;
+    formRadioPintar();
   }
 }
 
@@ -6401,48 +6563,16 @@ function formFuenteCtrls() {
   if (buscar) buscar.hidden = formFuenteLora();
   const busq = document.getElementById("f-busqueda-aviso");
   if (busq && formFuenteLora()) busq.textContent = "";
+  formRadioPintar();
 }
 
 // El nodo elegido en la lista de radio ES el destino: no hace falta
 // confirmarlo con otro botón. Aquí se fija y se cuenta lo que se sabe de él.
-// Cómo acabó lo último que se lanzó sobre este nodo.
-//
-// Una operación por radio tarda más de lo que nadie mira una pantalla, así
-// que lo normal es lanzarla, irse, y volver más tarde. Antes, al volver, no
-// había nada: el resultado estaba en el gateway y el visor no lo enseñaba, de
-// modo que lo único visible era el canal ocupado, sin explicación.
-async function formUltimaOperacion(origin) {
-  const est = document.getElementById("f-lora-ultima");
-  if (!est) return;
-  if (!origin) { est.hidden = true; return; }
-  try {
-    const r = await fetchApi("/api/config/lora/ultima?origin=" + origin);
-    const d = await r.json();
-    if (!r.ok) { est.hidden = true; return; }
-    const estados = {
-      pending: "pendiente", sending: "en curso", committing: "guardando",
-      done: "completada", failed: "no completada", cancelled: "cancelada",
-    };
-    const partes = [];
-    for (const [que, op] of [["Último cambio", d.envio], ["Última importación", d.lectura]]) {
-      if (!op) continue;
-      const cuando = op.hace_s < 90 ? `hace ${Math.round(op.hace_s)} s`
-                   : op.hace_s < 5400 ? `hace ${Math.round(op.hace_s / 60)} min`
-                   : `hace ${(op.hace_s / 3600).toFixed(1)} h`;
-      partes.push(`${que}: ${op.viva ? "en curso" : (estados[op.state] || "finalizada")} ${cuando}`);
-    }
-    est.hidden = partes.length === 0;
-    est.className = "aviso";
-    est.textContent = partes.join(". ");
-  } catch (e) { est.hidden = true; }
-}
-
 function formLoraDestino() {
   const sel = document.getElementById("f-lora-nodo");
   const origin = Number(sel && sel.value);
   const est = document.getElementById("f-fw-estado");
   formMode = "config";
-  formUltimaOperacion(origin);
   // Los schemas del destino se fijan ANTES de recalcular el botón, porque es
   // formDestino quien los consulta: al revés decidiría con los del nodo
   // anterior y el aviso iría siempre un nodo por detrás.
@@ -6666,7 +6796,7 @@ async function formCheckFw(node) {
       formMode = "config";
       est.className = "aviso";
       est.textContent = latest && ver
-        ? `El nodo está actualizado (${ver}). Al continuar se guardará la configuración.`
+        ? `El nodo está actualizado (${fwVersionTexto(ver)}). Al continuar se guardará la configuración.`
         : "Nodo detectado. Al continuar se guardará la configuración.";
       formDestino(true);
       return;
@@ -6678,7 +6808,7 @@ async function formCheckFw(node) {
     if (cmp === 1) {
       formMode = "config";
       est.className = "aviso";
-      est.textContent = `El nodo tiene una versión más reciente (${ver}). Solo se guardará la configuración.`;
+      est.textContent = `El nodo tiene una versión más reciente (${fwVersionTexto(ver)}). Solo se guardará la configuración.`;
       formDestino(true);
       return;
     }
@@ -6843,6 +6973,7 @@ async function formEnviar() {
   // cable con el que arreglarlo; la reversión del nodo lo cubre, pero cuesta
   // unos minutos y conviene saber en qué se está metiendo uno.
   if (formFuenteLora()) {
+    if (formRadioMotivo()) { formRadioPintar(); return; }
     const origin = Number(document.getElementById("f-lora-nodo").value);
     if (!origin) {
       res.className = "aviso mal";
@@ -6887,7 +7018,7 @@ async function formEnviar() {
       const d = await r.json();
       if (!r.ok) {
         cfgDialogo(T, d.error ?? "No se pudo guardar la configuración. Inténtalo de nuevo.",
-                   { cerrar: true });
+                   { cerrar: true, error: true });
         return;
       }
       const cita = applyAt
@@ -6896,7 +7027,7 @@ async function formEnviar() {
       cfgDialogo(T, SPIN + "Guardando la configuración..." + cita);
       await formLoraSeguir(d.id, T, applyAt);
     } catch (e) {
-      cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true });
+      cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true, error: true });
     }
     return;
   }
@@ -6915,7 +7046,7 @@ async function formEnviar() {
       cfgDialogo(T, "Configuración aplicada. El nodo volverá a estar disponible en unos segundos.",
                  { cerrar: true });
     } catch (e) {
-      cfgDialogo(T, textoError(e, "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo."), { cerrar: true });
+      cfgDialogo(T, textoError(e, "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo."), { cerrar: true, error: true });
     }
     return;
   }
@@ -6928,7 +7059,7 @@ async function formEnviar() {
         body: JSON.stringify({ port: formPuerto }) });
       const df = await rf.json();
       if (!rf.ok) {
-        cfgDialogo(T, df.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true });
+        cfgDialogo(T, df.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true, error: true });
         return;
       }
     }
@@ -6938,7 +7069,7 @@ async function formEnviar() {
       body: JSON.stringify({ port: formPuerto, config: texto }) });
     const data = await r.json();
     if (!r.ok) {
-      cfgDialogo(T, data.error ?? "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo.", { cerrar: true });
+      cfgDialogo(T, data.error ?? "El nodo no aceptó la configuración. Revísala e inténtalo de nuevo.", { cerrar: true, error: true });
       return;
     }
     cfgDialogo(T, formMode === "flash"
@@ -6946,7 +7077,7 @@ async function formEnviar() {
       : "Configuración aplicada. El nodo volverá a estar disponible en unos segundos.",
       { cerrar: true });
   } catch (e) {
-    cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true });
+    cfgDialogo(T, textoError(e, "No se pudo guardar la configuración. Inténtalo de nuevo."), { cerrar: true, error: true });
   }
 }
 

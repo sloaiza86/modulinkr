@@ -27,8 +27,8 @@ public:
                uint32_t baudrate = 115200);
 
     // Si verbose es true, cada comando AT enviado y su respuesta se
-    // vuelcan a `Serial.printf`, prefijo "[at] >>" para envío y
-    // "[at] <<" para respuesta. Útil para depurar la SIM y la red.
+    // registran como at.command y at.response en el diagnóstico.
+    // Permite comprobar la SIM y la red sin mostrar credenciales MQTT.
     void setVerbose(bool v) { verbose_ = v; }
 
     bool isOnline() const { return online_; }
@@ -79,8 +79,10 @@ public:
                      const char* user = nullptr,
                      const char* pass = nullptr);
 
-    // True si el SIM7028 reporta sesión MQTT activa al hacer
-    // AT+CMQTTCONNECT?.
+    enum class MqttState : uint8_t { UNKNOWN, DISCONNECTED, CONNECTED };
+
+    // Consulta local por UART. Una respuesta incompleta no prueba desconexión.
+    MqttState mqttConnectionState();
     bool mqttIsConnected();
 
     // Publica payload (texto). Implementación de 3 pasos:

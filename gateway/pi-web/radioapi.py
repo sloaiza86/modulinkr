@@ -29,6 +29,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 import configapi
+import netstatus
+import firmwaremeta
+import sqlite3
 
 LOG = logging.getLogger("modulinkr.web.radio")
 
@@ -68,6 +71,24 @@ def _sudo(cmd: list[str], timeout_s: float) -> tuple[bool, str]:
     return r.returncode == 0, out
 
 
+def _firmware_status():
+    installed = None
+    link = netstatus.gateway_link_state()
+    try:
+        with netstatus._conn() as c:
+            row = c.execute("SELECT version, port, ts FROM radio_identity WHERE id=1").fetchone()
+        if (row and row[1] == configapi.GATEWAY_PORT and 0 <= time.time() - row[2] <= 60
+                and link.get('lora_link') is True):
+            installed = row[0]
+    except (OSError, sqlite3.Error):
+        pass
+    available = firmwaremeta.image_version(RADIO_BIN)
+    return {'installed_version': installed, 'available_version': available,
+            'comparison': firmwaremeta.comparison(installed, available),
+            'connected': link.get('lora_link') is True,
+            'release_notes': firmwaremeta.release_notes('radio', available)}
+
+
 @router.get("/estado")
 def estado():
     port = configapi.GATEWAY_PORT
@@ -83,6 +104,7 @@ def estado():
         "service_active": _service_active("modulinkr-gateway"),
         "ports": configapi._candidate_ports(),
         "bin": bin_info,
+        **_firmware_status(),
     }
 
 
@@ -118,7 +140,7 @@ async def puerto(request: Request):
 
 
 @router.post("/flash")
-async def flash(_request: Request):
+async def flash(request: Request):
     """Flashea heltec-radio.bin en la radio (para el servicio, escribe la
     imagen y lo rearranca; lo hace flash_heltec.sh)."""
     if not FLASH_SH.is_file():
@@ -132,6 +154,18 @@ async def flash(_request: Request):
     if not configapi._serial_lock.acquire(blocking=False):
         return _err(409, "otra operación serie está en curso; reintentar")
     try:
+        status = _firmware_status()
+        try:
+            body = json.loads((await request.body()) or b"{}")
+        except (ValueError, TypeError):
+            return _err(400, "Petición no válida.")
+        if not isinstance(body, dict) or body.get('expected_version') != status['available_version']:
+            return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
+        recovery = body.get('recovery') is True
+        if not status['available_version']:
+            return _err(409, "No hay firmware disponible para la radio.")
+        if not recovery and (status['comparison'] != 'different' or not status['connected']):
+            return _err(409, "No hay una actualización aplicable. Vuelve a comprobar la versión de la radio.")
         LOG.info("event=radio.flash_started")
         ok, out = _sudo([str(FLASH_SH)], timeout_s=FLASH_TIMEOUT_S)
         # Solo el tramo final: esptool imprime barras de progreso largas.

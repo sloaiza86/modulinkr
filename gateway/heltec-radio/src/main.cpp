@@ -1,3 +1,6 @@
+#define MODULINKR_FIRMWARE_VERSION "0.3.3"
+#include "../../../shared/diagnostic_log.h"
+#include "../../../shared/firmware_identity.h"
 // ModuLinkr, gateway-radio (Heltec WiFi LoRa 32 v3).
 //
 // Front-end LoRa del gateway, rol de RADIO PURA (desde el 5-jul-2026).
@@ -103,17 +106,11 @@ IRAM_ATTR void onDio1() {
 }
 
 void printBanner() {
-    Serial.println();
-    Serial.println(F("=================================================="));
-    Serial.println(F("  ModuLinkr/gateway-radio  v0.3.0-radio-pura"));
-    Serial.println(F("  Heltec WiFi LoRa 32 v3 + SX1262 (RadioLib)"));
-    Serial.printf ("  freq=%.3f MHz  SF%u  BW%.0f kHz  CR4/%u  sync=0x%02X\n",
-                   g_freq_mhz, g_sf, g_bw_khz,
-                   kCodingRate, kSyncWord);
-    Serial.printf ("  network_id=%u  role=radio-front-end (ACK and BEACON on Pi)\n",
-                   g_network_id);
-    Serial.println(F("  Pi->Heltec: 'TX <hex>' / 'OLED ...' / 'RADIO ...'   Heltec->Pi: '[rx] ...'"));
-    Serial.println(F("=================================================="));
+    // La identidad de arranque sigue disponible para gateways anteriores.
+    Serial.printf("  ModuLinkr/gateway-radio  v%s\n", firmwareIdentity());
+    diag::log("INFO", "radio.init", "init.firmware", "version=%s hardware=Heltec_V3_SX1262", firmwareIdentity());
+    diag::log("INFO", "radio.init", "init.config", "freq_mhz=%.3f sf=%u bw_khz=%.0f cr=%u sync=0x%02X network_id=%u",
+              g_freq_mhz, g_sf, g_bw_khz, kCodingRate, kSyncWord, g_network_id);
 }
 
 // Vuelca la trama cruda al Pi con el formato que espera el servicio del Pi.
@@ -248,12 +245,12 @@ void handleRadioLine(char* rest) {
     unsigned netid = 0, sf = 0, bw = 0;
     unsigned long freq_hz = 0;
     if (sscanf(rest, "%u %lu %u %u", &netid, &freq_hz, &sf, &bw) != 4) {
-        Serial.println(F("[radio] err invalid_format expected='RADIO <netid> <freq_hz> <sf> <bw_khz>'"));
+        diag::log("WARNING", "radio.config", "radio.config_rejected", "reason=invalid_format expected='RADIO <netid> <freq_hz> <sf> <bw_khz>'");
         return;
     }
     if (netid < 1 || netid > 254 || freq_hz < 100000000UL || freq_hz > 1000000000UL ||
         sf < 7 || sf > 12 || (bw != 125 && bw != 250 && bw != 500)) {
-        Serial.println(F("[radio] err values_out_of_range"));
+        diag::log("WARNING", "radio.config", "radio.config_rejected", "reason=values_out_of_range");
         return;
     }
     const float freq_mhz = freq_hz / 1.0e6f;
@@ -267,18 +264,17 @@ void handleRadioLine(char* rest) {
     bool ok = true;
     int16_t s;
     if ((s = radio.setFrequency(freq_mhz)) == RADIOLIB_ERR_NONE) g_freq_mhz = freq_mhz;
-    else { ok = false; Serial.printf("[radio] setFrequency err=%d\n", s); }
+    else { ok = false; diag::log("ERROR", "radio.config", "radio.setfrequency_failed", "err=%d\n", s); }
     if ((s = radio.setSpreadingFactor(static_cast<uint8_t>(sf))) == RADIOLIB_ERR_NONE)
         g_sf = static_cast<uint8_t>(sf);
-    else { ok = false; Serial.printf("[radio] setSpreadingFactor err=%d\n", s); }
+    else { ok = false; diag::log("ERROR", "radio.config", "radio.setspreadingfactor_failed", "err=%d\n", s); }
     if ((s = radio.setBandwidth(bw_khz)) == RADIOLIB_ERR_NONE) g_bw_khz = bw_khz;
-    else { ok = false; Serial.printf("[radio] setBandwidth err=%d\n", s); }
+    else { ok = false; diag::log("ERROR", "radio.config", "radio.setbandwidth_failed", "err=%d\n", s); }
     g_network_id = static_cast<uint8_t>(netid);
 
     const int16_t rs = radio.startReceive();
-    if (rs != RADIOLIB_ERR_NONE) Serial.printf("[radio] startReceive err=%d\n", rs);
-    Serial.printf("[radio] applied netid=%u freq=%.3f MHz SF%u BW%.0f kHz%s\n",
-                  g_network_id, g_freq_mhz, g_sf, g_bw_khz, ok ? "" : " errors=true");
+    if (rs != RADIOLIB_ERR_NONE) diag::log("ERROR", "radio.config", "radio.startreceive_failed", "err=%d\n", rs);
+    diag::log("INFO", "radio.config", "radio.applied", "network_id=%u freq_mhz=%.3f sf=%u bw_khz=%.0f%s\n", g_network_id, g_freq_mhz, g_sf, g_bw_khz, ok ? "" : " errors=true");
 }
 
 // Procesa una línea completa recibida del Pi por USB. Entiende "TX <hex>"
@@ -290,6 +286,11 @@ void handleInLine(char* line, size_t len) {
         line[--len] = '\0';
     }
     if (len == 0) return;
+    if (strcmp(line, "FW?") == 0) {
+        Serial.printf("[fw] version=%s\n", firmwareIdentity());
+        return;
+    }
+
 
     if (len >= 3 && line[0] == 'T' && line[1] == 'X' && line[2] == ' ') {
         const char* hex = line + 3;
@@ -306,7 +307,7 @@ void handleInLine(char* line, size_t len) {
     } else if (len >= 6 && strncmp(line, "RADIO ", 6) == 0) {
         handleRadioLine(line + 6);
     } else {
-        Serial.println(F("[in] unknown_command allowed='TX|OLED|RADIO'"));
+        diag::log("INFO", "radio.in", "in.unknown_command", "allowed='TX|OLED|RADIO'");
     }
 }
 
@@ -324,7 +325,7 @@ void pollInput() {
         } else {
             // Línea demasiado larga: descartar hasta el próximo '\n'.
             g_in_len = 0;
-            Serial.println(F("[in] line_dropped reason=too_long"));
+            diag::log("WARNING", "radio.in", "in.line_dropped", "reason=too_long");
         }
     }
 }
@@ -389,7 +390,7 @@ void setup() {
     // SPI personalizado en los pines del Heltec.
     loraSpi.begin(kPinSpiSCK, kPinSpiMISO, kPinSpiMOSI, kPinNSS);
 
-    Serial.print(F("[init] SX1262.begin... "));
+    diag::log("INFO", "radio.init", "init.starting", "chip=SX1262");
     int16_t state = radio.begin(
         g_freq_mhz,
         g_bw_khz,
@@ -402,26 +403,26 @@ void setup() {
         true    // useRegulatorLDO
     );
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("FAILED code=%d\n", state);
+        diag::log("CRITICAL", "radio.init", "init.failed", "code=%d", state);
         while (true) {
             delay(1000);
         }
     }
-    Serial.println(F("OK"));
+    diag::log("INFO", "radio.init", "init.ready", "");
 
     radio.setDio1Action(onDio1);
 
-    Serial.print(F("[init] startReceive... "));
+    diag::log("INFO", "radio.init", "init.receive_starting", "");
     state = radio.startReceive();
     if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("FAILED code=%d\n", state);
+        diag::log("CRITICAL", "radio.init", "init.failed", "code=%d", state);
         while (true) {
             delay(1000);
         }
     }
-    Serial.println(F("OK"));
+    diag::log("INFO", "radio.init", "init.ready", "");
 
-    Serial.println(F("[init] radio_ready interfaces=LoRa,USB"));
+    diag::log("INFO", "radio.init", "init.radio_ready", "interfaces=LoRa,USB");
 }
 
 void loop() {

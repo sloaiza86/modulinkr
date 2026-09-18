@@ -32,6 +32,15 @@ deja de emitir ACK y BEACON: los nodos pierden al gateway como padre (sin
 beacon) y agotan reintentos (sin ACK), y escalan al respaldo NB-IoT. Por
 eso el servicio corre bajo systemd con `Restart=always`.
 
+La ruta de retorno para los sondeos y la configuración se actualiza con el
+último uplink cuyo destino final y salto receptor son el gateway. Si una
+trama vuelve a llegar directamente desde el nodo, se sustituye el relay
+guardado por el propio nodo. Si vuelve a llegar a través de un relay, se
+guarda ese vecino. El tráfico oído que va dirigido a otro salto y los ecos
+de BEACON actualizan el estado de red, pero no sustituyen esa ruta. Una ruta
+antigua se corrige al recibir el siguiente uplink válido, sin borrar la base
+de datos ni reiniciar el nodo.
+
 ## Enlace serial con el Heltec (frame-format.md §12)
 
 - Heltec a Pi: `[rx] #N len=L rssi=X snr=Y hex=...` por cada trama del aire.

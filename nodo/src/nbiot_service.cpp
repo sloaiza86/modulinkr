@@ -1,3 +1,4 @@
+#include "../../shared/diagnostic_log.h"
 // ModuLinkr, servicio NB-IoT no bloqueante (implementación)
 
 #include "nbiot_service.h"
@@ -8,10 +9,8 @@
 #include "nodeclock.h"
 
 namespace {
-constexpr const char* kTag = "[nbsvc]";
 
-// Log AT verboso (v2.3). Vuelca cada comando AT y su respuesta con prefijo
-// "[at] >>" / "[at] <<". Se apagó tras validar el NTP por NB-IoT en banco
+// Log AT verboso (v2.3). Vuelca los eventos at.command y at.response. Se apagó tras validar el NTP por NB-IoT en banco
 // (11-jul-2026); poner a true para volver a depurar el módem.
 constexpr bool kAtVerbose = false;
 }
@@ -44,9 +43,10 @@ void NbiotService::run() {
         }
 
         if (!step()) {
-            Serial.printf("%s state_failed state=%s backoff_ms=%lu\n",
-                          kTag, stateName(state_),
-                          static_cast<unsigned long>(kBackoffMs));
+            if (mqtt_state_ == Nbiot::MqttState::CONNECTED) {
+                mqtt_state_ = Nbiot::MqttState::UNKNOWN;
+            }
+            diag::log("ERROR", "node.nbiot", "nbiot.state_failed", "state=%s backoff_ms=%lu\n", stateName(state_), static_cast<unsigned long>(kBackoffMs));
             state_ = State::BACKOFF;
             continue;
         }
@@ -56,10 +56,39 @@ void NbiotService::run() {
     }
 }
 
+Nbiot::CeregStatus NbiotService::refreshRegistration() {
+    const auto registration = modem_.getCEREG();
+    registration_state_ = registration;
+    last_registration_check_ms_ = millis();
+    diag::log("INFO", "node.nbiot", "nbiot.network_status", "state=%s\n", Nbiot::ceregToString(registration));
+    return registration;
+}
+
 bool NbiotService::step() {
+    // El registro se comprueba aunque MQTT esté listo o en reconexión. Cada
+    // reporte LoRa debe conservar la edad de la comprobación real del módem.
+    if ((state_ == State::READY || state_ == State::MQTT_START
+         || state_ == State::MQTT_CONNECT)
+        && uint32_t(millis() - last_registration_check_ms_) >= kMqttCheckMs) {
+        const auto registration = refreshRegistration();
+        if (registration == Nbiot::CeregStatus::UNKNOWN) {
+            mqtt_state_ = Nbiot::MqttState::UNKNOWN;
+            csq_dbm_ = INT8_MIN;
+            return false;
+        }
+        if (!isRegistered(registration)) {
+            mqtt_state_ = Nbiot::MqttState::DISCONNECTED;
+            register_start_ms_ = millis();
+            state_ = State::REGISTERING;
+            return true;
+        }
+    }
     switch (state_) {
         case State::UART_INIT: {
-            Serial.printf("%s uart_opening modem=SIM7028\n", kTag);
+            registration_state_ = Nbiot::CeregStatus::UNKNOWN;
+            mqtt_state_ = Nbiot::MqttState::UNKNOWN;
+            csq_dbm_ = INT8_MIN;
+            diag::log("INFO", "node.nbiot", "nbiot.uart_opening", "modem=SIM7028\n");
             if (!modem_.begin(*cfg_.uart, cfg_.rx_pin, cfg_.tx_pin,
                               cfg_.baudrate)) {
                 return false;
@@ -71,18 +100,17 @@ bool NbiotService::step() {
 
         case State::SIM_CHECK: {
             if (!modem_.isSimReady()) {
-                Serial.printf("%s sim_not_ready\n", kTag);
+                diag::log("INFO", "node.nbiot", "nbiot.sim_not_ready", "\n");
                 return false;
             }
-            Serial.printf("%s sim_ready imsi=%s\n", kTag,
-                          modem_.readIMSI().c_str());
+            diag::log("INFO", "node.nbiot", "nbiot.sim_ready", "imsi=%s\n", modem_.readIMSI().c_str());
             state_ = State::APN_CONFIG;
             return true;
         }
 
         case State::APN_CONFIG: {
             if (!modem_.configureAPN(cfg_.apn, cfg_.user, cfg_.pass)) {
-                Serial.printf("%s apn_rejected\n", kTag);
+                diag::log("WARNING", "node.nbiot", "nbiot.apn_rejected", "\n");
                 // No fatal: algunos operadores registran igual.
             }
             // v2.1: la hora de red NITZ (AT+CTZU / CCLK) sale del diseño;
@@ -95,17 +123,15 @@ bool NbiotService::step() {
         }
 
         case State::REGISTERING: {
-            const auto creg = modem_.getCEREG();
+            const auto creg = refreshRegistration();
             csq_dbm_ = modem_.getCSQ();
-            if (creg == Nbiot::CeregStatus::REGISTERED_HOME ||
-                creg == Nbiot::CeregStatus::REGISTERED_ROAMING) {
-                Serial.printf("%s network_registered response=%s\n", kTag,
-                              Nbiot::ceregToString(creg));
+            if (isRegistered(creg)) {
+                diag::log("INFO", "node.nbiot", "nbiot.network_registered", "response=%s\n", Nbiot::ceregToString(creg));
                 state_ = State::MQTT_START;
                 return true;
             }
             if ((millis() - register_start_ms_) > kRegisterLimitMs) {
-                Serial.printf("%s network_registration_timeout timeout_min=30\n", kTag);
+                diag::log("WARNING", "node.nbiot", "nbiot.network_registration_timeout", "timeout_min=30\n");
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(kRegisterPollMs));
@@ -115,8 +141,7 @@ bool NbiotService::step() {
         case State::MQTT_START: {
             modem_.mqttReset();
             if (!modem_.mqttBegin(cfg_.client_id, cfg_.tls)) {
-                Serial.printf("%s mqtt_session_start_failed response=%s\n", kTag,
-                              modem_.lastResponse().c_str());
+                diag::log("ERROR", "node.nbiot", "nbiot.mqtt_session_start_failed", "response=%s\n", modem_.lastResponse().c_str());
                 return false;
             }
             state_ = State::MQTT_CONNECT;
@@ -126,47 +151,63 @@ bool NbiotService::step() {
         case State::MQTT_CONNECT: {
             if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                     cfg_.mqtt_user, cfg_.mqtt_pass)) {
-                Serial.printf("%s mqtt_connection_failed response=%s\n", kTag,
-                              modem_.lastResponse().c_str());
+                diag::log("ERROR", "node.nbiot", "nbiot.mqtt_connection_failed", "response=%s\n", modem_.lastResponse().c_str());
                 return false;
             }
-            Serial.printf("%s mqtt_ready host=%s port=%u transport=%s\n", kTag, cfg_.broker,
-                          cfg_.port, cfg_.tls ? "tls" : "tcp");
+            diag::log("INFO", "node.nbiot", "nbiot.mqtt_ready", "host=%s port=%u transport=%s\n", cfg_.broker, cfg_.port, cfg_.tls ? "tls" : "tcp");
             last_csq_ms_ = millis();
+            last_mqtt_check_ms_ = millis();
+            mqtt_state_ = Nbiot::MqttState::CONNECTED;
             state_ = State::READY;
             return true;
         }
 
         case State::READY: {
+            // Se consulta incluso sin muestras pendientes, en la tarea del módem.
+            if (uint32_t(millis() - last_mqtt_check_ms_) >= kMqttCheckMs) {
+                mqtt_state_ = modem_.mqttConnectionState();
+                last_mqtt_check_ms_ = millis();
+                const auto mqtt = mqtt_state_;
+                diag::log("INFO", "node.nbiot", "nbiot.mqtt_status", "state=%s\n", mqtt == Nbiot::MqttState::CONNECTED ? "connected" :
+                              mqtt == Nbiot::MqttState::DISCONNECTED ? "disconnected" :
+                              "unknown");
+                if (mqtt == Nbiot::MqttState::DISCONNECTED) {
+                    state_ = State::MQTT_START;
+                    return true;
+                }
+            }
             // Publicaciones pendientes.
             PubItem item{nullptr, 0};
             if (xQueueReceive(queue_, &item, pdMS_TO_TICKS(500)) == pdTRUE) {
                 bool ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
-                if (!ok && !modem_.mqttIsConnected()) {
+                if (!ok) {
+                    mqtt_state_ = modem_.mqttConnectionState();
+                    last_mqtt_check_ms_ = millis();
+                }
+                if (!ok && mqtt_state_ == Nbiot::MqttState::DISCONNECTED) {
                     // Sesión caída: un intento de reconexión y reintento.
-                    Serial.printf("%s mqtt_session_lost reconnecting=true\n", kTag);
+                    diag::log("WARNING", "node.nbiot", "nbiot.mqtt_session_lost", "reconnecting=true\n");
+                    state_ = State::MQTT_CONNECT;
                     if (modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                            cfg_.mqtt_user, cfg_.mqtt_pass)) {
+                        last_mqtt_check_ms_ = millis();
+                        mqtt_state_ = Nbiot::MqttState::CONNECTED;
+                        state_ = State::READY;
                         ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
                     }
                 }
                 if (ok) {
+                    mqtt_state_ = Nbiot::MqttState::CONNECTED;
                     published_ok_ = published_ok_ + 1;
                     // Confirmación: el loop (núcleo 1) libera del outbox las
                     // muestras de los batches con id <= este (v2.3).
                     last_published_batch_id_ = item.batch_id;
-                    Serial.printf("%s batch_published id=%lu bytes=%u published=%lu\n",
-                                  kTag, static_cast<unsigned long>(item.batch_id),
-                                  static_cast<unsigned>(strlen(item.json)),
-                                  static_cast<unsigned long>(published_ok_));
+                    diag::log("INFO", "node.nbiot", "nbiot.batch_published", "id=%lu bytes=%u published=%lu\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned>(strlen(item.json)), static_cast<unsigned long>(published_ok_));
                 } else {
                     // No se confirma: el batch sigue en el outbox y el loop
                     // lo reintentará (el backend deduplica por origin/ts/seq).
                     published_err_ = published_err_ + 1;
-                    Serial.printf("%s batch_publish_failed id=%lu errors=%lu response=%s\n", kTag,
-                                  static_cast<unsigned long>(item.batch_id),
-                                  static_cast<unsigned long>(published_err_),
-                                  modem_.lastResponse().c_str());
+                    diag::log("ERROR", "node.nbiot", "nbiot.batch_publish_failed", "id=%lu errors=%lu response=%s\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned long>(published_err_), modem_.lastResponse().c_str());
                 }
                 free(item.json);
                 if (!ok) return false;  // reevalúa la sesión desde el principio
@@ -180,11 +221,9 @@ bool NbiotService::step() {
                 ntp_last_try_ms_ = millis();
                 if (epoch != 0) {
                     nodeclock::sync(epoch);
-                    Serial.printf("%s ntp_synchronized epoch=%lu\n", kTag,
-                                  static_cast<unsigned long>(epoch));
+                    diag::log("INFO", "node.nbiot", "nbiot.ntp_synchronized", "epoch=%lu\n", static_cast<unsigned long>(epoch));
                 } else {
-                    Serial.printf("%s ntp_failed response=%s\n", kTag,
-                                  modem_.lastResponse().c_str());
+                    diag::log("ERROR", "node.nbiot", "nbiot.ntp_failed", "response=%s\n", modem_.lastResponse().c_str());
                 }
                 ntp_pending_ = false;
             } else if (ntp_pending_) {

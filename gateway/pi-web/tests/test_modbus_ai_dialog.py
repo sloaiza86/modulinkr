@@ -188,8 +188,9 @@ class DialogStructureTests(unittest.TestCase):
             self.assertNotIn(forbidden, assistant)
 
     def test_assets_share_the_dialog_cache_version(self):
-        version = "modbus-ai-flow-20260902"
-        self.assertEqual(3, self.html.count(version))
+        versions = re.findall(r'/static/(?:style.css|app.js|components.js)\?v=([^"\s]+)', self.html)
+        self.assertEqual(3, len(versions))
+        self.assertEqual(1, len(set(versions)))
         self.assertIn(".mbai-dialog", self.styles)
         self.assertIn('"modulinkr-modbus-ai-assistant"', self.components)
 

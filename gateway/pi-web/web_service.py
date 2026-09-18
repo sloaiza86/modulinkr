@@ -79,7 +79,7 @@ import netstatus
 LOG = logging.getLogger("modulinkr.web")
 logging.Formatter.converter = time.gmtime
 logging.basicConfig(level=os.environ.get("MODULINKR_LOG_LEVEL", "INFO"),
-                    format="%(asctime)sZ %(levelname)-8s %(name)s %(message)s",
+                    format="%(asctime)sZ %(levelname)-8s %(name)-24s %(message)s",
                     datefmt="%Y-%m-%dT%H:%M:%S")
 
 WEB_USER   = os.environ.get("MODULINKR_WEB_USER", "")

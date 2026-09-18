@@ -1,3 +1,4 @@
+#include "../../shared/diagnostic_log.h"
 // ModuLinkr, driver NB-IoT (implementación, fase 1 diagnóstico)
 
 #include "nbiot.h"
@@ -192,11 +193,11 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
 
     // Contexto SSL listo ANTES de arrancar la pila MQTT (v2.3).
     if (tls && !sslConfigure(ssl_ctx)) {
-        Serial.println("[nbiot]  warn event=tls.config_rejected action=continue");
+        diag::log("WARNING", "node.nbiot", "nbiot.tls.config_rejected", "action=continue");
     }
 
     // Arranca el servicio MQTT. Activa el PDP context internamente.
-    if (verbose_) Serial.println("[at] >> AT+CMQTTSTART");
+    if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=AT+CMQTTSTART");
     drain(*uart_);
     uart_->println("AT+CMQTTSTART");
 
@@ -206,7 +207,7 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
     last_response_ = r;
     if (verbose_) {
         String t = r; t.trim();
-        Serial.printf("[at] << %s\n", t.c_str());
+        diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
     if (r.indexOf("+CMQTTSTART: 0") < 0 && r.indexOf("ERROR") < 0) {
         return false;
@@ -228,8 +229,7 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
     if (tls) {
         snprintf(cmd, sizeof(cmd), "AT+CMQTTSSLCFG=0,%u", ssl_ctx);
         if (!sendAT(cmd, "OK", 3000)) {
-            Serial.printf("[nbiot]  warn event=mqtt.tls_config_failed response=%s\n",
-                          last_response_.c_str());
+            diag::log("ERROR", "node.nbiot", "nbiot.mqtt.tls_config_failed", "response=%s\n", last_response_.c_str());
         }
     }
     return true;
@@ -260,11 +260,9 @@ bool Nbiot::mqttConnect(const char* broker,
 
     if (verbose_) {
         if (have_auth) {
-            Serial.printf("[at] >> AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u,\"<redacted>\",\"<redacted>\"\n",
-                          broker, port, keepalive_s,
-                          clean_session ? 1 : 0);
+            diag::log("DEBUG", "node.at", "at.command", "data=AT+CMQTTCONNECT=0,\"tcp://%s:%u\",%u,%u,\"<redacted>\",\"<redacted>\"\n", broker, port, keepalive_s, clean_session ? 1 : 0);
         } else {
-            Serial.printf("[at] >> %s\n", cmd);
+            diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
         }
     }
     drain(*uart_);
@@ -275,19 +273,46 @@ bool Nbiot::mqttConnect(const char* broker,
     last_response_ = r;
     if (verbose_) {
         String t = r; t.trim();
-        Serial.printf("[at] << %s\n", t.c_str());
+        diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
     return r.indexOf("+CMQTTCONNECT: 0,0") >= 0;
 }
 
 bool Nbiot::mqttIsConnected() {
-    if (uart_ == nullptr) return false;
+    return mqttConnectionState() == MqttState::CONNECTED;
+}
+
+Nbiot::MqttState Nbiot::mqttConnectionState() {
+    if (uart_ == nullptr) return MqttState::UNKNOWN;
     drain(*uart_);
-    uart_->println("AT+CMQTTCONNECT?");
+    // SIM7028 MQTT(S) §3.2.9: la consulta devuelve disc_state, 0 conectado
+    // y 1 desconectado. No ejecuta la orden de desconexión ni publica datos.
+    uart_->println("AT+CMQTTDISC?");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
-    // Si está conectado responde con la URL del broker. Si no, solo OK.
-    return r.indexOf("tcp://") >= 0;
+    MqttState result = MqttState::UNKNOWN;
+    bool complete = false;
+    for (unsigned start = 0; start < r.length();) {
+        const int newline = r.indexOf('\n', start);
+        const unsigned end = newline < 0 ? r.length() : unsigned(newline);
+        String line = r.substring(start, end);
+        line.trim();
+        if (line == "OK") complete = true;
+        if (line.indexOf("ERROR") >= 0) return MqttState::UNKNOWN;
+        if (line.startsWith("+CMQTTDISC:")) {
+            unsigned client = 0, disconnected = 0;
+            int consumed = 0;
+            if (sscanf(line.c_str(), "+CMQTTDISC: %u , %u %n",
+                       &client, &disconnected, &consumed) != 2
+                || consumed != int(line.length()) || client != 0
+                || disconnected > 1 || result != MqttState::UNKNOWN) {
+                return MqttState::UNKNOWN;
+            }
+            result = disconnected ? MqttState::DISCONNECTED : MqttState::CONNECTED;
+        }
+        start = end + 1;
+    }
+    return complete ? result : MqttState::UNKNOWN;
 }
 
 bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
@@ -299,12 +324,12 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     const size_t topic_len = strlen(topic);
     snprintf(cmd, sizeof(cmd),
              "AT+CMQTTTOPIC=0,%u", static_cast<unsigned>(topic_len));
-    if (verbose_) Serial.printf("[at] >> %s\n", cmd);
+    if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     drain(*uart_);
     uart_->println(cmd);
     if (!waitForChar(*uart_, '>', 5000)) {
         last_response_ = "(timeout > en TOPIC)";
-        if (verbose_) Serial.println("[at] << timeout > TOPIC");
+        if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=timeout > TOPIC");
         return false;
     }
     uart_->write(reinterpret_cast<const uint8_t*>(topic), topic_len);
@@ -312,7 +337,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) Serial.println("[at] << TOPIC missing OK");
+            if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=TOPIC missing OK");
             return false;
         }
     }
@@ -321,12 +346,12 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     const size_t payload_len = strlen(payload);
     snprintf(cmd, sizeof(cmd),
              "AT+CMQTTPAYLOAD=0,%u", static_cast<unsigned>(payload_len));
-    if (verbose_) Serial.printf("[at] >> %s\n", cmd);
+    if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     drain(*uart_);
     uart_->println(cmd);
     if (!waitForChar(*uart_, '>', 5000)) {
         last_response_ = "(timeout > en PAYLOAD)";
-        if (verbose_) Serial.println("[at] << timeout > PAYLOAD");
+        if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=timeout > PAYLOAD");
         return false;
     }
     uart_->write(reinterpret_cast<const uint8_t*>(payload), payload_len);
@@ -334,14 +359,14 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) Serial.println("[at] << PAYLOAD missing OK");
+            if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=PAYLOAD missing OK");
             return false;
         }
     }
 
     // Paso 3: disparar la publicación.
     snprintf(cmd, sizeof(cmd), "AT+CMQTTPUB=0,%u,60", qos);
-    if (verbose_) Serial.printf("[at] >> %s\n", cmd);
+    if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     drain(*uart_);
     uart_->println(cmd);
 
@@ -350,7 +375,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     last_response_ = r;
     if (verbose_) {
         String t = r; t.trim();
-        Serial.printf("[at] << %s\n", t.c_str());
+        diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
     return r.indexOf("+CMQTTPUB: 0,0") >= 0;
 }
@@ -413,19 +438,31 @@ Nbiot::CeregStatus Nbiot::getCEREG() {
     const String r = readResponse(2000, "OK");
     last_response_ = r;
 
-    const int cereg_pos = r.indexOf("+CEREG:");
-    if (cereg_pos < 0) return CeregStatus::UNKNOWN;
-
-    const int first_comma = r.indexOf(',', cereg_pos);
-    if (first_comma < 0) return CeregStatus::UNKNOWN;
-
-    int p = first_comma + 1;
-    while (p < (int)r.length() && r[p] == ' ') ++p;
-    if (p >= (int)r.length() || !isDigit(r[p])) return CeregStatus::UNKNOWN;
-
-    const int stat = r[p] - '0';
-    if (stat < 0 || stat > 5) return CeregStatus::UNKNOWN;
-    return static_cast<CeregStatus>(stat);
+    CeregStatus result = CeregStatus::UNKNOWN;
+    bool complete = false, found = false;
+    for (unsigned start = 0; start < r.length();) {
+        const int newline = r.indexOf('\n', start);
+        const unsigned end = newline < 0 ? r.length() : unsigned(newline);
+        String line = r.substring(start, end);
+        line.trim();
+        if (line == "OK") complete = true;
+        if (line.indexOf("ERROR") >= 0) return CeregStatus::UNKNOWN;
+        // La consulta devuelve n,stat; un aviso espontáneo sin n no confirma
+        // el resultado de esta consulta. Tampoco basta una respuesta truncada.
+        if (line.startsWith("+CEREG:") && line.indexOf(',') >= 0) {
+            unsigned mode = 0, stat = 0;
+            int consumed = 0;
+            if (sscanf(line.c_str(), "+CEREG: %u , %u %n", &mode, &stat, &consumed) != 2
+                || mode > 5 || stat > 5 || found
+                || (consumed != int(line.length()) && line.c_str()[consumed] != ',')) {
+                return CeregStatus::UNKNOWN;
+            }
+            result = static_cast<CeregStatus>(stat);
+            found = true;
+        }
+        start = end + 1;
+    }
+    return complete && found ? result : CeregStatus::UNKNOWN;
 }
 
 uint32_t Nbiot::readClock() {
@@ -497,14 +534,14 @@ uint32_t Nbiot::ntpSync(const char* server) {
 
     // Ejecuta la sincronización: emite la URC +CNTP: <r>[,<time>] (r=1 OK).
     // Puede tardar segundos en contactar el servidor NTP.
-    if (verbose_) Serial.println("[at] >> AT+CNTP");
+    if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=AT+CNTP");
     drain(*uart_);
     uart_->println("AT+CNTP");
     String r = readResponse(20000, "+CNTP:");
     last_response_ = r;
     if (verbose_) {
         String t = r; t.trim();
-        Serial.printf("[at] << %s\n", t.c_str());
+        diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
 
     // Tras una sincronización correcta el RTC del módem tiene la hora real
@@ -529,7 +566,7 @@ bool Nbiot::sendAT(const char* cmd, const char* expected, uint32_t timeout_ms) {
     drain(*uart_);
 
     if (verbose_) {
-        Serial.printf("[at] >> %s\n", cmd);
+        diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     }
     uart_->println(cmd);
 
@@ -574,7 +611,7 @@ done:
         String t = buffer;
         t.trim();
         if (t.length() == 0) t = "(no response)";
-        Serial.printf("[at] << %s\n", t.c_str());
+        diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
     return result;
 }

@@ -239,9 +239,6 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
   min-width: 0; margin-bottom: 24px; padding: 0; cursor: default; justify-self: center;
   background: none; border: 0; border-radius: 0; box-shadow: none;
 }
-.tarjeta-nodo.nodo-offline .tn-cabecera,
-.tarjeta-nodo.nodo-offline .tn-sensores { opacity: 0.62; }
-
 .tn-cabecera {
   display: flex; align-items: center; gap: 8px; min-height: 24px;
   margin-bottom: 8px; padding: 0 4px; border-radius: 6px; cursor: pointer;
@@ -1013,7 +1010,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 }
 .archivo-config > h3 { margin: 0; color: var(--text); font-size: 14px; font-weight: 600; }
 .cfg-fila { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; }
-.cfg-fila button {
+.cfg-fila button, .bc-instalar {
   background: var(--card); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 0 16px; height: var(--cfg-control-alto);
   min-height: var(--cfg-control-alto); font: inherit; font-weight: 500; line-height: 1.2;
@@ -1021,7 +1018,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer; transition: background 150ms ease, border-color 150ms ease;
 }
-.cfg-fila button:hover { background: var(--bg); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.cfg-fila button:hover, .bc-instalar:hover { background: var(--bg); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .cfg-fila button.btn-primario {
   background: var(--accent); color: #fff; border: none; font-weight: 600;
 }
@@ -1669,8 +1666,19 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   margin-top: 0.8rem; height: 340px; overflow: auto;
   background: #0e1526; color: #d6e2ff; border-radius: 10px;
   padding: 0.7rem 0.9rem;
-  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
-  white-space: pre-wrap; word-break: break-all;
+  font: 13px/1.7 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre; word-break: normal; overflow-wrap: normal;
+  tab-size: 4;
+}
+#dbg-consola { height: clamp(340px, 55vh, 600px); }
+#dbg-info:not(:empty) { margin-top: 16px; }
+.dbg-filtros { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.dbg-filtros .cfg-campo { flex: 1 1 180px; min-width: 0; }
+.dbg-registro { display: block; min-width: max-content; }
+.dbg-registro[data-level="WARNING"] { color: #ffe09b; background: #30291b; }
+.dbg-registro[data-level="ERROR"], .dbg-registro[data-level="CRITICAL"] { color: #ffbcbc; background: #34202b; }
+#dbg-consola:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px;
 }
 
 /* Panel del cambio coordinado de parámetros de red (§17.8). */
@@ -1706,3 +1714,32 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
 .mig-pill.migrado  { color: #0a6b3d; background: rgba(10, 107, 61, 0.12); }
 .mig-pill.rezagado { color: #8a5300; background: rgba(138, 83, 0, 0.14); }
 .mig-pill.mudo     { color: var(--dim); background: rgba(127, 127, 127, 0.14); }
+
+.fw-versiones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+.fw-versiones > div { display: flex; flex-direction: column; gap: 6px; }
+.fw-versiones span { color: var(--dim); font-size: 13px; }
+.fw-versiones strong { font-weight: 500; overflow-wrap: anywhere; }
+.fw-detalles { margin: 12px 0; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+.fw-detalles summary { cursor: pointer; }
+#bc-tabla td { white-space: normal; }
+#bc-tabla td:last-child { text-align: right; }
+#bc-tabla .bc-instalar { white-space: nowrap; }
+ .fw-modos { display: flex; gap: 8px; margin-bottom: 16px; }
+.fw-modos button { min-height: 44px; flex: 1; padding: 10px 16px; font: inherit; font-weight: 600; color: var(--text); background: var(--panel, #fff); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.fw-modos button[aria-pressed="true"] { color: var(--accent); background: var(--accent-suave); border-color: var(--accent); }
+.fw-modos button:focus-visible, .bc-elegir:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.fw-notas { margin: 16px 0; color: var(--dim); }
+.fw-notas summary, .fw-recuperacion summary { min-height: 32px; cursor: pointer; color: var(--accent); }
+.fw-notas li { margin: 8px 0; }
+.fw-recuperacion { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border); }
+#bc-tabla input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; }
+#bc-tabla td { vertical-align: middle; }
+#fw-nombre { font-size: 16px; margin: 20px 0 0; }
+#fw-usb-card > .cfg-acciones:has(> button:not([hidden])) { margin-top: 20px; }
+#bc-estado:empty { display: none; }
+#fw-lora-barra { margin-top: 28px; }
+@media (max-width: 640px) { .fw-versiones { grid-template-columns: 1fr; } }
+
+#cfg-fw .cfg-acciones:not(:has(button:not([hidden]))):not(:has(.aviso:not(:empty))), #cfg-radio .cfg-acciones:not(:has(button:not([hidden]))) { display: none; }
+
+#fw-local-aviso:not(:empty), #fw-busqueda-aviso:not(:empty), #fw-resultado:not(:empty) { margin-top: 16px; }

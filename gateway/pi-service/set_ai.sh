@@ -10,7 +10,7 @@ WEB_ENV=/etc/modulinkr/web.env
 ALLOWED=" MODULINKR_AI_PROVIDER MODULINKR_AI_MODEL MODULINKR_AI_BASE_URL \
 MODULINKR_AI_API_KEY_B64 MODULINKR_AI_VERIFIED_SHA256 "
 
-[ "$(id -u)" = "0" ] || { echo "Ejecutar con sudo." >&2; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "[ERROR] Este comando requiere permisos de root. Vuelve a ejecutarlo con sudo." >&2; exit 1; }
 [ -f "$WEB_ENV" ] || { echo "No existe $WEB_ENV (¿instalador ejecutado?)." >&2; exit 1; }
 
 declare -A NEW

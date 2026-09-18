@@ -143,6 +143,12 @@ class GatewayBuffer:
                 mqtt_connected INTEGER NOT NULL
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS radio_identity (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version TEXT NOT NULL, port TEXT NOT NULL, ts REAL NOT NULL
+            )
+        """)
         # Instalación de una imagen difundida, nodo a nodo (§20.12).
         #
         # Una difusión no tiene destinatario, así que no puede llevar el estado
@@ -504,14 +510,14 @@ class GatewayBuffer:
         """Siguiente instalación de una imagen difundida, con los datos de su
         difusión (§20.12)."""
         row = self.conn.execute(
-            """SELECT i.id, i.origin, b.xfer, b.sha256, b.version
+            """SELECT i.id, i.origin, b.xfer, b.sha256, b.version, b.id
                  FROM fw_bcast_install i
                  JOIN fw_bcast b ON b.id = i.bcast_id
                 WHERE i.state = 'pending' ORDER BY i.id LIMIT 1""").fetchone()
         if row is None:
             return None
         return {"id": row[0], "origin": row[1], "xfer": row[2],
-                "sha256": row[3], "version": row[4]}
+                "sha256": row[3], "version": row[4], "bcast_id": row[5]}
 
     def bcast_install_state(self, inst_id: int, state: str,
                             detail: str | None = None) -> None:
@@ -524,10 +530,11 @@ class GatewayBuffer:
     def bcast_install_esperando(self, origin: int) -> dict | None:
         """La instalación de ese nodo que espera veredicto, si la hay."""
         row = self.conn.execute(
-            """SELECT id, created_ts FROM fw_bcast_install
-                WHERE origin = ? AND state = 'installing'
-             ORDER BY id DESC LIMIT 1""", (int(origin),)).fetchone()
-        return None if row is None else {"id": row[0], "created_ts": row[1]}
+            """SELECT i.id, i.created_ts, b.version FROM fw_bcast_install i
+                JOIN fw_bcast b ON b.id=i.bcast_id
+                WHERE i.origin = ? AND i.state = 'installing'
+             ORDER BY i.id DESC LIMIT 1""", (int(origin),)).fetchone()
+        return None if row is None else {"id": row[0], "created_ts": row[1], "version": row[2]}
 
     # ----- Sondeo de disponibilidad (spec §22) -----
 
@@ -664,7 +671,7 @@ class GatewayBuffer:
                  FROM fw_bcast
                 WHERE state NOT IN ('ready', 'install_req', 'installing',
                                     'done', 'failed', 'cancelled')
-             ORDER BY id DESC LIMIT 1""")
+             ORDER BY id ASC LIMIT 1""")
         row = cur.fetchone()
         if row is None:
             return None

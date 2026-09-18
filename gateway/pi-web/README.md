@@ -77,6 +77,23 @@ La vista Configuración adopta el patrón de ajustes de los paneles domóticos (
 
 **Cargar JSON vía USB** (`configapi.py`, `/api/config`): comisionamiento de un nodo Atom conectado por USB al Pi con el protocolo `CFG.*` del firmware (detección por sondeo de `CFG.HELLO`, lectura, carga con sha256 y borrado). El veredicto de validación es el del nodo; tras cargar o borrar, el visor re-detecta para confirmar el reinicio. El puerto del Heltec queda excluido de la búsqueda (`MODULINKR_GATEWAY_PORT` en `web.env`) y las operaciones serie van bajo un lock global.
 
+En Añadir nodo y Editar nodo, la validación previa identifica el dispositivo,
+la medida o la escritura y el campo que requiere corrección. Los límites de
+texto se comprueban en bytes UTF-8: 16 para el nombre del dispositivo, 32 para
+el nombre del nodo o de una medida o escritura, y 8 para identificadores y
+unidades. Las tildes y otros símbolos pueden ocupar más de un byte. También
+se detectan identificadores repetidos y los límites de 4 dispositivos,
+8 medidas totales y 4 escrituras por dispositivo. Los rechazos conocidos del
+nodo se presentan en castellano, incluidos los mensajes de versiones
+anteriores. Un error ambiguo del firmware se explica como tal, sin atribuirlo
+solo a un campo vacío. El diálogo de guardado distingue el rechazo de una
+operación de los mensajes informativos.
+Durante el progreso se conserva el indicador giratorio entre refrescos y
+solo se actualiza el texto. El color del icono se fija explícitamente según
+el estado, sin alternarlo al actualizar el contador.
+
+Al configurar un nodo por LoRa, importar y enviar requieren que el servicio y la radio del gateway estén disponibles. El formulario actualiza esta condición con el estado de la red y muestra el motivo del bloqueo. La API vuelve a comprobarla antes del sondeo del nodo y antes de encolar la configuración. Los errores incluyen un código que distingue la radio desconectada, el servicio detenido, un estado desconocido, un nodo sin respuesta y una transferencia en curso; un código HTTP 409 por sí solo no significa que exista otra operación. La vista no muestra el historial de cambios e importaciones anteriores.
+
 **Configurar radio LoRa** (`radioapi.py`, `/api/radio`): estado del servicio y del puerto, cambio del puerto del Heltec (`set_lora_port.sh`: `gateway.env`, `web.env` y reinicio del servicio) y flasheo de `heltec-radio.bin` (`flash_heltec.sh`). Las acciones privilegiadas corren con `sudo -n` bajo la regla acotada que el instalador deja en `/etc/sudoers.d/modulinkr-web`, limitada a los scripts declarados por cada página.
 
 **Configurar zona horaria** (`settingsapi.py`, `/api/ajustes`): zona de visualización del reloj de la cabecera y de las horas de las gráficas. A diferencia de la config del servicio (variables de entorno de solo lectura), estas preferencias se escriben en un JSON propio del visor (`MODULINKR_WEB_SETTINGS`, por defecto junto al `buffer.db`), con escritura atómica y validación de la zona con `zoneinfo`. El valor es una zona IANA fija, compartida por todos los navegadores, o `auto` para que cada navegador use la suya. El frontend rellena el selector con el catálogo de zonas del navegador (`Intl.supportedValuesOf`) y ofrece un botón para detectar la del navegador; el ajuste se aplica a todas las llamadas `toLocale` del reloj y de los ejes/tooltips.
@@ -89,7 +106,9 @@ La página se bloquea si el visor no tiene usuario y contraseña o no dispone de
 
 **Configurar base de datos** (`dbapi.py`, `/api/db`): parámetros de conexión al PostgreSQL de la VM que el módulo de datos (`dataapi.py`) usa para el histórico. Es la conexión de SOLO LECTURA (rol `modulinkr_ro`): alimenta la vista de Datos, el export CSV y el valor congelado de las tarjetas de red; la escritura la hace el consumer del servidor, con otro rol y su propio instalador. Los parámetros los consume el propio proceso del visor, así que se aplican en caliente: `set_db.sh` reescribe `web.env` (durabilidad) y, sin reiniciar el visor, se actualizan los globals de `dataapi` para que la próxima consulta use la conexión nueva. Botón de prueba con una conexión real (`psycopg2`, `SELECT 1`).
 
-**Configurar MQTT** (`mqttapi.py`, `/api/mqtt`): parámetros del broker cloud al que el gateway publica la telemetría. A diferencia de la base de datos, estos los consume el servicio del gateway (un proceso aparte que los lee de `gateway.env` al arrancar), así que aplicar pasa por `set_mqtt.sh` (reescribe `gateway.env` y reinicia el servicio del gateway). `gateway.env` es de solo root, así que el visor no puede leer los valores vigentes: el formulario los muestra desde una sombra no secreta guardada en los ajustes del visor al guardar (la contraseña nunca se guarda ahí ni se devuelve), y el estado vivo de la conexión sale del latido del servicio (`gateway_status`). Botón de prueba con una conexión MQTT real (`paho`, en el venv del visor). En las dos páginas, dejar la contraseña en blanco conserva la vigente (su clave no se reescribe).
+**Configurar MQTT** (`mqttapi.py`, `/api/mqtt`): parámetros del broker cloud al que el gateway publica la telemetría. A diferencia de la base de datos, estos los consume el servicio del gateway (un proceso aparte que los lee de `gateway.env` al arrancar), así que aplicar pasa por `set_mqtt.sh` (reescribe `gateway.env` y reinicia el servicio del gateway). El formulario muestra los parámetros desde una sombra no secreta guardada en los ajustes del visor, y el estado vivo de la conexión sale del latido del servicio (`gateway_status`). Botón de prueba con una conexión MQTT real (`paho`, en el venv del visor).
+
+En las dos páginas, «Probar conexión» con la contraseña vacía utiliza la credencial vigente. La base de datos usa la que el visor tiene en memoria. MQTT la recupera en cada prueba desde la configuración protegida del gateway mediante `get_net.sh`, bajo la regla sudo existente. Se captura la salida exclusivamente en el servidor, sin registrarla, devolverla al navegador ni persistirla en los ajustes. Si la lectura protegida falla o no contiene el campo esperado, se detiene la prueba antes de conectar. Una contraseña nueva se usa solo para ese intento; probar no guarda parámetros ni reinicia servicios. «Guardar conexión» sigue conservando la contraseña anterior cuando el campo está vacío.
 
 **Parámetros de red LoRa** (`netapi.py`, `/api/net`; camino B): edición de los parámetros que comparte todo el despliegue (Network ID, región, frecuencia, SF, ancho de banda, TTL y seguridad AES-CCM). Los valores actuales los sirve `GET /api/config/red` (`configapi.py`, vía `get_net.sh`); guardar pasa por `POST /api/net/guardar`, que aplica con `set_net.sh` (reescribe `gateway.env` y reinicia el servicio del gateway, que reempuja los parámetros de radio al Heltec con el comando `RADIO`, `frame-format.md` §12.6). Así un cambio de Network ID, frecuencia, SF o BW se aplica en caliente sin reflashear el Heltec. Validación en vivo que marca los campos fuera de rango y bloquea Guardar; la región precarga la frecuencia por defecto. Al leer un nodo, el asistente compara sus parámetros de red con los actuales y, si difieren, pregunta si actualizarlos o conservar los del nodo (desbloqueándolos para editarlos). Todo cambio obliga a reconfigurar los nodos a los mismos valores, o dejan de comunicarse, y por eso guardar pide confirmación explícita: el diálogo lista qué parámetros cambian y de qué valor a cuál, y nombra uno a uno los nodos que van a quedar incomunicados, marcando los que ya estaban sin señal. "Se perderán los nodos" y "vas a perder NodoV1 y SuperNodoV2.1" no se leen igual.
 
@@ -98,6 +117,8 @@ La confirmación solo aparece si cambia algo que rompa la red. Guardar sin tocar
 **Configurar red WiFi** (`wifiapi.py`, `/api/wifi`): red WiFi a la que se conecta el gateway, gestionada con NetworkManager (`nmcli`). La página muestra la red actual y su IP, escanea las redes visibles (SSID, señal, seguridad) y conecta a la elegida con contraseña opcional. El escaneo y la conexión son privilegiados y van por `set_wifi.sh` (modos `scan` y `connect`) bajo la regla sudoers; el estado actual (SSID e IP) lo lee el visor sin sudo. La contraseña viaja al script por stdin y de ahí a `nmcli --ask`, nunca por argumentos; NetworkManager guarda el perfil (persiste a reinicios) y el visor no escribe la contraseña en ningún archivo propio. Conectar a una red distinta cambia la IP del gateway y puede cortar la sesión si el navegador entra por ese mismo WiFi; el acceso por `gateway.local` (mDNS) no depende de la IP.
 
 **Herramientas de depuración** (`debugapi.py`, `/api/debug`): tres visores de log en vivo por Server-Sent Events (SSE), que el navegador consume con EventSource y el frontend cierra al salir de la página. El journal del servicio del gateway (`journalctl -u modulinkr-gateway`, leído sin sudo porque el instalador añade el usuario del servicio al grupo `systemd-journal`), la salida serie de un nodo conectado por USB (bajo el lock serie de `configapi`, con el puerto del Heltec excluido; mientras el monitor está abierto no se puede comisionar, comparten el bus) y las tramas modbus-debug filtradas por nodo (líneas `modbus-debug origin=<id>` del journal; solo aparecen si el nodo tiene `modbus.debug=true`, `node-config.md` §5). Cada stream mata su `journalctl` o cierra el puerto al desconectar el cliente.
+
+El diagnóstico de nodos 0.0.61 y radio 0.3.3 usa registros alineados con tiempo, nivel, componente y evento. Las tres pestañas del visor incorporan filtros por nivel, componente y texto, conservan las líneas completas con desplazamiento horizontal y evitan la traducción de los datos técnicos. El formato, las excepciones de protocolo y los límites de validación se describen en [`diagnostic-logs.md`](../../shared/diagnostic-logs.md).
 
 ## 6.1 Configuración de nodo (2026-07-24)
 
@@ -123,7 +144,7 @@ Instalar es una orden aparte y con confirmación, porque subir es inocuo y puede
 
 La tarjeta del gateway en la vista Red muestra dos enlaces independientes desde el latido de estado del servicio (`gateway_status`): un chip LoRa (radio del Heltec) y un chip MQTT (conexión al broker cloud). El servicio refresca el latido cada `MODULINKR_HEARTBEAT_S`, y ante una desconexión del Heltec marca `lora_link=0` en el acto: el chip LoRa pasa a "sin señal" en el siguiente sondeo de la web (unos segundos), sin esperar el hueco del auto-reporte de aire (antes hasta `MODULINKR_WEB_ONLINE_S`). El chip MQTT distingue conectado, sin conexión y no configurado, y es ortogonal al de LoRa (la nube puede estar arriba con la radio caída y viceversa). `netstatus.gateway_link_state` da el servicio por caído si el latido no se refresca dentro de `MODULINKR_WEB_HEARTBEAT_S` (default 15 s); un buffer anterior a la tabla `gateway_status` cae al veredicto antiguo del auto-reporte de aire con un solo chip.
 
-La tarjeta de cada nodo muestra chips por subsistema en vez de un estado único. **LoRa** (en línea o sin señal, desde `last_seen`) es el enlace principal. **Modbus** sale de los `st_code` de la última telemetría (`frame-format.md` §4): conectado, fallo, sin respuesta o fallo parcial. **NB-IoT/MQTT** aparece solo en supernodos: su fuente primaria es el broker (el gateway se suscribe y anota `node_status.mqtt_seen`), con el estado del heartbeat por LoRa (`frame-format.md` §6.1) como respaldo. Cuando el LoRa de un nodo se queda viejo pero su dato sigue llegando por NB-IoT (failover), `last_values` cambia a los valores frescos de `nbiot_last` y marca `via_nbiot`, y la tarjeta muestra el badge "vía NB-IoT (failover)". LoRa es primario: solo se cambia a NB-IoT con el LoRa vencido (`MODULINKR_WEB_ONLINE_S`, bajado a 30 s).
+La tarjeta de cada nodo muestra chips por subsistema en vez de un estado único. **LoRa** (en línea o sin señal, desde `last_seen`) es el enlace principal. **Modbus** sale de los `st_code` de la última telemetría (`frame-format.md` §4): conectado, fallo, sin respuesta o fallo parcial. **NB-IoT/MQTT** aparece solo en supernodos. Los iconos usan el estado reportado por el heartbeat LoRa (`frame-format.md` §6.1), con una vigencia de 180 s. El supernodo consulta el registro celular y la sesión MQTT cada 60 s por UART. NB-IoT conectado requiere un registro confirmado en red propia o roaming; no se deduce del estado interno del servicio. MQTT conectado no exige publicaciones recientes de telemetría. Si el módem no responde a la consulta de registro o la comprobación caduca, ambos estados pasan a desconocidos. Una caída exclusiva de MQTT conserva NB-IoT verde cuando el registro celular sigue confirmado. El visor muestra "NB-IoT: estado desconocido" o "MQTT: estado desconocido" según corresponda, también cuando el heartbeat deja de estar vigente. El gateway sigue anotando las publicaciones recibidas en `node_status.mqtt_seen` para observar el tráfico de respaldo, pero su ausencia no invalida una sesión reportada como conectada. Cuando el LoRa de un nodo se queda viejo pero su dato sigue llegando por NB-IoT (failover), `last_values` cambia a los valores frescos de `nbiot_last` y marca `via_nbiot`, y la tarjeta muestra el badge "vía NB-IoT (failover)". LoRa es primario: solo se cambia a NB-IoT con el LoRa vencido (`MODULINKR_WEB_ONLINE_S`, bajado a 30 s).
 
 ## 7. Descartes razonados
 
@@ -138,3 +159,78 @@ El visor sirve HTTPS. `uvicorn` termina el TLS con un certificado autofirmado qu
 El certificado incluye SAN por nombre mDNS (`<host>.local`, la vía de acceso normal) y por la IP del momento; el acceso por `<host>.local` no depende de la IP, que puede cambiar por DHCP. Al ser autofirmado, el navegador avisa la primera vez; el visor sirve la parte pública en `GET /cert` (público, es la parte pública del par) con un enlace en la página de login, para instalarlo como de confianza en el dispositivo y quitar el aviso. La cookie de sesión se marca `Secure` cuando hay TLS configurado; el arranque manual de banco sin certificado la deja sin el flag para no romper el login sobre HTTP.
 
 Descarte: no se monta una CA propia ni `mkcert`. Para un gateway de LAN al que se accede desde pocos dispositivos, el certificado autofirmado descargable da el mismo canal cifrado con menos partes móviles; una CA solo compensaría con muchos dispositivos o muchos gateways.
+
+
+## Identificación y actualización del firmware
+
+Las pantallas muestran la versión instalada y la versión disponible en el gateway, sin identificadores de compilación. Solo se ofrece actualizar cuando la versión disponible es superior. Una versión igual se presenta como «Actualizado» y una versión anterior no permite retroceder. Los firmwares antiguos que anuncian, por ejemplo, `0.0.58-difusion-red` se reconocen como `0.0.58`. Si no se puede leer una versión válida, se solicita repetir la identificación y no se habilita una actualización normal.
+
+La versión de prueba del nodo es `0.0.60` y la de la radio es `0.3.2`, sin cambios funcionales en el dispositivo respecto a `0.0.59` y `0.3.1`, respectivamente. Estas versiones permiten comprobar de nuevo los recorridos de actualización. Los cambios funcionales distribuidos requieren una versión nueva. El empaquetado verifica que la versión del binario coincida con la declarada en el código y rechaza sustituir una distribución por otra aplicación distinta con el mismo número. Se puede repetir el empaquetado del mismo firmware. «Ver cambios» presenta las notas correspondientes al componente y a la versión disponible.
+
+La identidad interna conserva el formato `version+compilacion`, con los primeros doce caracteres hexadecimales del SHA-256 del ELF, dentro del límite de 32 bytes existente. `shared/firmware_identity.h` la obtiene del descriptor ESP32. `firmwaremeta.py` lee el mismo descriptor y el marcador `MLFW:` del binario. Esa identidad se utiliza para validar la imagen distribuida y confirmar la instalación, sin trasladar sus detalles a la interfaz.
+
+El firmware de nodos presenta dos opciones: «Por LoRa» y «Por USB». En USB se elige entre este equipo y el gateway y se identifica el nodo antes de ofrecer una actualización. Antes de escribir se comprueba de nuevo la versión. En USB de este equipo, los controles permanecen bloqueados hasta cerrar la sesión. La identificación nueva sustituye a la anterior únicamente después de cerrar el puerto; una sesión que no pudo abrirlo no cierra el de otra operación. Tras escribir y reiniciar, se consulta el mismo nodo para confirmar su versión. Se muestra un diálogo de resultado y se conserva el mensaje en la página. Si no se puede confirmar el arranque, se indica que la escritura terminó y que es necesario repetir la identificación. En USB del gateway se mantiene la comprobación manual posterior al reinicio.
+
+Por LoRa se seleccionan uno o varios nodos en una única tabla. Se guardan envíos dirigidos en `fw_bcast`, con los campos existentes y en el orden seleccionado. El gateway los atiende por turnos y la cola continúa aunque se cierre el navegador. La selección parcial no emite una oferta de difusión a nodos no seleccionados. El coste de radio aumenta con cada destinatario porque se utiliza un envío dirigido por nodo. Se conserva la ruta individual existente para nodos con saltos intermedios. Las difusiones anteriores siguen visibles mientras requieren atención.
+
+La tabla distingue cola, envío, imagen lista, instalación y confirmación. La instalación se habilita al terminar los envíos y requiere confirmación por nodo. Se mantiene la comprobación mediante un mapa nuevo `FW_BCAST_POLL`, con un máximo de 30 segundos para responder. El veredicto de instalación debe identificar la imagen solicitada; si se pierde, se requiere un catálogo posterior a la orden que anuncie la identidad esperada, dentro de diez minutos. Un mapa completo no se interpreta como instalación confirmada. Cancelar detiene los envíos pendientes y conserva las imágenes ya recibidas.
+
+La radio responde a `FW?` por USB sin reiniciarse para esa consulta. El servicio también reconoce la versión del banner de los firmwares anteriores y no vacía ese banner al abrir el puerto. La identidad se elimina al iniciar una conexión serie nueva y permanece vigente durante esa conexión. La API requiere una identidad del puerto configurado, un enlace disponible y un registro refrescado en los últimos 60 segundos. La recepción del banner antiguo depende de que la radio lo emita durante la conexión; no se inventa una versión cuando no responde. Para esa situación se dispone de «Recuperación de la radio», una reinstalación USB explícita, separada del flujo normal y con confirmación de la interrupción de LoRa.
+
+Los avisos de estas pantallas reciben su tipo explícitamente. Un fallo de identificación no se convierte en éxito por contener la palabra «instalada» y solo se anima un indicador durante una operación real.
+
+La validación local incluye comparación de versiones, rechazo de empaquetado incoherente, cola dirigida con SQLite temporal, compatibilidad del banner de radio, comprobación de imagen y veredicto, y controles de interfaz. La revisión visual utiliza la aplicación real con respuestas simuladas. La compilación ESP32, el acceso USB y los envíos LoRa requieren validación en el banco.
+
+### Despliegue de estas pantallas y su identificación de firmware
+
+En el Mac, se compila primero cada proyecto desde VS Code con `PlatformIO: Build`: `firmware/nodo` y `firmware/gateway/heltec-radio`. Después se empaquetan ambos binarios:
+
+```bash
+cd "/Users/santiago/Documents/Documentos Academicos/Master/TFM/firmware/nodo" && ./make_dist.sh
+cd "/Users/santiago/Documents/Documentos Academicos/Master/TFM/firmware/gateway/heltec-radio" && ./make_dist.sh
+```
+
+En el Mac, se prepara y copia el paquete de despliegue:
+
+```bash
+tar -czf /tmp/modulinkr-firmware-ui.tar.gz \
+  -C "/Users/santiago/Documents/Documentos Academicos/Master/TFM/firmware/gateway" \
+  pi-web/static/app.js pi-web/static/index.html pi-web/static/style.css \
+  pi-web/configapi.py pi-web/radioapi.py pi-web/otaapi.py pi-web/firmwaremeta.py \
+  pi-service/gateway_service.py pi-service/buffer.py \
+  pi-service/nodo.bin pi-service/nodo.bin.version \
+  pi-service/nodo-app.bin pi-service/nodo-app.bin.version pi-service/nodo-app.bin.sha256 \
+  pi-service/heltec-radio.bin
+scp /tmp/modulinkr-firmware-ui.tar.gz modulinkr@Gateway.local:~/modulinkr-firmware-ui.tar.gz
+```
+
+En la sesión Termius del gateway, cuando no haya un envío o instalación en curso, se aplica el paquete a los directorios declarados por los servicios. Este paso reinicia el servicio de radio y el visor:
+
+```bash
+bash <<'SH'
+set -eu
+fw_web_dir="$(systemctl show modulinkr-web.service --property=WorkingDirectory --value)"
+fw_service_dir="$(systemctl show modulinkr-gateway.service --property=WorkingDirectory --value)"
+test -n "$fw_web_dir" && test -d "$fw_web_dir/static"
+test -n "$fw_service_dir" && test -f "$fw_service_dir/gateway_service.py"
+fw_stage="$(mktemp -d /tmp/modulinkr-fw-ui.XXXXXX)"
+trap 'rm -rf "$fw_stage"' EXIT
+tar -xzf "$HOME/modulinkr-firmware-ui.tar.gz" -C "$fw_stage"
+python3 "$fw_stage/pi-web/firmwaremeta.py" "$fw_stage/pi-service/nodo.bin"
+python3 "$fw_stage/pi-web/firmwaremeta.py" "$fw_stage/pi-service/nodo-app.bin"
+python3 "$fw_stage/pi-web/firmwaremeta.py" "$fw_stage/pi-service/heltec-radio.bin"
+sudo systemctl stop modulinkr-web.service modulinkr-gateway.service
+for fw_file in static/app.js static/index.html static/style.css configapi.py radioapi.py otaapi.py firmwaremeta.py; do
+  sudo install -m 644 "$fw_stage/pi-web/$fw_file" "$fw_web_dir/$fw_file"
+  cmp "$fw_stage/pi-web/$fw_file" "$fw_web_dir/$fw_file"
+done
+for fw_file in gateway_service.py buffer.py nodo.bin nodo.bin.version nodo-app.bin nodo-app.bin.version nodo-app.bin.sha256 heltec-radio.bin; do
+  sudo install -m 644 "$fw_stage/pi-service/$fw_file" "$fw_service_dir/$fw_file"
+  cmp "$fw_stage/pi-service/$fw_file" "$fw_service_dir/$fw_file"
+done
+sudo systemctl start modulinkr-gateway.service modulinkr-web.service
+systemctl is-active modulinkr-gateway.service modulinkr-web.service
+SH
+```
+
+Se recarga el navegador con `Cmd+Shift+R`. La copia de los binarios al gateway no los instala en los dispositivos. La instalación se realiza desde las pantallas correspondientes. Si la radio antigua no anuncia su versión, se utiliza «Recuperación de la radio» para instalar `0.3.2`. Se comprueba después que informe esa versión y que desaparezca la actualización normal. En los nodos se comprueba la identificación USB, la transición de `0.0.59` a `0.0.60`, la ausencia de reinstalación de la misma versión y el envío a los destinatarios seleccionados por LoRa.

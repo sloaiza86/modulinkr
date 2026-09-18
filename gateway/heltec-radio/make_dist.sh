@@ -52,6 +52,8 @@ else
     exit 1
 fi
 
+VER="$(python3 "$DIR/../pi-web/firmwaremeta.py" "$BUILD/firmware.bin" "$DIR/src/main.cpp" "$OUT")"
+
 "${ESPTOOL[@]}" --chip esp32s3 merge_bin -o "$OUT" \
     0x0     "$BUILD/bootloader.bin" \
     0x8000  "$BUILD/partitions.bin" \
@@ -60,5 +62,6 @@ fi
 
 echo
 echo "[ OK ] Archivo generado: $OUT"
+echo "  versión: $VER"
 ls -lh "$OUT" | awk '{print "  tamaño:", $5}'
 (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") | awk '{print "  sha256:", $1}'

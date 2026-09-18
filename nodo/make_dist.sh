@@ -53,39 +53,16 @@ else
     exit 1
 fi
 
+VER="$(python3 "$DIR/../gateway/pi-web/firmwaremeta.py" "$BUILD/firmware.bin" "$DIR/src/main.cpp" "$OUT")"
+
 "${ESPTOOL[@]}" --chip esp32 merge_bin -o "$OUT" \
     0x1000  "$BUILD/bootloader.bin" \
     0x8000  "$BUILD/partitions.bin" \
     0xE000  "$BOOT_APP0" \
     0x10000 "$BUILD/firmware.bin"
 
-# Versión del firmware junto al binario (kFirmwareVersion de main.cpp). El
-# visor la reporta y la compara con la que anuncia el nodo por CFG.HELLO,
-# para saber si el Atom está en la última versión.
-VER="$(grep -oE 'kFirmwareVersion[^"]*"[^"]+"' "$DIR/src/main.cpp" \
-       | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
-
-# La versión sale del CÓDIGO y el binario del directorio de compilación, así
-# que pueden no corresponderse: basta con bumpear main.cpp y empaquetar sin
-# recompilar para producir un paquete que ANUNCIA una versión y CONTIENE otra.
-# El sha no lo detecta, porque cuadra con los bytes que hay.
-#
-# Pasó el 1-ago-2026: se subió por radio un paquete etiquetado 0.0.46 que
-# llevaba dentro la 0.0.45. La transferencia, la verificación y la instalación
-# funcionaron perfectamente y el nodo arrancó con la versión anterior. Como
-# todo el sistema decide si actualizar comparando versiones, una etiqueta que
-# miente es peor que no tenerla.
-#
-# La cadena de versión está literalmente dentro del binario (es un string del
-# firmware), así que comprobarlo es buscarla ahí.
-if [ -n "$VER" ]; then
-    if ! grep -qa -- "$VER" "$BUILD/firmware.bin"; then
-        echo "[ERROR] main.cpp declara la versión '$VER', pero el binario compilado no la contiene." >&2
-        echo "[ERROR] Compila el firmware después de cambiar la versión." >&2
-        exit 1
-    fi
-    printf '%s' "$VER" > "$OUT.version"
-fi
+# La identidad se obtiene del binario compilado, no del código fuente.
+printf '%s' "$VER" > "$OUT.version"
 
 # Segunda salida: la aplicación sola, para la actualización en caliente.
 #

@@ -1,3 +1,4 @@
+#include "../../shared/diagnostic_log.h"
 // ModuLinkr, motor de muestreo Modbus (implementación)
 
 #include "sampler.h"
@@ -152,11 +153,7 @@ bool Sampler::readGroup(const Group& g, uint32_t now_ms) {
         for (uint8_t m = 0; m < g.n_reads; ++m) {
             slots_[globalIndex(g.dev, g.first_read + m)].status = status_byte;
         }
-        Serial.printf("[modbus] error=%s device=%s group_start=%u count=%u function=0x%02X ok=%lu errors=%lu\n",
-                      ModbusRTU::statusToString(st), dev.name,
-                      g.address, g.n_regs, g.function,
-                      static_cast<unsigned long>(ok_count_),
-                      static_cast<unsigned long>(err_count_));
+        diag::log("ERROR", "node.modbus", "modbus.read_failed", "error=%s device=%s group_start=%u count=%u function=0x%02X ok=%lu errors=%lu\n", ModbusRTU::statusToString(st), dev.name, g.address, g.n_regs, g.function, static_cast<unsigned long>(ok_count_), static_cast<unsigned long>(err_count_));
         captureDebug(g.dev, status_byte, true);
         return false;
     }

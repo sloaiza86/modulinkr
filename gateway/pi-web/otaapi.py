@@ -27,6 +27,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
+import netstatus
+import firmwaremeta
 
 LOG = logging.getLogger("modulinkr.web.ota")
 
@@ -55,6 +57,34 @@ PROBE_ESPERA_S     = 7.0
 
 
 PROBE_DESDE = (0, 0, 57)      # primera versión del nodo que sabe contestar
+
+CONFIG_ERRORS = {
+    "lora_radio_unavailable": "No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.",
+    "gateway_service_unavailable": "El servicio del gateway no está disponible. Comprueba su estado.",
+    "lora_status_unknown": "No se pudo comprobar la conexión de la radio LoRa del gateway.",
+    "node_no_response": "El nodo no responde por LoRa. Comprueba su alimentación y conexión.",
+    "node_unavailable": "El nodo no está disponible para esta operación. Vuelve a comprobar su estado.",
+    "node_status_unknown": "No se pudo comprobar la disponibilidad del nodo. Inténtalo de nuevo.",
+    "config_read_busy": "Hay una importación de configuración en curso para este nodo. Espera a que termine.",
+    "config_write_busy": "Hay un envío de configuración en curso para este nodo. Espera a que termine.",
+}
+
+
+def _radio_error() -> str:
+    try:
+        link = netstatus.gateway_link_state()
+    except (OSError, sqlite3.Error):
+        return "lora_status_unknown"
+    if link.get("service_online") is False:
+        return "gateway_service_unavailable"
+    if link.get("service_online") is not True or link.get("lora_link") is None:
+        return "lora_status_unknown"
+    return "" if link["lora_link"] else "lora_radio_unavailable"
+
+
+def _config_error(code: str, **extra) -> JSONResponse:
+    return JSONResponse(status_code=409,
+                        content={"code": code, "error": CONFIG_ERRORS[code], **extra})
 
 
 def _sabe_sondear(origin: int) -> bool:
@@ -86,20 +116,21 @@ def _disponible(origin: int, para_que: int) -> tuple:
     cae al criterio antiguo, que es mirar cuándo se le oyó por última vez:
     peor, porque no distingue "vivo" de "disponible", pero mejor que nada.
     """
+    radio_error = _radio_error()
+    if radio_error:
+        return False, radio_error
     if _sabe_sondear(origin):
         return _sondear(origin, para_que)
     callado = _callado_desde(origin)
     if callado is None:
         return True, ""
-    return False, (f"no da señales desde hace {_fmt_ago(callado)} "
-                   f"(su firmware es anterior al sondeo, así que solo se "
-                   f"puede mirar cuándo habló)")
+    return False, "node_no_response"
 
 
 def _sondear(origin: int, para_que: int) -> tuple:
     """Le pregunta al nodo si puede, y espera su respuesta.
 
-    Devuelve (puede, explicacion). Se le pregunta al nodo en vez de deducirlo
+    Devuelve (puede, codigo_error). Se le pregunta al nodo en vez de deducirlo
     de cuándo se le oyó por última vez, que es adivinar con datos viejos y
     además no distingue "vivo" de "disponible": un nodo puede estar
     perfectamente vivo y no ser buen momento, porque está bajando una imagen o
@@ -120,26 +151,29 @@ def _sondear(origin: int, para_que: int) -> tuple:
                 (origin, para_que, time.time()))
             c.commit()
             probe_id = cur.lastrowid
-    except sqlite3.Error as e:
-        return True, f"no se pudo sondear ({e}), se sigue adelante"
+    except sqlite3.Error:
+        return False, "node_status_unknown"
 
     limite = time.time() + PROBE_ESPERA_S
     while time.time() < limite:
         time.sleep(0.25)
+        radio_error = _radio_error()
+        if radio_error:
+            return False, radio_error
         try:
             with _conn() as c:
                 fila = c.execute(
                     "SELECT state, listo, detail FROM node_probe WHERE id = ?",
                     (probe_id,)).fetchone()
         except sqlite3.Error:
-            break
+            return False, "node_status_unknown"
         if fila is None:
-            break
+            return False, "node_status_unknown"
         if fila[0] == "done":
-            return bool(fila[1]), fila[2] or ""
+            return bool(fila[1]), "" if fila[1] else "node_unavailable"
         if fila[0] == "timeout":
-            return False, fila[2] or "el nodo no contestó al sondeo"
-    return False, "el nodo no contestó al sondeo"
+            return False, "node_no_response"
+    return False, _radio_error() or "node_no_response"
 
 
 def _fmt_ago(segundos: float) -> str:
@@ -273,11 +307,11 @@ def enviar(body: dict = Body(...)):
 
     puede, porque = _disponible(origin, PROBE_CONFIG_WRITE)
     if not puede:
-        return JSONResponse(
-            status_code=409,
-            content={"error": f"el nodo {origin} no puede ahora mismo: "
-                              f"{porque}. No se encola un envío que no puede "
-                              f"salir bien."})
+        return _config_error(porque)
+
+    radio_error = _radio_error()
+    if radio_error:
+        return _config_error(radio_error)
 
     try:
         with _conn() as c:
@@ -288,11 +322,7 @@ def enviar(body: dict = Body(...)):
                     WHERE origin = ? AND state IN ('pending','sending','committing')
                     ORDER BY id DESC LIMIT 1""", (origin,)).fetchone()
             if fila is not None:
-                return JSONResponse(
-                    status_code=409,
-                    content={"error": f"ya hay un envío en curso al nodo {origin} "
-                                      f"(id {fila[0]}, {fila[1]})",
-                             "id": fila[0]})
+                return _config_error("config_write_busy", id=fila[0])
 
             cur = c.execute(
                 """INSERT INTO config_push (origin, config, created_ts, state,
@@ -329,11 +359,11 @@ def leer(body: dict = Body(...)):
                             content={"error": "origin fuera de 1-254"})
     puede, porque = _disponible(origin, PROBE_CONFIG_READ)
     if not puede:
-        return JSONResponse(
-            status_code=409,
-            content={"error": f"el nodo {origin} no puede ahora mismo: "
-                              f"{porque}. No se encola una lectura que no "
-                              f"puede salir bien."})
+        return _config_error(porque)
+
+    radio_error = _radio_error()
+    if radio_error:
+        return _config_error(radio_error)
     try:
         with _conn() as c:
             fila = c.execute(
@@ -341,10 +371,7 @@ def leer(body: dict = Body(...)):
                     WHERE origin = ? AND state IN ('pending','reading')
                     ORDER BY id DESC LIMIT 1""", (origin,)).fetchone()
             if fila is not None:
-                return JSONResponse(
-                    status_code=409,
-                    content={"error": f"ya hay una lectura en curso del nodo "
-                                      f"{origin}", "id": fila[0]})
+                return _config_error("config_read_busy", id=fila[0])
             cur = c.execute(
                 """INSERT INTO config_read (origin, created_ts, state)
                    VALUES (?, ?, 'pending')""", (origin, time.time()))
@@ -379,6 +406,28 @@ def leer_estado(id: int):
 
 # ----- Actualización de firmware por LoRa (frame-format.md §18) -----
 
+def _firmware_nodes(available):
+    nodes = netstatus.network_state().get('nodes', [])
+    return [{"node_id": n['origin'], "name": n.get('name'),
+             "installed_version": n.get('fw_version'), "available_version": available,
+             "comparison": firmwaremeta.comparison(n.get('fw_version'), available),
+             "online": n.get('online', False),
+             "direct": n.get('parent_id') == 255 and n.get('hop_count') == 1}
+            for n in nodes if 1 <= n['origin'] <= 254]
+
+
+def _firmware_guard(origin, available):
+    error = _radio_error()
+    if error:
+        return _config_error(error)
+    with _conn() as c:
+        row = c.execute('SELECT fw_version FROM node_catalog WHERE origin_id=?', (origin,)).fetchone()
+    if firmwaremeta.comparison(row[0] if row else None, available) != 'different':
+        return JSONResponse(status_code=409, content={
+            'error': 'No hay una actualización aplicable. Vuelve a comprobar la versión del nodo.'})
+    return None
+
+
 @router.get("/firmware")
 def firmware():
     """Qué imagen hay disponible para enviar por radio.
@@ -392,10 +441,12 @@ def firmware():
                 "error": "no hay nodo-app.bin: generar con nodo/make_dist.sh"}
     try:
         tam = APP_BIN.stat().st_size
-        version = APP_VER.read_text().strip() if APP_VER.is_file() else ""
+        version = firmwaremeta.image_version(APP_BIN)
         sha = APP_SHA.read_text().strip() if APP_SHA.is_file() else ""
     except OSError as e:
         return {"disponible": False, "error": f"no se puede leer: {e}"}
+    if not version:
+        return {'disponible': False, 'error': 'No se puede identificar el firmware disponible. Vuelve a empaquetarlo.'}
     if len(sha) != 64:
         return {"disponible": False,
                 "error": "falta nodo-app.bin.sha256 o está mal formado"}
@@ -407,7 +458,10 @@ def firmware():
             # Reloj de pared con el ciclo de trabajo de la norma, que es lo que
             # de verdad quiere saber quien va a lanzar la subida: el tiempo de
             # aire solo dice cuánto ocupa el canal, no cuánto tarda.
-            "horas_8pct": round(aire_s / (3600.0 * DUTY_LEGAL) , 1)}
+            "horas_8pct": round(aire_s / (3600.0 * DUTY_LEGAL) , 1),
+            "nodes": _firmware_nodes(version),
+            "release_notes": firmwaremeta.release_notes("node", version),
+            "radio_available": not bool(_radio_error())}
 
 
 @router.post("/firmware/enviar")
@@ -433,6 +487,10 @@ def firmware_enviar(body: dict = Body(...)):
     info = firmware()
     if not info.get("disponible"):
         return JSONResponse(status_code=409, content={"error": info["error"]})
+
+    guard = _firmware_guard(origin, info['version'])
+    if guard is not None:
+        return guard
 
     # Se comprueba que el binario en disco sigue siendo el del sha anunciado.
     # Es barato (medio mega) y evita mandar horas de radio de algo que el nodo
@@ -556,12 +614,14 @@ def firmware_encurso(origin: int | None = None):
                     """SELECT id, target FROM fw_bcast
                         WHERE target IS NOT NULL
                           AND state NOT IN ('done','failed','cancelled')
+                          AND (state != 'ready' OR COALESCE(updated_ts, created_ts) > strftime('%s','now') - 86400)
                      ORDER BY id DESC LIMIT 1""").fetchone()
             else:
                 fila = c.execute(
                     """SELECT id, target FROM fw_bcast
                         WHERE target = ?
                           AND state NOT IN ('done','failed','cancelled')
+                          AND (state != 'ready' OR COALESCE(updated_ts, created_ts) > strftime('%s','now') - 86400)
                      ORDER BY id DESC LIMIT 1""", (int(origin),)).fetchone()
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
@@ -621,7 +681,7 @@ def firmware_instalar(body: dict = Body(...)):
         return JSONResponse(status_code=400, content={"error": "falta id"})
     try:
         with _conn() as c:
-            fila = c.execute("SELECT state, target FROM fw_bcast WHERE id = ?",
+            fila = c.execute("SELECT state, target, version FROM fw_bcast WHERE id = ?",
                              (push_id,)).fetchone()
             if fila is None:
                 return JSONResponse(status_code=404,
@@ -631,6 +691,9 @@ def firmware_instalar(body: dict = Body(...)):
                     status_code=409,
                     content={"error": "eso es una difusión, no un envío a un "
                                       "nodo: la orden de instalar va nodo a nodo."})
+            guard = _firmware_guard(fila[1], fila[2])
+            if guard is not None:
+                return guard
             if fila[0] != "ready":
                 return JSONResponse(
                     status_code=409,
@@ -717,6 +780,12 @@ def firmware_difundir(body: dict = Body(default={})):
     info = firmware()
     if not info.get("disponible"):
         return JSONResponse(status_code=409, content={"error": info["error"]})
+    error = _radio_error()
+    if error:
+        return _config_error(error)
+    if not any(n['online'] and n['direct'] and n['comparison'] == 'different'
+               for n in info.get('nodes', [])):
+        return JSONResponse(status_code=409, content={'error': 'No hay nodos conectados directamente que necesiten este firmware.'})
     try:
         real = hashlib.sha256(APP_BIN.read_bytes()).hexdigest()
     except OSError as e:
@@ -756,72 +825,115 @@ def firmware_difundir(body: dict = Body(default={})):
     return {"id": bid, "version": info["version"], "bytes": info["bytes"]}
 
 
+@router.post("/firmware/seleccion")
+def firmware_seleccion(body: dict = Body(...)):
+    origins = body.get('origins')
+    if (not isinstance(origins, list) or not origins or len(origins) > 254
+            or any(type(n) is not int or not 1 <= n <= 254 for n in origins)
+            or len(set(origins)) != len(origins)):
+        return JSONResponse(status_code=400, content={'error': 'Selecciona uno o varios nodos válidos.'})
+    info = firmware()
+    if not info.get('disponible'):
+        return JSONResponse(status_code=409, content={'error': info.get('error')})
+    error = _radio_error()
+    if error:
+        return _config_error(error)
+    if body.get('expected_version') != info['version']:
+        return JSONResponse(status_code=409, content={'error': 'El firmware disponible ha cambiado. Recarga la página y comprueba la versión.'})
+    eligible = {n['node_id'] for n in info['nodes'] if n['online'] and n['comparison'] == 'different'}
+    if not set(origins) <= eligible:
+        return JSONResponse(status_code=409, content={'error': 'La selección ha cambiado: comprueba la conexión y la versión de los nodos.'})
+    try:
+        if hashlib.sha256(APP_BIN.read_bytes()).hexdigest() != info['sha256']:
+            return JSONResponse(status_code=409, content={'error': 'El archivo de firmware no supera la comprobación de integridad.'})
+        with _conn() as c:
+            c.execute('BEGIN IMMEDIATE')
+            busy = c.execute("SELECT 1 FROM fw_bcast WHERE state NOT IN ('ready','done','failed','cancelled')").fetchone()
+            installing = c.execute("SELECT 1 FROM fw_bcast_install WHERE state IN ('pending','installing')").fetchone()
+            if busy or installing:
+                return JSONResponse(status_code=409, content={'error': 'Espera a que termine el envío o la instalación en curso.'})
+            ids = []
+            xfer = int.from_bytes(bytes.fromhex(info['sha256'])[:4], 'little')
+            for origin in origins:
+                guard = _firmware_guard(origin, info['version'])
+                if guard is not None:
+                    c.rollback()
+                    return guard
+                cur = c.execute("""INSERT INTO fw_bcast
+                    (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target)
+                    VALUES (?,?,?,?,?,128,10,'offering',?,?)""",
+                    (xfer, str(APP_BIN), info['version'], info['bytes'], info['sha256'], time.time(), origin))
+                ids.append(cur.lastrowid)
+            c.commit()
+    except (OSError, sqlite3.Error) as error:
+        LOG.warning('event=firmware_selection.failed error=%s', error)
+        return JSONResponse(status_code=503, content={'error': 'No se pudo guardar el envío en el gateway.'})
+    return {'ids': ids, 'version': info['version'], 'origins': origins}
+
+
 @router.get("/firmware/difusion")
 def firmware_difusion():
-    """Estado de la difusión, con el recuento por nodo para el panel."""
-    try:
-        with _conn() as c:
-            # Solo las difusiones de verdad. Desde que el envío a un nodo usa
-            # este mismo transporte (§20.12), las dos operaciones comparten
-            # tabla y se distinguen por el destinatario: sin él, va a todos.
-            # Sin este filtro, el panel de difusión enseñaba como propia la
-            # transferencia dirigida a un solo nodo.
-            fila = c.execute(
-                """SELECT id, version, total_len, state, pass_no, detail,
-                          created_ts
-                     FROM fw_bcast WHERE target IS NULL
-                 ORDER BY id DESC LIMIT 1""").fetchone()
-            # Y aunque no haya difusión, un envío dirigido en curso impide
-            # lanzar una: el aire es uno solo. Se dice aquí para que el botón
-            # pueda apagarse en vez de dejar pulsarlo y contestar con un error.
-            otra = c.execute(
-                """SELECT id, target FROM fw_bcast
-                    WHERE target IS NOT NULL
-                      AND state NOT IN ('ready','done','failed','cancelled')
-                 ORDER BY id DESC LIMIT 1""").fetchone()
-            if fila is None:
-                return {"activa": False,
-                        "otra_en_curso": ({"id": otra[0], "nodo": otra[1]}
-                                          if otra else None)}
-            bid = fila[0]
-            mapas = c.execute(
-                """SELECT node_id, missing, ts FROM fw_bcast_map
-                    WHERE bcast_id = ? ORDER BY node_id""", (bid,)).fetchall()
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=503,
-                            content={"error": f"buffer no disponible: {e}"})
-
-    total = (fila[2] + 211) // 212
-    nodos = [{"node_id": m[0], "missing": m[1],
-              "pct": round(100.0 * (total - m[1]) / total, 1) if total else 0.0,
-              "ts": m[2]} for m in mapas]
-    viva = fila[3] not in ("ready", "done", "failed", "cancelled")
-    return {"activa": viva, "id": bid, "version": fila[1],
-            "otra_en_curso": ({"id": otra[0], "nodo": otra[1]} if otra else None),
-            "total_frags": total, "state": fila[3], "pass_no": fila[4],
-            "detail": fila[5], "elapsed_s": round(time.time() - fila[6], 1),
-            "nodos": nodos}
+    available = firmwaremeta.image_version(APP_BIN)
+    nodes = _firmware_nodes(available)
+    now = time.time()
+    with _conn() as c:
+        c.row_factory = sqlite3.Row
+        jobs = [dict(r) for r in c.execute('SELECT * FROM fw_bcast ORDER BY id DESC')]
+        active_jobs = [j for j in jobs if j['state'] not in ('ready','install_req','installing','done','failed','cancelled')]
+        active = min(active_jobs, key=lambda j: j['id']) if active_jobs else None
+        installs = {(r['bcast_id'], r['origin']): dict(r) for r in c.execute('SELECT * FROM fw_bcast_install ORDER BY id')}
+        busy_install = any(i['state'] in ('pending','installing') for i in installs.values()) or any(j['state'] in ('install_req','installing') for j in jobs)
+        shown = []
+        for node in nodes:
+            origin = node['node_id']
+            job = next((j for j in jobs if j['target'] in (None, origin) and (
+                j['state'] not in ('ready','done','failed','cancelled')
+                or installs.get((j['id'],origin), {}).get('state') in ('pending','installing')
+                or (now - (j['updated_ts'] or j['created_ts']) < 86400 and j['version'] == available))), None)
+            node.update(operation_state=None, received=False, missing=None, can_install=False, job_id=None)
+            if job:
+                shown.append(job)
+                node['job_id'] = job['id']
+                node['broadcast'] = job['target'] is None
+                node['available_version'] = job['version']
+                node['comparison'] = firmwaremeta.comparison(node['installed_version'], job['version'])
+                mapping = c.execute('SELECT missing FROM fw_bcast_map WHERE bcast_id=? AND node_id=?', (job['id'],origin)).fetchone()
+                node['missing'] = mapping[0] if mapping else None
+                node['received'] = node['missing'] == 0 or (job['target'] == origin and job['state'] in ('ready','install_req','installing','done'))
+                inst = installs.get((job['id'],origin), {})
+                state = inst.get('state') if job['target'] is None else job['state']
+                node['operation_state'] = 'queued' if state == 'offering' and active and job['id'] != active['id'] else state
+                node['detail'] = inst.get('detail') or job['detail']
+                node['progress'] = round(100 * min(job['sent'] or 0, job['total_len']) / job['total_len']) if job['total_len'] else 0
+                node['can_install'] = bool((job['state'] == 'ready' or (job['target'] is None and job['state'] == 'done')) and node['received']
+                    and node['comparison'] == 'different' and node['online'] and not active and not busy_install
+                    and inst.get('state') not in ('pending','installing','done'))
+            node['can_send'] = bool(node['online'] and firmwaremeta.comparison(node['installed_version'], available) == 'different'
+                and not node['received'] and not active and not busy_install)
+    radio_available = not bool(_radio_error())
+    for node in nodes:
+        node['can_send'] = node['can_send'] and radio_available
+        node['can_install'] = node['can_install'] and radio_available
+    return {'id': active['id'] if active else shown[0]['id'] if shown else None,
+            'activa': bool(active), 'radio_available': radio_available,
+            'state': active['state'] if active else None, 'version': available,
+            'elapsed_s': max(0, now - active['created_ts']) if active else None,
+            'nodos': nodes, 'can_start': any(n['can_send'] for n in nodes),
+            'release_notes': firmwaremeta.release_notes('node', available)}
 
 
 @router.post("/firmware/difusion/cancelar")
 def firmware_difusion_cancelar():
     try:
         with _conn() as c:
-            cur = c.execute(
-                """UPDATE fw_bcast SET state = 'cancelled', updated_ts = ?,
-                          detail = 'cancelada desde el visor'
-                    WHERE target IS NULL
-                      AND state NOT IN ('ready','done','failed','cancelled')""",
-                (time.time(),))
+            cur = c.execute("""UPDATE fw_bcast SET state='cancelled', updated_ts=?, detail='cancelada desde el visor'
+                WHERE state NOT IN ('ready','install_req','installing','done','failed','cancelled')""", (time.time(),))
             c.commit()
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=503,
-                            content={"error": f"buffer no disponible: {e}"})
+    except sqlite3.Error:
+        return JSONResponse(status_code=503, content={'error': 'No se pudo cancelar el envío.'})
     if cur.rowcount == 0:
-        return JSONResponse(status_code=404,
-                            content={"error": "no hay difusión en curso"})
-    LOG.info("event=firmware_broadcast.cancelled source=web")
-    return {"ok": True}
+        return JSONResponse(status_code=404, content={'error': 'No hay un envío en curso.'})
+    return {'ok': True}
 
 
 @router.get("/estado")
@@ -909,6 +1021,12 @@ def difusion_instalar(body: dict = Body(...)):
                     status_code=409,
                     content={"error": f"la difusión no ha terminado "
                                       f"(estado: {state})"})
+            guard = _firmware_guard(origin, version)
+            if guard is not None:
+                return guard
+            existing = c.execute("SELECT id FROM fw_bcast_install WHERE bcast_id=? AND origin=? AND state IN ('pending','installing')", (bcast_id, origin)).fetchone()
+            if existing:
+                return JSONResponse(status_code=409, content={'error': 'La instalación de este nodo ya está en curso.'})
             mapa = c.execute(
                 """SELECT missing FROM fw_bcast_map
                     WHERE bcast_id = ? AND node_id = ?""",

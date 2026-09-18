@@ -12,9 +12,10 @@ Endpoints (auth de sesión aplicada al incluir el router):
   POST /api/mqtt/guardar   valida y aplica (set_mqtt.sh, reinicia el gateway)
   POST /api/mqtt/probar    prueba de conexión real al broker (paho)
 
-gateway.env es de solo root, así que el visor no puede leer los valores
-actuales; se muestran desde una sombra no secreta guardada en los ajustes
-del visor al guardar (la contraseña nunca se guarda ahí ni se devuelve).
+gateway.env es de solo root. Los valores del formulario proceden de una
+sombra no secreta guardada en los ajustes del visor. La prueba recupera la
+contraseña vigente mediante get_net.sh, autorizado por sudo, cuando el
+campo está vacío. La contraseña nunca se guarda en esa sombra ni se devuelve.
 El estado vivo (habilitado, conectado) sale del latido del servicio
 (gateway_status, ver netstatus.py), que sí es la verdad del momento.
 """
@@ -40,6 +41,7 @@ LOG = logging.getLogger("modulinkr.web.mqtt")
 
 SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
 SET_MQTT_SH = SERVICE_DIR / "set_mqtt.sh"
+GET_NET_SH = SERVICE_DIR / "get_net.sh"
 
 SHADOW = "mqtt"           # sección de los ajustes con los valores no secretos
 PROBE_TIMEOUT_S = 8.0
@@ -81,6 +83,25 @@ def _shadow_config() -> dict:
         "cafile":        s.get("cafile", ""),
         "tls_insecure":  bool(s.get("tls_insecure", False)),
     }
+
+
+def _current_password() -> str:
+    """Lee la credencial protegida sin persistirla ni registrar la salida."""
+    message = "No se pudo leer la credencial MQTT vigente del gateway."
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", str(GET_NET_SH)], capture_output=True,
+            text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        raise RuntimeError(message) from None
+    if result.returncode != 0:
+        raise RuntimeError(message)
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "MODULINKR_MQTT_PASS":
+            return value
+    raise RuntimeError(message)
 
 
 def _parse_body(body: dict) -> tuple[dict, str | None]:
@@ -171,9 +192,7 @@ async def guardar(request: Request):
 
 @router.post("/probar")
 async def probar(request: Request):
-    """Prueba de conexión real al broker con los valores del formulario. La
-    contraseña en blanco prueba sin ella (puede fallar la auth); para una
-    prueba con credenciales, escribirla."""
+    """Prueba sin guardar; el campo vacío usa la contraseña vigente."""
     try:
         import paho.mqtt.client as mqtt
     except ImportError:
@@ -189,6 +208,13 @@ async def probar(request: Request):
     if not cfg["host"]:
         return _err(400, "sin host que probar")
 
+    password = cfg["password"]
+    if not password:
+        try:
+            password = _current_password()
+        except RuntimeError as e:
+            return _err(503, str(e))
+
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
                              client_id="modulinkr-web-probe",
@@ -197,7 +223,7 @@ async def probar(request: Request):
         client = mqtt.Client(client_id="modulinkr-web-probe",
                              protocol=mqtt.MQTTv311)
     if cfg["user"]:
-        client.username_pw_set(cfg["user"], cfg["password"] or None)
+        client.username_pw_set(cfg["user"], password or None)
     if cfg["tls"]:
         try:
             client.tls_set(ca_certs=cfg["cafile"] or None,

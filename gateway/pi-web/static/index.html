@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=modbus-ai-flow-20260902">
+  <link rel="stylesheet" href="/static/style.css?v=diagnostic-logs-20260908">
 </head>
 <body>
 
@@ -381,85 +381,68 @@
           <h2>Actualizar firmware de nodos</h2>
         </div>
 
-        <div class="card cfg-card">
-          <h2>Actualización individual</h2>
-          <div class="mensaje mensaje-progreso mensaje-compacto" id="fw-bin-info" role="status" aria-live="polite">Comprobando actualizaciones...</div>
+        <div class="fw-modos" role="group" aria-label="Medio de actualización">
+          <button id="fw-modo-lora" aria-pressed="true">Por LoRa</button>
+          <button id="fw-modo-usb" aria-pressed="false">Por USB</button>
+        </div>
+        <div class="card cfg-card" id="fw-usb-card" hidden>
+          <h2>Actualizar por USB</h2>
+          <p class="texto-ayuda">Conecta e identifica el nodo para comprobar si hay una actualización. Su configuración se conservará.</p>
           <div class="cfg-fila">
-            <label class="cfg-campo"><span>Conexión del nodo</span>
+            <label class="cfg-campo"><span>USB conectado a</span>
               <select id="fw-fuente">
-                <option value="gateway">USB en el gateway</option>
-                <option value="local">USB en este equipo</option>
-                <option value="lora">LoRa</option>
+                <option value="local">Este equipo</option>
+                <option value="gateway">Gateway</option>
               </select>
             </label>
           </div>
-          <div id="fw-gateway">
-            <p class="texto-ayuda">Conecta el nodo al gateway. La configuración actual se conservará.</p>
+          <div id="fw-gateway" hidden>
             <div class="cfg-fila cfg-herramientas">
-              <button id="fw-buscar">Buscar nodo</button>
+              <button id="fw-buscar">Identificar nodo</button>
               <select id="fw-puertos" aria-label="Nodo conectado" hidden></select>
-              <span id="fw-busqueda-aviso" class="aviso"></span>
             </div>
-            <div class="cfg-fila cfg-acciones">
-              <button id="fw-flash" class="btn-primario" disabled>Actualizar nodo</button>
-              <span id="fw-resultado" class="aviso"></span>
-            </div>
+            <p id="fw-busqueda-aviso" class="mensaje-slot" role="status"></p>
           </div>
-          <div id="fw-local" hidden>
-            <p class="texto-ayuda">Conecta el nodo por USB a este equipo. La configuración actual se conservará.</p>
-            <div class="cfg-fila cfg-acciones">
-              <button id="fw-local-flash" class="btn-primario">Actualizar nodo</button>
-              <span id="fw-local-aviso" class="aviso"></span>
-            </div>
+          <div id="fw-local">
+            <div class="cfg-fila"><button id="fw-local-buscar">Identificar nodo</button></div>
+            <p id="fw-local-aviso" class="mensaje-slot" role="status"></p>
             <pre id="fw-local-log" class="dbg-consola" hidden></pre>
           </div>
-          <div id="fw-lora" hidden>
-            <div class="mensaje mensaje-info">
-              <span class="mensaje-titulo">Actualización por LoRa</span>
-              <span class="mensaje-detalle">Tiempo estimado: dos horas. El nodo seguirá disponible hasta la instalación.</span>
+          <div id="fw-ficha" hidden>
+            <h3 id="fw-nombre"></h3>
+            <div class="fw-versiones">
+              <div><span>Versión instalada</span><strong id="fw-version-instalada"></strong></div>
+              <div><span>Versión disponible</span><strong id="fw-version-disponible"></strong></div>
             </div>
-            <div class="cfg-form cfg-form-compacta">
-              <label class="cfg-campo"><span>Nodo</span><select id="fw-lora-nodo"></select></label>
-              <label class="cfg-campo"><span>Hora de inicio</span>
-                <input id="fw-lora-desde" type="number" min="0" max="23" value="23"></label>
-              <label class="cfg-campo"><span>Hora de fin</span>
-                <input id="fw-lora-hasta" type="number" min="0" max="23" value="6"></label>
-            </div>
-            <p class="aviso" id="fw-lora-riesgo"></p>
-            <div class="cfg-fila cfg-acciones">
-              <button id="fw-lora-enviar" class="btn-primario">Iniciar actualización</button>
-              <button id="fw-lora-cancelar" class="peligro-borde" hidden>Cancelar actualización</button>
-              <button id="fw-lora-instalar" hidden>Instalar actualización</button>
-              <span id="fw-lora-aviso" class="aviso"></span>
-            </div>
-            <progress id="fw-lora-barra" max="100" value="0" hidden style="width:100%"
-                      aria-label="Progreso de la actualización LoRa"></progress>
           </div>
+          <p id="fw-bin-info" class="mensaje-slot" role="status"></p>
+          <details id="fw-notas" class="fw-notas" hidden><summary>Ver cambios</summary><ul></ul></details>
+          <div class="cfg-fila cfg-acciones">
+            <button id="fw-flash" class="btn-primario" hidden>Actualizar nodo</button>
+            <button id="fw-local-flash" class="btn-primario" hidden>Actualizar nodo</button>
+          </div>
+          <p id="fw-resultado" class="mensaje-slot" role="status" aria-live="polite"></p>
         </div>
 
-        <!-- Difusión a toda la red (§20). Va en la misma página que la subida
-             individual porque son el mismo trabajo por dos caminos, y quien
-             busca "cargar firmware" tiene que encontrar los dos. -->
         <div class="card cfg-card" id="bc-card">
-          <h2>Actualizar varios nodos</h2>
-          <div class="mensaje mensaje-info">
-            <span class="mensaje-titulo">Nodos disponibles</span>
-            <span class="mensaje-detalle">La actualización llegará a los nodos conectados directamente. Los demás deberán actualizarse de forma individual.</span>
-          </div>
-          <div class="cfg-fila cfg-acciones">
-            <button id="bc-lanzar" class="btn-primario">Iniciar actualización</button>
-            <button id="bc-cancelar" class="peligro-borde" hidden>Cancelar actualización</button>
-            <span id="bc-aviso" class="aviso"></span>
-          </div>
+          <h2>Actualizar por LoRa</h2>
+          <p class="texto-ayuda">Selecciona los nodos que quieres actualizar. El gateway enviará el firmware por turnos y continuará aunque cierres esta página. Confirma la instalación cuando termine el envío.</p>
+          <details id="bc-notas" class="fw-notas" hidden><summary>Ver cambios</summary><ul></ul></details>
+          <p id="bc-radio-aviso" class="mensaje mensaje-info" hidden>No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.</p>
           <div id="bc-panel" hidden>
             <div id="bc-estado" class="mig-estado"></div>
             <div class="tabla-scroll" role="region" tabindex="0"
                  aria-label="Progreso de actualización de los nodos">
               <table class="tabla" id="bc-tabla">
-                <thead><tr><th>Nodo</th><th>Progreso</th><th>Pendiente</th><th>Última actualización</th><th></th></tr></thead>
+                <thead><tr><th><span class="sr-only">Selección</span></th><th>Nodo</th><th>Instalada</th><th>Disponible</th><th>Estado</th><th>Acción</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
+          </div>
+          <div class="cfg-fila cfg-acciones">
+            <button id="bc-lanzar" class="btn-primario" disabled>Selecciona los nodos</button>
+            <button id="bc-cancelar" class="peligro-borde" hidden>Cancelar actualización</button>
+            <span id="bc-aviso" class="mensaje-slot" role="status"></span>
           </div>
         </div>
       </div>
@@ -526,6 +509,7 @@
         <div class="card cfg-card">
           <h2>Conexión</h2>
           <p class="texto-ayuda">Selecciona la conexión utilizada por la radio.</p>
+          <details class="fw-detalles"><summary>Detalles de la conexión USB</summary><p id="radio-port-detail"></p></details>
           <div class="cfg-form">
             <label class="cfg-campo"><span>Conexión de radio</span><select id="radio-puertos"></select></label>
           </div>
@@ -536,10 +520,22 @@
 
         <div class="card cfg-card">
           <h2>Actualización</h2>
-          <p class="aviso" id="radio-bin-info"></p>
-          <div class="cfg-fila cfg-acciones">
-            <button id="radio-flash" class="btn-primario">Actualizar radio</button>
+          <p class="texto-ayuda">Método: USB en el gateway.</p>
+          <div class="fw-versiones">
+            <div><span>Firmware instalado</span><strong id="radio-version-instalada">Sin comprobar</strong></div>
+            <div><span>Disponible en el gateway</span><strong id="radio-version-disponible">Sin comprobar</strong></div>
           </div>
+          <p class="mensaje-slot" id="radio-bin-info" role="status"></p>
+          <details id="radio-notas" class="fw-notas" hidden><summary>Ver cambios</summary><ul></ul></details>
+          <div class="cfg-fila cfg-acciones">
+            <button id="radio-comprobar">Volver a comprobar</button>
+            <button id="radio-flash" class="btn-primario" hidden>Actualizar radio</button>
+          </div>
+          <details class="fw-recuperacion">
+            <summary>Recuperación de la radio</summary>
+            <p class="texto-ayuda">Si la radio no permite leer su versión o necesita recuperarse, puedes reinstalar el firmware por USB. La red LoRa se interrumpirá durante la instalación.</p>
+            <div class="cfg-fila"><button id="radio-recuperar" disabled>Reinstalar firmware por USB</button></div>
+          </details>
         </div>
       </div>
 
@@ -827,12 +823,24 @@
             <select id="dbg-nodo" aria-label="Nodo Modbus" hidden></select>
             <button id="dbg-toggle" class="btn-primario">Iniciar seguimiento</button>
             <button id="dbg-limpiar" class="btn-tranquilo">Limpiar</button>
-            <span id="dbg-info" class="aviso"></span>
           </div>
+          <p id="dbg-info" class="aviso" aria-live="polite"></p>
           <p class="texto-ayuda" id="dbg-ayuda"></p>
           <p class="aviso" id="dbg-modo" hidden></p>
 
-          <pre id="dbg-consola" class="dbg-consola"></pre>
+          <div class="dbg-filtros">
+            <label class="cfg-campo"><span>Nivel mínimo</span><select id="dbg-nivel">
+              <option value="">Todos los niveles</option><option value="INFO">Información</option>
+              <option value="WARNING">Advertencias</option><option value="ERROR">Errores</option>
+            </select></label>
+            <label class="cfg-campo"><span>Componente</span><select id="dbg-componente" translate="no">
+              <option value="">Todos los componentes</option>
+            </select></label>
+            <label class="cfg-campo"><span>Buscar en los registros</span><input id="dbg-filtro" type="search" placeholder="Evento, nodo o dato" autocomplete="off"></label>
+          </div>
+          <p class="texto-ayuda">Columnas: tiempo, nivel, componente y evento. «up=» indica tiempo desde el arranque. Desplázate horizontalmente para leer las líneas completas.</p>
+          <pre id="dbg-consola" class="dbg-consola notranslate" translate="no" tabindex="0" aria-label="Registros de diagnóstico"></pre>
+          <p id="dbg-contador" class="texto-ayuda">Sin registros</p>
           </div>
         </div>
       </div>
@@ -876,9 +884,7 @@
             <select id="f-leer-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>
           </div>
-          <!-- Cómo acabó lo último que se lanzó sobre este nodo. Una operación
-               por radio dura más de lo que nadie mira la pantalla. -->
-          <p class="aviso" id="f-lora-ultima" hidden></p>
+          <p id="f-radio-aviso" class="aviso ambar" hidden></p>
         </div>
 
         <div class="card cfg-card">
@@ -1253,7 +1259,7 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=modbus-ai-flow-20260902"></script>
-<script src="/static/app.js?v=modbus-ai-flow-20260902"></script>
+<script src="/static/components.js?v=diagnostic-logs-20260908"></script>
+<script src="/static/app.js?v=diagnostic-logs-20260908"></script>
 </body>
 </html>

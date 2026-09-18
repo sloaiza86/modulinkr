@@ -141,6 +141,7 @@ async def _serial_stream(request: Request, port: str):
             yield f"data: [no se pudo abrir {port}: {e}]\n\n"
             return
         yield f"data: [monitor serie abierto en {port} @ {configapi.BAUD}]\n\n"
+        pending = b""
         while True:
             if await request.is_disconnected():
                 break
@@ -148,7 +149,13 @@ async def _serial_stream(request: Request, port: str):
             # de keepalive y de punto para releer el estado de la conexión.
             raw = await loop.run_in_executor(None, ser.readline)
             if raw:
-                yield f"data: {raw.decode(errors='replace').rstrip()}\n\n"
+                pending += raw
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    yield f"data: {line.decode(errors='replace').rstrip(chr(13))}\n\n"
+                if len(pending) > 8192:
+                    yield "data: [monitor] incomplete_line_dropped reason=too_long\n\n"
+                    pending = b""
             else:
                 yield ": keepalive\n\n"
     finally:

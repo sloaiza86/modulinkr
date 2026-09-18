@@ -700,7 +700,7 @@ class GatewayService:
         self.n_beacon += 1
         # Se aparta para que quepa el eco de los nodos sin pisar un fragmento.
         self.eco_libre_ms = time.monotonic() + BEACON_ECHO_HOLE_S
-        LOG.info("beacon seq=%d ttl=%d epoch=%d (total=%d)",
+        LOG.info("event=beacon.sent seq=%d ttl=%d epoch=%d (total=%d)",
                  seq, self.max_ttl, epoch, self.n_beacon)
 
     def send_welcome(self, dest_id: int, hop_dst: int, status: int) -> None:
@@ -711,7 +711,7 @@ class GatewayService:
             self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_welcome += 1
-        LOG.info("welcome dest=%s status=%s epoch=%d via_hop=%s gw_seq=%d",
+        LOG.info("event=welcome.sent dest=%s status=%s epoch=%d via_hop=%s gw_seq=%d",
                  protocol.addr_name(dest_id),
                  protocol.ACK_STATUS_NAMES.get(status, hex(status)),
                  epoch, protocol.addr_name(hop_dst), seq)
@@ -1429,8 +1429,8 @@ class GatewayService:
         except OSError as e:
             self.buf.bcast_state(op["id"], "failed", f"no se pudo leer: {e}")
             return
-        if len(self.bcast_img) != op["total_len"]:
-            self.buf.bcast_state(op["id"], "failed", "el binario cambió de tamaño")
+        if len(self.bcast_img) != op["total_len"] or hashlib.sha256(self.bcast_img).hexdigest() != op["sha256"]:
+            self.buf.bcast_state(op["id"], "failed", "el binario no coincide con la imagen encolada")
             self.bcast_img = None
             return
 
@@ -1548,7 +1548,24 @@ class GatewayService:
         b   = self.bcast
         op  = b["op"]
 
-        # Ventana horaria, lo primero: estar fuera de ella no es un fallo sino
+        # Cancelación desde el visor. El visor no habla por radio: escribe el
+        # estado en la base, así que hay que ir a mirarlo. Cada pocos segundos
+        # basta, porque lo que se corta son horas de emisión.
+        if now - b.get("chk", 0.0) >= 5.0:
+            b["chk"] = now
+            try:
+                fila = self.buf.conn.execute(
+                    "SELECT state FROM fw_bcast WHERE id = ?",
+                    (op["id"],)).fetchone()
+            except sqlite3.Error:
+                fila = None
+            if fila is not None and fila[0] == "cancelled":
+                LOG.info("event=firmware_broadcast.cancelled id=%d source=web", op["id"])
+                self.bcast = None
+                self.bcast_img = None
+                return
+
+        # Ventana horaria: estar fuera de ella no es un fallo sino
         # el estado normal durante el día. Es la misma regla y la misma función
         # que usaba el transporte de §18, porque la decisión de CUÁNDO emitir
         # no depende de CÓMO se emite.
@@ -1566,23 +1583,6 @@ class GatewayService:
         if b.get("fuera_avisado"):
             b["fuera_avisado"] = False
             LOG.info("event=firmware_broadcast.resumed id=%d reason=inside_window", op["id"])
-
-        # Cancelación desde el visor. El visor no habla por radio: escribe el
-        # estado en la base, así que hay que ir a mirarlo. Cada pocos segundos
-        # basta, porque lo que se corta son horas de emisión.
-        if now - b.get("chk", 0.0) >= 5.0:
-            b["chk"] = now
-            try:
-                fila = self.buf.conn.execute(
-                    "SELECT state FROM fw_bcast WHERE id = ?",
-                    (op["id"],)).fetchone()
-            except sqlite3.Error:
-                fila = None
-            if fila is not None and fila[0] == "cancelled":
-                LOG.info("event=firmware_broadcast.cancelled id=%d source=web", op["id"])
-                self.bcast = None
-                self.bcast_img = None
-                return
 
         est = op["state"]
 
@@ -1710,10 +1710,13 @@ class GatewayService:
         """A quién se le pregunta: los nodos vistos por radio últimamente."""
         try:
             filas = self.buf.conn.execute(
-                """SELECT origin FROM node_status
-                    WHERE origin BETWEEN 1 AND 254
+                """SELECT s.origin FROM node_status s
+                    LEFT JOIN node_catalog k ON k.origin_id=s.origin
+                    WHERE s.origin BETWEEN 1 AND 254
+                      AND (k.fw_version IS NULL OR k.fw_version != ?)
                       AND last_seen > ? ORDER BY origin""",
-                (time.time() - BCAST_NODE_SEEN_S,)).fetchall()
+                (self.bcast["op"]["version"] if self.bcast else "",
+                 time.time() - BCAST_NODE_SEEN_S,)).fetchall()
             return [int(f[0]) for f in filas]
         except sqlite3.Error:
             return []
@@ -1847,6 +1850,50 @@ class GatewayService:
         LOG.info("event=firmware_broadcast.retransmit id=%d missing_fragments=%d nodes=%d",
                  op["id"], len(union), len(mapas))
 
+    def _install_image_ready(self, bid, origin, xfer, now):
+        checks = getattr(self, '_install_image_checks', None)
+        if checks is None:
+            checks = self._install_image_checks = {}
+        key = (bid, origin)
+        check = checks.get(key)
+        if check is None:
+            row = self.buf.conn.execute(
+                "SELECT total_len FROM fw_bcast WHERE id=?", (bid,)).fetchone()
+            check = checks[key] = {'xfer': xfer, 'start': now, 'parts': {},
+                                   'count': (row[0] + 211) // 212, 'result': None}
+            self._tx(protocol.build_fw_bcast_poll(
+                origin, self._config_hop(origin), xfer, self._next_gw_seq(),
+                self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts()))
+            return None
+        result = check['result']
+        if result is None and now - check['start'] < 30:
+            return None
+        del checks[key]
+        return result is True
+
+    def _install_image_map(self, parsed):
+        p = parsed['payload']
+        if len(p) < 7:
+            return
+        xfer = int.from_bytes(p[:4], 'little')
+        part, parts = p[4], p[5]
+        if not parts or part >= parts:
+            return
+        for (bid, origin), check in getattr(self, '_install_image_checks', {}).items():
+            if origin != parsed['origin_id'] or xfer != check['xfer']:
+                continue
+            if check.get('expected_parts', parts) != parts:
+                continue
+            check['expected_parts'] = parts
+            check['parts'][part] = bytes(p[6:])
+            if len(check['parts']) != parts:
+                continue
+            bits = b''.join(check['parts'][i] for i in range(parts))
+            missing = sum(1 for i in range(check['count'])
+                          if i >> 3 >= len(bits) or not (bits[i >> 3] & (1 << (i & 7))))
+            check['result'] = missing == 0
+            self.buf.bcast_map_set(bid, origin, bits, missing)
+
     def bcast_install_tick(self, now: float) -> None:
         """Atiende la orden de instalar de un envío dirigido (§20.12).
 
@@ -1870,6 +1917,12 @@ class GatewayService:
         if fila is None:
             return
         bid, xfer, sha_hex, destino = fila
+        ready = self._install_image_ready(bid, destino, xfer, now)
+        if ready is None:
+            return
+        if not ready:
+            self.buf.bcast_state(bid, "failed", "No se pudo confirmar la imagen completa en el nodo. Vuelve a enviar el firmware.")
+            return
         self._tx(protocol.build_fw_install(
             destino, self._config_hop(destino), xfer, bytes.fromhex(sha_hex),
             self._next_gw_seq(), self.net_id, self.max_ttl,
@@ -1894,16 +1947,16 @@ class GatewayService:
         """
         try:
             filas = self.buf.conn.execute(
-                """SELECT b.id, b.target, b.version, k.fw_version
+                """SELECT b.id, b.target, b.version, k.fw_version, k.t_updated, b.updated_ts
                      FROM fw_bcast b
                      LEFT JOIN node_catalog k ON k.origin_id = b.target
                     WHERE b.state = 'installing'
                       AND b.updated_ts < ?""",
-                (now - BCAST_INSTALL_VEREDICTO_S,)).fetchall()
+                (time.time() - BCAST_INSTALL_VEREDICTO_S,)).fetchall()
         except sqlite3.Error:
             return
-        for bid, destino, pedida, corriendo in filas:
-            ok = bool(pedida) and pedida == corriendo
+        for bid, destino, pedida, corriendo, reported, requested in filas:
+            ok = bool(pedida) and "+" in pedida and pedida == corriendo and reported >= requested
             self.buf.bcast_state(
                 bid, "done" if ok else "failed",
                 "instalada (confirmada por la version que anuncia el nodo)"
@@ -1924,11 +1977,28 @@ class GatewayService:
         if self.buf is None or now - self._bcast_inst2_chk < 2.0:
             return
         self._bcast_inst2_chk = now
+        expired = self.buf.conn.execute(
+            """SELECT i.id, b.version, k.fw_version, k.t_updated, i.updated_ts
+               FROM fw_bcast_install i JOIN fw_bcast b ON b.id=i.bcast_id
+               LEFT JOIN node_catalog k ON k.origin_id=i.origin
+               WHERE i.state='installing' AND i.updated_ts < ?""",
+            (time.time() - BCAST_INSTALL_VEREDICTO_S,)).fetchall()
+        for iid, wanted, running, reported, requested in expired:
+            ok = bool(wanted and '+' in wanted and wanted == running and reported >= requested)
+            self.buf.bcast_install_state(iid, 'done' if ok else 'failed',
+                'Instalación confirmada por el nodo.' if ok else 'El nodo no confirmó la instalación.')
         try:
             fila = self.buf.bcast_install_next()
         except sqlite3.Error:
             return
         if fila is None:
+            return
+        ready = self._install_image_ready(fila['bcast_id'], fila['origin'], fila['xfer'], now)
+        if ready is None:
+            return
+        if not ready:
+            self.buf.bcast_install_state(fila['id'], 'failed',
+                'No se pudo confirmar la imagen completa en el nodo. Vuelve a enviar el firmware.')
             return
         self._tx(protocol.build_fw_install(
             fila["origin"], self._config_hop(fila["origin"]), fila["xfer"],
@@ -1951,7 +2021,8 @@ class GatewayService:
             return False
         if parsed.get("fw_status") == protocol.FW_INSTALLING:
             return True     # aviso previo al reinicio, no veredicto
-        ok = parsed.get("fw_status") == protocol.FW_CONFIRMED
+        ok = (parsed.get("fw_status") == protocol.FW_CONFIRMED
+              and parsed.get("fw_detail") == fila["version"])
         detalle = parsed.get("fw_detail") or ""
         self.buf.bcast_install_state(
             fila["id"], "done" if ok else "failed",
@@ -1975,7 +2046,7 @@ class GatewayService:
             return False
         try:
             fila = self.buf.conn.execute(
-                """SELECT id, target FROM fw_bcast
+                """SELECT id, target, version FROM fw_bcast
                     WHERE state = 'installing' AND target = ?
                       AND (xfer = ? OR ? = 0 OR ? IS NULL)
                  ORDER BY id DESC LIMIT 1""",
@@ -1993,7 +2064,8 @@ class GatewayService:
             LOG.info("event=firmware_broadcast.node_restarting id=%d origin=%d",
                      bid, parsed["origin_id"])
             return True
-        ok = parsed.get("fw_status") == protocol.FW_CONFIRMED
+        ok = (parsed.get("fw_status") == protocol.FW_CONFIRMED
+              and parsed.get("fw_detail") == fila[2])
         self.buf.bcast_state(bid, "done" if ok else "failed",
                              f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
         LOG.info("event=firmware_broadcast.verdict id=%d origin=%d detail=%s",
@@ -2038,7 +2110,10 @@ class GatewayService:
 
     def bcast_on_map(self, parsed: dict) -> None:
         """Un trozo del mapa de un nodo (§20.9)."""
-        if self.bcast is None or self.buf is None:
+        if self.buf is None:
+            return
+        self._install_image_map(parsed)
+        if self.bcast is None:
             return
         p = parsed["payload"]
         if len(p) < 7:
@@ -2347,7 +2422,7 @@ class GatewayService:
             if t.get("apply_at"):
                 detalle += f", a aplicar en epoch {t['apply_at']}"
             self.buf.config_push_state(t["push_id"], "committing", detalle)
-            LOG.info("config-commit origin=%d xfer=%08X len=%d apply_at=%d",
+            LOG.info("event=config.commit origin=%d xfer=%08X len=%d apply_at=%d",
                      t["origin"], t["xfer"], t["total_len"],
                      t.get("apply_at", 0))
 
@@ -2412,7 +2487,7 @@ class GatewayService:
             self.sec_key, self._gw_sec_ts())
         self._tx(frame)
         self.n_ack += 1
-        LOG.info("ack dest=%s ack_seq=%d status=%s via_hop=%s gw_seq=%d",
+        LOG.info("event=ack.sent dest=%s ack_seq=%d status=%s via_hop=%s gw_seq=%d",
                  protocol.addr_name(origin_id), ack_seq,
                  protocol.ACK_STATUS_NAMES.get(status, hex(status)),
                  protocol.addr_name(hop_dst), seq)
@@ -2420,6 +2495,15 @@ class GatewayService:
     # ----- Recepción desde el Heltec -----
 
     def handle_rx_line(self, line: str) -> None:
+        identity = re.fullmatch(r"\[fw\] version=([0-9A-Za-z.+-]{1,32})", line.strip())
+        if identity is None:
+            identity = re.fullmatch(r"ModuLinkr/gateway-radio\s+v([0-9A-Za-z.+-]{1,32})", line.strip())
+        if identity and self.buf is not None:
+            self.buf.conn.execute(
+                "INSERT OR REPLACE INTO radio_identity VALUES (1, ?, ?, ?)",
+                (identity.group(1), self.port, time.time()))
+            self.buf.conn.commit()
+            return
         m = RX_RE.search(line)
         if not m:
             # Líneas de banner/init/tx del Heltec: se muestran para depurar.
@@ -2438,7 +2522,14 @@ class GatewayService:
             elif s.startswith("[tx] err"):
                 self.heltec_err += 1
                 LOG.warning("event=radio.tx_rejected detail=%s", s)
-            LOG.debug("event=radio.message detail=%s", s)
+            diagnostic = re.fullmatch(
+                r"(\S+)\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(radio\.\S+)\s+(event=.+)", s)
+            if diagnostic:
+                stamp, level, component, message = diagnostic.groups()
+                LOG.log(getattr(logging, level), "%s source_time=%s source_component=%s",
+                        message, stamp, component)
+            else:
+                LOG.debug("event=radio.message detail=%s", s)
             return
 
         try:
@@ -2506,7 +2597,7 @@ class GatewayService:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 modo = protocol.MB_DEBUG_NAMES.get(
                     self.mb_debug.get(parsed["origin_id"]), "?")
-                LOG.info("modbus-debug origin=%s mode=%s device=%d status=%s exception=%d "
+                LOG.info("event=modbus.frame modbus-debug origin=%s mode=%s device=%d status=%s exception=%d "
                          "request=%s response=%s purged=%s purged_total=%d resyncs=%d",
                          protocol.addr_name(parsed["origin_id"]), modo,
                          parsed["mb_dev"], parsed["mb_status_name"],
@@ -2671,7 +2762,7 @@ class GatewayService:
                         (f"[exc={b >> 4}]" if (b >> 4) else "")
                         for b in sts)
                     reads_fmt += f"  st={st_fmt}"
-                LOG.info("rx origin=%s seq=%d ts=%d rssi=%.1f snr=%.1f  %s%s",
+                LOG.info("event=telemetry.received origin=%s seq=%d ts=%d rssi=%.1f snr=%.1f  %s%s",
                          protocol.addr_name(parsed["origin_id"]), parsed["seq"],
                          parsed.get("ts", 0), rssi, snr, reads_fmt,
                          "" if is_new else "  [dup]")
@@ -2689,7 +2780,7 @@ class GatewayService:
             if nb_flags is not None:
                 self.buf.nbiot_update(parsed["origin_id"], nb_flags,
                                       parsed.get("nb_csq", 0xFF))
-            LOG.info("heartbeat origin=%s seq=%d tx_ms=%s nb=%s rssi=%.1f snr=%.1f",
+            LOG.info("event=heartbeat.received origin=%s seq=%d tx_ms=%s nb=%s rssi=%.1f snr=%.1f",
                      protocol.addr_name(parsed["origin_id"]), parsed["seq"],
                      tx_ms if tx_ms is not None else "-",
                      f"0x{nb_flags:02X}" if nb_flags is not None else "-",
@@ -2728,20 +2819,27 @@ class GatewayService:
         ft = parsed["frame_type_name"]
 
         hs = parsed["hop_src"]
+        origin = parsed["origin_id"]
+        # La ruta se aprende del uplink que llega a este gateway como destino
+        # y salto. Oír tráfico dirigido a otro vecino solo prueba que está vivo.
+        # El contacto directo sustituye una ruta anterior a través de un relay.
+        ruta = hs if (1 <= hs <= 254
+                      and parsed["hop_dst"] == protocol.ADDR_GATEWAY
+                      and parsed["dest_id"] == protocol.ADDR_GATEWAY) else None
         if 1 <= hs <= 254:
             parent = hop = None
             if parsed["frame_type"] == protocol.FRAME_BEACON:
                 parent = parsed.get("parent")
                 hop    = parsed.get("hop_count")
             self.buf.status_update(hs, ft, rssi=rssi, snr=snr,
-                                   parent_id=parent, hop_count=hop)
+                                   parent_id=parent, hop_count=hop,
+                                   hop_src=ruta if origin == hs else None)
 
-        origin = parsed["origin_id"]
         if origin != hs and 1 <= origin <= 254:
             # Ruta inversa (spec §2.4): el vecino por el que llegó este
             # uplink es por el que hay que bajar hacia ese nodo. Lo usa el
             # canal de configuración para alcanzar nodos a más de un salto.
-            self.buf.status_update(origin, ft, hop_src=hs)
+            self.buf.status_update(origin, ft, hop_src=ruta)
 
         # Pase de lista de la migración: se anota sobre el nodo que CAPTURÓ la
         # trama, no sobre el vecino que la reenvió. Oírle vale como prueba de
@@ -2816,7 +2914,7 @@ class GatewayService:
             f"{r['id']}[{r['unit']}]" if r['unit'] else r['id']
             for r in catalog["reads"])
         writes_fmt = ", ".join(w['id'] for w in catalog["writes"]) or "-"
-        LOG.info("register origin=%s fw=%s name=%r reads=[%s] writes=[%s]",
+        LOG.info("event=register.completed origin=%s fw=%s name=%r reads=[%s] writes=[%s]",
                  protocol.addr_name(origin), catalog["fw_version"],
                  catalog["node_name"], reads_fmt, writes_fmt)
         self.send_welcome(origin, hop_src, protocol.ACK_OK)
@@ -2837,7 +2935,7 @@ class GatewayService:
         pub_hlt  = self.mqtt.n_pub_hlt if self.mqtt is not None else 0
         pending  = self.buf.pending_publish() if self.buf is not None else -1
         LOG.info(
-            "STATS rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
+            "event=service.stats rx=%d ack=%d acksup=%d dup=%d beacon=%d reg=%d welcome=%d "
             "overheard=%d notconf=%d drop=%d micfail=%d buffer=%d "
             "mqtt=%s pub_tel=%d pub_cat=%d pub_hlt=%d pending=%d",
             self.n_rx, self.n_ack, self.n_acksup, self.n_dup, self.n_beacon,
@@ -2855,7 +2953,8 @@ class GatewayService:
         lanza: el bucle reintenta hasta que la radio aparece."""
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
-            self.ser.reset_input_buffer()
+            self.buf.conn.execute("DELETE FROM radio_identity")
+            self.buf.conn.commit()
             return True
         except serial.SerialException as e:
             LOG.warning("event=radio.open_failed port=%s error=%s", self.port, e)
@@ -3419,6 +3518,10 @@ class GatewayService:
                         self._heartbeat(lora_link=True)
                     if now - last_oled >= self.oled_s:
                         last_oled = now
+                        self.ser.write(b"FW?\n")
+                        # La versión del banner sigue vigente durante esta conexión USB.
+                        self.buf.conn.execute("UPDATE radio_identity SET ts=? WHERE port=?", (time.time(), self.port))
+                        self.buf.conn.commit()
                         self.push_radio()
                         self.push_oled()
 
@@ -3459,7 +3562,7 @@ def main() -> int:
     logging.Formatter.converter = time.gmtime
     logging.basicConfig(
         level=level,
-        format="%(asctime)sZ %(levelname)-8s %(name)s %(message)s",
+        format="%(asctime)sZ %(levelname)-8s %(name)-24s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     return GatewayService().run()

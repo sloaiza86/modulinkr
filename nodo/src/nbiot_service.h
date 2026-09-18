@@ -11,8 +11,10 @@
 //   MQTT_START, MQTT_CONNECT, LISTO.
 //
 // En LISTO la tarea atiende una cola de publicaciones (batches JSON) y
-// refresca CSQ periódicamente. Cualquier fallo retrocede al estado que
-// falló con un backoff de 30 s.
+// consulta el registro celular y la sesión MQTT cada 60 s por UART y
+// refresca CSQ periódicamente.
+// Una sesión desconectada se reinicia; los fallos de inicialización o
+// publicación reinician el servicio tras un backoff de 30 s.
 //
 // v2.1 (10-jul-2026): el estado CLOCK_SYNC (hora de red NITZ vía CCLK)
 // desaparece; la fuente de hora del sistema es el gateway (nodeclock,
@@ -69,19 +71,45 @@ public:
     bool begin(const Config& cfg);
 
     // True cuando la sesión MQTT está operativa (puede aceptar batches).
-    bool ready() const { return state_ == State::READY; }
+    bool ready() const {
+        return state_ == State::READY && mqttStatus() == Nbiot::MqttState::CONNECTED;
+    }
+
+    Nbiot::MqttState mqttStatus() const {
+        const auto registration = registrationStatus();
+        if (registration == Nbiot::CeregStatus::UNKNOWN) return Nbiot::MqttState::UNKNOWN;
+        if (!isRegistered(registration)) return Nbiot::MqttState::DISCONNECTED;
+        const auto status = mqtt_state_;
+        // Una tarea detenida no debe anunciar una comprobación vieja como actual.
+        if (status == Nbiot::MqttState::CONNECTED
+            && uint32_t(millis() - last_mqtt_check_ms_) > kMqttStatusMaxAgeMs) {
+            return Nbiot::MqttState::UNKNOWN;
+        }
+        return status;
+    }
+
+    Nbiot::CeregStatus registrationStatus() const {
+        if (uint32_t(millis() - last_registration_check_ms_) > kMqttStatusMaxAgeMs) {
+            return Nbiot::CeregStatus::UNKNOWN;
+        }
+        return registration_state_;
+    }
 
     State state() const { return state_; }
     static const char* stateName(State s);
 
     // Estado compacto para el heartbeat del supernodo (frame-format.md §6):
     // bit 0 = registrado en la red celular (pasó REGISTERING), bit 1 =
-    // conectado al broker MQTT cloud. BACKOFF cuenta como no operativo.
+    // conectado al broker MQTT cloud, bit 2 = estado MQTT desconocido,
+    // bit 3 = registro celular desconocido. El registro no se deduce de READY.
     uint8_t statusFlags() const {
         uint8_t f = 0;
-        if (state_ == State::MQTT_START || state_ == State::MQTT_CONNECT ||
-            state_ == State::READY) f |= 0x01;
-        if (state_ == State::READY) f |= 0x02;
+        const auto registration = registrationStatus();
+        if (isRegistered(registration)) f |= 0x01;
+        if (registration == Nbiot::CeregStatus::UNKNOWN) f |= 0x08;
+        const auto mqtt = mqttStatus();
+        if (state_ == State::READY && mqtt == Nbiot::MqttState::CONNECTED) f |= 0x02;
+        if (mqtt == Nbiot::MqttState::UNKNOWN) f |= 0x04;
         return f;
     }
 
@@ -121,6 +149,8 @@ private:
     static constexpr uint32_t kBackoffMs        = 30000;
     static constexpr uint32_t kRegisterPollMs   = 5000;
     static constexpr uint32_t kCsqRefreshMs     = 30000;
+    static constexpr uint32_t kMqttCheckMs      = 60000;
+    static constexpr uint32_t kMqttStatusMaxAgeMs = 180000;
     static constexpr uint32_t kRegisterLimitMs  = 30UL * 60UL * 1000UL;
     static constexpr uint32_t kNtpCooldownMs    = 5UL * 60UL * 1000UL;
 
@@ -131,6 +161,11 @@ private:
     };
 
     static void taskEntry(void* arg);
+    static bool isRegistered(Nbiot::CeregStatus status) {
+        return status == Nbiot::CeregStatus::REGISTERED_HOME
+            || status == Nbiot::CeregStatus::REGISTERED_ROAMING;
+    }
+    Nbiot::CeregStatus refreshRegistration();
     void run();
     bool step();  // ejecuta un paso de la máquina; false si debe ir a backoff
 
@@ -141,6 +176,10 @@ private:
     QueueHandle_t queue_  = nullptr;  // elementos: PubItem (json strdup + batch_id)
 
     volatile State    state_        = State::IDLE;
+    volatile Nbiot::MqttState mqtt_state_ = Nbiot::MqttState::UNKNOWN;
+    volatile uint32_t last_mqtt_check_ms_ = 0;
+    volatile Nbiot::CeregStatus registration_state_ = Nbiot::CeregStatus::UNKNOWN;
+    volatile uint32_t last_registration_check_ms_ = 0;
     volatile int8_t   csq_dbm_      = INT8_MIN;
     volatile uint32_t published_ok_  = 0;
     volatile uint32_t published_err_ = 0;

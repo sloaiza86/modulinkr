@@ -43,7 +43,7 @@ def check_secret_redaction(failures: list[str]) -> None:
         failures.append("nodo/src/nbiot.cpp: MQTT credentials are not redacted")
     guarded_log = re.search(
         r"if \(have_auth\).*?<redacted>.*?\} else \{.*?"
-        r"Serial\.printf\(\"\[at\] >> %s\\n\", cmd\);",
+        r'diag::log\("DEBUG", "node\.at", "at\.command", "data=%s\\n", cmd\);',
         mqtt_connect,
         re.DOTALL,
     )
@@ -112,9 +112,8 @@ def split_cpp_arguments(source: str) -> list[str]:
     return arguments
 
 
-def serial_printf_calls(source: str) -> list[tuple[int, str]]:
+def serial_printf_calls(source: str, marker: str = "Serial.printf(") -> list[tuple[int, str]]:
     calls: list[tuple[int, str]] = []
-    marker = "Serial.printf("
     offset = 0
     while True:
         start = source.find(marker, offset)
@@ -157,19 +156,21 @@ def check_serial_printf(failures: list[str]) -> None:
     for base in ("nodo/src", "gateway/heltec-radio/src"):
         for path in (ROOT / base).glob("**/*.cpp"):
             source = path.read_text(encoding="utf-8")
-            for line, call in serial_printf_calls(source):
+            calls = [(line, call, 0) for line, call in serial_printf_calls(source)]
+            calls += [(line, call, 3) for line, call in serial_printf_calls(source, "diag::log(")]
+            for line, call, format_index in calls:
                 if not call:
                     failures.append(
                         f"{path.relative_to(ROOT)}:{line}: unterminated Serial.printf call"
                     )
                     continue
                 arguments = split_cpp_arguments(call)
-                literals = string_literal.findall(arguments[0])
+                literals = string_literal.findall(arguments[format_index])
                 if not literals:
                     continue
                 message = "".join(literal[1:-1] for literal in literals)
                 expected = len(specifier.findall(message.replace("%%", "")))
-                actual = len(arguments) - 1
+                actual = len(arguments) - format_index - 1
                 if expected != actual:
                     failures.append(
                         f"{path.relative_to(ROOT)}:{line}: Serial.printf expects "
