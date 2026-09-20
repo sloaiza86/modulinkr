@@ -1,7 +1,7 @@
 // ModuLinkr, visor web del gateway: lógica de la interfaz (shell con
 // sidebar, tarjetas de red, topología y datos). Vanilla JS: la página
-// consulta la API y repinta; el refresco es por sondeo (5 s las
-// tarjetas, 10 s el mapa) y se pausa con la pestaña oculta.
+// consulta una instantánea cada 2 s para las tarjetas y el mapa.
+// El contador local avanza cada segundo; la pestaña oculta pausa la consulta.
 
 "use strict";
 
@@ -12,6 +12,7 @@ const COLOR = {
   accent: CSS.getPropertyValue("--accent").trim(),
   accentSoft: CSS.getPropertyValue("--accent-suave").trim(),
   ok:     CSS.getPropertyValue("--ok").trim(),
+  relay:  "#b77900",
   off:    CSS.getPropertyValue("--off").trim(),
   dim:    CSS.getPropertyValue("--dim").trim(),
   text:   CSS.getPropertyValue("--text").trim(),
@@ -85,6 +86,21 @@ function fmtAgo(s) {
   if (s < 86400) return (s / 3600).toFixed(1).replace(".", ",") + " h";
   return (s / 86400).toFixed(1).replace(".", ",") + " d";
 }
+function edadEnVivo(timestamp) {
+  return `<span data-live-age="${Number(timestamp)}">${fmtEdadEnVivo(Math.max(0, redAhora - timestamp))}</span>`;
+}
+function fmtEdadEnVivo(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min ${s % 60} s`;
+}
+function actualizarEdades() {
+  document.querySelectorAll("[data-live-age]").forEach(el => {
+    el.textContent = fmtEdadEnVivo(redAhora - Number(el.dataset.liveAge));
+  });
+}
+
 function fmtNum(x, dec = 1) {
   return x == null ? "" : Number(x).toFixed(dec).replace(".", ",");
 }
@@ -458,6 +474,15 @@ window.addEventListener("hashchange", () => {
 
 // ----- Vista de red: tarjetas por nodo -----
 
+let redSnapshot = null;
+let redRecibidaMs = 0;
+let redAhora = 0;
+let redConectada = false;
+let redPeticion = null;
+let redAbort = null;
+let firmaTarjetas = null;
+let firmaMapa = null;
+let mapaPintando = false;
 let cacheEstado = null;      // última respuesta de /api/red/estado
 let cacheUltimos = null;     // última respuesta de /api/red/ultimos
 let cacheCatalogosRed = null;
@@ -469,6 +494,12 @@ let detalleOrigen = null;    // nodo abierto en el panel de detalle
 // buffer anterior a la tabla de estado (lora_link null) cae al veredicto
 // antiguo del auto-reporte de aire, con un solo chip.
 function estadoGateway(data) {
+  if (data.observation_lost || data.service_online === false) {
+    return { caido: true, sub: "Estado del gateway no observable", chips: [
+      { cls: "gris", txt: "LoRa: estado no observable" },
+      { cls: "gris", txt: "MQTT: estado no observable" },
+    ] };
+  }
   if (data.lora_link == null && data.service_online == null) {
     const caido = data.gateway_online === false;
     return {
@@ -563,7 +594,7 @@ function chipEstado(n, ult, onlineS) {
   // muestreo. Antes salía de multiplicar por cinco el del enlace, y al pasar
   // ese a medirse contra el latido las dos cosas dejaron de tener relación.
   const datosS = n.datos_s || onlineS * 5;
-  let cls = "gris", txt = "Sin conexión";
+  let cls = "gris", txt = n.observation_lost ? "Estado no observable" : "Sin actividad reciente";
   // Con sesión abierta, un nodo callado no es un nodo caído.
   const mant = chipMantenimiento(n);
   const enlaceDisponible = nodoDisponible(n, ult);
@@ -597,10 +628,13 @@ function chipsNodo(n, ult, onlineS) {
   const mant = chipMantenimiento(n);
   // El mantenimiento acompaña al estado del enlace. No lo sustituye, porque
   // la actualización y la comunicación LoRa responden preguntas distintas.
-  const chips = [n.online ? { cls: "on", txt: "LoRa: conectado" }
-                          : { cls: "gris", txt: "LoRa: sin conexión" }];
+  const porRelay = n.transport === "relay" && n.delivery_online;
+  const lora = n.lora_route_online ?? n.online;
+  const chips = [porRelay
+    ? { cls: "ambar", txt: `LoRa: entrega mediante supernodo ${n.via_publisher}` }
+    : lora ? { cls: "on", txt: "LoRa: conectado al gateway" }
+           : { cls: "gris", txt: "LoRa: sin ruta confirmada al gateway" }];
   if (mant) chips.push(mant);
-  const viaNb = !!(ult && ult.via_nbiot);
 
   if (ult && ult.ago_s <= datosS) {
     const canales = ult.channels ?? [];
@@ -620,15 +654,29 @@ function chipsNodo(n, ult, onlineS) {
     chips.push({ cls: "gris", txt: "Modbus: sin datos recientes" });
   }
 
-  const tieneCelular = viaNb || n.nbiot_flags != null
+  const tieneCelular = n.role === "supernode" || n.nbiot_flags != null
     || n.nbiot_ago_s != null || n.mqtt_ago_s != null;
   if (tieneCelular) {
-    const nbFresco = n.nbiot_ago_s != null && n.nbiot_ago_s <= 180;
+    const nbFresco = n.nbiot_ago_s != null && n.nbiot_ago_s < 135;
     const nbDesconocido = n.nbiot_flags == null || (n.nbiot_flags & 0x08) !== 0;
     const reg = n.nbiot_flags != null && (n.nbiot_flags & 0x01) !== 0;
     const mqtt = n.nbiot_flags != null && (n.nbiot_flags & 0x02) !== 0;
     const mqttDesconocido = n.nbiot_flags != null && (n.nbiot_flags & 0x04) !== 0;
 
+    if (n.mqtt_recent) {
+      chips.push({ cls: "on", txt: "NB-IoT: entrega confirmada" });
+      chips.push({ cls: "on", txt: "MQTT: publicación recibida" });
+      return chips;
+    }
+    if (n.nbiot_state != null) {
+      for (const [field, label] of [["nbiot", "NB-IoT"], ["mqtt", "MQTT"]]) {
+        const state = n[field + "_state"];
+        const text = state === "up" ? "conectado" : state === "down" ? "sin conexión confirmada por el nodo"
+          : !n.cellular_observable && !n.lora_route_online ? "estado no observable" : "estado desconocido";
+        chips.push({ cls: state === "up" ? "on" : "gris", txt: `${label}: ${text}` });
+      }
+      return chips;
+    }
     chips.push(!nbFresco || nbDesconocido
       ? { cls: "gris", txt: "NB-IoT: estado desconocido" }
       : reg ? { cls: "on", txt: "NB-IoT: conectado" }
@@ -649,16 +697,23 @@ function chipsNodo(n, ult, onlineS) {
   return chips;
 }
 
+function textoRuta(n) {
+  const activa = n.delivery_online ?? n.online;
+  const ruta = n.transport === "relay" ? `mediante supernodo ${n.via_publisher}`
+    : n.transport === "nbiot" ? "por NB-IoT" : "por LoRa al gateway";
+  if (n.observation_lost || (!activa && n.cellular_observable === false && n.transport !== "lora"))
+    return `Estado no observable; última ruta ${ruta}`;
+  if (!activa && (n.mqtt_state === "down" || n.nbiot_state === "down"))
+    return `Desconexión celular confirmada; última ruta ${ruta}`;
+  return activa ? `Comunicación confirmada ${ruta}` : `Sin actividad reciente; última ruta ${ruta}`;
+}
+
 function nodoPorNbiot(n, ult = null) {
-  if (ult?.via_nbiot) return true;
-  const flags = n.nbiot_flags;
-  return !n.online && flags != null && (flags & 0x03) === 0x03
-    && n.nbiot_ago_s != null && n.nbiot_ago_s <= 180
-    && n.mqtt_ago_s != null && n.mqtt_ago_s <= 180;
+  return !!n.delivery_online && ["nbiot", "relay"].includes(n.transport);
 }
 
 function nodoDisponible(n, ult = null) {
-  return !!n.online || nodoPorNbiot(n, ult);
+  return n.delivery_online ?? !!n.online;
 }
 
 let masonryRaf = null;
@@ -683,9 +738,8 @@ window.addEventListener("resize", programarMasonryTarjetas);
 
 function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const canales = ult ? ult.channels : [];
-  const esSupernodo = n.type === "super_node" || !!ult?.via_nbiot
-    || n.nbiot_flags != null || n.nbiot_ago_s != null || n.mqtt_ago_s != null;
-  const iconoNodo = esSupernodo
+  const supernodo = esSupernodo(n);
+  const iconoNodo = supernodo
     ? '<modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon>'
     : iconoMdi("radio-handheld");
   const filas = canales.map((c, i) => {
@@ -705,7 +759,7 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   // La cabecera muestra siempre la edad de la última telemetría. El estado de
   // los enlaces se mantiene separado en los indicadores de conectividad.
   const medida = ult
-    ? `Última medida hace ${fmtAgo(ult.ago_s)}` : "Sin medidas recibidas";
+    ? `Última medida hace ${edadEnVivo(ult.t_last)}` : "Sin medidas recibidas";
   const disponible = nodoDisponible(n, ult);
   return `
   <modulinkr-node-card class="tarjeta-nodo${disponible ? "" : " nodo-offline"}" data-origin="${n.origin}">
@@ -714,6 +768,7 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
       <div class="tn-info">
         <div class="tn-nombre">${n.name ?? "nodo " + n.origin}</div>
         <div class="tn-sub">${medida}</div>
+        <div class="tn-sub">${n.last_activity_at ? `Última actividad conocida hace ${edadEnVivo(n.last_activity_at)}` : "Sin comunicación observada"}</div>
       </div>
       <div class="tn-estados">${chipsNodo(n, ult, onlineS)
         .map(chipConexion).join("")}</div>
@@ -732,62 +787,77 @@ function pintarBadge(data) {
   cabecera.setNetworkStatus(online, total);
 }
 
-async function refrescarRed() {
-  if (document.hidden) return;
-  const aviso = document.getElementById("red-aviso");
-  const cont = document.getElementById("tarjetas");
-  let estado, ultimos;
-  try {
-    const [r1, r2, r3] = await Promise.all([
-      fetchApi("/api/red/estado"), fetchApi("/api/red/ultimos"),
-      cacheCatalogosRed === null
-        ? fetchApi("/api/catalogos").catch(() => null)
-        : Promise.resolve(null),
-    ]);
-    if (!r1.ok) {
-      formRadioActualizar(null);
-      aviso.textContent = "No se pudo consultar el estado de la red. Vuelve a intentarlo.";
-      return;
-    }
-    estado = await r1.json();
-    ultimos = r2.ok ? await r2.json() : { nodes: [] };
-    if (r3?.ok) cacheCatalogosRed = await r3.json();
-  } catch (e) {
-    formRadioActualizar(null);
-    aviso.textContent = cacheEstado
-      ? "Gateway sin conexión. Se muestran los últimos datos recibidos."
-      : "No se puede cargar la red porque el gateway no responde. Comprueba la conexión.";
-    return;
-  }
+function firmaSinEdades(html) {
+  return html.replace(/(<span data-live-age="[^"]+">)[^<]*(<\/span>)/g, "$1$2");
+}
 
-  cacheEstado = estado;
-  formRadioActualizar(estado);
-  cacheUltimos = ultimos;
+function proyectarRed() {
+  if (!redSnapshot || document.hidden) return;
+  const elapsed = Math.max(0, (performance.now() - redRecibidaMs) / 1000);
+  const projected = ModulinkrNetwork.project(redSnapshot, elapsed, redConectada);
+  cacheEstado = projected.state;
+  cacheUltimos = projected.latest;
+  redAhora = projected.now;
+  formRadioActualizar(redConectada ? cacheEstado : null);
+  pintarBadge(cacheEstado);
+  const aviso = document.getElementById("red-observacion");
+  aviso.textContent = !redConectada ? "Sin conexión con el gateway. Se conserva la última información recibida con su antigüedad."
+    : !cacheEstado.service_online ? "No se puede confirmar el estado del servicio del gateway."
+    : cacheEstado.mqtt_enabled && !cacheEstado.mqtt_connected
+      ? "Sin conexión del gateway al broker. El estado celular solo puede confirmarse si llega por LoRa." : "";
+  aviso.hidden = !aviso.textContent;
+  const porOrigen = new Map(cacheUltimos.nodes.map(n => [n.origin, n]));
+  const catalogos = new Map((cacheCatalogosRed ?? []).map(n => [n.origin, n]));
+  const html = tarjetaGateway(cacheEstado) + cacheEstado.nodes.map(n =>
+    tarjetaNodo(n, porOrigen.get(n.origin), cacheEstado.online_s, catalogos.get(n.origin))).join("");
+  const firma = firmaSinEdades(html);
+  if (firma !== firmaTarjetas) {
+    document.getElementById("tarjetas").innerHTML = html;
+    firmaTarjetas = firma;
+    programarMasonryTarjetas();
+  }
+  if (detalleOrigen !== null) pintarDetalle(detalleOrigen);
+  if (modalSel !== null) pintarModalCabecera();
+  actualizarEdades();
+  if (vistaActual() === "topologia") refrescarMapa();
+}
+
+async function refrescarRed() {
+  if (document.hidden || redPeticion) return redPeticion;
+  const controller = new AbortController();
+  redAbort = controller;
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  redPeticion = (async () => {
+    try {
+      const response = await fetchApi("/api/red/resumen", { signal: controller.signal, cache: "no-store" });
+      if (!response.ok) throw new Error("Estado de red no disponible");
+      const data = await response.json();
+      if (controller.signal.aborted) return;
+      if (!data.state || !Array.isArray(data.state.nodes) || !data.latest)
+        throw new Error("Instantánea de red incompleta");
+      redSnapshot = data;
+      redRecibidaMs = performance.now();
+      redConectada = true;
+      cacheCatalogosRed = data.catalogs;
+      const aviso = document.getElementById("red-aviso");
+      aviso.innerHTML = data.state.nodes.length ? "" : 'No hay nodos configurados. <a href="#/configuracion/nodo/form">Añadir nodo</a>';
+    } catch (error) {
+      redConectada = false;
+      formRadioActualizar(null);
+      const aviso = document.getElementById("red-observacion");
+      aviso.textContent = "Sin conexión con el gateway. Se conserva la última información recibida con su antigüedad.";
+      aviso.hidden = false;
+    } finally {
+      clearTimeout(timeout);
+      redAbort = null;
+      proyectarRed();
+    }
+  })();
+  try { await redPeticion; } finally { redPeticion = null; }
   if (catalogo !== null && actualizarTiposCatalogo()) {
     selectorMedidas.catalog = catalogo;
     selectorMedidas.value = { selection: [...seleccion], mode: modo };
   }
-  pintarBadge(estado);
-
-  if (estado.nodes.length) {
-    aviso.textContent = "";
-  } else {
-    aviso.innerHTML = 'No hay nodos configurados. <a href="#/configuracion/nodo/form">Añadir nodo</a>';
-  }
-
-  const porOrigen = new Map(ultimos.nodes.map((u) => [u.origin, u]));
-  const catalogosPorOrigen = new Map((cacheCatalogosRed ?? [])
-    .map((c) => [c.origin, c]));
-  cont.innerHTML = tarjetaGateway(estado) +
-    estado.nodes.map((n) =>
-      tarjetaNodo(n, porOrigen.get(n.origin), estado.online_s,
-        catalogosPorOrigen.get(n.origin))).join("");
-  programarMasonryTarjetas();
-
-  if (detalleOrigen !== null) pintarDetalle(detalleOrigen);
-  // El refresco solo actualiza la cabecera del modal; la gráfica se
-  // carga al abrirlo (evita pedir el histórico cloud cada 5 s).
-  if (modalSel !== null) pintarModalCabecera();
 }
 
 // ----- Modal de minigráfica de una medida -----
@@ -836,8 +906,8 @@ function pintarModalCabecera() {
   document.getElementById("modal-icono").setAttribute(
     "name", `mdi:${iconoMedida(c.read_id)}`);
   const ultima = c.st_code && c.value_ago_s != null
-    ? `Última lectura válida hace ${fmtAgo(c.value_ago_s)}`
-    : `Última lectura hace ${fmtAgo(nodo.ago_s)}`;
+    ? `Última lectura válida hace ${edadEnVivo(redAhora - c.value_ago_s)}`
+    : `Última lectura hace ${edadEnVivo(nodo.t_last)}`;
   document.getElementById("modal-cuando").textContent = ultima;
   document.getElementById("modal-valor").innerHTML = c.st_code
     ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
@@ -1081,7 +1151,7 @@ function filaDet(k, v) {
 }
 
 function esSupernodo(n, ult = null) {
-  return n?.type === "super_node" || !!ult?.via_nbiot
+  return n?.role === "supernode" || n?.type === "super_node"
     || n?.nbiot_flags != null || n?.nbiot_ago_s != null || n?.mqtt_ago_s != null;
 }
 
@@ -1159,7 +1229,9 @@ function pintarDetalle(origin) {
   cuerpo.innerHTML = `
     <div class="det-grupo"><h3>Información</h3>
       ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
-      ${filaDet("Última actividad", "Hace " + fmtAgo(n.ago_s))}
+      ${filaDet("Última actividad LoRa observada", n.last_seen ? "Hace " + edadEnVivo(n.last_seen) : "Sin observaciones")}
+      ${filaDet("Entrega", htmlSeguro(textoRuta(n)))}
+      ${filaDet("Periodo de muestreo observado", n.sample_period_s == null ? "Aún no determinado" : fmtEdadEnVivo(n.sample_period_s))}
       ${filaDet("Versión", htmlSeguro(fwVersionTexto(n.fw_version)))}
     </div>
     ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>
@@ -1167,7 +1239,7 @@ function pintarDetalle(origin) {
     <div class="det-grupo"><h3>Radio LoRa</h3>
       ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
       ${filaDet("SNR", fmtNum(n.snr) + " dB")}
-      ${filaDet("Padre", htmlSeguro(nombrePadre(n.parent_id)))}
+      ${filaDet("Último padre LoRa observado", htmlSeguro(nombrePadre(n.parent_id)))}
       ${filaDet("Saltos", n.hop_count ?? "")}
       ${filaDet("Duty cycle, última hora", chipDuty(n.duty_1h))}
     </div>
@@ -1205,7 +1277,7 @@ function bloqueSalud(h) {
     ${filaDet("Arranques", h.boots)}
     ${filaDet("Causa del último", htmlSeguro(h.reset_name))}
     ${filaDet("Recuperaciones", htmlSeguro(escalera))}
-    ${filaDet("Reportado", "hace " + fmtAgo(h.ago_s))}
+    ${filaDet("Reportado", "hace " + edadEnVivo(redAhora - h.ago_s))}
     </div></details>`;
 }
 
@@ -1356,14 +1428,14 @@ function prepararImagenCelularTopologia() {
   return cargaImagenCelularTopologia;
 }
 
-function imagenTopologia(rol, online) {
+function imagenTopologia(rol, online, relay = false) {
   if (rol === "cellular" && imagenCelularTopologia) {
     return imagenCelularTopologia;
   }
   const infraestructura = rol === "gateway" || rol === "cellular";
   const lado = rol === "gateway" ? 56 : rol === "cellular" ? 52 : 48;
   const icono = rol === "gateway" ? 26 : 24;
-  const color = infraestructura ? COLOR.accent : (online ? COLOR.ok : COLOR.off);
+  const color = !online ? COLOR.off : infraestructura ? COLOR.accent : relay ? COLOR.relay : COLOR.ok;
   const opacidad = infraestructura ? 0.09 : (online ? 0.12 : 0.16);
   const componentes = color.replace("#", "").match(/.{2}/g)
     .map((componente) => parseInt(componente, 16));
@@ -1443,7 +1515,8 @@ function nodoVisualTopologia(n, posicion = null) {
     id: n.id,
     label: n.label,
     shape: "image",
-    image: imagenTopologia(rol, n.online),
+    image: imagenTopologia(rol, n.online, n.transport === "relay"),
+    title: ["gateway", "cellular"].includes(rol) ? n.label : textoRuta(n),
     size: rol === "gateway" ? 28 : rol === "cellular" ? 26 : 24,
     font: {
       color: COLOR.text,
@@ -1463,7 +1536,7 @@ function nodoVisualTopologia(n, posicion = null) {
 
 function aristaVisualTopologia(e) {
   const porNbiot = e.transport === "nbiot";
-  const color = porNbiot ? COLOR.ok : e.online ? COLOR.dim : COLOR.off;
+  const color = !e.online ? COLOR.off : e.transport === "relay" ? COLOR.relay : porNbiot ? COLOR.ok : COLOR.dim;
   const opacidad = e.online ? 0.72 : 0.58;
   const ancho = e.online ? 1.8 : 1.5;
   return {
@@ -1474,7 +1547,10 @@ function aristaVisualTopologia(e) {
     arrowStrikethrough: false,
     color: { color, hover: color, highlight: color, opacity: opacidad },
     width: ancho,
-    dashes: e.online ? false : [7, 6],
+    dashes: !e.online ? [7, 6] : e.transport === "relay" ? [2, 5] : false,
+    title: e.transport === "relay"
+      ? `Entrega mediante supernodo ${e.to}; saltos LoRa intermedios no confirmados${e.online ? "" : "; sin actividad reciente"}`
+      : `${porNbiot ? "NB-IoT" : "LoRa"}: ${e.online ? "actividad reciente" : "sin actividad reciente"}`,
     smooth: false,
     chosen: false,
   };
@@ -1855,18 +1931,18 @@ document.getElementById("topologia-restablecer")?.addEventListener(
   "click", () => restablecerTopologia());
 
 async function refrescarMapa() {
-  let r;
+  if (!cacheEstado || mapaPintando) return;
+  const g = ModulinkrNetwork.topology(cacheEstado);
+  const firma = JSON.stringify(g);
+  if (firma === firmaMapa && red !== null) return;
+  mapaPintando = true;
   try {
-    r = await fetchApi("/api/topologia");
-  } catch (e) { return; }
-  if (!r.ok) return;
-  const g = await r.json();
-  await prepararImagenCelularTopologia();
+    await prepararImagenCelularTopologia();
   grafoTopologia = g;
   const posiciones = posicionesInicialesTopologia(g);
   const mapa = document.getElementById("mapa");
   const equipos = g.nodes.filter((n) => !["gateway", "cellular"].includes(n.role));
-  mapa.setAttribute("aria-label", `Topología con ${equipos.length} ${equipos.length === 1 ? "equipo" : "equipos"}. ${equipos.map((n) => n.transport === "nbiot" ? `${n.label}: en línea por NB-IoT; LoRa sin conexión` : `${n.label}: ${n.online ? "en línea por LoRa" : "sin actividad reciente"}`).join(". ")}`);
+  mapa.setAttribute("aria-label", `Topología con ${equipos.length} ${equipos.length === 1 ? "equipo" : "equipos"}. ${equipos.map((n) => `${n.label}: ${textoRuta(n)}`).join(". ")}`);
 
   if (red === null) {
     mapa.classList.add("topologia-preparando");
@@ -1905,8 +1981,12 @@ async function refrescarMapa() {
   } else {
     const idsAnteriores = new Set(nodosTopologia.getIds());
     const idsNuevos = new Set(g.nodes.map((n) => n.id));
+    const conexionesAnteriores = new Set(aristasTopologia.getIds());
+    const conexionesNuevas = new Set(g.edges.map((e) => `${e.from}:${e.to}`));
     const estructuraCambiada = idsAnteriores.size !== idsNuevos.size
-      || [...idsAnteriores].some((id) => !idsNuevos.has(id));
+      || [...idsAnteriores].some((id) => !idsNuevos.has(id))
+      || conexionesAnteriores.size !== conexionesNuevas.size
+      || [...conexionesAnteriores].some((id) => !conexionesNuevas.has(id));
     nodosTopologia.remove([...idsAnteriores].filter((id) => !idsNuevos.has(id)));
     nodosTopologia.update(g.nodes.map((n) => nodoVisualTopologia(
       n, idsAnteriores.has(n.id) ? null : posiciones.get(n.id))));
@@ -1920,6 +2000,10 @@ async function refrescarMapa() {
     if (estructuraCambiada && !topologiaPersonalizada) {
       restablecerTopologia({ animar: false });
     }
+  }
+    firmaMapa = firma;
+  } finally {
+    mapaPintando = false;
   }
 }
 
@@ -7240,13 +7324,15 @@ navegar();
 // hasta que llega, el reloj y las gráficas usan la del navegador.
 cargarAjustes().then(refrescarRed);
 refrescarRed();
-setInterval(refrescarRed, 5000);
-setInterval(() => {
-  if (!document.hidden && vistaActual() === "topologia") refrescarMapa();
-}, 10000);
+setInterval(refrescarRed, 2000);
+setInterval(proyectarRed, 1000);
 document.addEventListener("visibilitychange", () => {
-  // Al volver a la pestaña se refresca al momento, sin esperar al sondeo.
-  if (!document.hidden) { refrescarRed(); if (vistaActual() === "topologia") refrescarMapa(); }
+  if (document.hidden) redAbort?.abort();
+  else {
+    proyectarRed();
+    if (redPeticion) redPeticion.finally(() => refrescarRed());
+    else refrescarRed();
+  }
 });
 function actualizarReloj() {
   document.getElementById("clock").textContent = new Date().toLocaleString(

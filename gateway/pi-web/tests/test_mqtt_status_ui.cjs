@@ -41,12 +41,12 @@ test("desconexión reportada aunque quede una publicación reciente", () => {
 test("consulta inválida y reportes ausentes o vencidos son desconocidos", () => {
   for (const overrides of [
     { nbiot_flags: 5 }, { nbiot_flags: 4 },
-    { nbiot_ago_s: null }, { nbiot_ago_s: 180.1 },
+    { nbiot_ago_s: null }, { nbiot_ago_s: 135 },
   ]) {
     assert.equal(mqtt(overrides).txt, "MQTT: estado desconocido");
     assert.equal(mqtt(overrides).cls, "gris");
   }
-  assert.equal(mqtt({ nbiot_ago_s: 180 }).cls, "on");
+  assert.equal(mqtt({ nbiot_ago_s: 134.9 }).cls, "on");
 });
 
 test("un nodo sin módem no adquiere un indicador MQTT", () => {

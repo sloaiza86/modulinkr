@@ -68,6 +68,7 @@ import json
 import logging
 import os
 import ssl
+import time
 
 import paho.mqtt.client as mqtt
 
@@ -204,8 +205,8 @@ class MqttPublisher:
         y nunca propaga (un fallo aquí no debe tumbar el bucle de red)."""
         try:
             publisher = int(msg.topic.split("/")[2])
-            if publisher == GATEWAY_ID:
-                return  # eco del propio gateway (camino LoRa), se ignora
+            if not 1 <= publisher <= 254 or msg.retain:
+                return  # Una publicación retenida no confirma actividad actual.
             payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
             samples = []
             for s in payload.get("samples") or []:
@@ -215,7 +216,8 @@ class MqttPublisher:
                 st = s.get("st")
                 samples.append(
                     (origin, ts, json.dumps({"v": v, "st": st} if st else v)))
-            self._nbiot_q.append((publisher, samples))
+            if samples:
+                self._nbiot_q.append((publisher, samples, time.time()))
         except Exception as e:                        # noqa: BLE001
             LOG.warning("event=mqtt.message_rejected error=%s", e)
 
@@ -225,12 +227,12 @@ class MqttPublisher:
         (nbiot_last). Barato: se llama cada vuelta del bucle del servicio."""
         while True:
             try:
-                publisher, samples = self._nbiot_q.popleft()
+                publisher, samples, received_at = self._nbiot_q.popleft()
             except IndexError:
                 break
             for origin, ts, reads_json in samples:
-                self.buf.nbiot_last_update(origin, ts, reads_json, publisher)
-            self.buf.mqtt_seen(publisher)
+                self.buf.nbiot_last_update(origin, ts, reads_json, publisher, received_at)
+            self.buf.mqtt_seen(publisher, received_at)
 
     # ----- Drenado -----
 

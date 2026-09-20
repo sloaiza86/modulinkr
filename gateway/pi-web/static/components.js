@@ -235,7 +235,7 @@
       }
       const sinConexion = Math.max(0, total - online);
       badge.textContent = `${sinConexion} ${sinConexion === 1
-        ? "nodo sin conexión" : "nodos sin conexión"}`;
+        ? "nodo sin actividad confirmada" : "nodos sin actividad confirmada"}`;
       badge.className = "badge " + (online === 0 ? "offline" : "warn");
       badge.hidden = false;
     }

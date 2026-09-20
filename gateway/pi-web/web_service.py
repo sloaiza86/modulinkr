@@ -197,6 +197,16 @@ def descargar_cert():
 red = APIRouter(prefix="/api/red", dependencies=[Depends(require_auth)])
 
 
+@red.get("/resumen")
+def red_resumen():
+    try:
+        return netstatus.snapshot()
+    except Exception as e:
+        LOG.warning("event=network_snapshot.unavailable error=%s", e)
+        return JSONResponse(status_code=503,
+                            content={"error": "No se pudo consultar el estado de la red."})
+
+
 @red.get("/estado")
 def red_estado():
     try:

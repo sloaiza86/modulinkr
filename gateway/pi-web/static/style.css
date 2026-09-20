@@ -580,6 +580,7 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 .topologia-linea {
   display: inline-block; width: 30px; border-top: 2px solid var(--dim);
 }
+.topologia-linea.relay { border-top: 2px dotted #b77900; }
 .topologia-linea.nbiot { border-color: var(--ok); }
 .topologia-linea.inactiva { border-top: 2px dashed var(--off); }
 

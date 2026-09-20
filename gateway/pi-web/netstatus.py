@@ -17,35 +17,19 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 # Misma variable y default que gateway_service.py: en el Pi instalado la
 # fija /etc/modulinkr/gateway.env (GW_HOME/modulinkr_buffer.db).
 DB_PATH = os.environ.get("MODULINKR_DB", "/home/practica/modulinkr_buffer.db")
 
-# Suelo del umbral de "conectado". Es un SUELO, no el umbral: el de verdad se
-# mide por nodo (ver _umbral_de).
-#
-# Fijarlo era correcto mientras todos los nodos hablaban cada cinco segundos,
-# que es el ritmo del banco. Con un despliegue real muestreando cada diez
-# minutos, treinta segundos convierten a un nodo perfectamente sano en uno "sin
-# señal" durante 570 de cada 600 segundos. Lo mismo le pasaba al indicador de
-# Modbus, que usa cinco veces este valor.
-ONLINE_S = float(os.environ.get("MODULINKR_WEB_ONLINE_S", "30"))
-
-# Cuántos latidos se toleran sin noticias antes de dar a un nodo por
-# desconectado. Tres deja margen para una entrega perdida y su reintento sin
-# declarar caído a quien solo va despacio.
-ONLINE_INTERVALOS = 3.0
-
-# Y cuántos intervalos de MUESTREO antes de dar por vieja la última medida.
-# Dos: pasado el doble de lo que el nodo tarda en muestrear, o se perdió una
-# entrega o el sensor dejó de responder, y en los dos casos el dato de la
-# pantalla ya no representa lo que está pasando.
-DATOS_INTERVALOS = 2.0
-
-# Techo del umbral, por si la medida sale disparatada (un nodo que estuvo días
-# parado y vuelve tiene huecos enormes entre muestras consecutivas).
-ONLINE_MAX_S = 3600.0
+# El heartbeat del firmware actual tiene un periodo de 60 s. Se tolera
+# una pérdida completa y 15 s de margen, incluso sin historial de arranque.
+ONLINE_S = 135.0
+MODEM_STATUS_S = 135.0
+DELIVERY_MIN_S = 45.0
+DELIVERY_MARGIN_S = 15.0
 
 # Frescura del latido de estado del servicio (gateway_status). Más corto
 # que ONLINE_S: gobierna el veredicto de "servicio caído". Debe cubrir
@@ -76,8 +60,34 @@ MB_DEBUG_NAMES = {
 }
 
 
-def _conn() -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+_READ_CONN = ContextVar("network_read_connection", default=None)
+
+
+@contextmanager
+def _conn():
+    shared = _READ_CONN.get()
+    if shared is not None:
+        yield shared
+        return
+    c = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+def snapshot() -> dict:
+    """Una lectura SQLite coherente para las tarjetas, los datos y el mapa."""
+    with _conn() as c:
+        c.execute("BEGIN")
+        token = _READ_CONN.set(c)
+        try:
+            state = network_state()
+            return {"state": state, "latest": last_values(include_cloud=False),
+                    "catalogs": catalogs()}
+        finally:
+            _READ_CONN.reset(token)
+            c.rollback()
 
 
 def _schemas_de(catalog_json) -> str:
@@ -108,27 +118,27 @@ def _intervalo_de(conn, origin: int, ahora: float) -> float | None:
     promedio y haría creer que el nodo va más lento de lo que va. Es el mismo
     criterio con el que el gateway dimensiona las ventanas de silencio.
 
-    Se cachea un minuto porque esta consulta corre en cada refresco de la
-    pantalla y el intervalo de un nodo no cambia de un segundo a otro.
+    Se combinan capturas distintas de ambas vías. La hora de recepción no
+    participa, porque una descarga del buffer puede entregar horas de datos
+    en una sola ráfaga.
     """
-    hit = _INTERVALO_CACHE.get(origin)
-    if hit and ahora - hit[0] < 60.0:
-        return hit[1]
     try:
         filas = conn.execute(
-            """SELECT ts FROM buffer WHERE origin_id = ?
-                ORDER BY ts DESC LIMIT 8""", (origin,)).fetchall()
+            "SELECT DISTINCT ts FROM buffer WHERE origin_id = ? AND ts > 0 AND ts <= ? ORDER BY ts DESC LIMIT 8",
+            (origin, ahora)).fetchall()
+        try:
+            filas += conn.execute(
+                "SELECT captured_ts FROM nbiot_captures WHERE origin = ? AND captured_ts <= ? ORDER BY captured_ts DESC LIMIT 8",
+                (origin, ahora)).fetchall()
+        except sqlite3.OperationalError:
+            pass  # Servicio aún sin la tabla de cadencia celular.
     except sqlite3.Error:
         return None
-    ts = [f[0] for f in filas if f[0]]
-    if len(ts) < 3:
+    captures = sorted({r[0] for r in filas}, reverse=True)[:8]
+    if len(captures) < 3:
         return None
-    deltas = sorted(a - b for a, b in zip(ts, ts[1:]) if a > b)
-    if not deltas:
-        return None
-    mediana = deltas[len(deltas) // 2]
-    _INTERVALO_CACHE[origin] = (ahora, float(mediana))
-    return float(mediana)
+    deltas = sorted(a - b for a, b in zip(captures, captures[1:]) if a > b)
+    return float(deltas[len(deltas) // 2]) if deltas else None
 
 
 def _latido_de(conn, origin: int, ahora: float) -> float | None:
@@ -161,41 +171,15 @@ def _latido_de(conn, origin: int, ahora: float) -> float | None:
 
 
 def _umbral_de(conn, origin: int, ahora: float) -> float:
-    """Segundos sin noticias tras los que un nodo se da por desconectado.
-
-    Se mide contra el heartbeat y no contra el muestreo. Medirlo contra el
-    muestreo daba media hora de gracia a un nodo que muestrea cada diez
-    minutos: el 2-ago-2026 uno desenchufado catorce minutos antes seguía
-    pintado en verde. El heartbeat va cada minuto, así que tres latidos son
-    tres minutos y un nodo caído se ve caído.
-
-    Apretarlo es seguro desde que existe la ventana de mantenimiento: durante
-    una subida de firmware el nodo calla sus diagnósticos a propósito, y esos
-    nodos ya no se juzgan por su silencio (ver _sesiones_firmware).
-
-    El respaldo sobre el muestreo se conserva para un nodo con firmware
-    anterior al heartbeat, que no tiene otra señal periódica.
-    """
-    intervalo = _latido_de(conn, origin, ahora)
-    if intervalo is None:
-        intervalo = _intervalo_de(conn, origin, ahora)
-    if intervalo is None:
-        return ONLINE_S
-    return min(ONLINE_MAX_S, max(ONLINE_S, intervalo * ONLINE_INTERVALOS))
+    """Ventana del heartbeat del firmware actual, independiente del muestreo."""
+    return ONLINE_S
 
 
 def _umbral_datos_de(conn, origin: int, ahora: float) -> float:
-    """Segundos tras los que la última medida deja de considerarse fresca.
-
-    Esta sí va contra el ritmo de muestreo, que es lo que la determina. Es la
-    otra mitad de la separación: el enlace y los datos son dos preguntas
-    distintas con dos periodos distintos, y usar un umbral para las dos
-    obligaba a estirarlo hasta que dejaba de servir para ninguna.
-    """
+    """Dos capturas esperadas y un margen de entrega, sin techo artificial."""
     intervalo = _intervalo_de(conn, origin, ahora)
-    if intervalo is None:
-        return ONLINE_S * 5
-    return min(ONLINE_MAX_S, max(ONLINE_S, intervalo * DATOS_INTERVALOS))
+    return DELIVERY_MIN_S if intervalo is None else max(
+        DELIVERY_MIN_S, 2 * intervalo + DELIVERY_MARGIN_S)
 
 
 def _clase_de(catalog_json: str) -> str:
@@ -259,7 +243,7 @@ def gateway_link_state() -> dict:
     now = time.time()
     unknown = {"service_online": None, "lora_link": None,
                "mqtt_enabled": None, "mqtt_connected": None,
-               "status_ago_s": None}
+               "status_ago_s": None, "service_until": 0}
     try:
         with _conn() as c:
             row = c.execute(
@@ -277,6 +261,7 @@ def gateway_link_state() -> dict:
         "mqtt_enabled":   bool(mqtt_en),
         "mqtt_connected": bool(mqtt_up) if fresh else False,
         "status_ago_s":   round(now - t_updated, 1),
+        "service_until": t_updated + HEARTBEAT_S,
     }
 
 
@@ -327,14 +312,16 @@ def network_state() -> dict:
     # pide lo de siempre y la salud sale vacía.
     COLS_SALUD = ("s.hl_fault, s.hl_reset_reason, s.hl_boots, s.hl_probes, "
                   "s.hl_reinits, s.hl_resets, s.hl_reboots, s.hl_updated")
-    base = """SELECT s.origin, s.last_seen, s.last_frame_type, s.rssi,
+    base = """SELECT ids.origin, COALESCE(s.last_seen, 0), s.last_frame_type, s.rssi,
                       s.snr, s.parent_id, s.hop_count,
                       k.node_name, k.fw_version, k.catalog_json,
                       s.nbiot_flags, s.nbiot_csq, s.nbiot_updated, s.mqtt_seen,
                       s.mb_debug, s.mb_debug_updated{extra}
-               FROM node_status s
-               LEFT JOIN node_catalog k ON k.origin_id = s.origin
-               ORDER BY s.origin"""
+               FROM (SELECT origin FROM node_status
+                     UNION SELECT origin FROM nbiot_last) ids
+               LEFT JOIN node_status s ON s.origin = ids.origin
+               LEFT JOIN node_catalog k ON k.origin_id = ids.origin
+               ORDER BY ids.origin"""
     with _conn() as c:
         hay_salud = True
         try:
@@ -343,6 +330,8 @@ def network_state() -> dict:
             hay_salud = False
             rows = c.execute(base.format(extra="")).fetchall()
         sesiones = _sesiones_firmware(c)
+        periods = {r[0]: _intervalo_de(c, r[0], now) for r in rows}
+        data_windows = {r[0]: _umbral_datos_de(c, r[0], now) for r in rows}
     nodes = [
         {
             "origin":     r[0],
@@ -360,11 +349,12 @@ def network_state() -> dict:
             # El umbral es de ESTE nodo, medido sobre su propio ritmo. Viaja
             # al visor para que la pantalla juzgue la frescura del dato con el
             # mismo criterio y no con una constante suya.
-            "online_s":   round(_umbral_de(c, r[0], now), 1),
-            "online":     (now - r[1]) <= _umbral_de(c, r[0], now),
+            "online_s":   ONLINE_S,
+            "online":     0 <= now - r[1] < ONLINE_S,
             # Umbral para la última medida, que va contra el ritmo de muestreo
             # y no contra el del latido: son dos preguntas distintas.
-            "datos_s":    round(_umbral_datos_de(c, r[0], now), 1),
+            "datos_s":    data_windows[r[0]],
+            "sample_period_s": periods[r[0]],
             "last_frame": r[2],
             "rssi":       r[3],
             "snr":        r[4],
@@ -414,11 +404,11 @@ def network_state() -> dict:
         for r in rows
     ]
 
-    # Latido del gateway: el servicio se auto-reporta en node_airtime
-    # (origen 255) con la cadencia del beacon. Si el Heltec se desconecta
-    # el servicio muere (y systemd lo recicla sin poder abrir el puerto),
-    # así que el reporte cesa: reporte fresco = gateway operativo. En un
-    # buffer anterior a v3.1 (sin la tabla) se devuelve None (desconocido).
+    link = gateway_link_state()
+    _delivery_state(nodes, now, link)
+
+    # El reporte de aire conserva la actividad LoRa del gateway. El latido
+    # del servicio distingue la radio desconectada del proceso detenido.
     gw_last = None
     try:
         with _conn() as c:
@@ -429,69 +419,162 @@ def network_state() -> dict:
     except sqlite3.OperationalError:
         pass
     gw_ago = round(now - gw_last, 1) if gw_last is not None else None
-    return {"nodes": nodes,
+    return {"nodes": nodes, "generated_at": now,
             "gateway_duty_1h": duty.get(GATEWAY_ID),
             "gateway_online": None if gw_ago is None else gw_ago <= ONLINE_S,
             "gateway_ago_s": gw_ago,
-            **gateway_link_state()}
+            **link}
 
 
-def topology() -> dict:
-    """Grafo para /api/topologia con la ruta activa de cada nodo.
+def _delivery_state(nodes: list[dict], now: float, link: dict) -> None:
+    """Genera evidencia con plazos; la interfaz solo proyecta su caducidad."""
+    with _conn() as c:
+        deliveries = {r[0]: r[1:] for r in c.execute(
+            "SELECT origin, captured_ts, recv_ts, via_publisher FROM nbiot_last")}
+    by_id = {n["origin"]: n for n in nodes}
+    service_until = link.get("service_until", 0)
+    radio_until = service_until if link["lora_link"] is True else 0
+    observer_until = service_until if link["mqtt_connected"] is True else 0
+    publisher_windows = {}
+    for origin, (_, _, publisher) in deliveries.items():
+        n = by_id.get(origin)
+        if n and n["sample_period_s"] is not None:
+            publisher_windows.setdefault(publisher, []).append(n["datos_s"])
 
-    LoRa se representa contra el gateway y NB-IoT contra la red celular. Si
-    ambas rutas dejan de estar frescas, se conserva como línea discontinua la
-    que haya recibido la comunicación más reciente. No se representa a la vez
-    una segunda ruta que ya no sea la última conocida.
-    """
-    nodes = network_state()["nodes"]
-    graph_nodes = [{"id": GATEWAY_ID, "label": "Gateway", "role": "gateway",
-                    "online": True}]
-    edges = []
-    hay_ruta_nbiot = False
     for n in nodes:
-        es_supernodo = any(n.get(campo) is not None for campo in (
-            "nbiot_flags", "nbiot_csq", "nbiot_ago_s", "mqtt_ago_s"))
-        flags = n.get("nbiot_flags")
-        via_nbiot = (
-            not n["online"]
-            and flags is not None
-            and (flags & 0x03) == 0x03
-            and n.get("nbiot_ago_s") is not None
-            and n["nbiot_ago_s"] <= 180
-            and n.get("mqtt_ago_s") is not None
-            and n["mqtt_ago_s"] <= 180
-        )
-        mqtt_ago = n.get("mqtt_ago_s")
-        lora_ago = n.get("ago_s")
-        ultima_via_nbiot = (
-            not n["online"]
-            and mqtt_ago is not None
-            and (lora_ago is None or mqtt_ago < lora_ago)
-        )
-        ruta_nbiot = via_nbiot or ultima_via_nbiot
-        hay_ruta_nbiot = hay_ruta_nbiot or ruta_nbiot
+        origin = n["origin"]
+        n["role"] = "supernode" if any(n.get(k) is not None for k in (
+            "nbiot_flags", "nbiot_csq", "mqtt_ago_s")) else "node"
+        n["lora_until"] = min(n["last_seen"] + n["online_s"], radio_until) if n["last_seen"] else 0
+        hb_at = now - n["nbiot_ago_s"] if n["nbiot_ago_s"] is not None else 0
+        pub_at = now - n["mqtt_ago_s"] if n["mqtt_ago_s"] is not None else 0
+        pub_window = min(publisher_windows.get(origin, [n["datos_s"]]))
+        pub_until = pub_at + pub_window if pub_at else 0
+        hb_until = hb_at + MODEM_STATUS_S if hb_at else 0
+        flags = n["nbiot_flags"]
+        n["modem_options"] = {}
+        for field in ("nbiot", "mqtt"):
+            options = []
+            if hb_at and flags is not None:
+                reg_unknown = bool(flags & 0x08)
+                reg = bool(flags & 0x01)
+                unknown = reg_unknown or (field == "mqtt" and bool(flags & 0x04))
+                state = "unknown" if unknown else "up" if reg and (field == "nbiot" or flags & 0x02) else "down"
+                options.append({"state": state, "at": hb_at,
+                                "until": min(hb_until, radio_until), "source": "heartbeat"})
+            # Un diagnóstico posterior no se borra al caducar: tampoco debe
+            # reaparecer una publicación anterior como si lo contradijera.
+            if pub_at and (not hb_at or pub_at > hb_at or (options and options[0]["state"] == "up")):
+                options.append({"state": "up", "at": pub_at,
+                                "until": min(pub_until, observer_until), "source": "publication"})
+            options.sort(key=lambda o: o["at"], reverse=True)
+            n["modem_options"][field] = options
+        n["cellular_observable"] = observer_until > now
+        n["observer_until"] = observer_until
+        n["publication_until"] = min(pub_until, observer_until)
+        # Un fallo explícito posterior invalida el camino, aunque la muestra
+        # siga siendo reciente y se conserve para su consulta.
+        n["cellular_blocked"] = bool(hb_at >= pub_at and flags is not None
+            and not flags & 0x08 and (not flags & 0x01 or
+                (not flags & 0x04 and not flags & 0x02)))
+        d = deliveries.get(origin)
+        n["via_publisher"] = d[2] if d else None
+        n["delivery_ago_s"] = round(now - d[1], 1) if d else None
+        n["capture_ago_s"] = round(now - d[0], 1) if d else None
+        n["capture_at"] = d[0] if d else 0
+        n["delivery_until"] = min(d[0] + n["datos_s"], d[1] + n["datos_s"], observer_until) if d and 0 < d[0] <= now else 0
+        n["last_activity_at"] = max(n["last_seen"], pub_at, n["capture_at"])
+        n["historical_transport"] = "lora"
+        if d and d[1] > max(n["last_seen"], pub_at):
+            n["historical_transport"] = "nbiot" if d[2] == origin else "relay"
+        elif pub_at > n["last_seen"]:
+            n["historical_transport"] = "nbiot"
+
+    def lora_deadline(n):
+        seen, deadline = set(), radio_until
+        while n and n["origin"] not in seen:
+            seen.add(n["origin"])
+            deadline = min(deadline, n["lora_until"])
+            if n["parent_id"] == GATEWAY_ID:
+                return deadline
+            n = by_id.get(n["parent_id"])
+        return 0
+
+    for n in nodes:
+        routes = [{"transport": "lora", "until": lora_deadline(n)}]
+        publisher = by_id.get(n["via_publisher"])
+        if publisher and not publisher["cellular_blocked"]:
+            routes.append({"transport": "nbiot" if publisher is n else "relay",
+                           "until": min(n["delivery_until"], publisher["observer_until"])})
+        if not n["cellular_blocked"] and n["role"] == "supernode":
+            modem = n["modem_options"]["mqtt"]
+            until = max((o["until"] for o in modem if o["state"] == "up"), default=0)
+            routes.append({"transport": "nbiot", "until": until})
+        n["route_options"] = routes
+    project_state({"nodes": nodes}, now)
+
+
+def project_state(state: dict, now: float) -> dict:
+    """Selecciona evidencia vigente; no renueva ningún plazo por silencio."""
+    for n in state["nodes"]:
+        active = next((o for o in n["route_options"] if o["until"] > now), None)
+        n["transport"] = active["transport"] if active else n["historical_transport"]
+        n["delivery_online"] = active is not None
+        n["lora_route_online"] = any(o["transport"] == "lora" and o["until"] > now for o in n["route_options"])
+        n["online"] = n["lora_until"] > now
+        n["cellular_delivery_recent"] = any(o["transport"] != "lora" and o["until"] > now for o in n["route_options"])
+        for field, options in n["modem_options"].items():
+            option = next((o for o in options if o["until"] > now), None)
+            n[field + "_state"] = option["state"] if option else "unknown"
+        n["mqtt_recent"] = any(o["state"] == "up" and o["until"] > now and o["source"] == "publication"
+                               for o in n["modem_options"]["mqtt"])
+    return state
+
+
+def topology(state: dict = None) -> dict:
+    """Representa rutas observadas y entregas celulares sin inventar saltos."""
+    state = network_state() if state is None else state
+    nodes = state["nodes"]
+    graph_nodes = [{"id": GATEWAY_ID, "label": "Gateway", "role": "gateway",
+                    "online": state["service_online"] is True}]
+    edges = []
+    for n in nodes:
+        transport = n["transport"]
+        active = n["delivery_online"]
         graph_nodes.append({
-            "id":     n["origin"],
-            "label":  n["name"] or f"nodo {n['origin']}",
-            "role":   "supernode" if es_supernodo else "node",
-            "online": n["online"] or via_nbiot,
-            "lora_online": n["online"],
-            "transport": "nbiot" if ruta_nbiot else "lora",
-            "rssi":   n["rssi"],
-            "hop":    n["hop_count"],
+            "id": n["origin"], "label": n["name"] or f"nodo {n['origin']}",
+            "role": n["role"], "online": active,
+            "cellular_observable": n["cellular_observable"],
+            "mqtt_state": n["mqtt_state"], "nbiot_state": n["nbiot_state"],
+            "lora_online": n["lora_route_online"], "transport": transport,
+            "via_publisher": n["via_publisher"], "rssi": n["rssi"],
+            "hop": 2 if transport == "relay" else 1 if transport == "nbiot" else n["hop_count"],
         })
-        if ruta_nbiot:
+        if transport == "relay":
+            # La publicación identifica la salida, no cada salto físico LoRa.
+            edges.append({"from": n["origin"], "to": n["via_publisher"],
+                          "online": active, "transport": "relay",
+                          "relation": "delivery"})
+        elif transport == "nbiot":
             edges.append({"from": n["origin"], "to": "cellular",
-                          "online": via_nbiot, "transport": "nbiot"})
-        elif n["parent_id"] is not None:
+                          "online": active, "transport": "nbiot"})
+        elif n["parent_id"] not in (None, 0, n["origin"]):
             edges.append({"from": n["origin"], "to": n["parent_id"],
-                          "online": n["online"], "transport": "lora"})
-    if hay_ruta_nbiot:
-        graph_nodes.insert(1, {
-            "id": "cellular", "label": "Red celular", "role": "cellular",
-            "online": True,
-        })
+                          "online": n["lora_route_online"], "transport": "lora"})
+    # Un supernodo puede entregar datos ajenos aunque no tenga muestra propia.
+    for n in nodes:
+        if n["transport"] != "relay":
+            continue
+        publisher = n["via_publisher"]
+        edge = next((e for e in edges if e["from"] == publisher and e["to"] == "cellular"), None)
+        if edge is None:
+            edges.append({"from": publisher, "to": "cellular",
+                          "online": n["delivery_online"], "transport": "nbiot"})
+        elif n["delivery_online"]:
+            edge["online"] = True
+    if any(e["to"] == "cellular" for e in edges):
+        graph_nodes.insert(1, {"id": "cellular", "label": "Red celular",
+                              "role": "cellular", "online": True})
     return {"nodes": graph_nodes, "edges": edges}
 
 
@@ -545,7 +628,7 @@ def _channels_simple(vals: list, sts: list, defs: list) -> list:
     return channels
 
 
-def last_values(window_s: float = 3600.0) -> dict:
+def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
     """Últimos valores por nodo para las tarjetas de /api/red/ultimos.
 
     Fuente: filas del buffer con reads_json (telemetría ya parseada por el
@@ -557,7 +640,7 @@ def last_values(window_s: float = 3600.0) -> dict:
     reads_def = _catalog_reads()
     with _conn() as c:
         last_rows = c.execute(
-            """SELECT b.origin_id, b.t_recv, b.reads_json
+            """SELECT b.origin_id, b.t_recv, b.reads_json, b.ts
                FROM buffer b
                JOIN (SELECT origin_id, MAX(t_recv) AS t FROM buffer
                      WHERE reads_json IS NOT NULL
@@ -571,7 +654,7 @@ def last_values(window_s: float = 3600.0) -> dict:
             (now - window_s,)).fetchall()
 
     nodes: dict[int, dict] = {}
-    for origin, t, rj in last_rows:
+    for origin, t, rj, captured_ts in last_rows:
         vals, sts = _reads_row(rj)
         defs = reads_def.get(origin, [])
         channels = []
@@ -618,7 +701,7 @@ def last_values(window_s: float = 3600.0) -> dict:
         # cloud. dataapi lo sirve con cache TTL (5 min) para que el sondeo
         # de 5 s no toque la VM cada vez; sin Internet devuelve vacío y el
         # canal queda con el motivo en texto.
-        if pendientes:
+        if pendientes and include_cloud:
             try:
                 from dataapi import last_good_cloud
                 cloud = last_good_cloud(origin)
@@ -631,8 +714,9 @@ def last_values(window_s: float = 3600.0) -> dict:
                     channels[i]["value_ago_s"] = round(now - got[0], 1)
                     pendientes.remove(i)
 
-        nodes[origin] = {"origin": origin, "t_last": t,
-                         "ago_s": round(now - t, 1), "channels": channels}
+        nodes[origin] = {"origin": origin, "t_last": captured_ts,
+                         "captured_ts": captured_ts,
+                         "ago_s": round(now - captured_ts, 1), "channels": channels}
 
     for origin, t, rj in win_rows:
         node = nodes.get(origin)
@@ -642,28 +726,22 @@ def last_values(window_s: float = 3600.0) -> dict:
             if i < len(node["channels"]):
                 node["channels"][i]["serie"].append([round(t, 1), v])
 
-    # Camino NB-IoT (failover, db-schema §2): si el LoRa de un nodo se quedó
-    # viejo pero su dato sigue entrando por NB-IoT, se muestran esos valores
-    # frescos y se marca via_nbiot. LoRa es primario: solo se cambia con el
-    # LoRa vencido (umbral ONLINE_S), nunca cuando el LoRa está fresco.
+    # La captura permite comparar ambas vías sin que una entrega tardía
+    # reemplace una medida más reciente ni rejuvenezca datos almacenados.
     with _conn() as c:
         nb_rows = c.execute(
-            "SELECT origin, captured_ts, recv_ts, reads_json FROM nbiot_last"
+            "SELECT origin, captured_ts, recv_ts, reads_json, via_publisher FROM nbiot_last"
         ).fetchall()
-        # El umbral es el del nodo, no una constante: con muestreo lento, un
-        # dato de hace dos minutos está fresco, y con muestreo rápido está
-        # viejo. Se resuelve dentro del `with` porque hace falta la conexión.
-        umbrales = {o: _umbral_de(c, o, now) for o, *_ in nb_rows}
-    for origin, cap_ts, recv_ts, rj in nb_rows:
-        umbral = umbrales.get(origin, ONLINE_S)
-        if rj is None or (now - recv_ts) > umbral:
+    for origin, cap_ts, recv_ts, rj, publisher in nb_rows:
+        if rj is None or not 0 < cap_ts <= now:
             continue  # sin dato NB-IoT, o también vencido
         lora = nodes.get(origin)
-        if lora is not None and lora["ago_s"] <= umbral:
-            continue  # LoRa fresco: es primario, no se cambia
+        if lora is not None and lora["captured_ts"] >= cap_ts:
+            continue
         vals, sts = _reads_row(rj)
-        nodes[origin] = {"origin": origin, "t_last": recv_ts,
-                         "ago_s": round(now - recv_ts, 1), "via_nbiot": True,
+        nodes[origin] = {"origin": origin, "t_last": cap_ts,
+                         "ago_s": round(now - cap_ts, 1), "via_nbiot": True,
+                         "via_publisher": publisher, "captured_ts": cap_ts,
                          "channels": _channels_simple(vals, sts, reads_def.get(origin, []))}
 
     return {"window_s": window_s, "nodes": list(nodes.values())}

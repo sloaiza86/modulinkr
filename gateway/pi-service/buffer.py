@@ -128,6 +128,15 @@ class GatewayBuffer:
                 via_publisher   INTEGER
             )
         """)
+        # Capturas distintas para aprender la cadencia celular sin confundir
+        # una descarga del buffer con un aumento de la frecuencia de muestreo.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS nbiot_captures (
+                origin INTEGER NOT NULL,
+                captured_ts INTEGER NOT NULL,
+                PRIMARY KEY (origin, captured_ts)
+            )
+        """)
         # Latido de estado del servicio para el visor (fila única id=1). El
         # servicio lo refresca cada pocos segundos: su frescura delata al
         # servicio caído, y lora_link cae a 0 en el instante en que el
@@ -954,7 +963,7 @@ class GatewayBuffer:
                 WHERE mb_debug IS NOT NULL""")
         return {row[0]: row[1] for row in cur.fetchall()}
 
-    def mqtt_seen(self, publisher: int) -> None:
+    def mqtt_seen(self, publisher: int, received_at: float = None) -> None:
         """Marca que un supernodo publicó en el broker cloud (lo oyó la
         suscripción del gateway): su NB-IoT y MQTT están operativos ahora.
         Upsert por si el nodo aún no tiene fila. En una fila nueva last_seen
@@ -964,14 +973,24 @@ class GatewayBuffer:
             """INSERT INTO node_status (origin, last_seen, mqtt_seen)
                VALUES (?, 0, ?)
                ON CONFLICT(origin) DO UPDATE SET mqtt_seen = excluded.mqtt_seen""",
-            (publisher, time.time()))
+            (publisher, time.time() if received_at is None else received_at))
         self.conn.commit()
 
     def nbiot_last_update(self, origin: int, captured_ts: int,
-                          reads_json: str, via_publisher: int) -> None:
+                          reads_json: str, via_publisher: int, received_at: float = None) -> None:
         """Guarda el último dato de un nodo recibido por NB-IoT (batch del
         supernodo en el broker). Solo si es más reciente que lo guardado, por
         si un batch reordenado trae una muestra vieja."""
+        received_at = time.time() if received_at is None else received_at
+        if not 0 < captured_ts <= received_at:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO nbiot_captures VALUES (?, ?)",
+            (origin, captured_ts))
+        self.conn.execute(
+            """DELETE FROM nbiot_captures WHERE origin = ? AND captured_ts NOT IN
+               (SELECT captured_ts FROM nbiot_captures WHERE origin = ?
+                ORDER BY captured_ts DESC LIMIT 8)""", (origin, origin))
         self.conn.execute(
             """INSERT INTO nbiot_last
                    (origin, captured_ts, recv_ts, reads_json, via_publisher)
@@ -981,8 +1000,8 @@ class GatewayBuffer:
                    recv_ts       = excluded.recv_ts,
                    reads_json    = excluded.reads_json,
                    via_publisher = excluded.via_publisher
-               WHERE excluded.captured_ts >= nbiot_last.captured_ts""",
-            (origin, captured_ts, time.time(), reads_json, via_publisher))
+               WHERE excluded.captured_ts > nbiot_last.captured_ts""",
+            (origin, captured_ts, received_at, reads_json, via_publisher))
         self.conn.commit()
 
     def accept(self, parsed: dict, rssi: float, snr: float) -> bool:

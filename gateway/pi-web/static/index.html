@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=diagnostic-logs-20260908">
+  <link rel="stylesheet" href="/static/style.css?v=network-timing-20260919">
 </head>
 <body>
 
@@ -63,6 +63,7 @@
       <span id="clock"></span>
     </div>
   </modulinkr-app-header>
+  <p id="red-observacion" class="aviso" role="status" hidden></p>
 
   <modulinkr-view-router>
     <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Resumen de red">
@@ -79,7 +80,7 @@
         </button>
         <div id="mapa" role="img" aria-label="Topología de la red"></div>
       </div>
-      <p class="leyenda topologia-copy">Las conexiones muestran la ruta activa de cada equipo. LoRa enlaza con el gateway y NB-IoT con la red celular. Una línea discontinua indica que no se ha detectado actividad reciente.</p>
+      <p class="leyenda topologia-copy">Las conexiones muestran la última ruta conocida. Amarillo: entrega mediante un supernodo por NB-IoT; la línea de puntos no confirma los saltos LoRa intermedios. Gris discontinuo: sin actividad reciente.</p>
       <div class="topologia-leyenda" aria-label="Leyenda de la topología">
         <span class="topologia-clave"><span class="topologia-tipo gateway"><modulinkr-icon name="mdi:router-wireless"></modulinkr-icon></span>Gateway</span>
         <span class="topologia-clave"><span class="topologia-tipo cellular" aria-hidden="true"></span>Red celular</span>
@@ -87,6 +88,7 @@
         <span class="topologia-clave"><span class="topologia-tipo supernodo"><modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon></span>Supernodo</span>
         <span class="topologia-clave"><span class="topologia-linea"></span>En línea por LoRa</span>
         <span class="topologia-clave"><span class="topologia-linea nbiot"></span>En línea por NB-IoT</span>
+        <span class="topologia-clave"><span class="topologia-linea relay"></span>Entrega mediante supernodo</span>
         <span class="topologia-clave"><span class="topologia-linea inactiva"></span>Sin actividad reciente</span>
       </div>
     </modulinkr-view>
@@ -1259,7 +1261,8 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=diagnostic-logs-20260908"></script>
-<script src="/static/app.js?v=diagnostic-logs-20260908"></script>
+<script src="/static/components.js?v=network-timing-20260919"></script>
+<script src="/static/network-state.js?v=network-timing-20260919"></script>
+<script src="/static/app.js?v=network-timing-20260919"></script>
 </body>
 </html>
