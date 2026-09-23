@@ -2744,6 +2744,8 @@ class GatewayService:
             # Aceptar en buffer (custodia) y confirmar. Nuevo o duplicado, se
             # confirma igual: un duplicado significa que el nodo perdió el ACK.
             # La identidad es (origin, ts, seq), ver buffer.py.
+            if not parsed.get("path") and parsed["hop_src"] == parsed["origin_id"]:
+                parsed["path"] = [parsed["origin_id"],255]
             is_new = self.buf.accept(parsed, rssi, snr)
             if not is_new:
                 self.n_dup += 1

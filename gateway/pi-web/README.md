@@ -77,6 +77,10 @@ El navegador consulta `/api/red/resumen` cada 2 s. Este recurso lee estado, últ
 
 Sin nuevas publicaciones se indica ausencia de actividad reciente, no desconexión física confirmada. Si se pierde la conexión del gateway al broker, el estado celular queda sin observación, salvo diagnóstico vigente recibido por LoRa. Si el navegador pierde acceso al gateway, conserva la última información con su antigüedad y retira las confirmaciones actuales. La desconexión explícita del radio invalida su ruta en la siguiente consulta, sin esperar los 135 s.
 
+El indicador Modbus requiere una ruta de entrega vigente además de lecturas recientes. Sin ruta confirmada se muestra en gris como estado no observable y, si la última muestra fue correcta, se informa de su antigüedad. Los valores se conservan visibles. El LoRa del supernodo aparece amarillo cuando se confirma una entrega reciente de otro origen a través de él por NB-IoT, con el texto «relay activo». Una publicación propia no basta para atribuir esa función. La recuperación de una ruta LoRa al gateway conserva prioridad verde.
+
+El refresco modifica los campos y atributos que cambian y conserva las tarjetas e iconos existentes, también en el detalle. Los SVG no se vacían antes de cargar su sustituto y las fechas MQTT se toman directamente del registro de recepción, sin reconstruirlas a partir de edades redondeadas. La prueba `tests/test_network_dom.html`, servida por HTTP junto a los archivos del visor, comprueba identidad de elementos, foco, etiquetas accesibles, inserción y retirada de tarjetas, diagnóstico abierto y sustitución de iconos.
+
 El cambio no modifica `samples.source` ni la deduplicación cloud. Se conserva la vía de la primera inserción y no se añade un histórico de rutas por muestra. La comprobación local usa SQLite, estados simulados y el navegador; la desconexión y recuperación físicas de la radio siguen pendientes de validación en el gateway.
 
 

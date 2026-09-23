@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.61"
+#define MODULINKR_FIRMWARE_VERSION "0.0.65"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
 // ModuLinkr, firmware del nodo (V2)
@@ -70,6 +70,7 @@
 
 #include "modbus.h"
 #include "lora.h"
+#include "route_trace.h"
 #include "pending.h"
 #include "protocol.h"
 #include "mesh.h"
@@ -389,6 +390,10 @@ uint32_t g_sn_next_req_ms    = 0;
 uint32_t g_sn_backoff_ms     = kSnBackoffMinMs;
 bool     g_sn_have_offer     = false;
 uint8_t  g_sn_target         = 0;
+uint8_t g_sn_path[routing::kMaxPath]={}, g_sn_path_len=0;
+uint16_t g_sn_request_seq=0;
+uint8_t g_offer_path[routing::kMaxPath]={}, g_offer_path_len=0;
+uint16_t g_offer_request_seq=0;
 uint8_t  g_sn_best_quality   = 0;
 int16_t  g_sn_best_rssi      = -127;
 
@@ -668,7 +673,9 @@ void handleAck(const LoraP2P::RxFrame& f) {
                                  (static_cast<uint16_t>(f.payload[1]) << 8);
         const uint8_t status = f.payload[2];
         uint8_t dest = protocol::kAddrGateway;
-        if (pending.ack(ack_seq, dest)) {
+        if (status!=protocol::kAckOk && status!=protocol::kAckOkViaNbiot) return;
+        if ((f.origin_id==protocol::kAddrGateway) != (status==protocol::kAckOk)) return;
+        if (pending.ack(ack_seq, dest, f.origin_id)) {
             g_lora_acked++;
 
             // Si la muestra vivía en la outbox (drenaje o custodia),
@@ -698,7 +705,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
 
 // Telemetría ajena con este nodo como DESTINO FINAL: entrega en custodia
 // para el respaldo NB-IoT (spec seccion 8.3). Solo aplica al supernodo.
-void acceptCustody(const LoraP2P::RxFrame& f) {
+void acceptCustody(const LoraP2P::RxFrame& f, const uint8_t* path=nullptr, uint8_t path_len=0) {
     if (!g_cfg.super_node) return;
     // Payload v3.2: ts (4 B) + N float32 + N bytes de estado (spec §3.1).
     if (f.payload_length < 9 || ((f.payload_length - 4) % 5) != 0) return;
@@ -711,8 +718,7 @@ void acceptCustody(const LoraP2P::RxFrame& f) {
     memcpy(&ts, f.payload, sizeof(ts));
 
     // v3.0 (spec §10 regla 11): ts=0 es inválido. Se responde DECODE_ERROR
-    // para que el origen (firmware viejo o con bug de reloj) saque la
-    // trama de su cola y lo delate en su log, en vez de reintentar.
+    // sin confirmar custodia ni liberar la muestra en el origen.
     if (ts == 0) {
         nextSeq();
         lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckDecodeError);
@@ -726,13 +732,24 @@ void acceptCustody(const LoraP2P::RxFrame& f) {
 
     // Reintento de custodia (ACK anterior perdido): se reemplaza la
     // entrada en vez de duplicarla.
-    const bool dup = outbox.remove(f.origin_id, f.seq);
-    outbox.push(f.origin_id, f.seq, values, sts, n, millis(), ts,
-                /*ts_fixed=*/true);
-    if (!dup) g_custody_rx++;
+    bool present=false;
+    for (size_t i=0; i<Outbox::capacity(); ++i) {
+        const auto* entry=outbox.at(i);
+        if (entry && entry->origin==f.origin_id && entry->seq==f.seq) {
+            if (entry->ts!=ts) return;
+            present=true;
+        }
+    }
+    if (!present) {
+        if (!outbox.space()) return;
+        outbox.push(f.origin_id, f.seq, values, sts, n, millis(), ts,
+                    /*ts_fixed=*/true, path, path_len, nodeclock::epochNow());
+        g_custody_rx++;
+    }
+    const bool dup=present;
 
     nextSeq();
-    lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckOkViaNbiot);
+    lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckOkViaNbiot, f.hop_src);
     diag::log("INFO", "node.custody", "custody.received", "origin=%u seq=%u%s  outbox=%u rx=%lu\n", f.origin_id, f.seq, dup ? " retry=true" : " retry=false", static_cast<unsigned>(outbox.count()), static_cast<unsigned long>(g_custody_rx));
 }
 
@@ -883,6 +900,8 @@ void handleSnRequest(const LoraP2P::RxFrame& f) {
     if (!g_cfg.super_node || f.payload_length != 2) return;
     if (!nbsvc.ready() || outbox.space() == 0) return;
 
+    if (g_offer_pending) return;
+    g_offer_path_len = 0;
     g_offer_pending = true;
     g_offer_dest    = f.origin_id;
     g_offer_due_ms  = millis() + random(0, 301);
@@ -892,39 +911,8 @@ void handleSnRequest(const LoraP2P::RxFrame& f) {
 // SN_OFFER entrante: candidato a salida celular durante la ventana de
 // búsqueda. Se queda con la mejor calidad (desempate por RSSI).
 void handleSnOffer(const LoraP2P::RxFrame& f) {
-    if (g_sn_state != SnState::WAIT_OFFERS) return;
-    // v2.3: la oferta puede traer 2 B (legado) o 6 B (con epoch del supernodo).
-    if (f.dest_id != g_cfg.node_id ||
-        (f.payload_length != 2 && f.payload_length != 6)) return;
-
-    const uint8_t quality = f.payload[0];  // CSQ crudo, 0xFF desconocida
-    const uint8_t space   = f.payload[1];
-
-    // Hora del supernodo: si viene (payload de 6 B) y este nodo aún no tiene
-    // reloj, se sincroniza. Es la vía para fechar muestras sin gateway.
-    uint32_t sn_epoch = 0;
-    if (f.payload_length == 6) {
-        memcpy(&sn_epoch, &f.payload[2], sizeof(sn_epoch));
-        if (sn_epoch != 0 && !nodeclock::synced()) {
-            nodeclock::sync(sn_epoch);
-            diag::log("INFO", "node.clock", "clock.synchronized", "source=supernode supernode=%u epoch=%lu\n", f.origin_id, static_cast<unsigned long>(sn_epoch));
-        }
-    }
-
-    diag::log("INFO", "node.supernode", "supernode.offer", "source=%u quality=%u space=%u epoch=%lu rssi=%d\n", f.origin_id, quality, space, static_cast<unsigned long>(sn_epoch), static_cast<int>(f.rssi));
-    if (space == 0) return;
-
-    const uint8_t q_known    = (quality == 0xFF) ? 0 : quality;
-    const uint8_t best_known = (g_sn_best_quality == 0xFF) ? 0 : g_sn_best_quality;
-    const bool better = !g_sn_have_offer ||
-                        q_known > best_known ||
-                        (q_known == best_known && f.rssi > g_sn_best_rssi);
-    if (better) {
-        g_sn_have_offer   = true;
-        g_sn_target       = f.origin_id;
-        g_sn_best_quality = quality;
-        g_sn_best_rssi    = f.rssi;
-    }
+    // Las búsquedas actuales solo aceptan ofertas correlacionadas de §23.
+    (void)f;
 }
 
 // ----- Canal de configuración remota (frame-format.md §17) -----
@@ -1670,6 +1658,92 @@ void fwResultTick(uint32_t now) {
     g_fw_result_ms = now + kHealthRepeatMs;
 }
 
+// La traza recibida se valida antes de aprender rutas o aceptar custodia.
+void handleRouteTelemetry(const LoraP2P::RxFrame& f) {
+    if (f.hop_dst!=g_cfg.node_id) return;
+    routing::Telemetry t;
+    if (!routing::decode(f.payload,f.payload_length,f.origin_id,f.hop_src,f.dest_id,t) ||
+        t.count>=routing::kMaxPath || routing::index(t.trace,t.count,g_cfg.node_id)>=0 ||
+        (t.planned && t.plan[t.count]!=g_cfg.node_id)) return;
+    uint8_t trace[routing::kMaxPath]; memcpy(trace,t.trace,t.count); trace[t.count]=g_cfg.node_id;
+    mesh.learnRoute(f.origin_id,f.hop_src,millis());
+    if (f.dest_id==g_cfg.node_id) {
+        LoraP2P::RxFrame base=f;
+        memcpy(base.payload,t.base,t.base_len); base.payload_length=t.base_len;
+        base.frame_type=protocol::kFrameTelemetry;
+        acceptCustody(base,trace,t.count+1);
+        return;
+    }
+    if (!g_cfg.relay_enabled || !f.ttl || t.count+1>=routing::kMaxPath) return;
+    const uint8_t next=t.planned ? t.plan[t.count+1] : mesh.hasParent() ? mesh.parentId() : 0;
+    if (!next || routing::index(trace,t.count+1,next)>=0) return;
+    LoraP2P::RxFrame forwarded=f;
+    forwarded.payload_length=routing::pack(forwarded.payload,t.base,t.base_len,trace,t.count+1,t.plan,t.planned);
+    lora.forwardFrame(forwarded,next);
+}
+
+struct RouteRequestPending {
+    bool used=false;
+    uint32_t due=0;
+    LoraP2P::RxFrame frame;
+};
+RouteRequestPending route_requests[4];
+
+void routeRequestTick(uint32_t now) {
+    for (auto& item:route_requests) {
+        if (!item.used || static_cast<int32_t>(now-item.due)<0) continue;
+        item.used=false;
+        if (g_cfg.relay_enabled && !bajandoFirmware()) lora.forwardFrame(item.frame,0);
+    }
+}
+
+void handleRouteRequest(const LoraP2P::RxFrame& f) {
+    if (f.payload_length<3 || f.dest_id || f.hop_dst || f.origin_id==g_cfg.node_id) return;
+    const uint8_t n=f.payload[1]; const uint8_t* p=f.payload+2;
+    if (f.payload_length!=2+n || !routing::valid(p,n) || n>=routing::kMaxPath ||
+        p[0]!=f.origin_id || p[n-1]!=f.hop_src || routing::index(p,n,g_cfg.node_id)>=0) return;
+    struct Seen { uint8_t origin=0; uint16_t seq=0; uint32_t at=0; };
+    static Seen seen[16]; static uint8_t slot=0;
+    for (const auto& e:seen)
+        if (e.origin==f.origin_id && e.seq==f.seq && millis()-e.at<180000UL) return;
+    seen[slot].origin=f.origin_id; seen[slot].seq=f.seq; seen[slot].at=millis(); slot=(slot+1)%16;
+    if (g_cfg.super_node && nbsvc.ready() && outbox.space() && !g_offer_pending) {
+        memcpy(g_offer_path,p,n); g_offer_path[n]=g_cfg.node_id; g_offer_path_len=n+1;
+        g_offer_request_seq=f.seq; g_offer_dest=f.origin_id;
+        g_offer_pending=true; g_offer_due_ms=millis()+random(0,301);
+    }
+    if (g_cfg.relay_enabled && f.ttl && n+1<routing::kMaxPath) {
+        LoraP2P::RxFrame forwarded=f;
+        forwarded.payload[1]=n+1; forwarded.payload[2+n]=g_cfg.node_id;
+        forwarded.payload_length=3+n;
+        for (auto& item:route_requests) if (!item.used) {
+            item.frame=forwarded; item.due=millis()+random(100,501); item.used=true;
+            break;
+        }
+    }
+}
+
+void handleRouteOffer(const LoraP2P::RxFrame& f) {
+    if (f.hop_dst!=g_cfg.node_id || f.payload_length<11) return;
+    const uint8_t n=f.payload[8]; const uint8_t* p=f.payload+9;
+    if (f.payload_length!=9+n || !routing::valid(p,n) || n<2 ||
+        p[0]!=f.dest_id || p[n-1]!=f.origin_id) return;
+    const int pos=routing::index(p,n,g_cfg.node_id);
+    if (pos<0 || pos>=n-1 || p[pos+1]!=f.hop_src) return;
+    if (pos>0) { if (g_cfg.relay_enabled && f.ttl) lora.forwardFrame(f,p[pos-1]); return; }
+    uint16_t request=0; memcpy(&request,f.payload+6,2);
+    if (g_sn_state!=SnState::WAIT_OFFERS || request!=g_sn_request_seq || !f.payload[1]) return;
+    uint32_t epoch=0; memcpy(&epoch,f.payload+2,4);
+    if (epoch && !nodeclock::synced()) nodeclock::sync(epoch);
+    const uint8_t quality=f.payload[0]==255 ? 0 : f.payload[0];
+    const uint8_t best=g_sn_best_quality==255 ? 0 : g_sn_best_quality;
+    if (!g_sn_have_offer || n<g_sn_path_len || (n==g_sn_path_len &&
+        (quality>best || (quality==best && f.rssi>g_sn_best_rssi)))) {
+        g_sn_have_offer=true; g_sn_target=f.origin_id; g_sn_best_quality=f.payload[0];
+        g_sn_best_rssi=f.rssi; g_sn_path_len=n; memcpy(g_sn_path,p,n);
+    }
+}
+
 // Reparte las tramas LoRa entrantes por tipo.
 void processLoraRx() {
     LoraP2P::RxFrame f;
@@ -1681,6 +1755,9 @@ void processLoraRx() {
         mesh.notePeerAlive(f.hop_src, millis());
 
         switch (f.frame_type) {
+            case protocol::kFrameTelemetryRoute: handleRouteTelemetry(f); break;
+            case protocol::kFrameSnRouteRequest: handleRouteRequest(f); break;
+            case protocol::kFrameSnRouteOffer: handleRouteOffer(f); break;
             case protocol::kFrameAck:
                 handleAck(f);
                 break;
@@ -1785,9 +1862,10 @@ void processAckTimeouts() {
     if (e->dest != protocol::kAddrGateway) {
         if (e->retries < g_cfg.max_retries) {
             lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->st,
-                                      e->n_values, e->dest);
+                                      e->n_values, e->dest, g_sn_path, g_sn_path_len);
             pending.markRetry(*e, now);
-            e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
+            e->timeout_ms = max(backoffTimeoutMs(e->retries),
+                g_cfg.ack_timeout_ms * uint32_t(g_sn_path_len>1 ? g_sn_path_len-1 : 1));
             g_lora_retx++;
             diag::log("INFO", "node.supernode", "supernode.custody_retry", "seq=%u attempt=%u/%u supernode=%u wait_ms=%lu\n", e->seq, e->retries, g_cfg.max_retries, e->dest, static_cast<unsigned long>(e->timeout_ms));
         } else {
@@ -1854,16 +1932,18 @@ void snClientTick(uint32_t now) {
 
     switch (g_sn_state) {
         case SnState::IDLE:
-            if (!mesh.hasParent() && (outbox.count() > 0 || need_time) &&
+            if (!mesh.hasParent() && !g_outbox_inflight && (outbox.count() > 0 || need_time) &&
                 now >= g_sn_next_req_ms) {
                 nextSeq();
                 const uint8_t queued = static_cast<uint8_t>(
                     outbox.count() > 255 ? 255 : outbox.count());
-                lora.sendSnRequest(g_lora_seq, queued);
+                const uint8_t request[]={queued,1,g_cfg.node_id};
+                g_sn_request_seq=g_lora_seq;
+                lora.sendRoute(0,0,g_lora_seq,protocol::kFrameSnRouteRequest,request,sizeof(request),min(g_cfg.max_ttl,uint8_t(15)));
                 g_sn_have_offer  = false;
                 g_sn_state       = SnState::WAIT_OFFERS;
-                g_sn_window_end_ms = now + g_cfg.sn_offer_wait_ms;
-                diag::log("INFO", "node.supernode", "supernode.request_sent", "queued=%u%s window_ms=%lu\n", queued, need_time ? " purpose=time_sync" : "", static_cast<unsigned long>(g_cfg.sn_offer_wait_ms));
+                g_sn_window_end_ms = now + g_cfg.sn_offer_wait_ms + 6000UL * min(uint16_t(g_cfg.max_ttl + 1), uint16_t(15));
+                diag::log("INFO", "node.supernode", "supernode.request_sent", "queued=%u%s window_ms=%lu\n", queued, need_time ? " purpose=time_sync" : "", static_cast<unsigned long>(g_sn_window_end_ms-now));
             }
             break;
 
@@ -1908,9 +1988,9 @@ void snClientTick(uint32_t now) {
                 if (e == nullptr) break;
                 const uint32_t ts = fixOutboxTs(*e);  // primera serialización
                 lora.sendTelemetryCustody(e->seq, ts, e->values, e->st,
-                                          e->n_values, g_sn_target);
+                                          e->n_values, g_sn_target, g_sn_path, g_sn_path_len);
                 pending.push(e->seq, e->values, e->st, e->n_values, now,
-                             g_sn_target, e->capture_ms, ts);
+                             g_sn_target, e->capture_ms, ts, g_cfg.ack_timeout_ms * (g_sn_path_len-1));
                 g_outbox_inflight = true;
                 diag::log("INFO", "node.supernode", "supernode.custody_delivery", "seq=%u supernode=%u outbox=%u\n", e->seq, g_sn_target, static_cast<unsigned>(outbox.count()));
             }
@@ -1948,6 +2028,15 @@ void offerTick(uint32_t now) {
     // v2.3: la oferta lleva el epoch NTP del supernodo (0 si aún no lo tiene)
     // para que un nodo huérfano sincronice su reloj sin gateway.
     const uint32_t epoch = nodeclock::epochNow();
+    if (g_offer_path_len) {
+        uint8_t offer[9+routing::kMaxPath];
+        offer[0]=nbsvc.csqRaw(); offer[1]=static_cast<uint8_t>(space);
+        memcpy(offer+2,&epoch,4); memcpy(offer+6,&g_offer_request_seq,2);
+        offer[8]=g_offer_path_len; memcpy(offer+9,g_offer_path,g_offer_path_len);
+        lora.sendRoute(g_offer_path[g_offer_path_len-2],g_offer_dest,g_lora_seq,
+                      protocol::kFrameSnRouteOffer,offer,9+g_offer_path_len,g_offer_path_len);
+        return;
+    }
     lora.sendSnOffer(g_offer_dest, g_lora_seq, nbsvc.csqRaw(),
                      static_cast<uint8_t>(space > 255 ? 255 : space), epoch);
     diag::log("DEBUG", "node.supernode", "supernode.offer_sent", "destination=%u csq=%u space=%u epoch=%lu\n", g_offer_dest, nbsvc.csqRaw(), static_cast<unsigned>(space > 255 ? 255 : space), static_cast<unsigned long>(epoch));
@@ -2276,8 +2365,16 @@ void batchTick(uint32_t now) {
     const uint32_t batch_id = g_batch_id + 1;
 
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "3.2";
+    doc["schema_version"] = "3.3";
 
+    // Se cuenta el mensaje completo, incluido el sobre más largo posible.
+    if (g_cfg.nbiot_debug) {
+        JsonObject dbg = doc["debug"].to<JsonObject>();
+        dbg["publisher"] = g_cfg.node_id;
+        dbg["batch_id"] = batch_id;
+        dbg["trigger"] = "failover";
+        dbg["fw_version"] = firmwareIdentity();
+    }
     JsonArray samples = doc["samples"].to<JsonArray>();
     Outbox::Entry* included[kBatchMaxSamples];
     size_t n_included = 0;
@@ -2295,12 +2392,19 @@ void batchTick(uint32_t now) {
             diag::log("ERROR", "node.batch", "batch.timestamp_missing", "error=missing_timestamp origin=%u seq=%u action=skip\n", e->origin, e->seq);
             continue;
         }
-        if (e->origin != g_cfg.node_id) all_own = false;
 
         JsonObject s = samples.add<JsonObject>();
         s["origin"] = e->origin;
         s["seq"]    = e->seq;
         s["ts"]     = ts;
+        if (e->path_len) {
+            JsonArray path=s["path"].to<JsonArray>();
+            for (uint8_t j=0;j<e->path_len;++j) path.add(e->path[j]);
+            s["path_at"]=e->path_at;
+        } else if (e->origin==g_cfg.node_id) {
+            s["path"].to<JsonArray>().add(g_cfg.node_id);
+            s["path_at"]=nodeclock::epochNow();
+        }
         JsonArray v = s["v"].to<JsonArray>();
         bool any_st = false;
         for (uint8_t k = 0; k < e->n_values; ++k) {
@@ -2315,22 +2419,19 @@ void batchTick(uint32_t now) {
             for (uint8_t k = 0; k < e->n_values; ++k) st_arr.add(e->st[k]);
         }
 
+        if (measureJson(doc) > Nbiot::kMaxPublishPayloadBytes) {
+            samples.remove(samples.size()-1);
+            break;
+        }
+        if (e->origin != g_cfg.node_id) all_own = false;
         included[n_included++] = e;
     }
     if (n_included == 0) return;
 
-    // Sobre debug opcional (batch-format.md §5), gobernado por el config.
-    // Muestras propias: failover. Cualquier ajena: relay.
     const char* trigger = all_own ? "failover" : "relay";
-    if (g_cfg.nbiot_debug) {
-        JsonObject dbg = doc["debug"].to<JsonObject>();
-        dbg["publisher"]  = g_cfg.node_id;
-        dbg["batch_id"]   = batch_id;
-        dbg["trigger"]    = trigger;
-        dbg["fw_version"] = firmwareIdentity();
-    }
+    if (g_cfg.nbiot_debug) doc["debug"]["trigger"] = trigger;
 
-    char json[1600];
+    char json[Nbiot::kMaxPublishPayloadBytes + 1];
     const size_t len = serializeJson(doc, json, sizeof(json));
     if (len == 0 || len >= sizeof(json)) {
         diag::log("ERROR", "node.batch", "batch.serialization_failed", "reason=buffer_too_small");
@@ -2635,6 +2736,7 @@ void loop() {
         processAckTimeouts();
 
         // Emisión diferida de la oferta de custodia (jitter fino).
+        routeRequestTick(now);
         offerTick(now);
 
         // Mantenimiento a 1 Hz: caducidades, fallback y batches. La hora

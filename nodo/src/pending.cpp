@@ -4,7 +4,7 @@
 
 bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
                         uint8_t n_values, uint32_t now_ms, uint8_t dest,
-                        uint32_t capture_ms, uint32_t ts) {
+                        uint32_t capture_ms, uint32_t ts, uint32_t timeout_ms) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     // Busca un hueco libre.
@@ -16,7 +16,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
             e.sent_ms    = now_ms;
             e.capture_ms = capture_ms;
             e.ts         = ts;
-            e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
+            e.timeout_ms = timeout_ms;
             e.retries    = 0;
             e.dest       = dest;
             e.n_values   = n_values;
@@ -37,7 +37,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
     e.sent_ms    = now_ms;
     e.capture_ms = capture_ms;
     e.ts         = ts;
-    e.timeout_ms = 0;   // primer intento: usa el base de firstExpired
+    e.timeout_ms = timeout_ms;
     e.retries    = 0;
     e.dest       = dest;
     e.n_values   = n_values;
@@ -48,9 +48,9 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
     return false;
 }
 
-bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out) {
+bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out, uint8_t expected) {
     for (size_t i = 0; i < kCapacity; ++i) {
-        if (entries_[i].in_use && entries_[i].seq == seq) {
+        if (entries_[i].in_use && entries_[i].seq == seq && (!expected || entries_[i].dest == expected)) {
             dest_out = entries_[i].dest;
             entries_[i].in_use = false;
             count_--;

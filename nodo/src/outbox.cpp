@@ -9,15 +9,14 @@ namespace {
 
 constexpr const char* kPath    = "/outbox.bin";
 constexpr const char* kTmpPath = "/outbox.tmp";
-// Marca de formato. Si algún día cambia el contenido de una entrada, cambia
-// esto y lo viejo se descarta en vez de leerse mal.
-constexpr uint8_t kMagic[4] = {'M', 'O', 'B', '1'};
+// MOB2 añade el recorrido. La lectura conserva compatibilidad con MOB1.
+constexpr uint8_t kMagic[4] = {'M', 'O', 'B', '2'};
 
 }  // namespace
 
 bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
                   const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
-                  uint32_t ts, bool ts_fixed) {
+                  uint32_t ts, bool ts_fixed, const uint8_t* path, uint8_t path_len, uint32_t path_at) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     Entry* slot = nullptr;
@@ -48,6 +47,9 @@ bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
     slot->ts         = ts;
     slot->ts_fixed   = ts_fixed;
     slot->n_values   = n_values;
+    slot->path_len = routing::valid(path,path_len) ? path_len : 0;
+    if (slot->path_len) memcpy(slot->path,path,slot->path_len);
+    slot->path_at = slot->path_len ? path_at : 0;
     for (uint8_t i = 0; i < n_values; ++i) {
         slot->values[i] = values[i];
         slot->st[i]     = (st != nullptr) ? st[i] : 0;
@@ -133,6 +135,9 @@ void Outbox::save() {
         f.write(reinterpret_cast<const uint8_t*>(e.values),
                 sizeof(float) * e.n_values);
         f.write(e.st, e.n_values);
+        f.write(&e.path_len,1);
+        f.write(e.path,e.path_len);
+        f.write(reinterpret_cast<const uint8_t*>(&e.path_at),4);
     }
     f.close();
     LittleFS.rename(kTmpPath, kPath);
@@ -145,7 +150,7 @@ void Outbox::begin(uint32_t now_ms) {
 
     uint8_t cab[5] = {0};
     if (f.read(cab, sizeof(cab)) != sizeof(cab) ||
-        memcmp(cab, kMagic, sizeof(kMagic)) != 0) {
+        (memcmp(cab, kMagic, 3) != 0 || (cab[3] != '1' && cab[3] != '2'))) {
         f.close();
         cargando_ = false;
         save();          // formato desconocido: se reescribe vacío
@@ -171,7 +176,15 @@ void Outbox::begin(uint32_t now_ms) {
         // que lo haga: se reparte por índice para conservar el ORDEN, que es
         // lo único que ese campo decide. La hora real de la muestra va en ts,
         // que sí es la que importa y sí se guarda.
-        push(origin, seq, valores, st, n_values, now_ms + i, ts, fijado != 0);
+        uint8_t path_len=0, path[routing::kMaxPath]={};
+        uint32_t path_at=0;
+        if (cab[3]=='2') {
+            if (f.read(&path_len,1)!=1 || path_len>routing::kMaxPath) break;
+            if (f.read(path,path_len)!=path_len) break;
+            if (f.read(reinterpret_cast<uint8_t*>(&path_at),4)!=4) break;
+        }
+        push(origin, seq, valores, st, n_values, now_ms + i, ts, fijado != 0,
+             path,path_len,path_at);
     }
     f.close();
     // Y se vuelve a escribir una sola vez, ya con la memoria montada: deja el

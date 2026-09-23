@@ -329,6 +329,10 @@ def network_state() -> dict:
         except sqlite3.OperationalError:
             hay_salud = False
             rows = c.execute(base.format(extra="")).fetchall()
+        try:
+            parent_times = dict(c.execute("SELECT origin,parent_updated FROM node_status"))
+        except sqlite3.OperationalError:
+            parent_times = {}
         sesiones = _sesiones_firmware(c)
         periods = {r[0]: _intervalo_de(c, r[0], now) for r in rows}
         data_windows = {r[0]: _umbral_datos_de(c, r[0], now) for r in rows}
@@ -359,12 +363,15 @@ def network_state() -> dict:
             "rssi":       r[3],
             "snr":        r[4],
             "parent_id":  r[5],
+            "parent_updated": parent_times.get(r[0]) or 0,
             "hop_count":  r[6],
             "duty_1h":    duty.get(r[0]),
             # Estado NB-IoT/MQTT del supernodo (frame-format.md §6): None si
             # el nodo nunca lo reportó (no es supernodo o aún no se oyó su
             # heartbeat con estado). nbiot_ago_s da la frescura del dato.
             "nbiot_flags": r[10],
+            "nbiot_seen": r[12],
+            "mqtt_seen": r[13],
             "nbiot_csq":   r[11],
             "nbiot_ago_s": None if r[12] is None else round(now - r[12], 1),
             # Actividad del supernodo en el broker cloud (visto por la
@@ -446,8 +453,8 @@ def _delivery_state(nodes: list[dict], now: float, link: dict) -> None:
         n["role"] = "supernode" if any(n.get(k) is not None for k in (
             "nbiot_flags", "nbiot_csq", "mqtt_ago_s")) else "node"
         n["lora_until"] = min(n["last_seen"] + n["online_s"], radio_until) if n["last_seen"] else 0
-        hb_at = now - n["nbiot_ago_s"] if n["nbiot_ago_s"] is not None else 0
-        pub_at = now - n["mqtt_ago_s"] if n["mqtt_ago_s"] is not None else 0
+        hb_at = n["nbiot_seen"] or 0
+        pub_at = n["mqtt_seen"] or 0
         pub_window = min(publisher_windows.get(origin, [n["datos_s"]]))
         pub_until = pub_at + pub_window if pub_at else 0
         hb_until = hb_at + MODEM_STATUS_S if hb_at else 0
@@ -494,24 +501,86 @@ def _delivery_state(nodes: list[dict], now: float, link: dict) -> None:
         seen, deadline = set(), radio_until
         while n and n["origin"] not in seen:
             seen.add(n["origin"])
-            deadline = min(deadline, n["lora_until"])
+            deadline = min(deadline, n["lora_until"], n["parent_updated"] + ONLINE_S if n["parent_updated"] else 0)
             if n["parent_id"] == GATEWAY_ID:
                 return deadline
             n = by_id.get(n["parent_id"])
         return 0
 
+    try:
+        with _conn() as c:
+            observed = c.execute("SELECT origin,source,publisher,observed_at,path_json,captured_ts,seq FROM delivery_routes").fetchall()
+    except sqlite3.OperationalError:
+        observed = []
     for n in nodes:
-        routes = [{"transport": "lora", "until": lora_deadline(n)}]
+        n["observed_routes"] = []
+    for origin, source, publisher, at, encoded, captured_ts, seq in observed:
+        n = by_id.get(origin)
+        if not n:
+            continue
+        try:
+            path = json.loads(encoded)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(path, list) or not path or path[0] != origin or path[-1] != publisher:
+            continue
+        until = min(at + (ONLINE_S if source == "lora" else n["datos_s"]), radio_until if source == "lora" else observer_until)
+        if source == "nbiot" and by_id.get(publisher, {}).get("cellular_blocked"):
+            until = 0
+        n["observed_routes"].append({"source": source, "path": path, "at": at, "until": until, "captured_ts": captured_ts, "seq": seq})
+
+    for n in nodes:
+        n["observed_routes"] = latest_sample_routes(n["observed_routes"])
+        if n["observed_routes"]:
+            n["route_options"] = [{"transport": "lora" if r["source"] == "lora" else ("nbiot" if r["path"][-1] == n["origin"] else "relay"),
+                "publisher": r["path"][-1], "until": r["until"]} for r in n["observed_routes"]]
+            last = max(n["observed_routes"], key=lambda r: r["at"])
+            n["historical_transport"] = "lora" if last["source"] == "lora" else ("nbiot" if last["path"][-1] == n["origin"] else "relay")
+            n["via_publisher"] = last["path"][-1] if last["source"] == "nbiot" else None
+            continue
+        routes = [{"transport": "lora", "until": max(lora_deadline(n), max((r["until"] for r in n["observed_routes"] if r["source"] == "lora"), default=0))}]
         publisher = by_id.get(n["via_publisher"])
         if publisher and not publisher["cellular_blocked"]:
-            routes.append({"transport": "nbiot" if publisher is n else "relay",
+            routes.append({"transport": "nbiot" if publisher is n else "relay", "publisher": publisher["origin"],
                            "until": min(n["delivery_until"], publisher["observer_until"])})
         if not n["cellular_blocked"] and n["role"] == "supernode":
             modem = n["modem_options"]["mqtt"]
             until = max((o["until"] for o in modem if o["state"] == "up"), default=0)
             routes.append({"transport": "nbiot", "until": until})
         n["route_options"] = routes
+    for n in nodes:
+        for r in n["observed_routes"]:
+            for hop in r["path"][1:-1]:
+                relay = by_id.get(hop)
+                if not relay:
+                    continue
+                transport = "lora" if r["source"] == "lora" else "relay"
+                relay["route_options"].append({"transport": transport, "until": r["until"], "publisher": r["path"][-1]})
+                relay["traced_activity"] = True
+                if transport == "relay" and not relay.get("via_publisher"):
+                    relay["via_publisher"] = r["path"][-1]
+                relay["last_activity_at"] = max(relay["last_activity_at"], r["at"])
     project_state({"nodes": nodes}, now)
+
+
+def latest_sample_routes(routes):
+    """Una entrega atrasada no sustituye el recorrido de una muestra nueva."""
+    if not routes:
+        return []
+    best = routes[0]
+    for r in routes[1:]:
+        ts, previous = r.get("captured_ts", r["at"]), best.get("captured_ts", best["at"])
+        delta = (r.get("seq", 0) - best.get("seq", 0)) % 65536
+        if ts > previous or (ts == previous and 0 < delta < 32768):
+            best = r
+    return [r for r in routes if (r.get("captured_ts", r["at"]), r.get("seq", 0)) ==
+            (best.get("captured_ts", best["at"]), best.get("seq", 0))]
+
+
+def visible_routes(routes, now, connected=True):
+    selected = latest_sample_routes(routes)
+    active = [r for r in selected if connected and r["until"] > now]
+    return active or ([max(selected, key=lambda r: r["at"])] if selected else [])
 
 
 def project_state(state: dict, now: float) -> dict:
@@ -520,6 +589,8 @@ def project_state(state: dict, now: float) -> dict:
         active = next((o for o in n["route_options"] if o["until"] > now), None)
         n["transport"] = active["transport"] if active else n["historical_transport"]
         n["delivery_online"] = active is not None
+        if active and active.get("publisher") is not None:
+            n["via_publisher"] = active["publisher"]
         n["lora_route_online"] = any(o["transport"] == "lora" and o["until"] > now for o in n["route_options"])
         n["online"] = n["lora_until"] > now
         n["cellular_delivery_recent"] = any(o["transport"] != "lora" and o["until"] > now for o in n["route_options"])
@@ -528,6 +599,11 @@ def project_state(state: dict, now: float) -> dict:
             n[field + "_state"] = option["state"] if option else "unknown"
         n["mqtt_recent"] = any(o["state"] == "up" and o["until"] > now and o["source"] == "publication"
                                for o in n["modem_options"]["mqtt"])
+    relays = {hop for n in state["nodes"] for r in n.get("observed_routes", [])
+              if r["source"] == "nbiot" and r["until"] > now for hop in r["path"][1:]}
+    relays.update(n["via_publisher"] for n in state["nodes"] if n["delivery_online"] and n["transport"] == "relay")
+    for n in state["nodes"]:
+        n["relay_active"] = n["origin"] in relays
     return state
 
 
@@ -537,45 +613,51 @@ def topology(state: dict = None) -> dict:
     nodes = state["nodes"]
     graph_nodes = [{"id": GATEWAY_ID, "label": "Gateway", "role": "gateway",
                     "online": state["service_online"] is True}]
-    edges = []
+    edges = {}
+    now = state.get("generated_at", time.time())
+    def add_edge(a, b, transport, online, relation, at=0):
+        key = (a, b)
+        edge = {"from": a, "to": b, "transport": transport, "online": online,
+                "relation": relation, "observed_at": at}
+        old = edges.get(key)
+        if old is None or (online, at) > (old["online"], old["observed_at"]):
+            edges[key] = edge
     for n in nodes:
-        transport = n["transport"]
-        active = n["delivery_online"]
-        graph_nodes.append({
-            "id": n["origin"], "label": n["name"] or f"nodo {n['origin']}",
-            "role": n["role"], "online": active,
+        graph_nodes.append({"id": n["origin"], "label": n["name"] or f"nodo {n['origin']}",
+            "role": n["role"], "online": n["delivery_online"],
             "cellular_observable": n["cellular_observable"],
             "mqtt_state": n["mqtt_state"], "nbiot_state": n["nbiot_state"],
-            "lora_online": n["lora_route_online"], "transport": transport,
-            "via_publisher": n["via_publisher"], "rssi": n["rssi"],
-            "hop": 2 if transport == "relay" else 1 if transport == "nbiot" else n["hop_count"],
-        })
-        if transport == "relay":
-            # La publicación identifica la salida, no cada salto físico LoRa.
-            edges.append({"from": n["origin"], "to": n["via_publisher"],
-                          "online": active, "transport": "relay",
-                          "relation": "delivery"})
-        elif transport == "nbiot":
-            edges.append({"from": n["origin"], "to": "cellular",
-                          "online": active, "transport": "nbiot"})
-        elif n["parent_id"] not in (None, 0, n["origin"]):
-            edges.append({"from": n["origin"], "to": n["parent_id"],
-                          "online": n["lora_route_online"], "transport": "lora"})
-    # Un supernodo puede entregar datos ajenos aunque no tenga muestra propia.
-    for n in nodes:
-        if n["transport"] != "relay":
-            continue
-        publisher = n["via_publisher"]
-        edge = next((e for e in edges if e["from"] == publisher and e["to"] == "cellular"), None)
-        if edge is None:
-            edges.append({"from": publisher, "to": "cellular",
-                          "online": n["delivery_online"], "transport": "nbiot"})
-        elif n["delivery_online"]:
-            edge["online"] = True
-    if any(e["to"] == "cellular" for e in edges):
-        graph_nodes.insert(1, {"id": "cellular", "label": "Red celular",
-                              "role": "cellular", "online": True})
-    return {"nodes": graph_nodes, "edges": edges}
+            "lora_online": n["lora_route_online"], "transport": n["transport"],
+            "via_publisher": n["via_publisher"], "rssi": n["rssi"], "hop": n["hop_count"]})
+        for r in visible_routes(n.get("observed_routes", []), now, not state.get("observation_lost")):
+            path = r["path"]
+            online = not state.get("observation_lost", False) and r["until"] > now
+            if not online and n["delivery_online"]:
+                continue
+            for a, b in zip(path, path[1:]):
+                add_edge(a, b, "lora" if r["source"] == "lora" else "relay", online, "observed", r["at"])
+            if r["source"] == "nbiot":
+                add_edge(path[-1], "cellular", "nbiot", online, "observed", r["at"])
+        if not n.get("observed_routes") and not n.get("traced_activity"):
+            if n["transport"] == "relay":
+                add_edge(n["origin"], n["via_publisher"], "relay", n["delivery_online"], "delivery")
+            elif n["parent_id"] not in (None, 0, n["origin"]):
+                add_edge(n["origin"], n["parent_id"], "lora", False, "declared")
+        if not n.get("observed_routes") and not n.get("traced_activity") and n["transport"] in ("relay", "nbiot"):
+            publisher = n["via_publisher"] if n["transport"] == "relay" else n["origin"]
+            add_edge(publisher, "cellular", "nbiot", n["delivery_online"], "publication")
+    known = {n["id"] for n in graph_nodes}
+    for edge in edges.values():
+        for origin in (edge["from"], edge["to"]):
+            if origin not in known:
+                graph_nodes.append({"id": origin, "label": "Red celular" if origin == "cellular" else f"nodo {origin}",
+                    "role": "cellular" if origin == "cellular" else "node", "online": edge["online"]})
+                known.add(origin)
+    active_ids = {origin for e in edges.values() if e["online"] for origin in (e["from"], e["to"])}
+    for n in graph_nodes:
+        if n["id"] in active_ids:
+            n["online"] = True
+    return {"nodes": graph_nodes, "edges": list(edges.values())}
 
 
 # Estados Modbus del nibble bajo del byte st (frame-format.md §3.1). El 0

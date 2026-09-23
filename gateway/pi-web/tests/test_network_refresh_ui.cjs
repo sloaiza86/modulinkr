@@ -98,3 +98,13 @@ test("los segundos no cambian la firma de las tarjetas", () => {
   const html = value=>`<div>Última comunicación <span data-live-age="1000">${value} s</span></div>`;
   assert.equal(c.firmaSinEdades(html(1)),c.firmaSinEdades(html(2)));
 });
+
+
+test("el relay del publicador caduca con la evidencia de los nodos y se pierde sin observación", () => {
+  const snapshot = fixture();
+  snapshot.state.nodes.push({...snapshot.state.nodes[0], origin:1, role:"supernode",
+    route_options:[{transport:"nbiot",until:1015}], via_publisher:1});
+  assert.equal(network.project(snapshot,5).state.nodes[1].relay_active,true);
+  assert.equal(network.project(snapshot,10).state.nodes[1].relay_active,false);
+  assert.equal(network.project(snapshot,5,false).state.nodes[1].relay_active,false);
+});

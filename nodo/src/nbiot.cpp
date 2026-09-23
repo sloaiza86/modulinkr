@@ -316,8 +316,23 @@ Nbiot::MqttState Nbiot::mqttConnectionState() {
 }
 
 bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
-    if (uart_ == nullptr) return false;
+    if (uart_ == nullptr || topic == nullptr || payload == nullptr) return false;
+    if (strlen(payload) > kMaxPublishPayloadBytes) {
+        last_response_ = "payload exceeds 1024 bytes";
+        diag::log("ERROR", "node.nbiot", "nbiot.publish_rejected",
+                  "stage=payload_size bytes=%u limit=%u\n",
+                  static_cast<unsigned>(strlen(payload)), static_cast<unsigned>(kMaxPublishPayloadBytes));
+        return false;
+    }
 
+    const auto failed = [&](const char* stage) {
+        const String original = last_response_;
+        diag::log("ERROR", "node.nbiot", "nbiot.publish_rejected",
+                  "stage=%s bytes=%u response=%s\n", stage,
+                  static_cast<unsigned>(strlen(payload)), original.c_str());
+        last_response_ = original;
+        return false;
+    };
     char cmd[100];
 
     // Paso 1: definir topic.
@@ -329,16 +344,14 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     uart_->println(cmd);
     if (!waitForChar(*uart_, '>', 5000)) {
         last_response_ = "(timeout > en TOPIC)";
-        if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=timeout > TOPIC");
-        return false;
+        return failed("topic_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(topic), topic_len);
     {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=TOPIC missing OK");
-            return false;
+            return failed("topic_accept");
         }
     }
 
@@ -351,16 +364,14 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     uart_->println(cmd);
     if (!waitForChar(*uart_, '>', 5000)) {
         last_response_ = "(timeout > en PAYLOAD)";
-        if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=timeout > PAYLOAD");
-        return false;
+        return failed("payload_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(payload), payload_len);
     {
         String r = readResponse(5000, "OK");
         last_response_ = r;
         if (r.indexOf("OK") < 0) {
-            if (verbose_) diag::log("WARNING", "node.at", "at.response", "data=PAYLOAD missing OK");
-            return false;
+            return failed("payload_accept");
         }
     }
 
@@ -377,7 +388,8 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
         String t = r; t.trim();
         diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
-    return r.indexOf("+CMQTTPUB: 0,0") >= 0;
+    if (r.indexOf("+CMQTTPUB: 0,0") >= 0) return true;
+    return failed("publish_ack");
 }
 
 bool Nbiot::mqttDisconnect() {

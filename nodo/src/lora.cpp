@@ -1,6 +1,7 @@
 // ModuLinkr, driver LoRa P2P (implementación)
 
 #include "lora.h"
+#include "route_trace.h"
 
 #include <Arduino.h>
 #include <cstring>
@@ -353,14 +354,10 @@ LoraP2P::Status LoraP2P::sendTelemetry(uint16_t seq,
     }
     std::memcpy(&payload[4u + 4u * n_values], st, n_values);
 
-    return buildAndSend(hop_dst,
-                        node_id_,
-                        protocol::kAddrGateway,
-                        seq,
-                        protocol::kFrameTelemetry,
-                        ttl_,
-                        payload,
-                        static_cast<uint8_t>(4u + 5u * n_values));
+    uint8_t routed[80];
+    const size_t len = routing::pack(routed, payload, 4u + 5u * n_values, &node_id_, 1);
+    return sendRoute(hop_dst, protocol::kAddrGateway, seq, protocol::kFrameTelemetryRoute,
+                     routed, static_cast<uint8_t>(len));
 }
 
 LoraP2P::Status LoraP2P::sendModbusDebug(uint16_t seq, uint8_t dev_index,
@@ -704,7 +701,7 @@ LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
                                               const float* values,
                                               const uint8_t* st,
                                               uint8_t n_values,
-                                              uint8_t sn_id) {
+                                              uint8_t sn_id, const uint8_t* path, uint8_t path_len) {
     if (!initialized_) return Status::NOT_INITIALIZED;
     if (n_values == 0 || n_values > kMaxValues || values == nullptr ||
         st == nullptr) {
@@ -718,10 +715,13 @@ LoraP2P::Status LoraP2P::sendTelemetryCustody(uint16_t seq,
     }
     std::memcpy(&payload[4u + 4u * n_values], st, n_values);
 
-    // Entrega directa al supernodo: dest_id = hop_dst = sn (spec §8.3).
-    return buildAndSend(sn_id, node_id_, sn_id, seq,
-                        protocol::kFrameTelemetry, 1,
-                        payload, static_cast<uint8_t>(4u + 5u * n_values));
+    const uint8_t direct[] = {node_id_, sn_id};
+    if (!path) { path=direct; path_len=2; }
+    if (!routing::valid(path,path_len) || path_len<2 || path[0]!=node_id_ ||
+        path[path_len-1]!=sn_id) return Status::INVALID_ARGS;
+    uint8_t routed[80];
+    const size_t len=routing::pack(routed,payload,4u+5u*n_values,&node_id_,1,path,path_len);
+    return sendRoute(path[1],sn_id,seq,protocol::kFrameTelemetryRoute,routed,len,path_len);
 }
 
 LoraP2P::Status LoraP2P::sendSnRequest(uint16_t seq, uint8_t queued) {
@@ -751,7 +751,7 @@ LoraP2P::Status LoraP2P::sendSnOffer(uint8_t requester, uint16_t seq,
 }
 
 LoraP2P::Status LoraP2P::sendAck(uint8_t dest, uint16_t own_seq,
-                                 uint16_t ack_seq, uint8_t status) {
+                                 uint16_t ack_seq, uint8_t status, uint8_t via) {
     if (!initialized_) return Status::NOT_INITIALIZED;
     const uint8_t payload[3] = {
         static_cast<uint8_t>(ack_seq & 0xFF),
@@ -759,8 +759,8 @@ LoraP2P::Status LoraP2P::sendAck(uint8_t dest, uint16_t own_seq,
         status,
     };
     // Receptor final directo (custodia): sin relay, ttl=1.
-    return buildAndSend(dest, node_id_, dest, own_seq,
-                        protocol::kFrameAck, /*ttl=*/1,
+    return buildAndSend(via ? via : dest, node_id_, dest, own_seq,
+                        protocol::kFrameAck, via ? routing::kMaxPath : 1,
                         payload, sizeof(payload));
 }
 
@@ -793,6 +793,15 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
         return Status::INVALID_ARGS;
     }
 
+    // La traza cambia al reenviar: cada transmisión usa un nonce nuevo.
+    if (sec_enabled_ && (frame_type==kFrameTelemetryRoute ||
+        frame_type==kFrameSnRouteRequest || frame_type==kFrameSnRouteOffer)) {
+        static uint32_t last_route_ts=0;
+        const uint32_t current=nodeclock::epochNow();
+        if (current>sec_ts) sec_ts=current;
+        if (sec_ts<=last_route_ts) sec_ts=last_route_ts+1;
+        last_route_ts=sec_ts;
+    }
     uint8_t frame[kOverhead + kMaxPayload];
 
     frame[kOffSchema]     = kSchemaVersion;
@@ -1240,7 +1249,7 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
         const uint8_t ft = buf[kOffFrameType];
         const bool control =
             ft == kFrameAck || ft == kFrameWelcome ||
-            ft == kFrameBeacon || ft == kFrameSnOffer;
+            ft == kFrameBeacon || ft == kFrameSnOffer || ft == kFrameSnRouteOffer;
         const bool consumer =
             ft == kFrameBeacon || buf[kOffDestId] == node_id_;
         if (control && consumer && nodeclock::synced() &&

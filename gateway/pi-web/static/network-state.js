@@ -18,6 +18,7 @@
       const active = n.route_options.find(valid);
       n.transport = active?.transport ?? n.historical_transport;
       n.delivery_online = !!active;
+      if (active?.publisher != null) n.via_publisher = active.publisher;
       n.lora_route_online = n.route_options.some(o => o.transport === "lora" && valid(o));
       n.online = connected && n.lora_until > now;
       n.cellular_delivery_recent = n.route_options.some(o => o.transport !== "lora" && valid(o));
@@ -29,6 +30,11 @@
       }
       n.mqtt_recent = n.modem_options.mqtt.some(o => valid(o) && o.state === "up" && o.source === "publication");
     }
+    const relays = new Set(state.nodes.flatMap(n => (n.observed_routes ?? [])
+      .filter(r => connected && r.source === "nbiot" && r.until > now).flatMap(r => r.path.slice(1))));
+    for (const n of state.nodes) if (n.delivery_online && n.transport === "relay") relays.add(n.via_publisher);
+    for (const n of state.nodes) n.relay_active = relays.has(n.origin);
+    state.generated_at = now;
     const latest = JSON.parse(JSON.stringify(snapshot.latest));
     for (const n of latest.nodes) {
       n.ago_s += elapsed;
@@ -37,30 +43,56 @@
     return { state, latest, now };
   }
 
+  function visibleRoutes(routes, now, connected = true) {
+    if (!routes?.length) return [];
+    const best = routes.reduce((a, b) => {
+      const ta = a.captured_ts ?? a.at, tb = b.captured_ts ?? b.at;
+      const delta = ((b.seq ?? 0) - (a.seq ?? 0) + 65536) % 65536;
+      return tb > ta || (tb === ta && delta > 0 && delta < 32768) ? b : a;
+    });
+    const selected = routes.filter(r => (r.captured_ts ?? r.at) === (best.captured_ts ?? best.at)
+      && (r.seq ?? 0) === (best.seq ?? 0));
+    const active = selected.filter(r => connected && r.until > now);
+    return active.length ? active : [selected.reduce((a, b) => b.at > a.at ? b : a)];
+  }
+
   function topology(state) {
     const nodes = [{ id: 255, label: "Gateway", role: "gateway", online: state.service_online === true }];
-    const edges = [];
+    const byEdge = new Map();
+    const add = (from, to, transport, online, relation, observed_at = 0) => {
+      const key = `${from}:${to}`, old = byEdge.get(key);
+      if (!old || (online && !old.online) || (online === old.online && observed_at > old.observed_at))
+        byEdge.set(key, { from, to, transport, online, relation, observed_at });
+    };
     for (const n of state.nodes) {
       nodes.push({ id: n.origin, label: n.name || `nodo ${n.origin}`, role: n.role,
         online: n.delivery_online, lora_online: n.lora_route_online, transport: n.transport,
         cellular_observable: n.cellular_observable, via_publisher: n.via_publisher,
         mqtt_state: n.mqtt_state, nbiot_state: n.nbiot_state,
-        observation_lost: n.observation_lost, rssi: n.rssi,
-        hop: n.transport === "relay" ? 2 : n.transport === "nbiot" ? 1 : n.hop_count });
-      if (n.transport === "relay") edges.push({ from: n.origin, to: n.via_publisher,
-        online: n.delivery_online, transport: "relay", relation: "delivery" });
-      else if (n.transport === "nbiot") edges.push({ from: n.origin, to: "cellular",
-        online: n.delivery_online, transport: "nbiot" });
-      else if (n.parent_id != null && n.parent_id !== 0 && n.parent_id !== n.origin)
-        edges.push({ from: n.origin, to: n.parent_id, online: n.lora_route_online, transport: "lora" });
+        observation_lost: n.observation_lost, rssi: n.rssi, hop: n.hop_count });
+      for (const r of visibleRoutes(n.observed_routes, state.generated_at, !state.observation_lost)) {
+        const active = !state.observation_lost && r.until > state.generated_at;
+        if (!active && n.delivery_online) continue;
+        for (let i = 1; i < r.path.length; i++)
+          add(r.path[i-1], r.path[i], r.source === "lora" ? "lora" : "relay", active, "observed", r.at);
+        if (r.source === "nbiot") add(r.path.at(-1), "cellular", "nbiot", active, "observed", r.at);
+      }
+      if (!n.observed_routes?.length && !n.traced_activity) {
+        if (n.transport === "relay") add(n.origin, n.via_publisher, "relay", n.delivery_online, "delivery");
+        else if (n.parent_id != null && n.parent_id !== 0 && n.parent_id !== n.origin)
+          add(n.origin, n.parent_id, "lora", false, "declared");
+      }
+      if (!n.observed_routes?.length && !n.traced_activity && ["relay", "nbiot"].includes(n.transport))
+        add(n.transport === "relay" ? n.via_publisher : n.origin, "cellular", "nbiot", n.delivery_online, "publication");
     }
-    for (const n of state.nodes.filter(n => n.transport === "relay")) {
-      const edge = edges.find(e => e.from === n.via_publisher && e.to === "cellular");
-      if (!edge) edges.push({ from: n.via_publisher, to: "cellular", online: n.delivery_online, transport: "nbiot" });
-      else if (n.delivery_online) edge.online = true;
+    const edges = [...byEdge.values()], known = new Set(nodes.map(n => n.id));
+    for (const e of edges) for (const id of [e.from, e.to]) if (!known.has(id)) {
+      nodes.push({ id, label: id === "cellular" ? "Red celular" : `nodo ${id}`,
+        role: id === "cellular" ? "cellular" : "node", online: e.online });
+      known.add(id);
     }
-    if (edges.some(e => e.to === "cellular"))
-      nodes.splice(1, 0, { id: "cellular", label: "Red celular", role: "cellular", online: true });
+    const activeIds = new Set(edges.filter(e => e.online).flatMap(e => [e.from, e.to]));
+    for (const n of nodes) if (activeIds.has(n.id)) n.online = true;
     return { nodes, edges };
   }
   const api = { project, topology };

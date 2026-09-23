@@ -26,9 +26,9 @@ Cada trama lleva en su primer byte la versión del schema que la describe:
 0xMm   donde M = major (4 bits altos), m = minor (4 bits bajos)
 ```
 
-Versión actual: `0x39` (= `v3.9`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
+Versión actual: `0x3A` (= `v3.10`). Permite hasta `15.15`. Cuando se agote (improbable), se reserva `0xFF` como puerta a futura extensión.
 
-Los formatos se versionan por separado en la implementación vigente. La trama LoRa usa v3.9, la configuración del nodo usa v3.3 y el mensaje MQTT usa v3.2. `commands-format.md` conserva el diseño v2.0 de un plano de comandos todavía no implementado. La equivalencia directa que se asumió en las primeras revisiones ya no describe el sistema actual.
+Los formatos se versionan por separado en la implementación vigente. La trama LoRa usa v3.10, la configuración del nodo usa v3.3 y el mensaje MQTT usa v3.3. `commands-format.md` conserva el diseño v2.0 de un plano de comandos todavía no implementado. La equivalencia directa que se asumió en las primeras revisiones ya no describe el sistema actual.
 
 Reglas de compatibilidad:
 
@@ -78,7 +78,7 @@ El CRC cubre **todos los bytes anteriores**, desde el byte 0 hasta el byte inmed
 Todas las tramas comparten una cabecera de **11 bytes** seguida de un payload variable y el CRC:
 
 ```
-byte 0      schema_version   (1 B)      0x39 para v3.9
+byte 0      schema_version   (1 B)      0x3A para v3.10
 byte 1      network_id       (1 B)      identificador de red
 byte 2      hop_src          (1 B)      emisor de este salto
 byte 3      hop_dst          (1 B)      receptor de este salto
@@ -94,7 +94,7 @@ bytes 11..  payload          (N B)      específico del frame_type
 
 | Campo | Contenido |
 | --- | --- |
-| `schema_version` | `0x39` para v3.9. |
+| `schema_version` | `0x3A` para v3.10. |
 | `network_id` | Identificador del despliegue, rango `1`-`254`. Todo receptor descarta en silencio tramas con `network_id` distinto al suyo, antes de cualquier otra lógica. Aísla despliegues vecinos que compartan canal (la separación por frecuencia y sync word es la primera línea, pero no es garantía: el sync word del RAK3172 en P2P no siempre es configurable). `0x00` y `0xFF` reservados. |
 | `hop_src` | Quién transmite físicamente este salto. Lo reescribe cada relay. |
 | `hop_dst` | A quién va dirigido este salto. `0x00` = broadcast (todos los vecinos procesan). Un receptor que no es `hop_dst` ni ve broadcast descarta en silencio: es tráfico ajeno legítimo. |
@@ -201,6 +201,8 @@ El ACK del gateway lleva `dest_id = origin de la telemetría` y `hop_dst = vecin
 - Si no la tiene (expiró o hubo reinicio): descarta en silencio. El origen tratará la trama como no confirmada.
 
 ### 2.5 Campos mutables e inmutables en relay
+
+Los tipos de recorrido de §23 añaden su traza al payload y actualizan su longitud y el `sec_ts` por salto. La tabla siguiente corresponde a los demás tipos.
 
 | Campo | En relay |
 | --- | --- |
@@ -489,6 +491,8 @@ Tamaño: **20 bytes**. ToA SF7 ≈ 54 ms por emisor. Con periodo de 30 s el cost
 
 ## 8. Fallback NB-IoT distribuido (SN_REQUEST / SN_OFFER)
 
+Esta sección conserva el intercambio legado de un salto. Desde v3.10 las búsquedas nuevas usan el descubrimiento y la custodia multi-salto de §23. Se mantienen las respuestas directas para solicitantes anteriores.
+
 Cuando un nodo **sin NB-IoT propio** se queda sin ruta al gateway (huérfano de §2.2, o failover disparado en §5.3), busca explícitamente un supernodo vecino que le sirva de salida celular. El flujo tiene tres pasos: solicitud broadcast, oferta unicast, y entrega en custodia.
 
 Desde v3.0 hay un segundo motivo de búsqueda: la **hora**. Un nodo huérfano sin reloj sincronizado no muestrea (§13.4), así que necesita el `epoch` del SN_OFFER antes de tener nada que entregar. Por eso el SN_REQUEST se emite también con la cola vacía (`queued = 0` es válido): la asociación puede ser solo para sincronizar, sin entrega en custodia posterior.
@@ -617,7 +621,7 @@ Cambios contemplados para versiones futuras del schema, listados aquí para que 
 - **Enlace descendente Pi a Heltec**: **implementado el 2026-07-06, ver §12**. Protocolo serial bidireccional para que el Pi construya y ordene la transmisión de ACKs (incluidos los de catálogo `SCHEMA_MISMATCH`, `UNKNOWN_NODE`, `DECODE_ERROR`), BEACON y, en el futuro, comandos downlink. Los `frame_type` `0x13`-`0x1F` quedan apartados para comandos por LoRa.
 - **Comandos a nodos sin NB-IoT**: ruta principal prevista: backend, Pi del gateway, Heltec, y descenso por el árbol con la misma ruta inversa de los ACKs (§2.4). Ruta de respaldo: entrada por un supernodo vía MQTT y entrega LoRa al vecino, simétrica al flujo de custodia de §8. Requiere resolver fragmentación del JSON en tramas y autenticación de comandos por aire.
 - **ACKs batched**: un ACK que cubre un rango de seqs (`ack_seq_from`, `ack_seq_to`) para abaratar downlink en rutas largas. Requeriría bump de minor de schema.
-- **Fallback multi-salto**: permitir que un SN_REQUEST/entrega en custodia atraviese relays (`ttl > 1`) cuando el supernodo no es vecino directo.
+- **Fallback multi-salto**: implementado en v3.10 mediante los tipos nuevos y las reglas de §23.
 - **Alarmas** (`frame_type = 0x03`): formato del payload TBD según necesidades del despliegue.
 - **Seguridad del canal (cifrado + autenticación)**: **implementado el 2026-07-11 en v2.2, ver §14**. El `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 2026-07-06: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. El modelo previsto aquí era de dos claves inspirado en LoRaWAN (clave de red para el MAC, clave de aplicación para el payload); la implementación final de §14 lo simplifica a **una clave de red con AES-CCM** (justificación en §14.1) y sustituye el anti-replay por `seq` (inviable tras el replanteo del seq efímero de v2.1) por el control de frescura basado en `sec_ts` (§14.5). Sin flag de cifrado en el aire: la activación es de toda la red, para cerrar el ataque de downgrade. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves); la rotación de claves es una mejora opcional fuera del alcance de v2.2 (§14.7).
 
@@ -1628,3 +1632,19 @@ Resumen para trazabilidad del TFM:
 - [`node-config.md`](node-config.md): spec del JSON que define qué hay en cada trama y los parámetros de red (`network_id`, bloque `mesh`).
 - [`batch-format.md`](batch-format.md): spec del mensaje de telemetría MQTT unificado que reempaqueta las muestras hacia el broker cloud, desde el gateway o desde un supernodo.
 - [`commands-format.md`](commands-format.md): spec de los comandos entrantes vía MQTT.
+
+## 23. Recorrido observado y respaldo celular multi-salto
+
+La extensión 3.10 añade TELEMETRY_ROUTE (`0x25`), SN_ROUTE_REQUEST (`0x26`) y SN_ROUTE_OFFER (`0x27`). Se conserva la cabecera, la identidad de la muestra y la seguridad por salto. Los equipos anteriores no interpretan estos tipos; el despliegue exige actualizar todos los nodos y el receptor Python antes de activarlos. El Heltec transporta las tramas sin interpretar su payload.
+
+TELEMETRY_ROUTE contiene tres bytes `base_len`, `trace_len`, `plan_len`, seguidos del payload TELEMETRY original, la lista de transmisores ya atravesados y, para custodia, el camino seleccionado. Cada lista admite como máximo 16 identificadores únicos no nulos. La traza comienza por el origen y termina en `hop_src`. Cada relay comprueba que no figura ya en ella y añade su identificador antes de transmitir. El receptor final añade el suyo al registrar el recorrido. El camino seleccionado de custodia empieza en el origen y termina en el supernodo; cada receptor exige que la traza sea su prefijo y que el salto siguiente le corresponda. En LoRa al gateway no hay plan y el siguiente salto sigue siendo el padre actual. La traza acredita el recorrido de esa recepción, no una ruta permanente.
+
+SN_ROUTE_REQUEST contiene `queued`, `path_len` y la lista desde el solicitante hasta el último emisor. Se difunde con TTL limitado; cada relay rechaza bucles y repeticiones de la misma pareja origen/secuencia durante la ventana de descubrimiento. El supernodo operativo añade su identificador y devuelve SN_ROUTE_OFFER por la lista inversa. La oferta contiene `quality`, `space`, `epoch` (4 B LE), secuencia de solicitud (2 B LE), `path_len` y la lista completa. El solicitante solo acepta ofertas de la solicitud vigente. La elección prioriza menos saltos y después calidad celular y RSSI. Los ACK de custodia regresan mediante la ruta inversa aprendida de la telemetría; solo un ACK positivo del destino esperado libera la muestra.
+
+La búsqueda no depende de los beacons del gateway. Los relays deben tener habilitado el reenvío. La muestra permanece en la outbox durante búsqueda y reintentos; al perder la salida celular se repite el descubrimiento. La recuperación del padre del gateway recupera la vía normal. La ruta observada de una muestra en custodia se conserva en la outbox y en el JSON MQTT `path`, incluso tras reinicio. Las colas antiguas se importan sin inventar una ruta.
+
+La difusión conserva hasta 16 solicitudes recientes, identificadas por origen y secuencia, durante 180 s. El reenvío se aplaza entre 100 y 500 ms, con una cola acotada de cuatro solicitudes. Las ofertas se comparan entre las recibidas; no se garantiza descubrir todas las rutas posibles. El plazo de ofertas añade 6 s por enlace posible, hasta 15 enlaces, a `sn_offer_wait_ms`. Con `max_ttl=4` y `sn_offer_wait_ms=1000` resulta 31 s. La espera inicial de ACK de custodia multiplica `ack_timeout_ms` por el número de enlaces elegidos; los reintentos conservan ese mínimo. Son márgenes de implementación pendientes de validación con radio y carga reales.
+
+En estos tres tipos, el payload y su longitud pueden cambiar por salto. Se recifra la trama con un `sec_ts` de transmisión no reutilizado dentro de la sesión del transmisor, conservando la identidad de la muestra. Esta regla sustituye la inmutabilidad del payload y del `sec_ts` de §2 y §14 únicamente para los tipos de §23. La traza es información aportada por dispositivos que comparten la clave de red, no una prueba criptográfica independiente de cada enlace.
+
+`path_at` conserva el instante de recepción en el supernodo o gateway. Republicar la misma custodia no lo renueva. La bandeja MOB2 conserva la ruta y su fecha e importa MOB1 sin reconstruir saltos desconocidos. Los reintentos de una custodia ya en cola no sustituyen una entrada en vuelo. El límite de 16 identificadores incluye origen y receptor final; el identificador 255 solo se admite como destino final del gateway.

@@ -74,7 +74,7 @@ import paho.mqtt.client as mqtt
 
 LOG = logging.getLogger("modulinkr.mqtt")
 
-SCHEMA_VERSION   = "3.2"
+SCHEMA_VERSION   = "3.3"
 SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
 TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
@@ -215,7 +215,7 @@ class MqttPublisher:
                     continue
                 st = s.get("st")
                 samples.append(
-                    (origin, ts, json.dumps({"v": v, "st": st} if st else v)))
+                    (origin, ts, json.dumps({"v": v, "st": st} if st else v), s.get("seq",0), s.get("path"), s.get("path_at")))
             if samples:
                 self._nbiot_q.append((publisher, samples, time.time()))
         except Exception as e:                        # noqa: BLE001
@@ -230,8 +230,9 @@ class MqttPublisher:
                 publisher, samples, received_at = self._nbiot_q.popleft()
             except IndexError:
                 break
-            for origin, ts, reads_json in samples:
+            for origin, ts, reads_json, seq, path, path_at in samples:
                 self.buf.nbiot_last_update(origin, ts, reads_json, publisher, received_at)
+                self.buf.observe_route(origin,ts,seq,"nbiot",publisher,path,path_at,received_at)
             self.buf.mqtt_seen(publisher, received_at)
 
     # ----- Drenado -----
@@ -290,6 +291,9 @@ class MqttPublisher:
                  "ts": r["ts"], "v": r["v"]}
             if r.get("st"):
                 s["st"] = r["st"]
+            if r.get("path"):
+                s["path"] = r["path"]
+                s["path_at"] = r["path_at"]
             samples.append(s)
         msg = {
             "schema_version": SCHEMA_VERSION,

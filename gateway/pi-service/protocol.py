@@ -80,7 +80,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x39          # v3.9 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x3A          # v3.9 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -118,6 +118,9 @@ ADDR_BROADCAST = 0x00
 ADDR_GATEWAY   = 0xFF
 
 # Tipos de trama (§1.6).
+FRAME_TELEMETRY_ROUTE = 0x25
+FRAME_SN_ROUTE_REQUEST = 0x26
+FRAME_SN_ROUTE_OFFER = 0x27
 FRAME_TELEMETRY     = 0x00
 FRAME_ACK           = 0x01
 FRAME_HEARTBEAT     = 0x02
@@ -168,6 +171,9 @@ FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
 
 FRAME_TYPE_NAMES = {
+    FRAME_TELEMETRY_ROUTE: 'TELEMETRY_ROUTE',
+    FRAME_SN_ROUTE_REQUEST: 'SN_ROUTE_REQUEST',
+    FRAME_SN_ROUTE_OFFER: 'SN_ROUTE_OFFER',
     FRAME_TELEMETRY:     'TELEMETRY',
     FRAME_ACK:           'ACK',
     FRAME_HEARTBEAT:     'HEARTBEAT',
@@ -443,6 +449,36 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
     else:
         payload = frame[OFF_PAYLOAD:OFF_PAYLOAD + payload_length]
     out['payload'] = payload
+
+    if frame_type == FRAME_TELEMETRY_ROUTE:
+        if len(payload) < 3:
+            out['error'] = 'ruta incompleta'
+            return out
+        base_len, count, planned = payload[:3]
+        trace = list(payload[3+base_len:3+base_len+count])
+        plan = list(payload[3+base_len+count:])
+        valid = lambda p: 1 <= len(p) <= 16 and 0 not in p and len(p) == len(set(p)) and 255 not in p[:-1]
+        if (len(payload) != 3+base_len+count+planned or not valid(trace)
+                or not 9 <= base_len <= 44 or (base_len-4) % 5
+                or trace[0] != origin_id or trace[-1] != hop_src or dest_id in trace
+                or (not planned and dest_id != 255)
+                or (planned and (not valid(plan) or plan[0] != origin_id
+                    or plan[-1] != dest_id or count >= planned or plan[:count] != trace))):
+            out['error'] = 'recorrido invalido'
+            return out
+        if hop_dst == dest_id:
+            if planned and plan[count] != dest_id:
+                out['error'] = 'destino fuera del recorrido'
+                return out
+            if count >= 16:
+                out['error'] = 'recorrido demasiado largo'
+                return out
+            out['path'] = trace + [dest_id]
+        payload = payload[3:3+base_len]
+        payload_length = base_len
+        frame_type = FRAME_TELEMETRY
+        out['frame_type'] = FRAME_TELEMETRY
+        out['frame_type_name'] = 'TELEMETRY'
 
     if frame_type == FRAME_TELEMETRY:
         # v3.2 (spec §3.1): ts de captura (uint32 LE) + N float32 + N bytes

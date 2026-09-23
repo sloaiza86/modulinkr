@@ -50,6 +50,11 @@ class GatewayBuffer:
         self.max_entries = max_entries
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS delivery_routes (
+            origin INTEGER NOT NULL, source TEXT NOT NULL, publisher INTEGER NOT NULL,
+            captured_ts INTEGER NOT NULL, seq INTEGER NOT NULL, observed_at REAL NOT NULL,
+            received_at REAL NOT NULL, path_json TEXT NOT NULL,
+            PRIMARY KEY(origin, source))""")
         self._migrate_v20_if_needed()
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS buffer (
@@ -431,9 +436,9 @@ class GatewayBuffer:
         cur = self.conn.execute("PRAGMA table_info(node_status)")
         cols = [row[1] for row in cur.fetchall()]
         reales = ("nbiot_updated", "mqtt_seen", "mb_debug_updated",
-                  "hl_updated")
+                  "hl_updated", "parent_updated")
         for col in ("nbiot_flags", "nbiot_csq", "nbiot_updated", "mqtt_seen",
-                    "mb_debug", "mb_debug_updated", "last_hop_src",
+                    "mb_debug", "mb_debug_updated", "last_hop_src", "parent_updated",
                     # Salud del nodo (NODE_HEALTH, §16.1). Llegaba al gateway
                     # y solo se escribía en el log y en MQTT, así que quien
                     # miraba el visor no tenía forma de ver por qué un nodo se
@@ -976,6 +981,26 @@ class GatewayBuffer:
             (publisher, time.time() if received_at is None else received_at))
         self.conn.commit()
 
+    def observe_route(self, origin, captured_ts, seq, source, publisher, path, observed_at, received_at=None):
+        received_at = time.time() if received_at is None else received_at
+        if (source not in ("lora", "nbiot") or not isinstance(path,list)
+                or not 1 <= len(path) <= 16 or any(type(i) is not int or not 1 <= i <= 255 for i in path)
+                or len(set(path)) != len(path) or path[0] != origin or path[-1] != publisher
+                or 255 in path[:-1] or not isinstance(observed_at,(int,float))
+                or not 0 < observed_at <= received_at or captured_ts <= 0):
+            return
+        self.conn.execute("""INSERT INTO delivery_routes VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(origin,source) DO UPDATE SET publisher=excluded.publisher,
+            captured_ts=excluded.captured_ts, seq=excluded.seq, observed_at=excluded.observed_at,
+            received_at=excluded.received_at, path_json=excluded.path_json
+            WHERE excluded.captured_ts > delivery_routes.captured_ts
+               OR (excluded.captured_ts = delivery_routes.captured_ts AND
+                   ((excluded.seq - delivery_routes.seq + 65536) % 65536 BETWEEN 1 AND 32767
+                    OR (excluded.seq = delivery_routes.seq AND
+                        excluded.observed_at > delivery_routes.observed_at)))""",
+            (origin,source,publisher,captured_ts,seq,observed_at,received_at,json.dumps(path)))
+        self.conn.commit()
+
     def nbiot_last_update(self, origin: int, captured_ts: int,
                           reads_json: str, via_publisher: int, received_at: float = None) -> None:
         """Guarda el último dato de un nodo recibido por NB-IoT (batch del
@@ -1020,11 +1045,17 @@ class GatewayBuffer:
             v = [None if isinstance(x, float) and math.isnan(x) else x
                  for x in parsed['reads']]
             st = parsed.get('st')
-            if st and any(st):
+            if parsed.get('path'):
+                reads_json = json.dumps({'v': v, 'st': st, 'path': parsed['path'], 'path_at': time.time()})
+            elif st and any(st):
                 reads_json = json.dumps({'v': v, 'st': st})
             else:
                 reads_json = json.dumps(v)
 
+        path = parsed.get('path')
+        if path:
+            self.observe_route(parsed['origin_id'],parsed.get('ts',0),parsed['seq'],
+                               'lora',255,path,time.time())
         try:
             self.conn.execute(
                 """INSERT INTO buffer
@@ -1139,6 +1170,9 @@ class GatewayBuffer:
                 "seq": seq,
                 "v": v,
             }
+            if isinstance(data,dict) and data.get("path"):
+                entry["path"] = data["path"]
+                entry["path_at"] = data.get("path_at")
             if st:
                 entry["st"] = st
             out.append(entry)
@@ -1212,6 +1246,8 @@ class GatewayBuffer:
                    last_hop_src    = COALESCE(excluded.last_hop_src, last_hop_src)""",
             (origin, time.time(), frame_type, rssi, snr,
              parent_id, hop_count, hop_src))
+        if parent_id is not None:
+            self.conn.execute("UPDATE node_status SET parent_updated=? WHERE origin=?", (time.time(),origin))
         self.conn.commit()
 
     def status_heartbeat(self, lora_link: bool, mqtt_enabled: bool,

@@ -277,10 +277,10 @@ public:
     // ----- Fallback NB-IoT (frame-format.md §8) -----
 
     // Telemetría en custodia: mismo formato que sendTelemetry (ts incluido)
-    // pero con destino final el supernodo elegido (unicast, sin relay).
+    // con el camino seleccionado hasta el supernodo y la traza de §23.
     Status sendTelemetryCustody(uint16_t seq, uint32_t ts,
                                 const float* values, const uint8_t* st,
-                                uint8_t n_values, uint8_t sn_id);
+                                uint8_t n_values, uint8_t sn_id, const uint8_t* path = nullptr, uint8_t path_len = 0);
 
     // MODBUS_DEBUG v3.4 (frame-format.md §15): una transacción Modbus en
     // crudo, hacia el gateway vía el padre. Best-effort como el HEARTBEAT:
@@ -400,10 +400,15 @@ public:
     Status sendSnOffer(uint8_t requester, uint16_t seq,
                        uint8_t quality, uint8_t queue_space, uint32_t epoch);
 
-    // ACK emitido por este nodo como receptor final (supernodo que acepta
-    // custodia). own_seq es el contador de tramas propio del emisor.
+    // Tramas de recorrido y descubrimiento de §23.
+    Status sendRoute(uint8_t hop, uint8_t dest, uint16_t seq, uint8_t type,
+                     const uint8_t* payload, uint8_t len, uint8_t ttl = 0) {
+        return buildAndSend(hop, node_id_, dest, seq, type, ttl ? ttl : ttl_, payload, len);
+    }
+
+    // La custodia devuelve el ACK por el vecino del último salto recibido.
     Status sendAck(uint8_t dest, uint16_t own_seq,
-                   uint16_t ack_seq, uint8_t status);
+                   uint16_t ack_seq, uint8_t status, uint8_t via = 0);
 
     // Lee la UART sin bloquear y acumula tramas entrantes válidas.
     // Llamar en cada vuelta del loop().

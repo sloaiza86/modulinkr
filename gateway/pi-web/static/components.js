@@ -28,8 +28,8 @@
       this.render();
     }
 
-    attributeChangedCallback() {
-      if (this.isConnected) this.render();
+    attributeChangedCallback(name, previous, next) {
+      if (this.isConnected && previous !== next) this.render();
     }
 
     static async manifest() {
@@ -69,7 +69,7 @@
         ? referencia.slice(10)
         : (referencia.startsWith("mdi:") ? referencia.slice(4) : "");
       const etiqueta = this.getAttribute("label");
-      this.replaceChildren();
+
       if (etiqueta) {
         this.setAttribute("role", "img");
         this.setAttribute("aria-label", etiqueta);
@@ -79,7 +79,7 @@
         this.removeAttribute("role");
         this.removeAttribute("aria-label");
       }
-      if (!nombre) return;
+      if (!nombre) { this.replaceChildren(); return; }
 
       try {
         let camino = esLocal
@@ -99,7 +99,7 @@
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         path.setAttribute("d", camino);
         svg.appendChild(path);
-        this.appendChild(svg);
+        this.replaceChildren(svg);
       } catch (error) {
         this.dataset.iconError = "";
         console.error(`No se pudo cargar ${referencia}`, error);
@@ -783,7 +783,7 @@
 
     _renderizar() {
       const elementos = this._elementos ?? [];
-      this.replaceChildren();
+
       this.hidden = elementos.length === 0;
       if (!elementos.length) return;
 

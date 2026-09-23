@@ -20,6 +20,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "route_trace.h"
 
 class Outbox {
 public:
@@ -36,6 +37,9 @@ public:
         bool     ts_fixed   = false;  // true: el ts ya viajó y es inmutable
         uint8_t  n_values   = 0;
         float    values[kMaxValues] = {};
+        uint8_t path_len = 0;
+        uint8_t path[routing::kMaxPath] = {};
+        uint32_t path_at = 0;
         uint8_t  st[kMaxValues] = {};  // v3.2: byte de estado por read
     };
 
@@ -48,7 +52,8 @@ public:
     //                  values; nullptr = todo ok.
     bool push(uint8_t origin, uint16_t seq, const float* values,
               const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
-              uint32_t ts, bool ts_fixed);
+              uint32_t ts, bool ts_fixed, const uint8_t* path = nullptr,
+              uint8_t path_len = 0, uint32_t path_at = 0);
 
     // Elimina la entrada de un origen+seq (confirmada por otra vía).
     bool remove(uint8_t origin, uint16_t seq);

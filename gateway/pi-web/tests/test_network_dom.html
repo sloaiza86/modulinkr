@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pruebas de actualización parcial</title>
+<script src="../static/components.js"></script>
+<pre id="resultado">Ejecutando…</pre>
+<div id="fixture"></div>
+<script>
+(async () => {
+  const results = [];
+  const assert = (ok, message) => { if (!ok) throw new Error(message); results.push("PASS: " + message); };
+  try {
+    const source = await (await fetch("../static/app.js")).text();
+    const start = source.indexOf("function actualizarContenido(");
+    const end = source.indexOf("function firmaSinEdades(", start);
+    const update = new Function(source.slice(start, end) + ";return actualizarContenido;")();
+    const host = document.getElementById("fixture");
+    const card = (id, value, name = "Temperatura") => `<modulinkr-node-card data-origin="${id}"><div class="tn-cabecera"><span class="tn-nombre">Nodo ${id}</span><modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon><img src="../static/img/technology/lora-connected.png"></div><modulinkr-measurement data-origin="${id}" data-canal="0"><span class="s-nombre">${name}</span><span class="s-valor">${value}</span></modulinkr-measurement></modulinkr-node-card>`;
+    update(host,card(1,20)+card(2,30));
+    const first = host.firstElementChild, second = host.lastElementChild;
+    const icon = first.querySelector("modulinkr-icon"), svg = icon.firstChild, img = first.querySelector("img");
+    const button = first.querySelector(".tn-cabecera");
+    button.focus();
+    update(host,card(1,21)+card(2,30));
+    assert(host.firstElementChild === first && host.lastElementChild === second,"se conservan las tarjetas al cambiar una medida");
+    assert(icon.firstChild === svg && first.querySelector("img") === img,"se conservan SVG e imágenes");
+    assert(document.activeElement === button && button.getAttribute("role") === "button","se conserva el foco y la acción accesible");
+    assert(first.querySelector(".s-valor").textContent === "21","se actualiza la medida");
+    update(host,card(1,22,"Humedad")+card(2,30));
+    assert(first.querySelector("modulinkr-measurement").getAttribute("aria-label") === "Abrir histórico de Humedad","se actualiza la etiqueta accesible");
+    update(host,card(2,31));
+    assert(host.firstElementChild === second && host.children.length === 1,"eliminar otro nodo conserva la tarjeta restante");
+    update(host,card(3,40)+card(2,32));
+    assert(host.lastElementChild === second && host.children.length === 2,"insertar otro nodo conserva la tarjeta restante");
+    update(host,'<details open><summary>Diagnóstico</summary><span>1</span></details>');
+    const details = host.firstElementChild;
+    update(host,'<details><summary>Diagnóstico</summary><span>2</span></details>');
+    assert(details.open && details.querySelector("span").textContent === "2","se conserva el diagnóstico abierto");
+    host.replaceChildren(icon);
+    const path = icon.constructor.path;
+    let resolve;
+    icon.constructor.path = () => new Promise(r => { resolve = r; });
+    const previous = icon.firstChild;
+    icon.setAttribute("name","mdi:test");
+    assert(icon.firstChild === previous,"el icono anterior permanece durante una carga pendiente");
+    resolve("M0 0h24v24H0z");
+    await Promise.resolve();
+    icon.constructor.path = path;
+    assert(icon.firstChild !== previous && icon.querySelector("path").getAttribute("d") === "M0 0h24v24H0z","la nueva imagen sustituye a la anterior al estar lista");
+    host.replaceChildren();
+  } catch (error) { results.push("FAIL: " + error.stack); }
+  document.getElementById("resultado").textContent = results.join("\n");
+})();
+</script>

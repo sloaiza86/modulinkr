@@ -44,7 +44,7 @@ En condiciones normales el supernodo no publica nada: NB-IoT sigue siendo respal
 
 | Campo | Tipo | Obligatorio | Notas |
 | --- | --- | --- | --- |
-| `schema_version` | string | sí | Versión de este esquema MQTT. La implementación vigente publica `3.2`. |
+| `schema_version` | string | sí | Versión de este esquema MQTT. La implementación vigente publica `3.3`. |
 | `samples` | array | sí | Lista de muestras. Vacía solo con `debug.trigger == "test"` (§5). Ver §4. |
 | `debug` | object | no | Sobre de diagnóstico, activable por configuración. El consumidor procesa el dato exactamente igual con o sin él. Ver §5. |
 
@@ -195,7 +195,9 @@ Clave única: **`(origin, ts, seq)`**. La misma muestra llegando por dos rutas (
 
 ## 9. Tamaños esperados y consumo de datos
 
-Para el caso típico (XY-MD02 con 2 reads):
+El supernodo limita cada publicación a 1024 bytes de JSON, capacidad declarada por el módem del banco mediante `AT+CMQTTPAYLOAD=?`. Desde el firmware 0.0.64 se mide el mensaje completo, incluidos `path`, `path_at` y el sobre opcional `debug`, antes de aceptar cada muestra. Se incluyen como máximo 16 muestras y se cierra el lote antes de superar el límite. Las restantes permanecen en la bandeja para publicaciones posteriores; las incluidas solo se liberan tras confirmar la publicación. No cambia el schema 3.3.
+
+Para el caso típico (XY-MD02 con 2 reads), estas estimaciones representan el volumen de muestras antes de dividirlo en publicaciones y sin recorridos. Los casos mayores de 1024 bytes requieren varios mensajes celulares y repiten el sobre JSON y la sobrecarga de transporte:
 
 | Escenario | Muestras | Tamaño aprox JSON | Con MQTT+TLS |
 | --- | --- | --- | --- |
@@ -205,7 +207,7 @@ Para el caso típico (XY-MD02 con 2 reads):
 | Failover largo (cola al límite) | 256 | ~17 KB | ~17,2 KB |
 | Test (vacío) | 0 | ~170 B | ~240 B |
 
-Con `debug` desactivado, cada mensaje ahorra ~90 B. La estimación de consumo anual del supernodo con failover semanal de 30 muestras se mantiene en ~100 KB/año, el 0,02 % de un plan SIM Lifetime de 500 MB / 10 años.
+Con `debug` desactivado, cada mensaje ahorra aproximadamente 90 B. El consumo efectivo depende de los recorridos, del número de publicaciones necesario y de los reintentos; las cifras de la tabla no incorporan ese coste adicional.
 
 ## 10. Mensaje de registro (register retenido)
 
@@ -271,3 +273,11 @@ El consumidor detecta la variante por la presencia de `raw_catalog` (en lugar de
 - [`frame-format.md`](frame-format.md): la trama LoRa de la que cada muestra hereda `(origin, ts, seq)`.
 - [`db-schema.md`](db-schema.md): persistencia, deduplicación y cuarentena en el consumidor.
 - [`commands-format.md`](commands-format.md): comandos `flush_batch` / `test_batch`.
+
+## 12. Recorrido observado (v3.3)
+
+Cada muestra puede añadir `path`, lista ordenada de identificadores desde el origen hasta el publicador, y `path_at`, fecha epoch de la observación de ese recorrido. Una recepción LoRa de 3 mediante 2 hasta el gateway lleva `[3, 2, 255]`; una custodia equivalente hasta el supernodo 1 lleva `[3, 2, 1]`. Una muestra propia del supernodo lleva `[1]` y no confirma actividad LoRa. El receptor valida longitud de 1 a 16, ausencia de repeticiones, origen inicial y coincidencia del extremo con el publicador del topic. Una ruta inválida no sirve como evidencia de topología.
+
+El gateway conserva el último recorrido de cada origen y vía en SQLite, junto con la fecha de observación y la de recepción MQTT. Una republicación atrasada no rejuvenece el recorrido. Se mantiene la recepción de muestras antiguas sin estos campos, con recorrido no reportado. El consumidor cloud acepta el major 3 y conserva el comportamiento de `samples.source`: vía de la primera recepción almacenada, `lora` para el publicador 255 y `nbiot` para un supernodo. La deduplicación no crea un historial de recepciones alternativas ni conserva `path` en PostgreSQL. No se requiere una migración de esa base de datos para mostrar la vía.
+
+La consulta de datos admite `via=all`, `via=lora` o `via=nbiot`. Cada punto agregado contiene `[epoch, promedio, cantidad_lora, cantidad_nbiot]`. Un promedio mixto conserva ambos recuentos; no se atribuye a una sola vía. El CSV incorpora la columna `via` por muestra y respeta el mismo filtro.

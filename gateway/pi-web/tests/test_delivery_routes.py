@@ -50,6 +50,22 @@ class DeliveryTests(unittest.TestCase):
     def edge(self, origin, target):
         return next(e for e in net.topology()["edges"] if e["from"] == origin and e["to"] == target)
 
+    def test_exact_publication_time_and_relay_expiry(self):
+        self.now += 400
+        self.link(False)
+        self.publish()
+        published = self.now
+        for delta in (0.01, 2.04):
+            self.now = published + delta
+            n = self.nodes()[1]
+            self.assertEqual(n["last_activity_at"], published)
+            self.assertTrue(n["relay_active"])
+        self.now = published + 46
+        self.link(False)
+        self.assertFalse(self.nodes()[1]["relay_active"])
+        self.publish(origin=1)
+        self.assertFalse(self.nodes()[1]["relay_active"])
+
     def test_disconnect_relay_expiry_and_recovery(self):
         self.assertTrue(self.nodes()[2]["lora_route_online"])
         self.now += 1
@@ -72,7 +88,8 @@ class DeliveryTests(unittest.TestCase):
         self.buf.status_update(1, "BEACON", parent_id=255)
         self.buf.status_update(2, "BEACON", parent_id=1)
         self.assertEqual(self.nodes()[2]["transport"], "lora")
-        self.assertTrue(self.edge(2, 1)["online"])
+        self.assertFalse(self.edge(2, 1)["online"])
+        self.assertEqual(self.edge(2, 1)["relation"], "declared")
 
     def test_old_and_future_captures_do_not_refresh_origin(self):
         self.now += 400
@@ -223,6 +240,99 @@ class DeliveryTests(unittest.TestCase):
                 for node in projected:
                     for key in ("transport", "delivery_online", "lora_route_online", "mqtt_state", "nbiot_state", "cellular_observable"):
                         self.assertEqual(node[key], expected[node["origin"]][key], (elapsed, node["origin"], key))
+
+    def test_actual_paths_replace_inferred_tree_and_expire_without_refresh(self):
+        self.buf.observe_route(2, self.now, 7, "lora", 255, [2, 3, 255], self.now, self.now)
+        graph = net.topology()
+        edges = {(e["from"], e["to"]):e for e in graph["edges"]}
+        self.assertNotIn((2, 1), edges)
+        self.assertTrue(edges[(2, 3)]["online"])
+        self.assertEqual(edges[(3, 255)]["relation"], "observed")
+        self.link(False)
+        self.publish()
+        self.buf.observe_route(2, self.now, 8, "nbiot", 1, [2, 3, 1], self.now, self.now)
+        graph = net.topology()
+        edges = {(e["from"], e["to"]):e for e in graph["edges"]}
+        self.assertEqual(edges[(2, 3)]["transport"], "relay")
+        self.assertTrue(edges[(3, 1)]["online"])
+        self.assertNotIn((3, 255), edges)
+        self.assertNotIn((2, 1), edges)
+        snapshot=net.snapshot()
+        code = "const n=require(process.argv[1]);let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>console.log(JSON.stringify(n.topology(n.project(JSON.parse(s)).state))));"
+        js=subprocess.run(["node","-e",code,str(WEB / "static/network-state.js")],input=json.dumps(snapshot),text=True,capture_output=True,check=True)
+        self.assertEqual(json.loads(js.stdout)["edges"], net.topology(snapshot["state"])["edges"])
+        self.now += 1000
+        self.link(False)
+        self.assertFalse(self.edge(3, 1)["online"])
+
+    def test_new_sample_replaces_old_route_and_disconnect_keeps_only_last(self):
+        self.publish()
+        self.buf.observe_route(2, self.now, 8, "nbiot", 1, [2, 1], self.now, self.now)
+        self.now += 1
+        self.link(True)
+        self.buf.observe_route(2, self.now, 9, "lora", 255, [2, 255], self.now, self.now)
+        for disconnected in (False, True):
+            if disconnected:
+                self.link(False)
+            state = net.network_state()
+            graph = net.topology(state)
+            edges = {(e["from"], e["to"]): e for e in graph["edges"]}
+            self.assertNotIn((2, 1), edges)
+            self.assertEqual(edges[(2, 255)]["online"], not disconnected)
+            node = next(n for n in state["nodes"] if n["origin"] == 2)
+            self.assertEqual(node["delivery_online"], not disconnected)
+            code = "const n=require(process.argv[1]);let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>console.log(JSON.stringify(n.topology(JSON.parse(s)))));"
+            js = subprocess.run(["node", "-e", code, str(WEB / "static/network-state.js")],
+                input=json.dumps(state), text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(js.stdout)["edges"], graph["edges"])
+
+    def test_backlog_does_not_replace_current_lora_sample(self):
+        self.buf.observe_route(2, self.now, 10, "lora", 255, [2, 255], self.now, self.now)
+        self.now += 1
+        self.publish(age=30)
+        self.buf.observe_route(2, self.now-30, 9, "nbiot", 1, [2, 1], self.now, self.now)
+        self.assertEqual(self.nodes()[2]["transport"], "lora")
+        self.assertFalse(any(e["from"] == 2 and e["to"] == 1 for e in net.topology()["edges"]))
+
+    def test_latest_sample_on_both_routes_then_one_route_then_silence(self):
+        self.publish()
+        self.buf.observe_route(2, self.now, 10, "lora", 255, [2, 255], self.now, self.now)
+        self.buf.observe_route(2, self.now, 10, "nbiot", 1, [2, 1], self.now, self.now)
+        self.assertTrue(self.edge(2, 255)["online"])
+        self.assertTrue(self.edge(2, 1)["online"])
+        self.now += 1
+        self.buf.observe_route(2, self.now, 11, "nbiot", 1, [2, 1], self.now, self.now)
+        self.assertEqual(self.nodes()[2]["transport"], "relay")
+        self.assertFalse(any(e["from"] == 2 and e["to"] == 255 for e in net.topology()["edges"]))
+        self.now += 400
+        self.link(False)
+        self.assertFalse(self.edge(2, 1)["online"])
+        self.assertFalse(any(e["from"] == 2 and e["to"] == 255 for e in net.topology()["edges"]))
+
+    def test_same_sample_routes_expire_in_browser_without_resurrecting_history(self):
+        self.publish()
+        self.buf.observe_route(2, self.now, 65535, "lora", 255, [2,255], self.now, self.now)
+        self.buf.observe_route(2, self.now, 65535, "nbiot", 1, [2,1], self.now, self.now)
+        snapshot = net.snapshot()
+        code = "const n=require(process.argv[1]);let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>console.log(JSON.stringify(n.topology(n.project(JSON.parse(s),Number(process.argv[2]),process.argv[3]==='true').state))));"
+        for elapsed, connected in ((0, True), (46, True), (200, True), (0, False)):
+            state = json.loads(json.dumps(snapshot["state"]))
+            state["generated_at"] += elapsed
+            state["observation_lost"] = not connected
+            net.project_state(state, state["generated_at"] if connected else 1e15)
+            js = subprocess.run(["node", "-e", code, str(WEB / "static/network-state.js"), str(elapsed), str(connected).lower()],
+                input=json.dumps(snapshot), text=True, capture_output=True, check=True)
+            expected = net.topology(state)["edges"]
+            self.assertEqual(json.loads(js.stdout)["edges"], expected)
+            origin_edges = [e for e in expected if e["from"] == 2]
+            self.assertEqual(len(origin_edges), 2 if elapsed == 0 and connected else 1)
+
+    def test_heard_traffic_does_not_refresh_old_parent(self):
+        self.now += 140
+        self.link(True)
+        self.buf.status_update(1, "HEARTBEAT")
+        self.buf.status_update(2, "HEARTBEAT")
+        self.assertFalse(self.nodes()[2]["lora_route_online"])
 
     def test_unknown_parent_and_cycles_do_not_confirm_gateway_route(self):
         for parent in (3, 2):

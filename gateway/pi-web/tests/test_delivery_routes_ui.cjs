@@ -10,9 +10,9 @@ function section(start, end) {
   assert.ok(a >= 0 && b > a);
   return source.slice(a, b);
 }
-const c = vm.createContext({ chipMantenimiento: () => null,
-  COLOR: { ok: "green", off: "grey", dim: "blue", relay: "yellow" } });
-vm.runInContext(section("function chipsNodo(", "let masonryRaf")
+const c = vm.createContext({ cacheEstado: null, chipMantenimiento: () => null, fmtEdadEnVivo: s => `${s} s`,
+  COLOR: { accent: "blue", ok: "green", off: "grey", dim: "blue", relay: "yellow" } });
+vm.runInContext(section("function nombreNodoRuta(", "let masonryRaf")
   + section("function esSupernodo(", "function nombreCanalDetalle(")
   + section("function aristaVisualTopologia(", "function opcionesFisicaTopologia("), c);
 
@@ -44,10 +44,10 @@ test("el supernodo confirma NB-IoT y MQTT sin heartbeat LoRa reciente", () => {
 });
 
 test("la ruta de entrega es amarilla y punteada, la histórica es gris", () => {
-  const relay = c.aristaVisualTopologia({ from: 2, to: 1, transport: "relay", online: true });
+  const relay = c.aristaVisualTopologia({ from: 2, to: 1, transport: "relay", online: true, relation: "delivery" });
   assert.equal(relay.color.color, "yellow");
   assert.ok(relay.dashes);
-  assert.match(relay.title, /intermedios no confirmados/);
+  assert.match(relay.title, /recorrido no reportado/);
   for (const transport of ["relay", "nbiot", "lora"]) {
     const edge = c.aristaVisualTopologia({ from: 2, to: 1, transport, online: false });
     assert.equal(edge.color.color, "grey");
@@ -59,4 +59,49 @@ test("recuperar la ruta al gateway devuelve LoRa a verde", () => {
   const restored = { ...node, online: true, lora_route_online: true, transport: "lora" };
   assert.equal(c.chipsNodo(restored, null, 30)[0].cls, "on");
   assert.match(c.textoRuta(restored), /LoRa al gateway/);
+});
+
+
+test("Modbus exige observación y datos vigentes por cualquiera de las vías", () => {
+  const sample = {ago_s:27, channels:[{value:21,st_code:0}]};
+  const modbus = n => c.chipsNodo(n, sample, 135).find(x => x.txt.startsWith("Modbus:"));
+  assert.equal(modbus({...node,delivery_online:false}).cls,"gris");
+  assert.match(modbus({...node,delivery_online:false}).txt,/no observable.*27 s/);
+  for (const transport of ["lora","relay","nbiot"])
+    assert.equal(modbus({...node,transport,datos_s:45}).cls,"on");
+  assert.match(modbus({...node,datos_s:20}).txt,/sin datos recientes/);
+});
+
+test("el supernodo solo muestra relay amarillo con entrega ajena vigente", () => {
+  const sn = {...node,role:"supernode",transport:"nbiot",relay_active:true};
+  assert.equal(c.chipsNodo(sn,null,135)[0].cls,"ambar");
+  assert.match(c.chipsNodo(sn,null,135)[0].txt,/relay activo.*otros nodos/);
+  assert.equal(c.chipsNodo({...sn,relay_active:false},null,135)[0].cls,"gris");
+  assert.equal(c.chipsNodo({...sn,lora_route_online:true},null,135)[0].cls,"on");
+});
+
+test("la entrega muestra el nombre configurado del supernodo", () => {
+  c.cacheEstado = {nodes:[{origin:1,name:"Acelerómetro"}]};
+  assert.match(c.chipsNodo(node,null,135)[0].txt,/mediante Acelerómetro/);
+  assert.match(c.textoRuta(node),/mediante Acelerómetro/);
+  c.cacheEstado = null;
+});
+
+test("un salto observado es continuo y no inventa una entrega directa", () => {
+  const edge=c.aristaVisualTopologia({from:3,to:2,transport:"relay",online:true,relation:"observed"});
+  assert.equal(edge.dashes,false);
+  assert.match(edge.title,/recorrido observado/);
+});
+
+test("un promedio mixto conserva las dos vías en el texto", () => {
+  vm.runInContext(section("function viaMuestras(","function tooltipGrafico("),c);
+  assert.equal(c.viaMuestras([0,21,2,1]),"Vía registrada: 2 LoRa · 1 NB-IoT");
+  assert.equal(c.viaMuestras([0,21]),"Vía no disponible");
+});
+
+
+test("LoRa activo se distingue del último recorrido desconectado", () => {
+  const route = { from: 2, to: 255, transport: "lora", relation: "observed" };
+  assert.equal(c.aristaVisualTopologia({...route, online:true}).color.color, "blue");
+  assert.equal(c.aristaVisualTopologia({...route, online:false}).color.color, "grey");
 });

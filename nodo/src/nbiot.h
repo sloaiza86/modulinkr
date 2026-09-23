@@ -12,6 +12,8 @@
 
 class Nbiot {
 public:
+    // Capacidad declarada por el SIM7028 del banco mediante CMQTTPAYLOAD=?.
+    static constexpr size_t kMaxPublishPayloadBytes = 1024;
     enum class CeregStatus : uint8_t {
         NOT_REGISTERED       = 0,
         REGISTERED_HOME      = 1,

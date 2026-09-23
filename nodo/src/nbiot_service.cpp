@@ -180,6 +180,7 @@ bool NbiotService::step() {
             PubItem item{nullptr, 0};
             if (xQueueReceive(queue_, &item, pdMS_TO_TICKS(500)) == pdTRUE) {
                 bool ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
+                String publish_response = modem_.lastResponse();
                 if (!ok) {
                     mqtt_state_ = modem_.mqttConnectionState();
                     last_mqtt_check_ms_ = millis();
@@ -194,6 +195,7 @@ bool NbiotService::step() {
                         mqtt_state_ = Nbiot::MqttState::CONNECTED;
                         state_ = State::READY;
                         ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
+                        publish_response = modem_.lastResponse();
                     }
                 }
                 if (ok) {
@@ -207,7 +209,7 @@ bool NbiotService::step() {
                     // No se confirma: el batch sigue en el outbox y el loop
                     // lo reintentará (el backend deduplica por origin/ts/seq).
                     published_err_ = published_err_ + 1;
-                    diag::log("ERROR", "node.nbiot", "nbiot.batch_publish_failed", "id=%lu errors=%lu response=%s\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned long>(published_err_), modem_.lastResponse().c_str());
+                    diag::log("ERROR", "node.nbiot", "nbiot.batch_publish_failed", "id=%lu errors=%lu bytes=%u response=%s\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned long>(published_err_), static_cast<unsigned>(strlen(item.json)), publish_response.c_str());
                 }
                 free(item.json);
                 if (!ok) return false;  // reevalúa la sesión desde el principio

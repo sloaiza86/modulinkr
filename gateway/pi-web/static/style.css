@@ -578,9 +578,9 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 .topologia-tipo.gateway modulinkr-icon,
 .topologia-tipo.cellular modulinkr-icon { width: 17px; height: 17px; }
 .topologia-linea {
-  display: inline-block; width: 30px; border-top: 2px solid var(--dim);
+  display: inline-block; width: 30px; border-top: 2px solid var(--accent);
 }
-.topologia-linea.relay { border-top: 2px dotted #b77900; }
+.topologia-linea.relay { border-top: 2px solid #b77900; }
 .topologia-linea.nbiot { border-color: var(--ok); }
 .topologia-linea.inactiva { border-top: 2px dashed var(--off); }
 

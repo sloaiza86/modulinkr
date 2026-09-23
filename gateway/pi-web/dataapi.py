@@ -169,9 +169,11 @@ def nodos():
 
 @router.get("/series")
 def series(channels: str = Query(...), desde: str = Query(...),
-           hasta: str = Query(...), max_puntos: int = Query(800)):
+           hasta: str = Query(...), max_puntos: int = Query(800), via: str = "all"):
     """Series temporales por canal. Si el rango tiene más muestras que
     max_puntos, se agrega por buckets (promedio) en el servidor."""
+    if via not in ("all", "lora", "nbiot"):
+        raise HTTPException(400, "Vía no válida")
     ids = _parse_channels(channels)
     t0, t1 = _parse_range(desde, hasta)
     max_puntos = max(10, min(max_puntos, MAX_POINTS_CAP))
@@ -188,13 +190,16 @@ def series(channels: str = Query(...), desde: str = Query(...),
                 raise HTTPException(404, f"canal {cid} no existe")
             cur.execute(
                 """SELECT floor(extract(epoch FROM s.ts) / %s) * %s AS t,
-                          avg(v.value)
+                          avg(v.value),
+                          count(*) FILTER (WHERE s.source = 'lora'),
+                          count(*) FILTER (WHERE s.source = 'nbiot')
                    FROM sample_values v
                    JOIN samples s ON s.sample_id = v.sample_id
                    WHERE v.channel_id = %s AND s.ts >= %s AND s.ts < %s
+                     AND (%s = 'all' OR s.source = %s)
                    GROUP BY 1 ORDER BY 1""",
-                (bucket_s, bucket_s, cid, t0, t1))
-            pts = [[int(t), round(val, 6)] for t, val in cur.fetchall()]
+                (bucket_s, bucket_s, cid, t0, t1, via, via))
+            pts = [[int(t), round(val, 6) if val is not None else None, lo, nb] for t, val, lo, nb in cur.fetchall()]
             result.append({"channel_id": cid, "node_id": meta[2],
                            "read_id": meta[0], "unit": meta[1],
                            "bucket_s": bucket_s, "points": pts})
@@ -204,9 +209,11 @@ def series(channels: str = Query(...), desde: str = Query(...),
 
 @router.get("/csv")
 def export_csv(channels: str = Query(...), desde: str = Query(...),
-               hasta: str = Query(...)):
+               hasta: str = Query(...), via: str = "all"):
     """Datos crudos (sin agregar) de los canales en el rango, como CSV en
     streaming: ts ISO, nodo, medida, unidad, valor."""
+    if via not in ("all", "lora", "nbiot"):
+        raise HTTPException(400, "Vía no válida")
     ids = _parse_channels(channels)
     t0, t1 = _parse_range(desde, hasta)
 
@@ -216,25 +223,26 @@ def export_csv(channels: str = Query(...), desde: str = Query(...),
             with conn.cursor(name="csv_export") as cur:  # cursor de servidor
                 cur.itersize = 5000
                 cur.execute(
-                    """SELECT s.ts, s.origin, c.read_id, c.unit, v.value
+                    """SELECT s.ts, s.origin, c.read_id, c.unit, v.value, s.source
                        FROM sample_values v
                        JOIN samples s  ON s.sample_id  = v.sample_id
                        JOIN channels c ON c.channel_id = v.channel_id
                        WHERE v.channel_id = ANY(%s)
                          AND s.ts >= %s AND s.ts < %s
+                         AND (%s = 'all' OR s.source = %s)
                        ORDER BY s.ts, s.origin, c.position""",
-                    (ids, t0, t1))
+                    (ids, t0, t1, via, via))
                 buf = io.StringIO()
                 w = csv.writer(buf)
-                w.writerow(["ts", "node", "read_id", "unit", "value"])
+                w.writerow(["ts", "node", "read_id", "unit", "value", "via"])
                 n = 0
-                for ts, origin, rid, unit, value in cur:
+                for ts, origin, rid, unit, value, source in cur:
                     w.writerow([ts.isoformat(), origin, rid, unit or "",
-                                repr(float(value))])
+                                repr(float(value)) if value is not None else "", source])
                     n += 1
                     if n >= CSV_MAX_ROWS:
                         w.writerow(["# truncado en", CSV_MAX_ROWS,
-                                    "filas", "", ""])
+                                    "filas", "", "", ""])
                         break
                     if buf.tell() > 64_000:
                         yield buf.getvalue()

@@ -72,9 +72,9 @@ function chipConexion(c) {
   if (tecnologia) {
     const estado = c.cls === "on" ? "connected"
       : (c.cls === "ambar" || c.cls === "rojo" ? "warning" : "offline");
-    return `<span class="chip conexion logo-conexion ${c.cls}" role="img" title="${detalle}" aria-label="${detalle}"><img class="logo-tecnologia logo-${tecnologia}" src="/static/img/technology/${tecnologia}-${estado}.png" alt=""></span>`;
+    return `<span class="chip conexion logo-conexion ${c.cls}" role="img" title="${htmlSeguro(detalle)}" aria-label="${htmlSeguro(detalle)}"><img class="logo-tecnologia logo-${tecnologia}" src="/static/img/technology/${tecnologia}-${estado}.png" alt=""></span>`;
   }
-  return `<span class="chip conexion ${c.cls}" title="${detalle}" aria-label="${detalle}">${iconoMdi(icono)}<span>${nombre}</span></span>`;
+  return `<span class="chip conexion ${c.cls}" title="${htmlSeguro(detalle)}" aria-label="${htmlSeguro(detalle)}">${iconoMdi(icono)}<span>${nombre}</span></span>`;
 }
 
 // ----- Utilidades -----
@@ -622,6 +622,10 @@ function chipEstado(n, ult, onlineS) {
 // Modbus. El chip Modbus sale de los st_code de la última telemetría (v3.2).
 // NB-IoT y MQTT se muestran por separado porque una red celular registrada no
 // implica que la sesión con el broker esté disponible.
+function nombreNodoRuta(id) {
+  return cacheEstado?.nodes.find(n => n.origin === id)?.name || `supernodo ${id}`;
+}
+
 function chipsNodo(n, ult, onlineS) {
   onlineS = n.online_s || onlineS;
   const datosS = n.datos_s || onlineS * 5;
@@ -631,12 +635,17 @@ function chipsNodo(n, ult, onlineS) {
   const porRelay = n.transport === "relay" && n.delivery_online;
   const lora = n.lora_route_online ?? n.online;
   const chips = [porRelay
-    ? { cls: "ambar", txt: `LoRa: entrega mediante supernodo ${n.via_publisher}` }
+    ? { cls: "ambar", txt: `LoRa: entrega mediante ${nombreNodoRuta(n.via_publisher)}` }
     : lora ? { cls: "on", txt: "LoRa: conectado al gateway" }
+    : n.relay_active ? { cls: "ambar", txt: "LoRa: relay activo; entrega datos de otros nodos por NB-IoT" }
            : { cls: "gris", txt: "LoRa: sin ruta confirmada al gateway" }];
   if (mant) chips.push(mant);
 
-  if (ult && ult.ago_s <= datosS) {
+  if (!(n.delivery_online ?? n.online)) {
+    const correcta = ult?.channels?.length && ult.channels.every(c => !c.st_code);
+    const anterior = correcta ? " Última lectura correcta hace " + fmtEdadEnVivo(ult.ago_s) + "." : "";
+    chips.push({ cls: "gris", txt: "Modbus: estado no observable." + anterior });
+  } else if (ult && ult.ago_s <= datosS) {
     const canales = ult.channels ?? [];
     const malos = canales.filter((c) => c.st_code);
     if (!canales.length) {
@@ -699,7 +708,7 @@ function chipsNodo(n, ult, onlineS) {
 
 function textoRuta(n) {
   const activa = n.delivery_online ?? n.online;
-  const ruta = n.transport === "relay" ? `mediante supernodo ${n.via_publisher}`
+  const ruta = n.transport === "relay" ? `mediante ${nombreNodoRuta(n.via_publisher)}`
     : n.transport === "nbiot" ? "por NB-IoT" : "por LoRa al gateway";
   if (n.observation_lost || (!activa && n.cellular_observable === false && n.transport !== "lora"))
     return `Estado no observable; última ruta ${ruta}`;
@@ -787,6 +796,67 @@ function pintarBadge(data) {
   cabecera.setNetworkStatus(online, total);
 }
 
+// Conserva los elementos existentes para que una nueva medida no borre sus iconos.
+function actualizarContenido(destino, html) {
+  const plantilla = document.createElement("template");
+  plantilla.innerHTML = html;
+  function clave(n) {
+    return n.nodeType === 1 && n.tagName === "MODULINKR-NODE-CARD"
+      ? n.getAttribute("data-origin") : null;
+  }
+  function sincronizar(actual, nuevo) {
+    if (actual.nodeType !== nuevo.nodeType || actual.nodeName !== nuevo.nodeName) {
+      actual.replaceWith(nuevo.cloneNode(true));
+      return;
+    }
+    if (actual.nodeType !== 1) {
+      if (actual.nodeValue !== nuevo.nodeValue) actual.nodeValue = nuevo.nodeValue;
+      return;
+    }
+    const accesible = ["MODULINKR-NODE-CARD", "MODULINKR-MEASUREMENT"].includes(actual.tagName)
+      || actual.classList.contains("tn-cabecera");
+    for (const a of [...actual.attributes]) {
+      if (accesible && ["role", "tabindex", "aria-label"].includes(a.name)) continue;
+      if ((a.name === "style" && actual.tagName === "MODULINKR-NODE-CARD") ||
+          (a.name === "open" && actual.tagName === "DETAILS") ||
+          (actual.tagName === "MODULINKR-ICON" && ["aria-hidden", "role", "aria-label", "data-icon-error"].includes(a.name))) continue;
+      if (!nuevo.hasAttribute(a.name)) actual.removeAttribute(a.name);
+    }
+    for (const a of nuevo.attributes)
+      if (actual.getAttribute(a.name) !== a.value) actual.setAttribute(a.name, a.value);
+    if (actual.tagName === "MODULINKR-ICON") return;
+    hijos(actual, nuevo);
+    if (actual.tagName === "MODULINKR-NODE-CARD") {
+      const label = "Abrir " + (actual.querySelector(".tn-nombre")?.textContent?.trim() || "nodo");
+      actual.setAttribute("aria-label", label);
+      actual.querySelector(".tn-cabecera")?.setAttribute("aria-label", label);
+    }
+    if (actual.tagName === "MODULINKR-MEASUREMENT")
+      actual.setAttribute("aria-label", "Abrir histórico de " + actual.querySelector(".s-nombre")?.textContent?.trim());
+  }
+  function hijos(actual, nuevo) {
+    let cursor = actual.firstChild;
+    for (const siguiente of [...nuevo.childNodes]) {
+      const id = clave(siguiente);
+      if (id !== null) {
+        const existente = [...actual.childNodes].find(n => clave(n) === id);
+        if (existente && existente !== cursor) actual.insertBefore(existente, cursor);
+        if (existente) cursor = existente;
+        else {
+          actual.insertBefore(siguiente.cloneNode(true), cursor);
+          continue;
+        }
+      }
+      if (!cursor) { actual.appendChild(siguiente.cloneNode(true)); continue; }
+      const despues = cursor.nextSibling;
+      sincronizar(cursor, siguiente);
+      cursor = despues;
+    }
+    while (cursor) { const siguiente = cursor.nextSibling; cursor.remove(); cursor = siguiente; }
+  }
+  hijos(destino, plantilla.content);
+}
+
 function firmaSinEdades(html) {
   return html.replace(/(<span data-live-age="[^"]+">)[^<]*(<\/span>)/g, "$1$2");
 }
@@ -812,7 +882,7 @@ function proyectarRed() {
     tarjetaNodo(n, porOrigen.get(n.origin), cacheEstado.online_s, catalogos.get(n.origin))).join("");
   const firma = firmaSinEdades(html);
   if (firma !== firmaTarjetas) {
-    document.getElementById("tarjetas").innerHTML = html;
+    actualizarContenido(document.getElementById("tarjetas"), html);
     firmaTarjetas = firma;
     programarMasonryTarjetas();
   }
@@ -908,11 +978,11 @@ function pintarModalCabecera() {
   const ultima = c.st_code && c.value_ago_s != null
     ? `Última lectura válida hace ${edadEnVivo(redAhora - c.value_ago_s)}`
     : `Última lectura hace ${edadEnVivo(nodo.t_last)}`;
-  document.getElementById("modal-cuando").textContent = ultima;
-  document.getElementById("modal-valor").innerHTML = c.st_code
+  actualizarContenido(document.getElementById("modal-cuando"), ultima);
+  actualizarContenido(document.getElementById("modal-valor"), c.st_code
     ? `<span class="s-fallo" title="${tituloFallo(c)}">${valorFallo(c)}</span>`
     : fmtValor(c.value) +
-      (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : "");
+      (c.unit ? ` <span class="s-unidad">${unidad(c.unit)}</span>` : ""));
 }
 
 // Zona horaria de visualización (ajuste del gateway, GET /api/ajustes).
@@ -974,7 +1044,7 @@ function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
         const [t, v] = ps[0].value;
         const d = new Date(t);
         return `${fmtDia(d)} ${fmtHora(d)}<br><b>${fmtValor(v)}` +
-               (unit ? " " + unit : "") + "</b>";
+               (unit ? " " + htmlSeguro(unit) : "") + "</b><br>" + viaMuestras(ps[0].value);
       },
     },
     xAxis: {
@@ -1021,6 +1091,7 @@ function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
       lineStyle: { color: colorSerie, width: 2 },
       itemStyle: { color: colorSerie },
       areaStyle: { color: colorSerie, opacity: 0.08 },
+      encode: { x: 0, y: 1 },
       data: puntos,
     }],
   };
@@ -1073,7 +1144,7 @@ async function cargarModalGrafica() {
       const r = await fetchApi("/api/datos/series?" + q);
       if (r.ok) {
         const pts = (await r.json()).series[0]?.points ?? [];
-        if (pts.length >= 2) puntos = pts.map(([t, v]) => [t * 1000, v]);
+        if (pts.length >= 2) puntos = pts.map(([t, v, lo, nb]) => [t * 1000, v, lo, nb]);
       } else {
         error = "No se pudo cargar el histórico. Vuelve a intentarlo.";
       }
@@ -1196,17 +1267,17 @@ function pintarDetalle(origin) {
   if (origin === 255) {
     titulo.textContent = "Gateway";
     subtitulo.textContent = "Coordinador de la red";
-    icono.innerHTML = iconoMdi("radio-tower");
-    estados.innerHTML = cacheEstado
-      ? estadoGateway(cacheEstado).chips.map(chipConexion).join("") : "";
-    cuerpo.innerHTML = `<div class="det-grupo"><h3>Radio LoRa</h3>
+    actualizarContenido(icono, iconoMdi("radio-tower"));
+    actualizarContenido(estados, cacheEstado
+      ? estadoGateway(cacheEstado).chips.map(chipConexion).join("") : "");
+    actualizarContenido(cuerpo, `<div class="det-grupo"><h3>Radio LoRa</h3>
       ${filaDet("Duty cycle, última hora", chipDuty(cacheEstado ? cacheEstado.gateway_duty_1h : null))}
       ${filaDet("Límite permitido", "10 %")}
     </div>
-    <p class="leyenda">Límite aplicable a la banda de radio configurada.</p>`;
-    acciones.innerHTML = `<a class="detalle-accion" href="#/topologia" data-detalle-accion="topologia">
+    <p class="leyenda">Límite aplicable a la banda de radio configurada.</p>`);
+    actualizarContenido(acciones, `<a class="detalle-accion" href="#/topologia" data-detalle-accion="topologia">
       ${iconoMdi("graph-outline")}<span>Ver topología</span>${iconoMdi("chevron-right")}
-    </a>`;
+    </a>`);
     return;
   }
 
@@ -1216,17 +1287,17 @@ function pintarDetalle(origin) {
   const supernodo = esSupernodo(n, u);
   titulo.textContent = n.name ?? (supernodo ? "Supernodo " : "Nodo ") + n.origin;
   subtitulo.textContent = `${supernodo ? "Supernodo" : "Nodo"} ${n.origin}`;
-  icono.innerHTML = supernodo
+  actualizarContenido(icono, supernodo
     ? '<modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon>'
-    : iconoMdi("radio-handheld");
-  estados.innerHTML = chipsNodo(n, u, cacheEstado?.online_s ?? 60)
-    .map(chipConexion).join("");
+    : iconoMdi("radio-handheld"));
+  actualizarContenido(estados, chipsNodo(n, u, cacheEstado?.online_s ?? 60)
+    .map(chipConexion).join(""));
 
   const sensores = (u?.channels ?? [])
     .map((canal, indice) => medidaDetalle(origin, canal, indice)).join("");
   const estado = chipEstado(n, u, cacheEstado?.online_s ?? 60);
 
-  cuerpo.innerHTML = `
+  actualizarContenido(cuerpo, `
     <div class="det-grupo"><h3>Información</h3>
       ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
       ${filaDet("Última actividad LoRa observada", n.last_seen ? "Hace " + edadEnVivo(n.last_seen) : "Sin observaciones")}
@@ -1243,12 +1314,12 @@ function pintarDetalle(origin) {
       ${filaDet("Saltos", n.hop_count ?? "")}
       ${filaDet("Duty cycle, última hora", chipDuty(n.duty_1h))}
     </div>
-    ${bloqueSalud(n.health)}`;
+    ${bloqueSalud(n.health)}`);
   const diagnostico = cuerpo.querySelector(".detalle-diagnostico");
   if (diagnostico) diagnostico.open = diagnosticoAbierto;
   cuerpo.scrollTop = desplazamiento;
-  acciones.innerHTML = `<button class="detalle-accion" type="button" data-detalle-accion="datos"
-      data-origin="${origin}">${iconoMdi("chart-line")}<span>Ver más datos</span>${iconoMdi("chevron-right")}</button>`;
+  actualizarContenido(acciones, `<button class="detalle-accion" type="button" data-detalle-accion="datos"
+      data-origin="${origin}">${iconoMdi("chart-line")}<span>Ver más datos</span>${iconoMdi("chevron-right")}</button>`);
 }
 
 // Salud del nodo, del NODE_HEALTH (§16.1). Los contadores llegaban al gateway
@@ -1536,7 +1607,7 @@ function nodoVisualTopologia(n, posicion = null) {
 
 function aristaVisualTopologia(e) {
   const porNbiot = e.transport === "nbiot";
-  const color = !e.online ? COLOR.off : e.transport === "relay" ? COLOR.relay : porNbiot ? COLOR.ok : COLOR.dim;
+  const color = !e.online ? COLOR.off : e.transport === "relay" ? COLOR.relay : porNbiot ? COLOR.ok : COLOR.accent;
   const opacidad = e.online ? 0.72 : 0.58;
   const ancho = e.online ? 1.8 : 1.5;
   return {
@@ -1547,10 +1618,11 @@ function aristaVisualTopologia(e) {
     arrowStrikethrough: false,
     color: { color, hover: color, highlight: color, opacity: opacidad },
     width: ancho,
-    dashes: !e.online ? [7, 6] : e.transport === "relay" ? [2, 5] : false,
-    title: e.transport === "relay"
-      ? `Entrega mediante supernodo ${e.to}; saltos LoRa intermedios no confirmados${e.online ? "" : "; sin actividad reciente"}`
-      : `${porNbiot ? "NB-IoT" : "LoRa"}: ${e.online ? "actividad reciente" : "sin actividad reciente"}`,
+    dashes: !e.online ? [7, 6] : e.relation === "delivery" ? [2, 5] : false,
+    title: e.relation === "delivery"
+      ? `Entrega mediante ${nombreNodoRuta(e.to)}; recorrido no reportado`
+      : e.relation === "declared" ? "Padre anunciado; recorrido de muestras no confirmado"
+      : `${porNbiot ? "NB-IoT" : "LoRa"}: ${e.online ? "recorrido observado recientemente" : "último recorrido observado, sin confirmación reciente"}`,
     smooth: false,
     chosen: false,
   };
@@ -2273,6 +2345,11 @@ const EJE_X = {
   axisTick: { lineStyle: { color: COLOR.border } },
 };
 
+function viaMuestras(value) {
+  const lo = Number(value?.[2] ?? 0), nb = Number(value?.[3] ?? 0);
+  return lo || nb ? `Vía registrada: ${[lo ? `${lo} LoRa` : "", nb ? `${nb} NB-IoT` : ""].filter(Boolean).join(" · ")}` : "Vía no disponible";
+}
+
 function tooltipGrafico(parametros) {
   const lista = Array.isArray(parametros) ? parametros : [parametros];
   const contenedor = document.createElement("div");
@@ -2297,7 +2374,7 @@ function tooltipGrafico(parametros) {
     const medida = document.createElement("span");
     medida.textContent = nombreMedida(meta.read_id == null ? { name: parametro.seriesName } : meta);
     const nodo = document.createElement("small");
-    nodo.textContent = meta.node_name ?? "";
+    nodo.textContent = [meta.node_name, viaMuestras(parametro.value)].filter(Boolean).join(" · ");
     textos.append(medida, nodo);
     const valor = document.createElement("b");
     const numero = Array.isArray(parametro.value) ? parametro.value[1] : parametro.value;
@@ -2316,7 +2393,8 @@ function opcionesGrafico(series) {
     type: "line", showSymbol: false, sampling: "lttb",
     lineStyle: { color: colorDeCanal(s.channel_id), width: 2 },
     itemStyle: { color: colorDeCanal(s.channel_id) },
-    data: s.points.map(([t, v]) => [t * 1000, v]),
+    encode: { x: 0, y: 1 },
+    data: s.points.map(([t, v, lo, nb]) => [t * 1000, v, lo, nb]),
   });
   const seleccionLeyenda = Object.fromEntries(series.map((serie) => [
     etiquetaCanal(serie.channel_id), !seriesOcultas.has(String(serie.channel_id)),
@@ -2431,7 +2509,7 @@ async function graficar() {
   const anchoGrafico = document.getElementById("grafico")?.clientWidth ?? 800;
   const maxPuntos = Math.max(240, Math.min(1200, Math.round(anchoGrafico * 0.75)));
   const q = new URLSearchParams({
-    channels: [...seleccion].join(","), ...rg, max_puntos: String(maxPuntos),
+    channels: [...seleccion].join(","), via: document.getElementById("datos-via").value, ...rg, max_puntos: String(maxPuntos),
   });
   try {
     const r = await fetchApi("/api/datos/series?" + q);
@@ -2470,11 +2548,12 @@ function exportarCsv() {
     aviso.textContent = "Selecciona al menos una medida y un periodo.";
     return;
   }
-  const q = new URLSearchParams({ channels: [...seleccion].join(","), ...rg });
+  const q = new URLSearchParams({ channels: [...seleccion].join(","), via: document.getElementById("datos-via").value, ...rg });
   // Descarga por navegación: el navegador gestiona el attachment.
   window.location.href = "/api/datos/csv?" + q;
 }
 
+document.getElementById("datos-via").addEventListener("change", programarGrafico);
 selectorPeriodo.addEventListener("modulinkr-period-change", programarGrafico);
 selectorPeriodo.addEventListener("modulinkr-period-export", exportarCsv);
 selectorMedidas.addEventListener("modulinkr-measures-apply", (evento) => {
