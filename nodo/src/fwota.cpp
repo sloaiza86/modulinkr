@@ -300,6 +300,7 @@ State onData(uint32_t xfer, uint32_t offset, const uint8_t* data, size_t len) {
 
 uint32_t written()  { return flushed_ + staged_; }
 uint32_t totalLen() { return total_; }
+bool receiving(uint32_t now_ms) { return xfer_ != 0 && !ready_ && !failed_ && now_ms - last_ms_ < 30000; }
 uint32_t xfer()     { return xfer_; }
 bool     ready()    { return ready_; }
 

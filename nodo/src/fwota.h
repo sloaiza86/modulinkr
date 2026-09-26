@@ -151,3 +151,5 @@ bool confirmRunning();
 bool rollbackRunning();
 
 }  // namespace fwota
+
+namespace fwota { bool receiving(uint32_t now_ms); }

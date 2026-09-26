@@ -1,4 +1,5 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.65"
+#define MODULINKR_FIRMWARE_VERSION "0.0.66"
+#include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
 // ModuLinkr, firmware del nodo (V2)
@@ -472,6 +473,11 @@ void printBanner() {
     }
 }
 
+statusled::Evidence g_led_lora, g_led_custody, g_led_cellular;
+uint8_t g_led_modbus_failures = 0, g_led_search_failures = 0;
+bool g_led_nb_started = false;
+uint8_t g_led_parent = 0, g_led_custody_target = 0;
+
 void setLed(uint32_t color) {
     M5.dis.drawpix(0, color);
 }
@@ -534,7 +540,13 @@ bool fireLora() {
     // Muestreo en la ventana callada: la radio lleva casi todo el ciclo
     // sin actividad, igual que el firmware previo leía el sensor justo
     // antes de transmitir (ver cabecera de sampler.h).
+    const uint32_t errors_before = sampler.errCount();
     sampler.pollDue();
+    if (sampler.errCount() != errors_before) {
+        if (g_led_modbus_failures < 3) ++g_led_modbus_failures;
+    } else {
+        g_led_modbus_failures = 0;
+    }
 
     // Snapshot de todas las lecturas, en el orden global de reads[] (el
     // mismo del payload TELEMETRY, frame-format.md §3.1). v3.2: siempre
@@ -677,6 +689,14 @@ void handleAck(const LoraP2P::RxFrame& f) {
         if ((f.origin_id==protocol::kAddrGateway) != (status==protocol::kAckOk)) return;
         if (pending.ack(ack_seq, dest, f.origin_id)) {
             g_lora_acked++;
+            if (status == protocol::kAckOkViaNbiot) {
+                g_led_custody.ok(millis());
+                g_led_custody_target = f.origin_id;
+            } else {
+                g_led_lora.ok(millis());
+                g_led_parent = mesh.hasParent() ? mesh.parentId() : 0;
+            }
+            g_led_search_failures = 0;
 
             // Si la muestra vivía en la outbox (drenaje o custodia),
             // queda entregada y sale de ahí.
@@ -1592,6 +1612,7 @@ void handleFwInstall(const LoraP2P::RxFrame& f) {
 
     // Se anota la instalación ANTES de reiniciar: si la imagen nueva no
     // arranca, el registro es lo único que quedará contándolo.
+    setLed(statusled::violet);
     g_health.fw_installs++;
     health::save(g_health);
     // Y se suelta el mapa de la difusión, que a partir de este momento describe
@@ -1873,6 +1894,7 @@ void processAckTimeouts() {
             // la búsqueda vuelve a empezar con backoff.
             diag::log("WARNING", "node.supernode", "supernode.supernode_unresponsive", "id=%u search_restarted=true\n", e->dest);
             g_outbox_inflight = false;
+            g_led_custody.lost();
             g_sn_state        = SnState::IDLE;
             g_sn_next_req_ms  = now + g_sn_backoff_ms;
             g_sn_backoff_ms   = min(g_sn_backoff_ms * 2, kSnBackoffMaxMs);
@@ -1898,6 +1920,7 @@ void processAckTimeouts() {
         diag::log("INFO", "node.lora", "lora.retry", "seq=%u attempt=%u/%u via=%u wait_ms=%lu result=%s\n", e->seq, e->retries, g_cfg.max_retries, mesh.parentId(), static_cast<unsigned long>(e->timeout_ms), LoraP2P::statusToString(st));
     } else {
         // Cuenta contra el padre (spec §2.2) y la muestra se retiene.
+        g_led_lora.lost();
         mesh.onDeliveryFail();
         retainInOutbox(*e, mesh.hasParent() ? "retries_exhausted"
                                             : "retries_exhausted_parent_invalidated");
@@ -1964,6 +1987,7 @@ void snClientTick(uint32_t now) {
                     g_sn_next_req_ms = now + g_sn_backoff_ms;
                     diag::log("WARNING", "node.supernode", "supernode.supernode_clock_unavailable", "id=%u retry_ms=%lu\n", g_sn_target, static_cast<unsigned long>(g_sn_backoff_ms));
                 } else {
+                    if (g_led_search_failures < 3) ++g_led_search_failures;
                     // Sin ofertas: backoff creciente.
                     g_sn_state       = SnState::IDLE;
                     g_sn_next_req_ms = now + g_sn_backoff_ms;
@@ -2464,12 +2488,55 @@ EspSoftwareSerial::Config swserialConfig(char parity, uint8_t stopbits) {
 
 }  // namespace
 
+void statusLedTick(uint32_t now) {
+    static uint32_t published = 0, errors = 0;
+    static uint8_t nb_failures = 0;
+    static bool was_backoff = false;
+    const uint8_t next_parent = mesh.hasParent() ? mesh.parentId() : 0;
+    if (g_led_parent != next_parent) { g_led_lora.lost(); g_led_parent = next_parent; }
+    if (g_led_custody_target != g_sn_target) { g_led_custody.lost(); g_led_custody_target = g_sn_target; }
+    const bool backoff = nbsvc.state() == NbiotService::State::BACKOFF;
+    if (backoff && !was_backoff && nb_failures < 3) ++nb_failures;
+    was_backoff = backoff;
+    if (nbsvc.publishedErr() != errors) {
+        errors = nbsvc.publishedErr();
+        g_led_cellular.lost();
+    }
+    if (nbsvc.publishedOk() != published) {
+        published = nbsvc.publishedOk();
+        g_led_cellular.ok(now);
+        nb_failures = 0;
+    }
+    if (!nbsvc.ready()) g_led_cellular.lost();
+    statusled::Input state;
+    state.configured = g_configured;
+    state.fatal = !g_lora_ready && (!g_cfg.super_node || !g_led_nb_started);
+    state.updating = fwbcast::receiving(now) || fwota::receiving(now);
+    state.synchronized = nodeclock::synced();
+    state.modbusFault = g_led_modbus_failures >= 3;
+    if (g_lora_ready && mesh.hasParent()) {
+        state.path = statusled::Path::Lora;
+        state.confirmed = g_led_lora.fresh(now, g_cfg.send_interval_ms);
+    } else if (g_cfg.super_node && g_led_nb_started && nb_failures < 3) {
+        state.path = statusled::Path::Cellular;
+        state.confirmed = g_led_cellular.fresh(now, g_cfg.send_interval_ms);
+    } else if (!g_cfg.super_node && g_sn_state == SnState::DELIVER) {
+        state.path = statusled::Path::Custody;
+        state.confirmed = g_led_custody.fresh(now, g_cfg.send_interval_ms);
+    }
+    state.exhausted = g_cfg.super_node ? (!g_led_nb_started || nb_failures >= 3) : g_led_search_failures >= 3;
+    static uint32_t previous = 0xFFFFFFFF;
+    const uint32_t current = statusled::color(state, now);
+    if (current != previous) { setLed(current); previous = current; }
+}
+
 void setup() {
     diag::epochClock = nodeclock::epochNow;
     // El buffer RX de Serial se amplía ANTES de begin: el payload de
     // CFG.PUT llega a ráfagas de 115200 baud y el buffer por defecto
     // (256 B) se desbordaría entre vueltas del loop.
     M5.begin(/*serial_enable=*/false, /*i2c_enable=*/false, /*led_enable=*/true);
+    setLed(statusled::white);
     Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     delay(200);
@@ -2590,7 +2657,7 @@ void setup() {
     printBanner();
     diag::log("INFO", "node.register", "register.catalog", "catalog_bytes=%u fragments=%u",
                   static_cast<unsigned>(g_reg_catalog_len), g_reg_frag_total);
-    setLed(0x202000);
+    setLed(statusled::white);
 
     // ----- Modbus sobre SoftwareSerial, parámetros del config -----
     modbus_uart.begin(g_cfg.baudrate,
@@ -2654,7 +2721,8 @@ void setup() {
         nbcfg.mqtt_pass   = g_cfg.mqtt_pass;
         nbcfg.client_id   = g_client_id;
         nbcfg.topic_batch = g_cfg.topic_batch;
-        if (nbsvc.begin(nbcfg)) {
+        g_led_nb_started = nbsvc.begin(nbcfg);
+        if (g_led_nb_started) {
             diag::log("INFO", "node.init", "init.nb_iot_service_started", "core=0 blocking=false");
         } else {
             diag::log("ERROR", "node.init", "init.nb_iot_service_start_failed", "");
@@ -2664,7 +2732,7 @@ void setup() {
     }
 
     if (g_lora_ready) {
-        setLed(0x002000);
+        setLed(statusled::blue);
         diag::log("INFO", "node.init", "init.ready", "mesh_available=true");
     } else {
         setLed(0x200000);
@@ -2683,22 +2751,18 @@ void loop() {
     fwTrialTick(millis());
     pendingTick();
 
-    // Sin config válido: LED rojo parpadeando, recordatorio periódico en
+    // Sin config válido: LED rojo fijo, recordatorio periódico en
     // el log (con el motivo: ausente o inválido) y nada más que hacer.
     if (!g_configured) {
         const uint32_t wait_now = millis();
         static uint32_t last_log_ms   = 0;
-        static uint32_t last_blink_ms = 0;
-        static bool     led_on        = false;
+
+
         if (wait_now - last_log_ms >= 5000) {
             last_log_ms = wait_now;
             diag::log("ERROR", "node.config", "config.status", "state=%s error=%s waiting_for=CFG.PUT\n", g_cfg_missing ? "missing" : "invalid", g_cfg_err);
         }
-        if (wait_now - last_blink_ms >= 500) {
-            last_blink_ms = wait_now;
-            led_on = !led_on;
-            setLed(led_on ? 0x200000 : 0x000000);
-        }
+        setLed(statusled::red);
         delay(20);
         return;
     }
@@ -2750,6 +2814,7 @@ void loop() {
             const bool had_parent = mesh.hasParent();
             mesh.tick(tnow);
             if (had_parent && !mesh.hasParent()) {
+                g_led_lora.lost();
                 diag::log("WARNING", "node.mesh", "mesh.parent_lost", "reason=beacon_silence");
             }
             registrationTick(tnow);
@@ -2788,5 +2853,6 @@ void loop() {
         }
     }
 
+    statusLedTick(millis());
     delay(20);
 }

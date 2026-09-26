@@ -514,6 +514,7 @@ void onData(uint32_t xfer, uint16_t index, const uint8_t* data, size_t len) {
 uint32_t xfer()       { return xfer_; }
 uint16_t totalFrags() { return n_orig_; }
 uint16_t missing()    { return (map_ == nullptr) ? 0 : (n_orig_ - got_); }
+bool receiving(uint32_t now_ms) { return map_ != nullptr && !complete() && now_ms - last_ms_ < 30000; }
 bool     complete()   { return map_ != nullptr && got_ == n_orig_ && n_orig_ > 0; }
 
 uint8_t mapParts() {

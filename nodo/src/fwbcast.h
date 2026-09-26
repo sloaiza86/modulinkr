@@ -108,3 +108,5 @@ void     mask(uint32_t xfer_id, uint16_t block, uint8_t parity,
               uint16_t k, uint8_t* out);
 
 }  // namespace fwbcast
+
+namespace fwbcast { bool receiving(uint32_t now_ms); }
