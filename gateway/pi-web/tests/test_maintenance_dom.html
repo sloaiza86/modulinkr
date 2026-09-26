@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mantenimiento: comprobación local</title>
+<link rel="stylesheet" href="../static/style.css?v=maintenance-1">
+<script src="../static/components.js?v=maintenance-1"></script>
+<style>body{display:block;padding:24px}#fixture{max-width:960px;margin:auto}#results{max-width:960px;margin:0 auto 20px;font:12px system-ui}</style>
+<p id="results">Comprobando con servicios simulados…</p>
+<main id="fixture"></main>
+<script>
+(async()=>{
+ const results=[];
+ const check=(ok,label)=>{if(!ok)throw Error(label);results.push(label)};
+ try{
+  const html=await(await fetch('../static/index.html',{cache:'no-store'})).text();
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  const panel=doc.querySelector('#cfg-mantenimiento');panel.hidden=false;
+  document.querySelector('#fixture').append(panel);
+  document.body.append(doc.querySelector('#cfg-dialogo'),doc.querySelector('#cfg-dialogo-fondo'));
+  const source=await(await fetch('../static/app.js',{cache:'no-store'})).text();
+  const section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+  const factory=new Function(`
+    ${section('function mensajeConfigNodo(', 'function textoError(')}
+    ${section('function tipoMensaje(', '// Chip de duty cycle:')}
+    iniciarMensajes();
+    const sessionStorage={getItem:()=>null,setItem:()=>{},removeItem:()=>{}};
+    let operation=null,posts=0,phase='idle',postStatus=200,offline=false;
+    const fetch=async(url,options)=>{
+      if(offline)throw Error('sin conexión');
+      if(options.method==='POST'){
+        posts++; operation={id:String(posts),target:url.split('/').pop(),requested_at:Date.now()/1000,state:'pending'};
+        phase='pending';
+        if(postStatus!==200)return {ok:false,status:postStatus,json:async()=>({detail:'No se pudo programar o comprobar el reinicio.'})};
+      }else if(phase==='complete')operation.state='completed';
+      return {ok:true,status:200,json:async()=>({operation})};
+    };
+    ${section('const MANTENIMIENTO =', 'function cfgBotones(')}
+    ${section("const SPIN =", '// Tras un CFG.PUT')}
+    document.querySelector('#cfg-dialogo-confirmar').onclick=()=>cfgConfirmarCb?.();
+    document.querySelector('#cfg-dialogo-cancelar').onclick=cfgDialogoCerrar;
+    document.querySelector('#cfg-dialogo-cerrar').onclick=cfgDialogoCerrar;
+    return {uncertain:()=>{postStatus=503},offline:x=>{offline=x},load:mantenimientoCargar,posts:()=>posts,confirm:()=>cfgConfirmarCb(),complete:()=>{phase='complete'},reset:()=>{operation=null;phase='idle';mantenimientoEsperandoDesde=0;clearTimeout(mantenimientoTimer)}};
+  `);
+  const api=factory();await api.load();
+  const buttons=[...document.querySelectorAll('[data-reinicio]')];
+  check(buttons.length===3&&buttons.every(b=>!b.disabled),'Tres acciones disponibles');
+  buttons[0].click();
+  check(document.querySelector('#cfg-dialogo-titulo').textContent==='¿Reiniciar visor?','Confirmación específica');
+  check(api.posts()===0,'Abrir confirmación no reinicia');
+  document.querySelector('#cfg-dialogo-cancelar').click();
+  check(api.posts()===0,'Cancelar no envía la orden');
+  for(const button of buttons){
+    button.click();await api.confirm();await api.load();
+    check(buttons.every(b=>b.disabled),'Acciones bloqueadas durante '+button.dataset.reinicio);
+    const expected={web:'visor',communications:'comunicaciones',gateway:'gateway'}[button.dataset.reinicio];
+    check(document.querySelector('#mantenimiento-estado').textContent==='Reiniciando '+expected+'...','Texto específico tras tratamiento global: '+expected);
+    api.complete();await api.load();
+    check(document.querySelector('#mantenimiento-estado').textContent===''&&buttons.every(b=>!b.disabled),'Recuperación sin aviso persistente de '+button.dataset.reinicio);
+  }
+  api.uncertain();buttons[2].click();await api.confirm();await api.load();
+  check(document.querySelector('#mantenimiento-estado').textContent==='Reiniciando gateway...','HTTP 503 no anuncia un falso fallo');
+  const sent=api.posts();api.offline(true);await api.load();
+  check(document.querySelector('#mantenimiento-estado').textContent==='Reiniciando gateway...'&&api.posts()===sent,'Desconexión mantiene espera sin repetir la orden');
+  api.offline(false);api.complete();await api.load();
+  check(buttons.every(b=>!b.disabled)&&document.querySelector('#mantenimiento-estado').textContent==='','Recuperación tras desconexión');
+  check(!document.querySelector('#mantenimiento-comprobar'),'Sin botón de comprobación manual');
+  check(new Set(buttons.map(b=>getComputedStyle(b.closest('.mantenimiento-fila')).backgroundColor)).size===1,'Fondo uniforme en las tres acciones');
+  api.reset();await api.load();
+  const layout=document.createElement('div');layout.style.cssText='display:flex;flex-direction:column;height:600px';
+  const banner=doc.querySelector('#red-observacion');banner.hidden=false;banner.textContent='Sin conexión con el gateway.';
+  layout.append(banner);document.querySelector('#fixture').prepend(layout);
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  check(banner.getBoundingClientRect().height<100,'Aviso compacto dentro de una columna flexible');
+  document.body.classList.add('mantenimiento-reiniciando');
+  check(getComputedStyle(banner).display==='none','Aviso global oculto durante el reinicio');
+  document.body.classList.remove('mantenimiento-reiniciando');
+  check(banner.getBoundingClientRect().height>0&&banner.getBoundingClientRect().height<100,'Aviso global compacto al terminar');
+  layout.remove();
+  document.querySelector('#results').textContent=results.length+' comprobaciones correctas: '+results.join(' · ');
+ }catch(error){document.querySelector('#results').textContent='FAIL: '+error.stack}
+})();
+</script>

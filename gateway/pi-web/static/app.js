@@ -266,7 +266,6 @@ function textoCliente(texto) {
     [/^encolando.*$/i, "Guardando los cambios..."],
     [/^guardando y reiniciando.*$/i, "Guardando los cambios..."],
     [/^aplicando el puerto y reiniciando.*$/i, "Aplicando el cambio..."],
-    [/^reiniciando.*$/i, "Aplicando los cambios..."],
   ];
   for (const [patron, reemplazo] of procesos) {
     if (patron.test(original)) return reemplazo;
@@ -414,6 +413,7 @@ const TITULOS = { red: "Resumen de red", topologia: "Topología de red", datos: 
 let vistaNavegada = null;
 
 const RUTAS_CONFIG = {
+  "mantenimiento": { panel: "cfg-mantenimiento", titulo: "Mantenimiento", volver: "#/configuracion" },
   "":              { panel: "cfg-menu",     titulo: "Configuración",           volver: null },
   "nodo":          { panel: "cfg-sub-nodo", titulo: "Nodos",                   volver: "#/configuracion" },
   "nodo/firmware": { panel: "cfg-fw",       titulo: "Actualizar firmware de nodos", volver: "#/configuracion/nodo" },
@@ -463,6 +463,7 @@ function navegar() {
     prepararTopologiaAlMostrar();
     refrescarMapa();
   }
+  if (v === "red") programarMasonryTarjetas();
   if (v === "datos" && catalogo === null) cargarCatalogo();
   if (v === "configuracion") cfgRuta();
   vistaNavegada = v;
@@ -728,7 +729,7 @@ function nodoDisponible(n, ult = null) {
 let masonryRaf = null;
 function ajustarMasonryTarjetas() {
   const cont = document.getElementById("tarjetas");
-  if (!cont) return;
+  if (!cont || !cont.getClientRects().length || cont.getBoundingClientRect().width === 0) return;
   cont.querySelectorAll(":scope > .tarjeta-nodo").forEach((tarjeta) => {
     tarjeta.style.gridRowEnd = "auto";
     const alto = tarjeta.getBoundingClientRect().height + 24;
@@ -2689,7 +2690,159 @@ function cfgRuta() {
   if (sub === "nodo/firmware") { fwCargar(); bcSondeoArrancar(); }
   else bcSondeoParar();
   if (sub === "nodo/form") formInit();
+  if (sub === "mantenimiento") mantenimientoCargar();
+  else { clearTimeout(mantenimientoTimer); document.body.classList.remove("mantenimiento-reiniciando"); }
 }
+
+const MANTENIMIENTO = {
+  web: { nombre: "Reiniciar visor", efecto: "La página perderá conexión brevemente. La recepción y el envío de muestras continuarán." },
+  communications: { nombre: "Reiniciar comunicaciones", efecto: "La recepción LoRa y el envío MQTT del gateway se interrumpirán temporalmente. El visor seguirá disponible." },
+  gateway: { nombre: "Reiniciar gateway", efecto: "El equipo completo se reiniciará. El visor y las comunicaciones dejarán de estar disponibles durante el arranque." },
+};
+let mantenimientoTimer = null;
+let mantenimientoRevision = 0;
+let mantenimientoEnviando = false;
+let mantenimientoAnterior = null;
+let mantenimientoIgnorarId = null;
+let mantenimientoEsperandoDesde = 0;
+let mantenimientoTarget = null;
+try {
+  const saved = JSON.parse(sessionStorage.getItem("modulinkr-reinicio") || "null");
+  if (saved && MANTENIMIENTO[saved.target] && Number.isFinite(saved.desde)) {
+    mantenimientoEsperandoDesde = saved.desde;
+    mantenimientoTarget = saved.target;
+    mantenimientoIgnorarId = saved.anterior;
+  }
+} catch (_) {}
+
+window.addEventListener("hashchange", () => {
+  if (location.hash !== "#/configuracion/mantenimiento") {
+    clearTimeout(mantenimientoTimer);
+    document.body.classList.remove("mantenimiento-reiniciando");
+  }
+});
+
+function mantenimientoGuardarEspera() {
+  try {
+    if (mantenimientoEsperandoDesde) sessionStorage.setItem("modulinkr-reinicio", JSON.stringify({
+      desde: mantenimientoEsperandoDesde, target: mantenimientoTarget, anterior: mantenimientoIgnorarId,
+    }));
+    else sessionStorage.removeItem("modulinkr-reinicio");
+  } catch (_) {}
+}
+
+function mantenimientoMensajeEspera() {
+  const esperando = Date.now() - mantenimientoEsperandoDesde < 180000;
+  const nombre = mantenimientoTarget === "web" ? "visor" : mantenimientoTarget === "communications" ? "comunicaciones" : "gateway";
+  document.getElementById("mantenimiento-estado").textContent = esperando
+    ? `Reiniciando ${nombre}...`
+    : "No se ha podido confirmar que el servicio o el gateway haya vuelto.";
+  document.body.classList.toggle("mantenimiento-reiniciando", esperando && location.hash === "#/configuracion/mantenimiento");
+}
+
+function mantenimientoBotones(bloquear) {
+  document.querySelectorAll("[data-reinicio]").forEach(b => { b.disabled = bloquear; });
+}
+
+async function mantenimientoPeticion(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, { ...options, cache: "no-store", signal: controller.signal });
+    if (response.status === 401) {
+      const error = new Error("La sesión ha finalizado. Recarga la página para iniciar sesión.");
+      error.rechazado = true;
+      throw error;
+    }
+    const data = await response.json();
+    if (!response.ok) {
+      const error = new Error(data.error || data.detail || "No se pudo completar la operación.");
+      error.rechazado = [400, 401, 403, 409, 422].includes(response.status);
+      throw error;
+    }
+    return data;
+  } finally { clearTimeout(timeout); }
+}
+
+async function mantenimientoCargar() {
+  clearTimeout(mantenimientoTimer);
+  if (mantenimientoEnviando) return;
+  const revision = ++mantenimientoRevision;
+  const estado = document.getElementById("mantenimiento-estado");
+  mantenimientoBotones(true);
+  let repetir = false;
+  try {
+    const data = await mantenimientoPeticion("/api/mantenimiento/estado");
+    if (revision !== mantenimientoRevision) return;
+    const operation = data.operation;
+    if (mantenimientoEsperandoDesde && (!operation || operation.id === mantenimientoIgnorarId)) {
+      repetir = true;
+      mantenimientoMensajeEspera();
+    } else if (operation?.state === "pending") {
+      repetir = true;
+      mantenimientoTarget = operation.target;
+      if (!mantenimientoEsperandoDesde) mantenimientoEsperandoDesde = operation.requested_at * 1000;
+      mantenimientoGuardarEspera();
+      mantenimientoMensajeEspera();
+    } else {
+      mantenimientoEsperandoDesde = 0;
+      mantenimientoGuardarEspera();
+      document.body.classList.remove("mantenimiento-reiniciando");
+      estado.textContent = operation?.state === "timeout"
+        ? "No se ha podido confirmar que el servicio o el gateway haya vuelto." : "";
+      mantenimientoBotones(false);
+    }
+    mantenimientoAnterior = operation?.id ?? null;
+  } catch (error) {
+    if (revision !== mantenimientoRevision) return;
+    repetir = !error.rechazado;
+    if (error.rechazado) estado.textContent = error.message;
+    else if (mantenimientoEsperandoDesde) mantenimientoMensajeEspera();
+    else estado.textContent = "No se puede consultar el estado del gateway. Reintentando...";
+  }
+  if (repetir && location.hash === "#/configuracion/mantenimiento")
+    mantenimientoTimer = setTimeout(mantenimientoCargar, 2500);
+}
+
+function mantenimientoConfirmar(target) {
+  const action = MANTENIMIENTO[target];
+  if (!action || mantenimientoEnviando) return;
+  cfgConfirmarCb = async () => {
+    cfgDialogoCerrar();
+    clearTimeout(mantenimientoTimer);
+    mantenimientoEnviando = true;
+    mantenimientoRevision++;
+    mantenimientoBotones(true);
+    mantenimientoIgnorarId = mantenimientoAnterior;
+    mantenimientoEsperandoDesde = Date.now();
+    mantenimientoTarget = target;
+    mantenimientoGuardarEspera();
+    mantenimientoMensajeEspera();
+    let rejected = false;
+    try {
+      await mantenimientoPeticion("/api/mantenimiento/reiniciar/" + target, {
+        method: "POST", headers: { "X-ModuLinkr-Maintenance": "1" },
+      });
+    } catch (error) {
+      if (error.rechazado) {
+        rejected = true;
+        mantenimientoEsperandoDesde = 0;
+        mantenimientoGuardarEspera();
+        document.body.classList.remove("mantenimiento-reiniciando");
+        document.getElementById("mantenimiento-estado").textContent = error.message;
+        mantenimientoBotones(false);
+      }
+    } finally { mantenimientoEnviando = false; }
+    if (!rejected) mantenimientoCargar();
+  };
+  cfgDialogo("¿" + action.nombre + "?", "<p>" + action.efecto + "</p><p>Se conservarán la configuración y los datos almacenados.</p>",
+    { cancelar: true, confirmar: true, confirmarText: action.nombre, confirmarPeligro: false });
+}
+
+document.querySelectorAll("[data-reinicio]").forEach(button => {
+  button.addEventListener("click", () => mantenimientoConfirmar(button.dataset.reinicio));
+});
+
 
 function cfgBotones(bloquear) {
   ["cfg-buscar", "cfg-leer", "cfg-archivo-btn", "cfg-enviar",

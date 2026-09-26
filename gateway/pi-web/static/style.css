@@ -1775,3 +1775,26 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
 #cfg-fw .cfg-acciones:not(:has(button:not([hidden]))):not(:has(.aviso:not(:empty))), #cfg-radio .cfg-acciones:not(:has(button:not([hidden]))) { display: none; }
 
 #fw-local-aviso:not(:empty), #fw-busqueda-aviso:not(:empty), #fw-resultado:not(:empty) { margin-top: 16px; }
+
+
+.mantenimiento-card { padding: 0; overflow: hidden; }
+.mantenimiento-fila { display: flex; align-items: center; gap: 16px; padding: 20px; }
+.mantenimiento-fila + .mantenimiento-fila { border-top: 1px solid var(--border); }
+.mantenimiento-fila .ai-texto { flex: 1; min-width: 0; }
+.mantenimiento-fila h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.mantenimiento-fila p { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.5; }
+.mantenimiento-fila button {
+  min-height: 44px; padding: 0 14px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--card); color: var(--accent); cursor: pointer;
+}
+.mantenimiento-fila button:disabled { opacity: 0.45; cursor: default; }
+#cfg-mantenimiento .texto-ayuda { font-size: 13px; line-height: 1.5; }
+#cfg-mantenimiento .aviso { width: auto; }
+@media (max-width: 600px) {
+  .mantenimiento-fila { flex-wrap: wrap; gap: 12px; padding: 16px; }
+  .mantenimiento-fila .ai-texto { flex-basis: calc(100% - 60px); }
+  .mantenimiento-fila button { margin-left: 52px; }
+}
+
+#red-observacion { flex: 0 0 auto; width: auto; margin: 12px 24px 0; }
+body.mantenimiento-reiniciando #red-observacion { display: none; }

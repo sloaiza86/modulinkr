@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Distribución del resumen de red</title>
+<link rel="stylesheet" href="../static/style.css">
+<style>body{display:block;padding:24px}#tarjetas{width:960px;grid-template-columns:repeat(2,1fr)}#results{white-space:pre-wrap}</style>
+<pre id="results">Comprobando…</pre>
+<div id="sidebar"></div>
+<modulinkr-view-router>
+<section id="view-red"><div id="tarjetas" class="grid-tarjetas">
+<div class="tarjeta-nodo" style="height:100px">Gateway</div>
+<div class="tarjeta-nodo" style="height:140px">Nodo</div>
+<div class="tarjeta-nodo" style="height:180px">Supernodo</div>
+</div></section>
+</modulinkr-view-router>
+<script>
+(async()=>{
+ const results=[];
+ const check=(ok,text)=>{if(!ok)throw Error(text);results.push('PASS: '+text)};
+ try{
+  const source=await(await fetch('../static/app.js',{cache:'no-store'})).text();
+  const section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+  const router=document.querySelector('modulinkr-view-router');
+  router.show=v=>{document.querySelector('#view-red').hidden=v!=='red'};
+  const api=new Function(`
+   let current='red',vistaNavegada='red',catalogo={};
+   const vistaActual=()=>current,TITULOS={red:'Resumen',configuracion:'Configuración'};
+   const cfgLocalCerrar=()=>{},migSondeoParar=()=>{},debugStop=()=>{},bcSondeoParar=()=>{},cfgRuta=()=>{},actualizarCabecera=()=>{};
+   ${section('let masonryRaf =','function tarjetaNodo(')}
+   ${section('function navegar()','window.addEventListener("hashchange"')}
+   return {go:v=>{current=v;navegar()},measure:ajustarMasonryTarjetas};
+  `)();
+  const frame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+  const cards=[...document.querySelectorAll('.tarjeta-nodo')];
+  api.go('red');await frame();await frame();await frame();
+  const initial=cards.map(c=>c.style.gridRowEnd);
+  const separated=()=>{
+   const bounds=cards.map(c=>c.getBoundingClientRect());
+   return bounds.every((a,i)=>bounds.slice(i+1).every(b=>a.right<=b.left||b.right<=a.left||a.bottom<=b.top||b.bottom<=a.top));
+  };
+  check(separated(),'Sin solapamiento inicial');
+  api.go('configuracion');cards[0].style.height='220px';api.measure();
+  check(cards.every((c,i)=>c.style.gridRowEnd===initial[i]),'La actualización oculta conserva las alturas reservadas');
+  api.go('red');await frame();await frame();await frame();
+  check(cards[0].style.gridRowEnd==='span 244','Volver a Resumen recalcula la nueva altura');
+  const bounds=cards.map(c=>c.getBoundingClientRect());
+  check(bounds.every((a,i)=>bounds.slice(i+1).every(b=>a.right<=b.left||b.right<=a.left||a.bottom<=b.top||b.bottom<=a.top)),'Sin solapamiento después de volver');
+ }catch(error){results.push('FAIL: '+error.stack)}
+ document.querySelector('#results').textContent=results.join('\n');
+})();
+</script>

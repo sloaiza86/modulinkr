@@ -255,3 +255,17 @@ SH
 ```
 
 Se recarga el navegador con `Cmd+Shift+R`. La copia de los binarios al gateway no los instala en los dispositivos. La instalación se realiza desde las pantallas correspondientes. Si la radio antigua no anuncia su versión, se utiliza «Recuperación de la radio» para instalar `0.3.2`. Se comprueba después que informe esa versión y que desaparezca la actualización normal. En los nodos se comprueba la identificación USB, la transición de `0.0.59` a `0.0.60`, la ausencia de reinstalación de la misma versión y el envío a los destinatarios seleccionados por LoRa.
+
+## Mantenimiento
+
+Configuración incluye Mantenimiento con reinicio del visor, del servicio de comunicaciones y del gateway completo. Cada acción requiere confirmación y conserva la configuración y los datos almacenados. Reiniciar comunicaciones no equivale a reiniciar físicamente la radio ni a reiniciar nodos.
+
+La API autenticada utiliza `maintenanceapi.py`. El instalador copia `pi-service/maintenance.py` a `/usr/local/libexec/modulinkr-maintenance`, propiedad de root, y añade una regla sudoers que permite únicamente los argumentos `web`, `communications` y `gateway`. La consulta `status` no requiere privilegios. `install_maintenance.sh` instala estos permisos también en gateways existentes, detectando el usuario del servicio del visor.
+
+La orden se programa mediante systemd con una demora de tres segundos para permitir la respuesta HTTP. El registro de la operación se guarda en `/var/lib/modulinkr-maintenance/operation.json`. Se confirma un servicio solo si cambia su InvocationID y vuelve a estar activo. El reinicio completo exige un boot_id diferente y ambos servicios activos. La página consulta el resultado y permite recuperarlo después de recargarse. Tras 180 segundos sin confirmación se informa de que no se ha podido verificar el reinicio; no se interpreta una mera reconexión como éxito ni se reenvía automáticamente la orden.
+
+Se rechaza el reinicio si existe una operación USB, una transferencia o instalación de firmware, un envío de configuración o una migración de red pendiente. Durante el reinicio se bloquean nuevas peticiones de modificación a la API. Los bloqueos no coordinan acciones externas realizadas por consola ni una programación Web Serial independiente en el navegador.
+
+Las pruebas de `tests/test_maintenance.py` simulan systemd y comprueban selección de acciones, persistencia, recuperación, cabecera de confirmación y bloqueos. `tests/test_maintenance_dom.html` verifica los controles y confirmaciones sin emitir reinicios reales. La validación de systemd, sudoers y arranque completo requiere el gateway operativo.
+
+El visor conserva la espera del reinicio en la sesión del navegador. Una desconexión o una respuesta HTTP 5xx mantiene la consulta automática sin repetir la orden. Al confirmarse la recuperación se habilitan las acciones y se retira el mensaje de progreso. No se muestra un historial persistente ni un botón de comprobación manual. El aviso global conserva una altura ajustada al texto y se oculta en Mantenimiento durante la espera inicial para evitar mensajes duplicados.

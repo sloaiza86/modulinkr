@@ -188,6 +188,7 @@ web_write_env() {
 }
 
 web_write_sudoers() {
+    bash "$APP_DIR/install_maintenance.sh" "$GW_USER"
     step "Permisos sudo acotados del visor"
     # Las páginas de configuración del visor ejecutan un puñado de acciones
     # privilegiadas acotadas. La regla protege frente a una sesión web

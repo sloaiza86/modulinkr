@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=chart-controls-20260926">
+  <link rel="stylesheet" href="/static/style.css?v=network-layout-20260926">
 </head>
 <body>
 
@@ -343,9 +343,41 @@
             </div>
             <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
+          <a class="ajuste-item" href="#/configuracion/mantenimiento">
+            <div class="ai-icono"><modulinkr-icon name="mdi:restart"></modulinkr-icon></div>
+            <div class="ai-texto"><div class="ai-titulo">Mantenimiento</div>
+              <div class="ai-sub">Reiniciar servicios o el gateway</div></div>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
+          </a>
           </div>
         </section>
         </div>
+
+      <div class="ajustes" id="cfg-mantenimiento" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion" title="Volver"><modulinkr-icon name="mdi:arrow-left"></modulinkr-icon></a>
+          <h2>Mantenimiento</h2>
+        </div>
+        <div class="card mantenimiento-card">
+          <div class="mantenimiento-fila">
+            <div class="ai-icono"><modulinkr-icon name="mdi:monitor-dashboard"></modulinkr-icon></div>
+            <div class="ai-texto"><h3>Reiniciar visor</h3><p>La página perderá conexión brevemente. Las comunicaciones seguirán funcionando.</p></div>
+            <button type="button" data-reinicio="web" aria-label="Reiniciar visor" disabled>Reiniciar</button>
+          </div>
+          <div class="mantenimiento-fila">
+            <div class="ai-icono"><modulinkr-icon name="mdi:access-point"></modulinkr-icon></div>
+            <div class="ai-texto"><h3>Reiniciar comunicaciones</h3><p>Interrumpe temporalmente la recepción LoRa y el envío MQTT del gateway. El visor permanece disponible.</p></div>
+            <button type="button" data-reinicio="communications" aria-label="Reiniciar comunicaciones" disabled>Reiniciar</button>
+          </div>
+          <div class="mantenimiento-fila">
+            <div class="ai-icono"><modulinkr-icon name="mdi:restart"></modulinkr-icon></div>
+            <div class="ai-texto"><h3>Reiniciar gateway</h3><p>Reinicia el equipo completo. El visor y las comunicaciones dejarán de estar disponibles durante el arranque.</p></div>
+            <button type="button" data-reinicio="gateway" aria-label="Reiniciar gateway" disabled>Reiniciar</button>
+          </div>
+        </div>
+        <p class="texto-ayuda">Los reinicios conservan la configuración y los datos almacenados.</p>
+        <p id="mantenimiento-estado" class="aviso" aria-live="polite"></p>
+      </div>
 
       <!-- Nivel 2: Configurar nodo -->
       <div class="ajustes" id="cfg-sub-nodo" hidden>
@@ -1294,8 +1326,8 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=chart-controls-20260926"></script>
+<script src="/static/components.js?v=network-layout-20260926"></script>
 <script src="/static/network-state.js?v=route-trace-20260921"></script>
-<script src="/static/app.js?v=chart-controls-20260926"></script>
+<script src="/static/app.js?v=network-layout-20260926"></script>
 </body>
 </html>

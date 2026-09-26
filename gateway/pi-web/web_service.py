@@ -75,6 +75,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import netstatus
+from starlette.concurrency import run_in_threadpool
 
 LOG = logging.getLogger("modulinkr.web")
 logging.Formatter.converter = time.gmtime
@@ -296,6 +297,7 @@ import wifiapi  # noqa: E402
 # ----- Módulo: herramientas de depuración (logs en vivo por SSE) -----
 
 import debugapi  # noqa: E402
+import maintenanceapi  # noqa: E402
 
 # ----- Stub de fase futura -----
 
@@ -325,6 +327,34 @@ app.include_router(dbapi.router, dependencies=[Depends(require_auth)])
 app.include_router(otaapi.router, dependencies=[Depends(require_auth)])
 app.include_router(wifiapi.router, dependencies=[Depends(require_auth)])
 app.include_router(debugapi.router, dependencies=[Depends(require_auth)])
+app.include_router(maintenanceapi.router, dependencies=[Depends(require_auth)])
+
+_active_writes = 0
+_scheduling_restart = False
+
+
+@app.middleware("http")
+async def maintenance_guard(request: Request, call_next):
+    global _active_writes, _scheduling_restart
+    if request.method in ('GET', 'HEAD', 'OPTIONS') or not request.url.path.startswith('/api/'):
+        return await call_next(request)
+    restart = request.url.path.startswith('/api/mantenimiento/reiniciar/')
+    if _scheduling_restart or (restart and _active_writes):
+        return JSONResponse(status_code=409, content={'error': 'Hay una operación en curso. Espera a que termine.'})
+    if restart:
+        _scheduling_restart = True
+    _active_writes += 1
+    try:
+        if await run_in_threadpool(maintenanceapi.pending):
+            return JSONResponse(status_code=409, content={'error': 'Hay un reinicio en curso. Espera a que termine.'})
+        return await call_next(request)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={'error': exc.detail})
+    finally:
+        _active_writes -= 1
+        if restart:
+            _scheduling_restart = False
+
 
 
 # ----- Frontend estático -----
