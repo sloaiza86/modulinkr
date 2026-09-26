@@ -95,7 +95,7 @@ test("un salto observado es continuo y no inventa una entrega directa", () => {
 
 test("un promedio mixto conserva las dos vías en el texto", () => {
   vm.runInContext(section("function viaMuestras(","function tooltipGrafico("),c);
-  assert.equal(c.viaMuestras([0,21,2,1]),"Vía registrada: 2 LoRa · 1 NB-IoT");
+  assert.equal(c.viaMuestras([0,21,2,1]),"Promedio de 3 muestras · 2 LoRa · 1 NB-IoT");
   assert.equal(c.viaMuestras([0,21]),"Vía no disponible");
 });
 

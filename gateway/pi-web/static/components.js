@@ -748,7 +748,7 @@
 
     set items(valor) {
       this._elementos = Array.isArray(valor) ? valor : [];
-      if (this._elementos.length <= 6) this._expandida = false;
+      if (!this._elementos.length) this._expandida = false;
       if (this._iniciado) this._renderizar();
     }
 
@@ -785,7 +785,7 @@
       const elementos = this._elementos ?? [];
 
       this.hidden = elementos.length === 0;
-      if (!elementos.length) return;
+      if (!elementos.length) { this.replaceChildren(); return; }
 
       const resumen = document.createElement("button");
       resumen.type = "button";
@@ -796,7 +796,7 @@
       const icono = document.createElement("modulinkr-icon");
       icono.setAttribute("name", this._expandida ? "mdi:chevron-up" : "mdi:chevron-down");
       resumen.appendChild(icono);
-      this.appendChild(resumen);
+
 
       const cuerpo = document.createElement("div");
       cuerpo.className = "grafico-leyenda-cuerpo";
@@ -836,7 +836,11 @@
         menos.textContent = "Ver menos";
         cuerpo.appendChild(menos);
       }
-      this.appendChild(cuerpo);
+      const foco = this.contains(document.activeElement) ? document.activeElement : null;
+      const accion = foco?.dataset.accion, serie = foco?.dataset.serie;
+      this.replaceChildren(resumen, cuerpo);
+      if (accion) [...this.querySelectorAll("button[data-accion]")]
+        .find(b => b.dataset.accion === accion && b.dataset.serie === serie)?.focus();
     }
 
     _accion = (evento) => {

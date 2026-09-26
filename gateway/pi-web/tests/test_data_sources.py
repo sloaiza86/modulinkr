@@ -66,6 +66,15 @@ class SourcesTests(unittest.TestCase):
         result=self.env['series'](**self.args,max_puntos=10,via='nbiot')
         self.assertEqual(result['series'][0]['points'][0][1:],[22,0,1])
 
+    def test_source_averages_remain_separate_in_same_bucket(self):
+        self.db.execute('UPDATE sample_values SET value=50 WHERE sample_id=2')
+        series = self.env['series'](**self.args, max_puntos=10)['series'][0]
+        self.assertEqual(series['source_points']['lora'][0][1:], [22, 2, 0])
+        self.assertEqual(series['source_points']['nbiot'][0][1:], [50, 0, 1])
+        self.assertEqual(series['points'][0][1:], [31.333333, 2, 1])
+        filtered = self.env['series'](**self.args, max_puntos=10, via='lora')['series'][0]
+        self.assertIsNone(filtered['source_points']['nbiot'][0][1])
+
     def test_csv_keeps_original_source_and_respects_filter(self):
         text=''.join(self.env['export_csv'](**self.args,via='lora'))
         rows=list(csv.DictReader(io.StringIO(text)))

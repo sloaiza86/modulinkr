@@ -425,7 +425,10 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
 }
 .modal-grafico-cabecera > :first-child { color: var(--text); font-weight: 600; }
 #modal-periodo {
-  overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 65%; min-height: 36px; padding: 0 30px 0 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background-color: var(--card); color: var(--text); font: inherit;
+  cursor: pointer;
 }
 #modal-grafico { height: 290px; min-height: 210px; margin: 0 8px 8px; }
 .modal-vacio { padding: 2rem 1.2rem; color: var(--dim); text-align: center; }
@@ -715,7 +718,7 @@ modulinkr-chart-legend {
 }
 .grafico-leyenda-cuerpo {
   display: flex; align-items: flex-start; flex-wrap: wrap;
-  gap: 8px 24px; padding: 10px 4px;
+  gap: 8px 24px; padding: 10px 4px; max-height: 144px; overflow-y: auto;
 }
 .grafico-leyenda-grupo {
   display: grid; grid-template-columns: minmax(112px, auto) minmax(0, 1fr);
@@ -784,17 +787,45 @@ modulinkr-chart-legend {
   width: var(--control-alto); padding: 0; display: inline-flex;
   align-items: center; justify-content: center;
 }
+.vistas button:disabled { opacity: 0.4; cursor: default; }
 .vistas button modulinkr-icon { width: 18px; height: 18px; }
+.grafico-vias {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px;
+  padding: 9px 16px 3px; color: var(--dim); font-size: 11px; flex: none;
+}
+.grafico-vias > span { display: inline-flex; align-items: center; gap: 6px; }
+.grafico-trazo { width: 24px; border-top: 2px solid var(--dim); }
+.grafico-trazo.nbiot { border-top-style: dotted; }
+.grafico-vias-titulo { font-weight: 500; }
+.grafico-vias-ayuda { position: relative; margin-left: -12px; }
+.grafico-vias-ayuda summary {
+  display: grid; place-items: center; width: 24px; height: 24px;
+  color: var(--dim); cursor: pointer; list-style: none; border-radius: 6px;
+  font-size: 16px;
+}
+.grafico-vias-ayuda summary::-webkit-details-marker { display: none; }
+.grafico-vias-ayuda summary:hover { background: var(--bg); }
+.grafico-vias-ayuda summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.grafico-vias-ayuda p {
+  position: absolute; z-index: 12; top: 100%; left: -110px;
+  width: 250px; max-width: calc(100vw - 48px); margin: 4px 0 0; padding: 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--card);
+  color: var(--text); font-size: 12px; line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(15, 30, 45, 0.12);
+}
+#modal-vias { padding: 0 24px; gap: 6px 14px; }
+#modal-vias .grafico-vias-ayuda { margin-left: -10px; }
+.grafico-contenido { position: relative; flex: 1; display: flex; min-height: 0; }
 #grafico { flex: 1 1 auto; width: 100%; height: auto; min-height: 0; }
 .datos-vacio {
-  position: absolute; inset: 52px 0 0; display: grid; place-content: center;
+  position: absolute; inset: 0; display: grid; place-content: center;
   justify-items: center; gap: 6px; padding: 24px; color: var(--dim); text-align: center;
   pointer-events: none;
 }
 .datos-vacio modulinkr-icon { width: 28px; height: 28px; margin-bottom: 4px; color: var(--off); }
 .datos-vacio strong { color: var(--text); font-size: 15px; font-weight: 500; line-height: 1.4; }
 .datos-vacio span { max-width: 320px; font-size: 12px; line-height: 1.5; }
-#datos-aviso { flex: none; margin: 0; padding: 0 12px 10px; }
+#datos-aviso { flex: none; width: auto; margin: 8px 16px 16px; }
 #datos-aviso:empty { display: none; }
 #view-datos { padding-bottom: 84px; }
 .datos-panel-fondo { display: none; }
@@ -1545,8 +1576,8 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   modulinkr-app-header { gap: 0.55rem; }
   modulinkr-app-header .header-derecha { display: none; }
   .datos-panel { width: 100%; border: 0; border-radius: 0; }
-  .vistas { width: 100%; flex-wrap: wrap; }
-  .vistas select { flex: 1 1 100%; min-width: 0; }
+  .vistas { width: 100%; flex-wrap: nowrap; }
+  .vistas select { flex: 1 1 0; min-width: 0; width: 0; }
   .vistas button { flex: 0 0 var(--control-alto); }
   .datos-barra { flex-wrap: wrap; padding: 8px; }
   #btn-medidas { margin-right: auto; }

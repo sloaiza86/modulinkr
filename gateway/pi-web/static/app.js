@@ -938,7 +938,7 @@ async function refrescarRed() {
 // nunca salen del Pi). Zoom temporal con la rueda del ratón y barra de
 // desplazamiento abajo; el eje de magnitud se ajusta al rango visible.
 
-const MODAL_DIAS = 5;    // ventana del histórico del modal
+let modalPeriodoSegundos = 5 * 86400;
 let modalSel = null;     // {origin, canal} de la medida abierta
 let modalChart = null;   // instancia de ECharts del modal
 let modalToken = 0;      // invalida respuestas tardías al cambiar de medida
@@ -1004,12 +1004,10 @@ function fmtHora(d) {
 
 function pintarModalPeriodo() {
   const etiqueta = document.getElementById("modal-periodo");
-  if (!modalZoomAplicado || modalRangoVisible === null) {
-    etiqueta.textContent = `Últimos ${MODAL_DIAS} días`;
-    return;
-  }
-  etiqueta.textContent = `${fmtDia(modalRangoVisible.desde)}, ${fmtHora(modalRangoVisible.desde)}`
-    + ` a ${fmtDia(modalRangoVisible.hasta)}, ${fmtHora(modalRangoVisible.hasta)}`;
+  etiqueta.value = String(modalPeriodoSegundos);
+  etiqueta.title = modalRangoVisible
+    ? `${fmtDia(modalRangoVisible.desde)}, ${fmtHora(modalRangoVisible.desde)} a ${fmtDia(modalRangoVisible.hasta)}, ${fmtHora(modalRangoVisible.hasta)}`
+    : "Seleccionar periodo del histórico";
 }
 
 function actualizarRangoModal(evento) {
@@ -1032,7 +1030,7 @@ function actualizarRangoModal(evento) {
   pintarModalPeriodo();
 }
 
-function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
+function opcionesModal(serie, unit, colorSerie = COLOR.accent) {
   return {
     backgroundColor: "transparent",
     textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.dim },
@@ -1041,10 +1039,12 @@ function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
       trigger: "axis", confine: true,
       textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 12, color: COLOR.text },
       formatter: (ps) => {
-        const [t, v] = ps[0].value;
-        const d = new Date(t);
-        return `${fmtDia(d)} ${fmtHora(d)}<br><b>${fmtValor(v)}` +
-               (unit ? " " + htmlSeguro(unit) : "") + "</b><br>" + viaMuestras(ps[0].value);
+        const entries = ps.filter(p => p.value?.[1] != null);
+        if (!entries.length) return "";
+        const d = new Date(entries[0].value[0]);
+        return `${fmtDia(d)} ${fmtHora(d)}<br>` + entries.map(p =>
+          `<b>${fmtValor(p.value[1])}${unit ? " " + htmlSeguro(unit) : ""}</b><br>${viaMuestras(p.value)}`
+        ).join("<br>");
       },
     },
     xAxis: {
@@ -1086,14 +1086,7 @@ function opcionesModal(puntos, unit, colorSerie = COLOR.accent) {
         borderColor: COLOR.border,
         textStyle: { color: COLOR.dim, fontFamily: FUENTE_GRAFICO, fontSize: 11 } },
     ],
-    series: [{
-      type: "line", showSymbol: false, smooth: 0.2,
-      lineStyle: { color: colorSerie, width: 2 },
-      itemStyle: { color: colorSerie },
-      areaStyle: { color: colorSerie, opacity: 0.08 },
-      encode: { x: 0, y: 1 },
-      data: puntos,
-    }],
+    series: lineasDeCanal(serie, colorSerie),
   };
 }
 
@@ -1101,6 +1094,9 @@ async function cargarModalGrafica() {
   const token = ++modalToken;
   const cont = document.getElementById("modal-grafico");
   const enlaceDatos = document.getElementById("modal-ver-datos");
+  const vias = document.getElementById("modal-vias");
+  vias.hidden = true;
+  vias.querySelector("details").open = false;
   modalCanalId = null;
   modalConsulta = null;
   modalRangoVisible = null;
@@ -1116,9 +1112,8 @@ async function cargarModalGrafica() {
 
   const nodo = cacheUltimos?.nodes.find((x) => x.origin === modalSel.origin);
   const c = nodo?.channels[modalSel.canal];
-  let puntos = null;
-  let error = "Sin histórico para esta medida en los últimos " +
-              MODAL_DIAS + " días.";
+  let serie = null;
+  let error = "No hay lecturas en el periodo seleccionado.";
 
   // Se localiza el channel_id por nodo y medida en el catálogo de la
   // pestaña Datos (se carga aquí si aún no se abrió).
@@ -1130,7 +1125,7 @@ async function cargarModalGrafica() {
     const canal = cn?.channels.find((x) => x.read_id === c.read_id);
     if (canal) {
       const hasta = new Date();
-      const desde = new Date(hasta.getTime() - MODAL_DIAS * 86400 * 1000);
+      const desde = new Date(hasta.getTime() - modalPeriodoSegundos * 1000);
       modalCanalId = canal.channel_id;
       modalConsulta = { desde, hasta };
       modalRangoVisible = { desde: new Date(desde), hasta: new Date(hasta) };
@@ -1143,8 +1138,8 @@ async function cargarModalGrafica() {
       });
       const r = await fetchApi("/api/datos/series?" + q);
       if (r.ok) {
-        const pts = (await r.json()).series[0]?.points ?? [];
-        if (pts.length >= 2) puntos = pts.map(([t, v, lo, nb]) => [t * 1000, v, lo, nb]);
+        const data = (await r.json()).series[0];
+        if (data?.points.some(p => p[1] != null)) serie = data;
       } else {
         error = "No se pudo cargar el histórico. Vuelve a intentarlo.";
       }
@@ -1160,14 +1155,15 @@ async function cargarModalGrafica() {
   // El modal pudo cerrarse o cambiar de medida mientras se consultaba.
   if (token !== modalToken || modalSel === null) return;
 
-  if (puntos === null) {
+  if (serie === null) {
     cont.innerHTML = `<p class="modal-vacio">${error}</p>`;
     return;
   }
   cont.innerHTML = "";
+  vias.hidden = false;
   modalChart = echarts.init(cont);
   modalChart.setOption(opcionesModal(
-    puntos, unidad(c?.unit), colorDeCanal(modalCanalId)
+    serie, unidad(c?.unit), colorDeCanal(modalCanalId)
   ));
   modalChart.on("datazoom", actualizarRangoModal);
 }
@@ -1213,6 +1209,10 @@ function verModalEnDatos(evento) {
 document.getElementById("modal").addEventListener(
   "modulinkr-close-request", cerrarModal);
 document.getElementById("modal-ver-datos").addEventListener("click", verModalEnDatos);
+document.getElementById("modal-periodo").addEventListener("change", (evento) => {
+  modalPeriodoSegundos = Number(evento.target.value);
+  if (modalSel !== null) cargarModalGrafica();
+});
 window.addEventListener("resize", () => modalChart?.resize({ animation: { duration: 0 } }));
 
 // ----- Panel de detalle de nodo -----
@@ -2103,8 +2103,15 @@ const botonMedidas = document.getElementById("btn-medidas");
 const estadoVacioDatos = document.getElementById("datos-vacio");
 const leyendaGrafico = document.getElementById("grafico-leyenda");
 
-function mostrarEstadoVacioDatos(mostrar) {
-  if (estadoVacioDatos) estadoVacioDatos.hidden = !mostrar;
+function mostrarEstadoVacioDatos(mostrar, titulo = "Selecciona una medida",
+  mensaje = "Elige una o varias medidas para consultar sus datos.") {
+  if (estadoVacioDatos) {
+    estadoVacioDatos.hidden = !mostrar;
+    estadoVacioDatos.querySelector("strong").textContent = titulo;
+    estadoVacioDatos.querySelector("span").textContent = mensaje;
+  }
+  document.getElementById("grafico").hidden = mostrar;
+  document.getElementById("grafico-vias").hidden = mostrar;
 }
 
 function graficoEsCompacto() {
@@ -2226,7 +2233,14 @@ function actualizarTiposCatalogo() {
   return cambiado;
 }
 
+function actualizarAccionesDatos() {
+  document.getElementById("btn-guardar-vista").disabled = !seleccion.size;
+  document.getElementById("btn-borrar-vista").disabled = !document.getElementById("vistas-guardadas").value;
+  document.getElementById("btn-exportar-csv").disabled = !seleccion.size || !rango();
+}
+
 function actualizarBotonMedidas() {
+  actualizarAccionesDatos();
   const cantidad = seleccion.size;
   const cuenta = document.getElementById("btn-medidas-cuenta");
   if (cuenta) cuenta.textContent = String(cantidad);
@@ -2250,6 +2264,7 @@ function renderVistas() {
     opt.textContent = nombre;
     sel.appendChild(opt);
   }
+  actualizarAccionesDatos();
 }
 function vistaGuardar() {
   const aviso = document.getElementById("datos-aviso");
@@ -2280,8 +2295,9 @@ function vistaGuardar() {
     localStorage.setItem("modulinkr_vistas", JSON.stringify(vistas));
     renderVistas();
     document.getElementById("vistas-guardadas").value = nombre;
+    actualizarAccionesDatos();
     cfgDialogoCerrar();
-    aviso.textContent = `Vista «${nombre}» guardada.`;
+    toast(`Vista «${nombre}» guardada.`);
   };
   cfgDialogo("Guardar vista",
     '<label class="cfg-campo"><span>Nombre</span><input id="vista-nombre" type="text" maxlength="64" autocomplete="off"></label>'
@@ -2313,7 +2329,7 @@ function vistaBorrar() {
     localStorage.setItem("modulinkr_vistas", JSON.stringify(vistas));
     renderVistas();
     cfgDialogoCerrar();
-    document.getElementById("datos-aviso").textContent = `Vista «${nombre}» eliminada.`;
+    toast(`Vista «${nombre}» eliminada.`);
   };
   cfgDialogo("Eliminar vista",
     "<p>La vista seleccionada se eliminará. Esta acción no se puede deshacer.</p>",
@@ -2347,11 +2363,16 @@ const EJE_X = {
 
 function viaMuestras(value) {
   const lo = Number(value?.[2] ?? 0), nb = Number(value?.[3] ?? 0);
-  return lo || nb ? `Vía registrada: ${[lo ? `${lo} LoRa` : "", nb ? `${nb} NB-IoT` : ""].filter(Boolean).join(" · ")}` : "Vía no disponible";
+  const total = lo + nb;
+  if (!total) return "Vía no disponible";
+  const muestras = total === 1 ? "1 muestra" : `Promedio de ${total} muestras`;
+  const via = lo && nb ? `${lo} LoRa · ${nb} NB-IoT` : lo ? "LoRa" : "NB-IoT";
+  return `${muestras} · ${via}`;
 }
 
 function tooltipGrafico(parametros) {
-  const lista = Array.isArray(parametros) ? parametros : [parametros];
+  const lista = (Array.isArray(parametros) ? parametros : [parametros])
+    .filter(p => Array.isArray(p.value) && p.value[1] != null);
   const contenedor = document.createElement("div");
   contenedor.className = "grafico-tooltip";
   const instante = Number(lista[0]?.value?.[0]);
@@ -2362,8 +2383,8 @@ function tooltipGrafico(parametros) {
     contenedor.appendChild(fecha);
   }
   for (const parametro of lista) {
-    const meta = metaCanal.get(parametro.seriesId)
-      ?? metaCanal.get(Number(parametro.seriesId)) ?? {};
+    const canal = String(parametro.seriesId).split(":")[0];
+    const meta = metaCanal.get(canal) ?? metaCanal.get(Number(canal)) ?? {};
     const fila = document.createElement("div");
     fila.className = "grafico-tooltip-fila";
     const muestra = document.createElement("span");
@@ -2385,17 +2406,37 @@ function tooltipGrafico(parametros) {
   return contenedor;
 }
 
+function lineasDeCanal(serie, color = colorDeCanal(serie.channel_id)) {
+  const sources = serie.source_points ?? { unknown: serie.points };
+  return Object.entries(sources).filter(([, points]) => points.some(p => p[1] != null))
+    .map(([source, points]) => {
+      const gaps = points.slice(1).map((p, i) => p[0] - points[i][0]).filter(d => d > 0).sort((a,b) => a-b);
+      const cadence = gaps[Math.floor((gaps.length - 1) / 2)] ?? serie.bucket_s ?? 0;
+      const gapLimit = Math.max((serie.bucket_s ?? 0) * 2, cadence * 3);
+      const data = [];
+      for (const [t, v, lo, nb] of points) {
+        const previous = data.at(-1)?.[0];
+        // Se corta el trazo ante separaciones largas respecto a las lecturas observadas.
+        if (previous != null && gapLimit > 0 && t * 1000 - previous > gapLimit * 1000)
+          data.push([previous + cadence * 1000, null, 0, 0]);
+        data.push([t * 1000, v, lo, nb]);
+      }
+      return {
+        id: `${serie.channel_id}:${source}`, name: etiquetaCanal(serie.channel_id),
+        type: "line", showSymbol: true, connectNulls: false,
+        symbolSize: (_value, params) => data[params.dataIndex - 1]?.[1] == null
+          && data[params.dataIndex + 1]?.[1] == null ? 5 : 0,
+        lineStyle: { color, width: 2,
+          type: source === "nbiot" ? "dotted" : source === "lora" ? "solid" : "dashed" },
+        itemStyle: { color },
+        encode: { x: 0, y: 1 }, data,
+      };
+    });
+}
+
 function opcionesGrafico(series) {
   const unidades = [...new Set(series.map((s) => s.unit ?? ""))];
   const compacto = graficoEsCompacto();
-  const linea = (s) => ({
-    id: String(s.channel_id), name: etiquetaCanal(s.channel_id),
-    type: "line", showSymbol: false, sampling: "lttb",
-    lineStyle: { color: colorDeCanal(s.channel_id), width: 2 },
-    itemStyle: { color: colorDeCanal(s.channel_id) },
-    encode: { x: 0, y: 1 },
-    data: s.points.map(([t, v, lo, nb]) => [t * 1000, v, lo, nb]),
-  });
   const seleccionLeyenda = Object.fromEntries(series.map((serie) => [
     etiquetaCanal(serie.channel_id), !seriesOcultas.has(String(serie.channel_id)),
   ]));
@@ -2419,15 +2460,15 @@ function opcionesGrafico(series) {
         right: unidades.length === 2 ? (compacto ? 48 : 60) : (compacto ? 14 : 24),
         top: compacto ? 26 : 24, bottom: compacto ? 54 : 60, containLabel: true,
       },
-      xAxis: EJE_X,
+      xAxis: { ...EJE_X, splitNumber: compacto ? 3 : 6 },
       yAxis: unidades.map((u, i) => ({
         ...EJE_Y, name: unidad(u), position: i === 0 ? "left" : "right",
         axisLabel: { ...EJE_Y.axisLabel, align: i === 0 ? "right" : "left" },
       })),
       dataZoom: zoom,
-      series: series.map((s) => ({
-        ...linea(s), yAxisIndex: unidades.indexOf(s.unit ?? ""),
-      })),
+      series: series.flatMap(s => lineasDeCanal(s).map(linea => ({
+        ...linea, yAxisIndex: unidades.indexOf(s.unit ?? ""),
+      }))),
     };
   }
 
@@ -2449,7 +2490,7 @@ function opcionesGrafico(series) {
       top: `${inicio + i * alto}%`, height: `${alto - 5}%`, containLabel: false,
     })),
     xAxis: unidades.map((u, i) => ({
-      ...EJE_X, gridIndex: i,
+      ...EJE_X, gridIndex: i, splitNumber: compacto ? 3 : 6,
       axisLabel: { ...EJE_X.axisLabel, show: i === unidades.length - 1 },
       axisLine: { ...EJE_X.axisLine, show: i === unidades.length - 1 },
       axisTick: { ...EJE_X.axisTick, show: i === unidades.length - 1 },
@@ -2466,9 +2507,9 @@ function opcionesGrafico(series) {
         textStyle: { fontFamily: FUENTE_GRAFICO, fontSize: 11, color: COLOR.dim },
       },
     ],
-    series: series.map((s) => {
+    series: series.flatMap((s) => {
       const gi = unidades.indexOf(s.unit ?? "");
-      return { ...linea(s), xAxisIndex: gi, yAxisIndex: gi };
+      return lineasDeCanal(s).map(linea => ({ ...linea, xAxisIndex: gi, yAxisIndex: gi }));
     }),
   };
 }
@@ -2477,9 +2518,11 @@ let solicitudGrafico = 0;
 let temporizadorGrafico = null;
 
 function programarGrafico() {
+  actualizarAccionesDatos();
+  document.getElementById("datos-aviso").textContent = "";
   clearTimeout(temporizadorGrafico);
+  solicitudGrafico += 1;
   if (!seleccion.size) {
-    solicitudGrafico += 1;
     seriesGraficoActuales = [];
     if (chart) chart.clear();
     actualizarLeyendaGrafico([]);
@@ -2488,7 +2531,7 @@ function programarGrafico() {
     selectorPeriodo.loading = false;
     return;
   }
-  mostrarEstadoVacioDatos(false);
+  mostrarEstadoVacioDatos(true, "Cargando lecturas", "");
   temporizadorGrafico = window.setTimeout(graficar, 120);
 }
 
@@ -2501,28 +2544,31 @@ async function graficar() {
     return;
   }
   if (!rg) { aviso.textContent = "Selecciona un periodo."; return; }
-  mostrarEstadoVacioDatos(false);
+  mostrarEstadoVacioDatos(true, "Cargando lecturas", "");
+  seriesGraficoActuales = [];
+  if (chart) chart.clear();
   const solicitud = ++solicitudGrafico;
   selectorPeriodo.loading = true;
   aviso.textContent = "";
 
-  const anchoGrafico = document.getElementById("grafico")?.clientWidth ?? 800;
+  const anchoGrafico = document.querySelector(".grafico-contenido")?.clientWidth || 800;
   const maxPuntos = Math.max(240, Math.min(1200, Math.round(anchoGrafico * 0.75)));
   const q = new URLSearchParams({
-    channels: [...seleccion].join(","), via: document.getElementById("datos-via").value, ...rg, max_puntos: String(maxPuntos),
+    channels: [...seleccion].join(","), via: "all", ...rg, max_puntos: String(maxPuntos),
   });
   try {
     const r = await fetchApi("/api/datos/series?" + q);
     if (solicitud !== solicitudGrafico) return;
     if (!r.ok) {
       const d = await r.json();
-      aviso.textContent = d.detail ?? "No se pudieron cargar los datos seleccionados.";
+      if (solicitud !== solicitudGrafico) return;
+      mostrarEstadoVacioDatos(true, "No se pudieron cargar las lecturas",
+        d.detail ?? "Vuelve a seleccionar el periodo para reintentar.");
       return;
     }
     const data = await r.json();
     if (solicitud !== solicitudGrafico) return;
-    aviso.textContent = data.series.every((s) => s.points.length === 0)
-      ? "No hay lecturas en el periodo seleccionado. Cambia el periodo y vuelve a intentarlo." : "";
+    const sinLecturas = data.series.every(s => !s.points.some(p => p[1] != null));
 
     seriesGraficoActuales = data.series;
     const idsPresentes = new Set(data.series.map((serie) => String(serie.channel_id)));
@@ -2530,11 +2576,17 @@ async function graficar() {
       if (!idsPresentes.has(id)) seriesOcultas.delete(id);
     });
     actualizarLeyendaGrafico(data.series);
+    if (sinLecturas) {
+      mostrarEstadoVacioDatos(true, "No hay lecturas en este periodo", "Prueba otro periodo o selecciona otra medida.");
+      return;
+    }
+    mostrarEstadoVacioDatos(false);
     graficoCompacto = graficoEsCompacto();
-    asegurarGrafico().setOption(opcionesGrafico(data.series), true);
+    asegurarGrafico().resize();
+    chart.setOption(opcionesGrafico(data.series), true);
   } catch (e) {
     if (solicitud === solicitudGrafico) {
-      aviso.textContent = "No se pueden cargar los datos porque el gateway no responde.";
+      mostrarEstadoVacioDatos(true, "No se pudieron cargar las lecturas", "El gateway no responde. Vuelve a seleccionar el periodo para reintentar.");
     }
   } finally {
     if (solicitud === solicitudGrafico) selectorPeriodo.loading = false;
@@ -2548,12 +2600,11 @@ function exportarCsv() {
     aviso.textContent = "Selecciona al menos una medida y un periodo.";
     return;
   }
-  const q = new URLSearchParams({ channels: [...seleccion].join(","), via: document.getElementById("datos-via").value, ...rg });
+  const q = new URLSearchParams({ channels: [...seleccion].join(","), via: "all", ...rg });
   // Descarga por navegación: el navegador gestiona el attachment.
   window.location.href = "/api/datos/csv?" + q;
 }
 
-document.getElementById("datos-via").addEventListener("change", programarGrafico);
 selectorPeriodo.addEventListener("modulinkr-period-change", programarGrafico);
 selectorPeriodo.addEventListener("modulinkr-period-export", exportarCsv);
 selectorMedidas.addEventListener("modulinkr-measures-apply", (evento) => {
@@ -2575,9 +2626,12 @@ leyendaGrafico?.addEventListener("modulinkr-chart-series-toggle", (evento) => {
   }
 });
 botonMedidas.addEventListener("click", () => selectorMedidas.open());
+document.getElementById("btn-exportar-csv").addEventListener("click", exportarCsv);
 document.getElementById("btn-guardar-vista").addEventListener("click", vistaGuardar);
 document.getElementById("btn-borrar-vista").addEventListener("click", vistaBorrar);
 document.getElementById("vistas-guardadas").addEventListener("change", (e) => {
+  actualizarAccionesDatos();
+  document.getElementById("datos-aviso").textContent = "";
   if (e.target.value) vistaAplicar(e.target.value);
 });
 // ----- Vista Configuración: comisionamiento de nodos por USB -----

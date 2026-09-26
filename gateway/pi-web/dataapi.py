@@ -192,17 +192,27 @@ def series(channels: str = Query(...), desde: str = Query(...),
                 """SELECT floor(extract(epoch FROM s.ts) / %s) * %s AS t,
                           avg(v.value),
                           count(*) FILTER (WHERE s.source = 'lora'),
-                          count(*) FILTER (WHERE s.source = 'nbiot')
+                          count(*) FILTER (WHERE s.source = 'nbiot'),
+                          avg(v.value) FILTER (WHERE s.source = 'lora'),
+                          avg(v.value) FILTER (WHERE s.source = 'nbiot')
                    FROM sample_values v
                    JOIN samples s ON s.sample_id = v.sample_id
                    WHERE v.channel_id = %s AND s.ts >= %s AND s.ts < %s
                      AND (%s = 'all' OR s.source = %s)
                    GROUP BY 1 ORDER BY 1""",
                 (bucket_s, bucket_s, cid, t0, t1, via, via))
-            pts = [[int(t), round(val, 6) if val is not None else None, lo, nb] for t, val, lo, nb in cur.fetchall()]
+            rows = cur.fetchall()
+            pts = [[int(t), round(val, 6) if val is not None else None, lo, nb]
+                   for t, val, lo, nb, _, _ in rows]
+            source_points = {
+                "lora": [[int(t), round(lv, 6) if lv is not None else None, lo, 0]
+                         for t, _, lo, _, lv, _ in rows],
+                "nbiot": [[int(t), round(nv, 6) if nv is not None else None, 0, nb]
+                          for t, _, _, nb, _, nv in rows],
+            }
             result.append({"channel_id": cid, "node_id": meta[2],
                            "read_id": meta[0], "unit": meta[1],
-                           "bucket_s": bucket_s, "points": pts})
+                           "bucket_s": bucket_s, "points": pts, "source_points": source_points})
     return {"desde": t0.isoformat(), "hasta": t1.isoformat(),
             "series": result}
 

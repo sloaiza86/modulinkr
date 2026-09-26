@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pruebas de gráfica y leyenda</title>
+<link rel="stylesheet" href="../static/style.css?v=chart-controls-4">
+<script src="../static/vendor/echarts.min.js"></script>
+<script src="../static/components.js?v=chart-controls-4"></script>
+<style>
+:root { --sb-ancho: 0px; }
+body { display: block; padding: 12px; }
+#fixture { max-width: 1200px; margin: auto; }
+.datos-layout { --datos-alto: calc(100dvh - 240px); }
+#view-datos { padding: 0 0 84px; }
+#results { font: 12px system-ui; margin: 0 auto 12px; max-width: 1200px; }
+#controls { display:flex; gap:12px; margin:12px auto; max-width:1200px; }
+</style>
+<div id="results">Ejecutando pruebas…</div>
+<div id="controls"><button id="populated">Con lecturas</button><button id="empty">Sin lecturas</button><button id="error">Error de conexión</button><button id="notice-test">Aviso</button><button id="modal-test">Histórico del resumen</button></div>
+<div id="fixture"></div>
+<script>
+(async()=>{
+  const results=[];
+  const assert=(ok,message)=>{if(!ok) throw new Error(message);results.push(message);};
+  try {
+    const html=await(await fetch('../static/index.html', {cache:'no-store'})).text();
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const view=doc.querySelector('#view-datos');view.hidden=false;
+    document.querySelector('#fixture').append(view);
+    document.body.append(doc.querySelector('#modal-fondo'), doc.querySelector('#modal'));
+    const source=await(await fetch('../static/app.js', {cache:'no-store'})).text();
+    const section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+    const factory=new Function(`
+      const COLOR={dim:'#53668c',text:'#17234f',border:'#d9e2f2'};
+      const FUENTE_GRAFICO='system-ui', COLORES_GRAFICO=['#0756eb','#8956d8'];
+      const unidad=x=>x, fmtEje=x=>String(x), fmtValor=x=>Number(x).toFixed(2),fmtDia=x=>x.toLocaleDateString(),fmtHora=x=>x.toLocaleTimeString();
+      const vistaGuardar=()=>{},vistaBorrar=()=>{},vistaAplicar=()=>{},actualizarBotonMedidas=()=>{};
+      const rango=()=>({desde:'2026-09-23T08:00:00Z',hasta:'2026-09-23T10:00:00Z'});
+      let responseMode='data', pendingResolve=null;
+      let modalToken=0, modalCanalId=null,modalConsulta=null,modalRangoVisible=null,modalZoomAplicado=false,modalChart=null;
+      let modalSel={origin:1,canal:0};
+      let modalPeriodoSegundos=432000; const cacheUltimos={nodes:[{origin:1,channels:[{read_id:'temperature',unit:'°C'}]}]};
+      const pintarModalCabecera=()=>{},actualizarRangoModal=()=>{};
+      const htmlSeguro=x=>String(x);
+      let lastQuery=''; const fetchApi=async url=>{ lastQuery=url;
+        if(responseMode==='error')throw Error('offline');
+        if(responseMode==='pending')return new Promise(resolve=>{pendingResolve=resolve});
+        return {ok:true,json:async()=>({series:makeSeries(responseMode==='empty')})};
+      };
+      ${section('let chart = null;', 'async function cargarCatalogo(')}
+      ${section('const EJE_Y =', '// ----- Vista Configuración:')}
+      ${section('function pintarModalPeriodo(', 'function actualizarRangoModal(')}
+      ${section('function actualizarAccionesDatos(', 'function actualizarBotonMedidas(')}
+      ${section('function opcionesModal(', 'function abrirModal(')}
+      ${section('document.getElementById("modal-periodo").addEventListener(', 'window.addEventListener("resize", () => modalChart')}
+
+      function makeSeries(empty=false){
+        return ['°C','%RH'].map((unit,index)=>{
+          const points=[],lora=[],nbiot=[];
+          for(let i=0;!empty&&i<100;i++){
+            const t=1790150400+i*60,v=(index?55:24)+Math.sin(i/12+(index?1.2:0))*(index?5:2),nb=i>=40&&i<70;
+            points.push([t,v,nb?0:1,nb?1:0]);
+            lora.push([t,nb?null:v,nb?0:1,0]);nbiot.push([t,nb?v:null,0,nb?1:0]);
+          }
+          return {channel_id:index+1,unit,bucket_s:60,points,source_points:{lora,nbiot}};
+        });
+      }
+      metaCanal.set(1,{node_id:1,node_name:'Nodo Sensor Ambiental',name:'Temperatura',read_id:'temperature',unit:'°C'});
+      metaCanal.set(2,{node_id:1,node_name:'Nodo Sensor Ambiental',name:'Humedad',read_id:'humidity',unit:'%RH'});
+      selectorMedidas.catalog=[{node_id:1,name:'Nodo Sensor Ambiental',channels:[{channel_id:1,read_id:'temperature',name:'Temperatura',unit:'°C'},{channel_id:2,read_id:'humidity',name:'Humedad',unit:'%RH'}]}];
+      catalogo=[{node_id:1,channels:[{channel_id:1,read_id:'temperature'}]}];
+      seleccion=new Set([1,2]);selectorMedidas.value={selection:[1,2],mode:'nodo'};
+      actualizarAccionesDatos();
+      return {query:()=>lastQuery,actions:actualizarAccionesDatos,load:async mode=>{responseMode=mode;await graficar()},chart:()=>chart,
+        modal:async()=>{document.querySelector('#modal-titulo').textContent='Temperatura';document.querySelector('#modal-nodo').textContent='Nodo Sensor Ambiental';document.querySelector('#modal').show();await cargarModalGrafica();return modalChart},
+        legend:leyendaGrafico,empty:estadoVacioDatos,clear:()=>{seleccion.clear();programarGrafico()},
+        cancel:()=>{programarGrafico();clearTimeout(temporizadorGrafico)},
+        resolve:()=>pendingResolve({ok:true,json:async()=>({series:makeSeries()})})};
+    `);
+    const api=factory();window.chartTest=api;
+    const formatNotice=new Function('el', `const textoCliente=x=>x; ${section('function tipoMensaje(', 'function iniciarMensajes(')} actualizarMensaje(el);`);
+    const notice=document.querySelector('#datos-aviso');
+    const showNotice=()=>{notice.textContent='No se pudo descargar el archivo. Vuelve a intentarlo.';notice.classList.add('mensaje-slot');formatNotice(notice);};
+    showNotice();
+    assert(parseFloat(getComputedStyle(notice).paddingLeft)>30,'El aviso reserva espacio para su icono');
+    assert(notice.getBoundingClientRect().right<=notice.parentElement.getBoundingClientRect().right,'El aviso queda dentro de la tarjeta');
+    notice.textContent='';formatNotice(notice);
+    document.querySelector('#notice-test').onclick=showNotice;
+    await api.load('data');
+    for(let i=0;i<10;i++)await api.load('data');
+    assert(api.legend.querySelectorAll('.grafico-leyenda-cuerpo').length===1,'Una leyenda tras once cargas');
+    assert(api.legend.querySelectorAll('[data-accion="serie"]').length===2,'Dos entradas para dos medidas');
+    if (matchMedia('(max-width:600px)').matches) api.legend.querySelector('[data-accion="compacta"]').click();
+    const button=api.legend.querySelector('[data-accion="serie"]');button.focus();button.click();
+    assert(api.legend.querySelectorAll('[data-accion="serie"]').length===2,'Ocultar no duplica entradas');
+    assert(document.activeElement.dataset.serie===button.dataset.serie,'Se conserva el foco del control');
+    document.activeElement.click();
+    assert(api.chart().getOption().series.length===4,'Dos vías por medida en ECharts');
+    await api.load('empty');
+    assert(!api.empty.hidden&&api.empty.textContent.includes('No hay lecturas'),'Estado vacío centrado');
+    assert(document.querySelector('#grafico').hidden&&document.querySelector('#grafico-vias').hidden,'Sin ejes ni leyenda de vías vacíos');
+    assert(!document.querySelector('#datos-aviso').textContent,'Sin aviso superpuesto al periodo');
+    await api.load('error');
+    assert(api.empty.textContent.includes('gateway no responde'),'Error sin gráfica anterior');
+    const pending=api.load('pending');api.cancel();api.resolve();await pending;
+    assert(document.querySelector('#grafico').hidden,'La respuesta anterior no se dibuja tras cambiar selección');
+    api.clear();api.actions();
+    assert(document.querySelector('#btn-guardar-vista').disabled&&document.querySelector('#btn-exportar-csv').disabled&&document.querySelector('#btn-borrar-vista').disabled,'Acciones no disponibles deshabilitadas');
+    assert(api.legend.children.length===0,'Limpiar elimina la leyenda del DOM');
+    await api.load('data');const modalChart=await api.modal();
+    assert(modalChart.getOption().series.length===2,'El modal carga las dos vías desde la respuesta');
+    assert(!document.querySelector('#modal-vias').hidden,'Leyenda de vías visible en el modal');
+    const period=document.querySelector('#modal-periodo');
+    for(const seconds of ['3600','31536000']){
+      period.value=seconds;period.dispatchEvent(new Event('change'));
+      await new Promise(resolve=>setTimeout(resolve,30));
+      const q=new URL(api.query(),location.origin).searchParams;
+      assert((new Date(q.get('hasta'))-new Date(q.get('desde')))/1000===Number(seconds),'Consulta del periodo '+seconds+' segundos');
+    }
+    await api.load('empty');await api.modal();
+    assert(document.querySelector('#modal-vias').hidden,'Sin leyenda de vías cuando el modal no tiene datos');
+    document.querySelector('#modal').hide();
+    document.querySelector('#results').textContent=results.length+' comprobaciones correctas: '+results.join(' · ');
+    // Se recompone la selección para la inspección visual manual.
+    document.querySelector('#selector-medidas').dispatchEvent(new CustomEvent('modulinkr-measures-apply',{detail:{selection:[1,2],mode:'nodo'}}));
+    api.cancel();await api.load('data');
+    document.querySelector('#populated').onclick=()=>api.load('data');
+    document.querySelector('#empty').onclick=()=>api.load('empty');
+    document.querySelector('#error').onclick=()=>api.load('error');
+    document.querySelector('#modal-test').onclick=()=>api.modal();
+  }catch(error){document.querySelector('#results').textContent='FAIL: '+error.stack;}
+})();
+</script>

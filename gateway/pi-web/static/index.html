@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=route-trace-20260921">
+  <link rel="stylesheet" href="/static/style.css?v=chart-controls-20260926">
 </head>
 <body>
 
@@ -135,14 +135,18 @@
                 <span id="btn-medidas-cuenta" class="badge">0</span>
               </button>
               <div class="vistas">
+                <button id="btn-exportar-csv" type="button" disabled title="Descargar CSV"
+                        aria-label="Descargar CSV de las medidas y el periodo seleccionados">
+                  <modulinkr-icon name="mdi:download"></modulinkr-icon>
+                </button>
                 <select id="vistas-guardadas" aria-label="Vistas guardadas">
                   <option value="">Vistas guardadas</option>
                 </select>
-                <button id="btn-guardar-vista" type="button" title="Guardar vista"
+                <button id="btn-guardar-vista" disabled type="button" title="Guardar vista"
                         aria-label="Guardar la selección actual como vista">
                   <modulinkr-icon name="mdi:content-save-outline"></modulinkr-icon>
                 </button>
-                <button id="btn-borrar-vista" type="button" title="Eliminar vista"
+                <button id="btn-borrar-vista" disabled type="button" title="Eliminar vista"
                         aria-label="Eliminar la vista seleccionada">
                   <modulinkr-icon name="mdi:delete-outline"></modulinkr-icon>
                 </button>
@@ -150,22 +154,27 @@
             </div>
             <modulinkr-chart-legend id="grafico-leyenda"
                                     aria-label="Leyenda de la gráfica"></modulinkr-chart-legend>
+            <div id="grafico-vias" class="grafico-vias" aria-label="Vías de recepción" hidden>
+              <span class="grafico-vias-titulo">Vía de recepción</span>
+              <details class="grafico-vias-ayuda">
+                <summary aria-label="Información sobre la vía de recepción">ⓘ</summary>
+                <p>Indica la vía de recepción registrada para cada muestra.</p>
+              </details>
+              <span><i class="grafico-trazo" aria-hidden="true"></i>LoRa</span>
+              <span><i class="grafico-trazo nbiot" aria-hidden="true"></i>NB-IoT</span>
+            </div>
+            <div class="grafico-contenido">
             <div id="grafico"></div>
             <div id="datos-vacio" class="datos-vacio" role="status">
               <modulinkr-icon name="mdi:chart-line"></modulinkr-icon>
               <strong>Selecciona una medida</strong>
               <span>Elige una o varias medidas para consultar sus datos.</span>
             </div>
+            </div>
             <p id="datos-aviso" class="aviso"></p>
           </div>
         </section>
       </div>
-      <label class="leyenda">Vía registrada
-        <select id="datos-via" aria-label="Filtrar por vía de recepción">
-          <option value="all">Todas</option><option value="lora">LoRa</option><option value="nbiot">NB-IoT</option>
-        </select>
-      </label>
-      <p class="leyenda">La vía corresponde a la primera recepción guardada de cada muestra. Una retransmisión por otra vía no cambia ese registro.</p>
       <modulinkr-period-selector id="selector-periodo">
         <div class="periodo-barra card">
           <button class="periodo-abrir" type="button"
@@ -1082,7 +1091,25 @@
   </div>
   <div class="modal-grafico-cabecera">
     <span>Histórico</span>
-    <span id="modal-periodo">Últimos 5 días</span>
+    <select id="modal-periodo" aria-label="Periodo del histórico">
+      <option value="3600">Última hora</option>
+      <option value="21600">Últimas 6 horas</option>
+      <option value="86400">Último día</option>
+      <option value="432000" selected>Últimos 5 días</option>
+      <option value="604800">Últimos 7 días</option>
+      <option value="2592000">Últimos 30 días</option>
+      <option value="7776000">Últimos 90 días</option>
+      <option value="31536000">Último año</option>
+    </select>
+  </div>
+  <div id="modal-vias" class="grafico-vias" aria-label="Vías de recepción" hidden>
+              <span class="grafico-vias-titulo">Vía de recepción</span>
+              <details class="grafico-vias-ayuda">
+                <summary aria-label="Información sobre la vía de recepción">ⓘ</summary>
+                <p>Indica la vía de recepción registrada para cada muestra.</p>
+              </details>
+              <span><i class="grafico-trazo" aria-hidden="true"></i>LoRa</span>
+              <span><i class="grafico-trazo nbiot" aria-hidden="true"></i>NB-IoT</span>
   </div>
   <div id="modal-grafico"></div>
   <div class="modal-acciones">
@@ -1267,8 +1294,8 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=route-trace-20260921"></script>
+<script src="/static/components.js?v=chart-controls-20260926"></script>
 <script src="/static/network-state.js?v=route-trace-20260921"></script>
-<script src="/static/app.js?v=route-trace-20260921"></script>
+<script src="/static/app.js?v=chart-controls-20260926"></script>
 </body>
 </html>
