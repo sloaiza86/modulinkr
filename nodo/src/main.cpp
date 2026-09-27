@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.67"
+#define MODULINKR_FIRMWARE_VERSION "0.0.68"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -285,6 +285,7 @@ uint32_t g_fw_result_xfer  = 0;
 uint8_t  g_fw_result_code  = 0;
 
 health::Record g_health;
+uint32_t g_maintenance_restart_ms = 0;
 uint8_t  g_recov_level     = 0;   // 0 sana, 1..4 último nivel ejecutado
 uint32_t g_recov_step_ms   = 0;   // millis() de esa ejecución
 uint8_t  g_reboots_window  = 0;
@@ -487,6 +488,7 @@ void setLed(uint32_t color) {
 // intentarse nada, para que el llamante reintente en la vuelta siguiente en
 // vez de esperar otro intervalo entero (ver el porqué en el llamante).
 bool fireLora() {
+    if (g_maintenance_restart_ms) return false;
     // Cerrojo de muestreo (v2.3): al arrancar no se toma ninguna medida
     // Modbus hasta que el nodo completa su registro en la red LoRa (primer
     // WELCOME del gateway). Así el bus arranca sincronizado con el envío,
@@ -1540,6 +1542,66 @@ void handleFwData(const LoraP2P::RxFrame& f) {
     }
 }
 
+void sendMaintenanceResult(uint32_t id, uint8_t action, uint8_t state) {
+    uint8_t payload[32] = {};
+    std::memcpy(payload, &id, 4);
+    payload[4] = action;
+    payload[5] = state;
+    std::memcpy(payload + 6, &g_health.counters_since, 4);
+    payload[10] = g_health.last_fault;
+    payload[11] = g_health.reset_reason;
+    const uint32_t counters[] = {g_health.boots, g_health.probes, g_health.reinits,
+                                 g_health.resets, g_health.reboots};
+    std::memcpy(payload + 12, counters, sizeof(counters));
+    nextSeq();
+    lora.sendRoute(mesh.parentId(), protocol::kAddrGateway, g_lora_seq,
+                   protocol::kFrameNodeMaintenanceResult, payload, sizeof(payload));
+}
+
+void handleNodeMaintenance(const LoraP2P::RxFrame& f) {
+    if (f.origin_id != protocol::kAddrGateway || f.payload_length != 9) return;
+    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "maintenance"); return; }
+    uint32_t id, expires;
+    std::memcpy(&id, f.payload, 4);
+    const uint8_t action = f.payload[4];
+    std::memcpy(&expires, f.payload + 5, 4);
+    if (!id || (action != 1 && action != 2)) return;
+    if (id == g_health.maintenance_id && action == g_health.maintenance_action) {
+        sendMaintenanceResult(id, action, g_health.maintenance_pending ? 0 : 1);
+        return;
+    }
+    if (id <= g_health.maintenance_id || !nodeclock::synced() ||
+        nodeclock::epochNow() > expires) {
+        sendMaintenanceResult(id, action, 4);
+        return;
+    }
+    if (g_maintenance_restart_ms || bajandoFirmware() || cfgota::active() ||
+        g_trial_active || g_fw_trial_active || g_cfgread_req || configstore::pendingAt()) {
+        sendMaintenanceResult(id, action, 2);
+        return;
+    }
+    if (action == 1 && pending.count()) {
+        sendMaintenanceResult(id, action, 5);
+        return;
+    }
+    health::Record updated = g_health;
+    updated.maintenance_id = id;
+    updated.maintenance_action = action;
+    updated.maintenance_pending = action == 1;
+    if (action == 2) {
+        updated.boots = updated.probes = updated.reinits = updated.resets = updated.reboots = 0;
+        updated.counters_since = nodeclock::epochNow();
+    }
+    if (!health::save(updated)) {
+        sendMaintenanceResult(id, action, 3);
+        return;
+    }
+    g_health = updated;
+    sendMaintenanceResult(id, action, action == 1 ? 0 : 1);
+    if (action == 1) g_maintenance_restart_ms = millis() + 3000;
+    else { g_health_tx_left = kHealthRepeats; g_health_tx_ms = 0; }
+}
+
 // NODE_PING: el gateway pregunta si el nodo puede con lo que le va a pedir,
 // antes de comprometer la operación.
 //
@@ -1829,6 +1891,9 @@ void processLoraRx() {
             case protocol::kFrameFwBcastPoll:
                 handleFwBcastPoll(f);
                 break;
+            case protocol::kFrameNodeMaintenance:
+                handleNodeMaintenance(f);
+                break;
             case protocol::kFrameNodePing:
                 handleNodePing(f);
                 break;
@@ -1838,6 +1903,8 @@ void processLoraRx() {
             case protocol::kFrameFwStatus:
             case protocol::kFrameFwResult:
             case protocol::kFrameFwBcastMap:
+            case protocol::kFrameNodeHealth:
+            case protocol::kFrameNodeMaintenanceResult:
             case protocol::kFrameNodePong:
                 // Subida de otro nodo con este como salto: relay normal.
                 handleUplinkRelay(f);
@@ -2333,7 +2400,7 @@ void nodeHealthTick(uint32_t now) {
                             static_cast<uint16_t>(g_health.reinits),
                             static_cast<uint16_t>(g_health.resets),
                             static_cast<uint16_t>(g_health.reboots),
-                            static_cast<uint8_t>(g_cfg.modbus_debug))
+                            static_cast<uint8_t>(g_cfg.modbus_debug), g_health.counters_since)
         != LoraP2P::Status::OK) {
         return;   // cola llena o radio no lista: se reintenta en el próximo tick
     }
@@ -2569,6 +2636,7 @@ void setup() {
     // o de un brownout, que es justo lo que no se sabía de los dos incidentes.
     if (fs_ready) {
         health::load(g_health);
+        g_health.maintenance_pending = false;
         g_health.boots++;
         g_health.reset_reason = static_cast<uint8_t>(esp_reset_reason());
         health::save(g_health);
@@ -2743,6 +2811,10 @@ void setup() {
 void loop() {
     // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
     commission::poll();
+    if (g_maintenance_restart_ms && static_cast<int32_t>(millis() - g_maintenance_restart_ms) >= 0) {
+        ESP.restart();
+        return;
+    }
 
     // Ventanas de prueba, las dos fuera del bloque que exige radio lista, a
     // propósito. Un config o una imagen que impidan inicializar la radio son
@@ -2819,7 +2891,7 @@ void loop() {
             }
             registrationTick(tnow);
             snClientTick(tnow);
-            outboxDrainTick(tnow);
+            if (!g_maintenance_restart_ms) outboxDrainTick(tnow);
             ntpTick();
             heartbeatTick(tnow);
             radioHealthTick(tnow);

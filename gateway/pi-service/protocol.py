@@ -148,6 +148,8 @@ FRAME_FW_BCAST_MAP   = 0x22
 # Sondeo de disponibilidad (v4.1, §22).
 FRAME_NODE_PING      = 0x23
 FRAME_NODE_PONG      = 0x24
+FRAME_NODE_MAINTENANCE = 0x28
+FRAME_NODE_MAINTENANCE_RESULT = 0x29
 
 # Para qué se pregunta, y qué contesta el nodo.
 PROBE_CONFIG_WRITE = 0x01
@@ -171,6 +173,8 @@ FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
 
 FRAME_TYPE_NAMES = {
+    FRAME_NODE_MAINTENANCE: 'NODE_MAINTENANCE',
+    FRAME_NODE_MAINTENANCE_RESULT: 'NODE_MAINTENANCE_RESULT',
     FRAME_TELEMETRY_ROUTE: 'TELEMETRY_ROUTE',
     FRAME_SN_ROUTE_REQUEST: 'SN_ROUTE_REQUEST',
     FRAME_SN_ROUTE_OFFER: 'SN_ROUTE_OFFER',
@@ -645,10 +649,11 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
         # recuperaciones por nivel y los contadores de radio.
-        if payload_length != 25:
+        if payload_length not in (25, 29):
             out['error'] = (f'NODE_HEALTH payload_length={payload_length}, '
-                            f'esperado 25')
+                            f'esperado 25 o 29')
             return out
+        out['hl_counters_since'] = struct.unpack_from('<I', payload, 25)[0] if payload_length >= 29 else 0
         out['hl_fault']        = payload[0]
         out['hl_fault_name']   = HEALTH_FAULT_NAMES.get(
             payload[0], f'unknown(0x{payload[0]:02X})')
@@ -664,6 +669,14 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['hl_mb_debug']      = payload[24]
         out['hl_mb_debug_name'] = MB_DEBUG_NAMES.get(
             payload[24], f'unknown(0x{payload[24]:02X})')
+
+    elif frame_type == FRAME_NODE_MAINTENANCE_RESULT:
+        if payload_length != 32:
+            out['error'] = 'NODE_MAINTENANCE_RESULT: longitud incorrecta'
+            return out
+        values = struct.unpack('<IBBIBBIIIII', payload)
+        out['maintenance'] = dict(zip(('id', 'action', 'status', 'counters_since',
+            'fault', 'reset_reason', 'boots', 'probes', 'reinits', 'resets', 'reboots'), values))
 
     elif frame_type == FRAME_NODE_PONG:
         if payload_length < 4:
@@ -1057,6 +1070,23 @@ def build_fw_bcast_poll(dest_id: int, hop_dst: int, xfer_id: int, gw_seq: int,
     frame[OFF_TTL]         = ttl
     frame[OFF_PAYLOAD_LEN] = 4
     struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
+    return _finalize(frame, key, sec_ts)
+
+
+def build_node_maintenance(dest_id, hop_dst, request_id, action, expires,
+                           gw_seq, network_id, ttl, key=None, sec_ts=0):
+    frame = bytearray(HEADER_BYTES + 9)
+    frame[OFF_SCHEMA] = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID] = network_id
+    frame[OFF_HOP_SRC] = ADDR_GATEWAY
+    frame[OFF_HOP_DST] = hop_dst
+    frame[OFF_ORIGIN_ID] = ADDR_GATEWAY
+    frame[OFF_DEST_ID] = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE] = FRAME_NODE_MAINTENANCE
+    frame[OFF_TTL] = ttl
+    frame[OFF_PAYLOAD_LEN] = 9
+    struct.pack_into('<IBI', frame, OFF_PAYLOAD, request_id, action, expires)
     return _finalize(frame, key, sec_ts)
 
 

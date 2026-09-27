@@ -50,6 +50,11 @@ class GatewayBuffer:
         self.max_entries = max_entries
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS node_maintenance (
+            id INTEGER PRIMARY KEY, origin INTEGER NOT NULL, action INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued', created REAL NOT NULL,
+            expires INTEGER NOT NULL, sent_at REAL NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '')""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS delivery_routes (
             origin INTEGER NOT NULL, source TEXT NOT NULL, publisher INTEGER NOT NULL,
             captured_ts INTEGER NOT NULL, seq INTEGER NOT NULL, observed_at REAL NOT NULL,
@@ -370,6 +375,9 @@ class GatewayBuffer:
         """)
         self._migrate_fw_bcast_target()
         self._migrate_node_status_nbiot()
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(node_status)")}
+        if 'hl_counters_since' not in cols:
+            self.conn.execute("ALTER TABLE node_status ADD COLUMN hl_counters_since INTEGER NOT NULL DEFAULT 0")
         self._migrate_config_push_apply_at()
         self._migrate_net_migration_rescate()
         self.conn.commit()
@@ -480,19 +488,16 @@ class GatewayBuffer:
 
     def set_health(self, origin: int, fault: int, reset_reason: int,
                    boots: int, probes: int, reinits: int, resets: int,
-                   reboots: int) -> None:
-        """Guarda los contadores del NODE_HEALTH de un nodo (§16.1).
-
-        Son acumulados desde la fabricación, no eventos, así que guardar el
-        último recibido es guardarlo todo. Upsert con last_seen a 0 por la
-        misma razón que en set_mb_debug: la salud puede llegar antes de que el
-        nodo tenga fila.
-        """
+                   reboots: int, counters_since: int = 0) -> None:
+        """Guarda el diagnóstico sin recuperar contadores anteriores a una puesta a cero."""
+        previous = self.conn.execute("SELECT hl_counters_since FROM node_status WHERE origin=?", (origin,)).fetchone()
+        if previous and previous[0] > counters_since:
+            return
         self.conn.execute(
             """INSERT INTO node_status (origin, last_seen, hl_fault,
                    hl_reset_reason, hl_boots, hl_probes, hl_reinits,
-                   hl_resets, hl_reboots, hl_updated)
-               VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                   hl_resets, hl_reboots, hl_updated, hl_counters_since)
+               VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(origin) DO UPDATE SET
                    hl_fault = excluded.hl_fault,
                    hl_reset_reason = excluded.hl_reset_reason,
@@ -501,9 +506,10 @@ class GatewayBuffer:
                    hl_reinits = excluded.hl_reinits,
                    hl_resets = excluded.hl_resets,
                    hl_reboots = excluded.hl_reboots,
-                   hl_updated = excluded.hl_updated""",
+                   hl_updated = excluded.hl_updated,
+                   hl_counters_since = excluded.hl_counters_since""",
             (origin, fault, reset_reason, boots, probes, reinits, resets,
-             reboots, time.time()))
+             reboots, time.time(), counters_since))
         self.conn.commit()
 
     def hop_for(self, origin: int) -> int:

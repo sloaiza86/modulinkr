@@ -23,6 +23,10 @@ enum class Fault : uint8_t {
 };
 
 struct Record {
+    uint32_t maintenance_id = 0;
+    uint8_t maintenance_action = 0;
+    bool maintenance_pending = false;
+    uint32_t counters_since = 0;
     uint32_t boots            = 0;
     uint8_t  reset_reason     = 0;  // esp_reset_reason() del arranque actual
     uint32_t probes           = 0;  // L1, sondeos AT

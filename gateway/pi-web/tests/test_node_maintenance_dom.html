@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mantenimiento de nodos: comprobación local</title>
+<link rel="stylesheet" href="../static/style.css">
+<script src="../static/components.js"></script>
+<style>body{display:block;padding:24px}#fixture{max-width:960px;margin:auto}#results{max-width:960px;margin:0 auto 20px;font:12px system-ui}#health-fixture{max-width:420px;margin:24px auto;background:var(--panel);padding:20px;border:1px solid var(--border);border-radius:12px}</style>
+<p id="results">Comprobando con servicios simulados…</p>
+<main id="fixture"></main><aside id="health-fixture"></aside>
+<script>
+(async()=>{
+ const results=[];
+ const check=(ok,label)=>{if(!ok)throw Error(label);results.push(label)};
+ try{
+  const html=await(await fetch('../static/index.html',{cache:'no-store'})).text();
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  const panel=doc.querySelector('#cfg-mantenimiento');panel.hidden=false;
+  document.querySelector('#fixture').append(panel);
+  document.body.append(doc.querySelector('#cfg-dialogo'),doc.querySelector('#cfg-dialogo-fondo'));
+  const source=await(await fetch('../static/app.js',{cache:'no-store'})).text();
+  const section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+  const factory=new Function(`
+    ${section('function htmlSeguro(', '// -----')}
+    ${section('function mensajeConfigNodo(', 'function textoError(')}
+    ${section('function tipoMensaje(', '// Chip de duty cycle:')}
+    iniciarMensajes();
+    const sessionStorage={getItem:()=>null,setItem:()=>{},removeItem:()=>{}};
+    let data={nodes:[{origin:1,name:'Nodo Sensor Ambiental',unavailable:''},{origin:2,name:'Supernodo Acelerómetro',unavailable:'No hay una conexión LoRa disponible.'}],operations:[]};
+    let posts=0,offline=false;
+    const fetch=async(url,options)=>{
+      if(offline)throw Error('sin conexión');
+      if(options.method==='POST'){
+        posts++;data.operations=[{id:posts,origin:1,action:url.endsWith('restart')?1:2,state:'queued'}];
+        return {ok:true,status:200,json:async()=>({id:posts,state:'queued'})};
+      }
+      return {ok:true,status:200,json:async()=>data};
+    };
+    ${section('const MANTENIMIENTO =', 'function cfgBotones(')}
+    ${section("const SPIN =", '// Tras un CFG.PUT')}
+    return {load:()=>{mantenimientoTab='nodos';return mantenimientoNodosCargar()},confirm:()=>cfgConfirmarCb(),posts:()=>posts,
+      state:s=>{data.operations[0].state=s},offline:v=>{offline=v},paint:mantenimientoNodoPintar,
+      stop:()=>clearTimeout(mantenimientoTimer)};
+  `);
+  const api=factory();
+  document.querySelector('[data-mantenimiento-tab="nodos"]').click();
+  await api.load();
+  const select=document.querySelector('#mantenimiento-nodo');
+  const restart=document.querySelector('[data-nodo-accion="restart"]');
+  const reset=document.querySelector('[data-nodo-accion="reset-counters"]');
+  const status=()=>document.querySelector('#mantenimiento-nodo-estado').textContent;
+  check(!document.querySelector('#mantenimiento-gateway').getClientRects().length,'Gateway oculto en la pestaña Nodos');
+  check(!restart.disabled&&!reset.disabled,'Acciones disponibles con LoRa y firmware compatible');
+  select.value='2';select.dispatchEvent(new Event('change'));
+  check(restart.disabled&&reset.disabled,'Nodo sin LoRa: acciones deshabilitadas');
+  select.value='1';select.dispatchEvent(new Event('change'));
+  restart.click();
+  check(document.querySelector('#cfg-dialogo').textContent.includes('Nodo Sensor Ambiental'),'Confirmación identifica al nodo');
+  check(api.posts()===0,'Abrir la confirmación no envía órdenes');
+  await api.confirm();await api.load();
+  check(status().includes('pendiente de envío'),'Encolar no confirma el reinicio');
+  api.state('sent');await api.load();check(status().includes('Esperando su aceptación'),'Envío espera aceptación');
+  api.state('accepted');await api.load();check(status()==='Reiniciando Nodo Sensor Ambiental…','Aceptación indica qué se reinicia');
+  api.offline(true);await api.load();check(!status().includes('falló')&&api.posts()===1,'Pérdida de conexión no repite ni declara fallo');
+  api.offline(false);api.state('confirmed');await api.load();
+  check(status().includes('reinicio confirmado')&&!restart.disabled,'Confirmación del nodo termina la espera');
+  reset.click();check(document.querySelector('#cfg-dialogo').textContent.includes('arranques acumulados'),'Puesta a cero enumera contadores');
+  await api.confirm();api.state('accepted');await api.load();check(status().includes('Poniendo a cero'),'Acción de contadores tiene mensaje específico');
+  api.state('unconfirmed');await api.load();check(status().includes('No se recibió la confirmación'),'Silencio no se presenta como éxito');
+  api.state('confirmed');await api.load();check(status().includes('contadores puestos a cero'),'Puesta a cero confirmada');
+  api.stop();
+  const diag=new Function(`
+    ${section('function htmlSeguro(', '// -----')}
+    const redAhora=2000,cacheEstado={service_online:true};
+    const nombreNodoRuta=id=>'Supernodo '+id,edadEnVivo=()=> '5 s',opcHora=o=>o;
+    const filaDet=(label,value)=>'<div class="det-fila"><span>'+label+'</span><span>'+value+'</span></div>';
+    ${section('function viaEntregaDetalle(', 'async function verNodoEnDatos(')}
+    return {via:viaEntregaDetalle,health:bloqueSalud};
+  `)();
+  check(diag.via({origin:1,transport:'lora'})==='LoRa · recorrido no disponible','No inventa una ruta directa');
+  check(diag.via({origin:1,transport:'lora',observed_routes:[{source:'lora',path:[1,255],at:1900}]})==='LoRa directa','Ruta LoRa directa');
+  check(diag.via({origin:1,transport:'lora',observed_routes:[{source:'lora',path:[1,2,255],at:1900}]})==='LoRa mediante relay','Ruta LoRa mediante relay');
+  check(diag.via({origin:1,transport:'relay',via_publisher:2}).includes('NB-IoT mediante supernodo'),'Salida celular mediante supernodo');
+  const h={fault:2,reset_reason:1,boots:799,probes:54,reinits:633,resets:606,reboots:600,ago_s:5,counters_since:1790490000};
+  const health=diag.health(h,{delivery_online:true,last_activity_at:1995});
+  document.querySelector('#health-fixture').innerHTML=health;
+  document.querySelector('#health-fixture details').open=true;
+  check(health.includes('Comunicación operativa')&&health.includes('Sin recepción LoRa'),'Estado actual separado del fallo histórico');
+  check(health.includes('Contadores desde')&&health.includes('Diagnóstico recibido hace'),'Fecha de contadores y antigüedad explícitas');
+  check(!source.includes('filaDet("Periodo de muestreo observado"')&&!source.includes('filaDet("Último padre LoRa observado"'),'Campos innecesarios eliminados');
+  document.querySelector('#results').textContent=results.length+' comprobaciones correctas: '+results.join(' · ');
+ }catch(error){document.querySelector('#results').textContent='FAIL: '+error.stack}
+})();
+</script>

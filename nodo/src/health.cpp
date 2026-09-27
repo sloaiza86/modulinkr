@@ -15,7 +15,7 @@ constexpr const char* kTmpPath = "/health.tmp";
 
 // Holgado para el registro actual (unos 200 B serializados), con margen para
 // campos futuros sin tener que revisar el tamaño.
-constexpr size_t kJsonCapacity = 512;
+constexpr size_t kJsonCapacity = 1024;
 }  // namespace
 
 bool load(Record& out) {
@@ -29,6 +29,10 @@ bool load(Record& out) {
     f.close();
     if (err) return false;
 
+    out.maintenance_id = doc["maintenance_id"] | 0u;
+    out.maintenance_action = doc["maintenance_action"] | 0u;
+    out.maintenance_pending = doc["maintenance_pending"] | false;
+    out.counters_since = doc["counters_since"] | 0u;
     out.boots            = doc["boots"]            | 0u;
     out.reset_reason     = doc["reset_reason"]     | 0u;
     out.probes           = doc["probes"]           | 0u;
@@ -49,6 +53,10 @@ bool load(Record& out) {
 
 bool save(const Record& r) {
     StaticJsonDocument<kJsonCapacity> doc;
+    doc["maintenance_id"] = r.maintenance_id;
+    doc["maintenance_action"] = r.maintenance_action;
+    doc["maintenance_pending"] = r.maintenance_pending;
+    doc["counters_since"] = r.counters_since;
     doc["boots"]            = r.boots;
     doc["reset_reason"]     = r.reset_reason;
     doc["probes"]           = r.probes;
@@ -69,7 +77,7 @@ bool save(const Record& r) {
     if (!f) return false;
     const size_t written = serializeJson(doc, f);
     f.close();
-    if (written == 0) {
+    if (written != measureJson(doc)) {
         LittleFS.remove(kTmpPath);
         return false;
     }

@@ -1648,3 +1648,33 @@ La difusión conserva hasta 16 solicitudes recientes, identificadas por origen y
 En estos tres tipos, el payload y su longitud pueden cambiar por salto. Se recifra la trama con un `sec_ts` de transmisión no reutilizado dentro de la sesión del transmisor, conservando la identidad de la muestra. Esta regla sustituye la inmutabilidad del payload y del `sec_ts` de §2 y §14 únicamente para los tipos de §23. La traza es información aportada por dispositivos que comparten la clave de red, no una prueba criptográfica independiente de cada enlace.
 
 `path_at` conserva el instante de recepción en el supernodo o gateway. Republicar la misma custodia no lo renueva. La bandeja MOB2 conserva la ruta y su fecha e importa MOB1 sin reconstruir saltos desconocidos. Los reintentos de una custodia ya en cola no sustituyen una entrada en vuelo. El límite de 16 identificadores incluye origen y receptor final; el identificador 255 solo se admite como destino final del gateway.
+
+## 24. Mantenimiento remoto de nodos
+
+Desde el firmware 0.0.68 se admiten NODE_MAINTENANCE (`0x28`) y NODE_MAINTENANCE_RESULT (`0x29`). Se conserva la cabecera y el cifrado configurado para la red. La petición solo se consume si el origen es el gateway y el destino es el propio nodo. Los relays reenvían la petición por la ruta descendente aprendida y la respuesta hacia el gateway. El servicio, el nodo destinatario y los relays del recorrido deben estar actualizados. No se utiliza NB-IoT para estas órdenes.
+
+NODE_MAINTENANCE contiene 9 bytes: identificador de operación de 32 bits, acción de 8 bits y vencimiento UTC de 32 bits, todos los enteros multibyte en little-endian. La acción 1 reinicia el nodo y la 2 pone a cero los cinco contadores de salud visibles. El gateway asigna un identificador creciente, como máximo entre el segundo UTC actual y el último identificador persistido más uno. Se fija un vencimiento de 60 s para aceptar una orden nueva. Se retransmite la misma operación cada 10 s, con nueva secuencia de trama, durante un máximo de 180 s para recoger su resultado.
+
+Antes de aceptar una acción se comprueba que no haya transferencia de firmware, configuración en curso, lectura de configuración, aplicación programada ni ventana de prueba. Para reiniciar se exige además que no haya muestras pendientes de ACK. Tras aceptar el reinicio se suspende el nuevo muestreo y el drenaje LoRa durante los tres segundos previos al reinicio; la outbox persistente se conserva. Una puesta a cero no reinicia el nodo ni modifica las muestras, la configuración, el último fallo, la causa del arranque o los contadores de actualización de firmware y configuración.
+
+El identificador, la acción y el estado pendiente se guardan en el mismo registro atómico que la salud antes de responder. Una repetición del último identificador devuelve el resultado sin ejecutar de nuevo la acción. Un identificador anterior, o el mismo con otra acción, se rechaza. La repetición de una operación ya registrada permite consultar su resultado aunque haya vencido el plazo de aceptación. El arranque posterior elimina el estado pendiente del reinicio; recibir la orden o volver a ver tráfico no confirma por sí solo que haya arrancado.
+
+NODE_MAINTENANCE_RESULT contiene 32 bytes:
+
+| Posición | Campo | Tamaño |
+| --- | --- | --- |
+| 0 | Identificador de operación | 4 B |
+| 4 | Acción | 1 B |
+| 5 | Resultado | 1 B |
+| 6 | Fecha UTC de puesta a cero, 0 si no consta | 4 B |
+| 10 | Último fallo reportado | 1 B |
+| 11 | Motivo del último arranque | 1 B |
+| 12 | Arranques acumulados | 4 B |
+| 16 | Consultas a la radio sin respuesta | 4 B |
+| 20 | Reconfiguraciones de radio | 4 B |
+| 24 | Reinicios de radio | 4 B |
+| 28 | Reinicios automáticos del nodo | 4 B |
+
+El resultado 0 indica aceptación, 1 confirmación, 2 operación incompatible en curso, 3 fallo de persistencia, 4 orden caducada o sustituida y 5 muestras pendientes de ACK. El gateway exige correspondencia de origen, identificador y acción. Una aceptación tardía no sustituye una confirmación. Al agotarse el plazo sin resultado se conserva el estado sin confirmar; no se interpreta el silencio como éxito o fallo de ejecución.
+
+NODE_HEALTH conserva el prefijo anterior de 25 bytes y añade la fecha UTC de puesta a cero en los bytes 25 a 28. El receptor acepta ambos tamaños. Tras recibir una fecha de puesta a cero, un diagnóstico con fecha anterior no restaura los contadores antiguos. La fecha y los contadores sobreviven al reinicio del nodo; se requiere actualizar el receptor Python antes de instalar este firmware.

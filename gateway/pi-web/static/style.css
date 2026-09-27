@@ -1798,3 +1798,7 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
 
 #red-observacion { flex: 0 0 auto; width: auto; margin: 12px 24px 0; }
 body.mantenimiento-reiniciando #red-observacion { display: none; }
+
+#mantenimiento-nodos > .card + .card { margin-top: 16px; }
+#mantenimiento-nodos select { width: 100%; margin-top: 8px; }
+.detalle-diagnostico-contenido .texto-ayuda { font-size: 12px; color: var(--dim); }

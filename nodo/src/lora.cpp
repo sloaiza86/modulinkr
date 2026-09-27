@@ -547,15 +547,15 @@ LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
                                         uint16_t boots,
                                         uint16_t l1, uint16_t l2,
                                         uint16_t l3, uint16_t l4,
-                                        uint8_t mb_debug_mode) {
+                                        uint8_t mb_debug_mode, uint32_t counters_since) {
     if (!initialized_) return Status::NOT_INITIALIZED;
 
-    // Payload v3.4 (spec §16), 25 bytes. Los contadores de recuperación van
+    // El prefijo conserva los 25 bytes de §16; se añade la fecha de puesta a cero. Los contadores de recuperación van
     // en uint16: un nodo que supere las 65535 recuperaciones tiene un
     // problema que ningún contador va a resolver. El último byte es el modo
     // de depuración Modbus vigente, que el visor necesita para distinguir
     // "el bus va limpio" de "la depuración está apagada".
-    uint8_t payload[25];
+    uint8_t payload[29];
     payload[0] = fault;
     payload[1] = reset_reason;
     std::memcpy(&payload[2],  &boots, sizeof(boots));
@@ -571,6 +571,7 @@ LoraP2P::Status LoraP2P::sendNodeHealth(uint16_t seq, uint8_t hop_dst,
     std::memcpy(&payload[16], &done,  sizeof(done));
     std::memcpy(&payload[20], &rxv,   sizeof(rxv));
     payload[24] = mb_debug_mode;
+    std::memcpy(payload + 25, &counters_since, 4);
 
     return buildAndSend(hop_dst,
                         node_id_,

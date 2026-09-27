@@ -411,6 +411,15 @@ def network_state() -> dict:
         for r in rows
     ]
 
+    try:
+        with _conn() as c:
+            since = dict(c.execute("SELECT origin, hl_counters_since FROM node_status"))
+        for node in nodes:
+            if node.get('health'):
+                node['health']['counters_since'] = since.get(node['origin'], 0)
+    except sqlite3.OperationalError:
+        pass
+
     link = gateway_link_state()
     _delivery_state(nodes, now, link)
 

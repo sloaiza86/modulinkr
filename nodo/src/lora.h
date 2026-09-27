@@ -378,7 +378,7 @@ public:
                           uint8_t fault, uint8_t reset_reason,
                           uint16_t boots,
                           uint16_t l1, uint16_t l2, uint16_t l3, uint16_t l4,
-                          uint8_t mb_debug_mode);
+                          uint8_t mb_debug_mode, uint32_t counters_since = 0);
 
     // Tiempo de aire de la última trama emitida, en ms. Sirve para espaciar
     // ráfagas propias según el ciclo de trabajo sin recalcular el ToA fuera.

@@ -1301,9 +1301,8 @@ function pintarDetalle(origin) {
   actualizarContenido(cuerpo, `
     <div class="det-grupo"><h3>Información</h3>
       ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
-      ${filaDet("Última actividad LoRa observada", n.last_seen ? "Hace " + edadEnVivo(n.last_seen) : "Sin observaciones")}
-      ${filaDet("Entrega", htmlSeguro(textoRuta(n)))}
-      ${filaDet("Periodo de muestreo observado", n.sample_period_s == null ? "Aún no determinado" : fmtEdadEnVivo(n.sample_period_s))}
+      ${filaDet("Última actividad", n.last_activity_at ? "Hace " + edadEnVivo(n.last_activity_at) : "Sin información")}
+      ${filaDet(n.delivery_online ? "Vía de entrega" : "Última vía de entrega", htmlSeguro(viaEntregaDetalle(n)))}
       ${filaDet("Versión", htmlSeguro(fwVersionTexto(n.fw_version)))}
     </div>
     ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>
@@ -1311,11 +1310,10 @@ function pintarDetalle(origin) {
     <div class="det-grupo"><h3>Radio LoRa</h3>
       ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
       ${filaDet("SNR", fmtNum(n.snr) + " dB")}
-      ${filaDet("Último padre LoRa observado", htmlSeguro(nombrePadre(n.parent_id)))}
       ${filaDet("Saltos", n.hop_count ?? "")}
       ${filaDet("Duty cycle, última hora", chipDuty(n.duty_1h))}
     </div>
-    ${bloqueSalud(n.health)}`);
+    ${bloqueSalud(n.health, n)}`);
   const diagnostico = cuerpo.querySelector(".detalle-diagnostico");
   if (diagnostico) diagnostico.open = diagnosticoAbierto;
   cuerpo.scrollTop = desplazamiento;
@@ -1323,33 +1321,41 @@ function pintarDetalle(origin) {
       data-origin="${origin}">${iconoMdi("chart-line")}<span>Ver más datos</span>${iconoMdi("chevron-right")}</button>`);
 }
 
-// Salud del nodo, del NODE_HEALTH (§16.1). Los contadores llegaban al gateway
-// desde hace semanas y solo se escribían en el log y en MQTT, así que quien
-// miraba la pantalla no tenía forma de saber por qué se había reiniciado un
-// nodo ni cuántas veces se le había caído la radio.
-//
-// La escalera de recuperación se enseña entera y en orden, de menos a más
-// agresiva, porque lo que importa no es cada número suelto sino hasta qué
-// peldaño ha tenido que subir: sondeos y reinicializaciones son rutina, un
-// ATZ ya es serio, y un reinicio del nodo es el último recurso.
-function bloqueSalud(h) {
-  if (!h) {
-    return `<details class="detalle-diagnostico"><summary>Diagnóstico</summary>
-      <div class="detalle-diagnostico-contenido">
-        ${filaDet("Estado", "Aún no hay información de diagnóstico")}
-      </div></details>`;
-  }
-  const escalera = `${h.probes} comprobaciones · ${h.reinits} recuperaciones `
-                 + `· ${h.resets} restablecimientos · ${h.reboots} reinicios`;
+function viaEntregaDetalle(n) {
+  if (!n.transport) return "Sin información";
+  if (n.transport === "relay") return `NB-IoT mediante supernodo · ${nombreNodoRuta(n.via_publisher)}`;
+  if (n.transport === "nbiot") return "NB-IoT directa";
+  const rutas = (n.observed_routes ?? []).filter(r => r.source === "lora" &&
+    (!n.delivery_online || r.until > redAhora)).sort((a, b) => b.at - a.at);
+  const path = rutas[0]?.path;
+  if (!path || path[0] !== n.origin || path.at(-1) !== 255)
+    return "LoRa · recorrido no disponible";
+  return path.length === 2 ? "LoRa directa" : "LoRa mediante relay";
+}
+
+function bloqueSalud(h, n) {
+  const sinObservacion = n.observation_lost || cacheEstado?.service_online !== true;
+  const estado = sinObservacion ? "Sin información reciente" : n.delivery_online
+    ? "Comunicación operativa" : n.last_activity_at ? "Comunicación interrumpida" : "Sin información reciente";
+  const fallos = { 0: "Ninguno", 1: "Sin confirmación de transmisión LoRa", 2: "Sin recepción LoRa" };
+  const motivos = { 1: "Encendido", 2: "Reinicio externo", 3: "Reinicio por software", 4: "Fallo de ejecución",
+    5: "Bloqueo de interrupciones", 6: "Bloqueo de una tarea", 7: "Bloqueo del sistema",
+    8: "Salida de suspensión", 9: "Caída de tensión", 10: "Reinicio SDIO" };
+  const desde = h?.counters_since ? new Date(h.counters_since * 1000)
+    .toLocaleString("es-ES", opcHora({ day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })) : null;
   return `<details class="detalle-diagnostico"><summary>Diagnóstico</summary>
     <div class="detalle-diagnostico-contenido">
-    ${filaDet("Último fallo", h.fault
-        ? `<span class="chip ambar">${htmlSeguro(h.fault_name)}</span>`
-        : `<span class="chip on">${htmlSeguro(h.fault_name)}</span>`)}
-    ${filaDet("Arranques", h.boots)}
-    ${filaDet("Causa del último", htmlSeguro(h.reset_name))}
-    ${filaDet("Recuperaciones", htmlSeguro(escalera))}
-    ${filaDet("Reportado", "hace " + edadEnVivo(redAhora - h.ago_s))}
+    ${filaDet("Estado actual", htmlSeguro(estado))}
+    ${h ? `${filaDet("Último fallo reportado", htmlSeguro(fallos[h.fault] ?? "Desconocido"))}
+    ${filaDet("Motivo del último arranque", htmlSeguro(motivos[h.reset_reason] ?? "Desconocido"))}
+    ${filaDet("Arranques acumulados", h.boots)}
+    ${filaDet("Consultas a la radio sin respuesta", h.probes)}
+    ${filaDet("Reconfiguraciones de radio", h.reinits)}
+    ${filaDet("Reinicios de radio", h.resets)}
+    ${filaDet("Reinicios automáticos del nodo", h.reboots)}
+    ${desde ? filaDet("Contadores desde", htmlSeguro(desde)) : ""}
+    <p class="texto-ayuda">Diagnóstico recibido hace ${edadEnVivo(redAhora - h.ago_s)}</p>`
+    : '<p class="texto-ayuda">Aún no se ha recibido un diagnóstico del nodo.</p>'}
     </div></details>`;
 }
 
@@ -2766,6 +2772,7 @@ async function mantenimientoPeticion(url, options = {}) {
 
 async function mantenimientoCargar() {
   clearTimeout(mantenimientoTimer);
+  if (mantenimientoTab === "nodos") return mantenimientoNodosCargar();
   if (mantenimientoEnviando) return;
   const revision = ++mantenimientoRevision;
   const estado = document.getElementById("mantenimiento-estado");
@@ -2843,6 +2850,133 @@ document.querySelectorAll("[data-reinicio]").forEach(button => {
   button.addEventListener("click", () => mantenimientoConfirmar(button.dataset.reinicio));
 });
 
+
+let mantenimientoTab = "gateway";
+let mantenimientoNodos = [];
+let mantenimientoOperaciones = [];
+const mantenimientoOperacionesVistas = new Set();
+let mantenimientoNodoEnviando = false;
+let mantenimientoNodoIncierto = null;
+
+function mantenimientoNodoPintar() {
+  const origin = Number(document.getElementById("mantenimiento-nodo").value);
+  const node = mantenimientoNodos.find(n => n.origin === origin);
+  const op = mantenimientoOperaciones.find(o => o.origin === origin);
+  const busy = mantenimientoNodoEnviando || mantenimientoNodoIncierto !== null ||
+    mantenimientoOperaciones.some(o => ["queued", "sent", "accepted"].includes(o.state));
+  document.getElementById("mantenimiento-nodo-disponibilidad").textContent = node?.unavailable ?? "No hay nodos registrados.";
+  document.getElementById("mantenimiento-nodo").disabled = mantenimientoNodoEnviando || mantenimientoNodoIncierto !== null;
+  document.querySelectorAll("[data-nodo-accion]").forEach(b => { b.disabled = busy || !node || !!node.unavailable; });
+  const status = document.getElementById("mantenimiento-nodo-estado");
+  if (mantenimientoNodoEnviando) return;
+  if (mantenimientoNodoIncierto !== null) {
+    status.textContent = "Comprobando si el gateway registró la orden…";
+    return;
+  }
+  const name = node?.name || `Nodo ${origin}`;
+  const action = op?.action === 1 ? `Reiniciando ${name}…` : `Poniendo a cero los contadores de ${name}…`;
+  status.textContent = !op || !mantenimientoOperacionesVistas.has(op.id) ? "" : {
+    queued: `Orden pendiente de envío a ${name}.`,
+    sent: `Orden enviada a ${name}. Esperando su aceptación…`,
+    accepted: action,
+    confirmed: op.action === 1 ? `${name}: reinicio confirmado.` : `${name}: contadores puestos a cero.`,
+    rejected: op.detail || "El nodo rechazó la orden.",
+    unconfirmed: `No se recibió la confirmación de ${name}. No se puede asegurar que la acción haya terminado.`,
+  }[op.state] || "";
+}
+
+async function mantenimientoNodosCargar() {
+  const revision = ++mantenimientoRevision;
+  try {
+    const data = await mantenimientoPeticion("/api/mantenimiento/nodos");
+    if (revision !== mantenimientoRevision || mantenimientoTab !== "nodos") return;
+    mantenimientoNodos = data.nodes;
+    mantenimientoOperaciones = data.operations;
+    for (const op of data.operations) {
+      if (["queued", "sent", "accepted"].includes(op.state)) mantenimientoOperacionesVistas.add(op.id);
+    }
+    const select = document.getElementById("mantenimiento-nodo");
+    const previous = select.value;
+    const options = data.nodes.map(n => `<option value="${n.origin}">${htmlSeguro(n.name || `Nodo ${n.origin}`)}</option>`).join("");
+    if (select.innerHTML !== options) {
+      select.innerHTML = options;
+      if (data.nodes.some(n => String(n.origin) === previous)) select.value = previous;
+    }
+    if (mantenimientoNodoIncierto !== null) {
+      const newer = data.operations.find(o => o.origin === mantenimientoNodoIncierto.origin && o.id !== mantenimientoNodoIncierto.previous);
+      if (newer) { mantenimientoOperacionesVistas.add(newer.id); mantenimientoNodoIncierto = null; }
+      else if (Date.now() - mantenimientoNodoIncierto.at > 180000) {
+        mantenimientoNodoIncierto = null;
+        mantenimientoNodoPintar();
+        document.getElementById("mantenimiento-nodo-estado").textContent = "No se pudo confirmar el registro de la orden. Comprueba el estado del nodo antes de volver a solicitarla.";
+        return;
+      }
+    }
+    mantenimientoNodoPintar();
+  } catch (error) {
+    if (revision !== mantenimientoRevision || mantenimientoTab !== "nodos") return;
+    document.querySelectorAll("[data-nodo-accion]").forEach(b => { b.disabled = true; });
+    document.getElementById("mantenimiento-nodo-estado").textContent = "Sin conexión con el gateway. Esperando para comprobar el estado de la orden…";
+  }
+  if (location.hash === "#/configuracion/mantenimiento" && mantenimientoTab === "nodos")
+    mantenimientoTimer = setTimeout(mantenimientoNodosCargar, 2500);
+}
+
+function mantenimientoNodoConfirmar(action) {
+  const origin = Number(document.getElementById("mantenimiento-nodo").value);
+  const node = mantenimientoNodos.find(n => n.origin === origin);
+  if (!node || node.unavailable || mantenimientoNodoEnviando) return;
+  const name = node.name || `Nodo ${origin}`;
+  const restart = action === "restart";
+  cfgConfirmarCb = async () => {
+    cfgDialogoCerrar();
+    clearTimeout(mantenimientoTimer);
+    mantenimientoRevision++;
+    mantenimientoNodoEnviando = true;
+    mantenimientoNodoIncierto = {origin, previous: mantenimientoOperaciones.find(o => o.origin === origin)?.id ?? null, at: Date.now()};
+    mantenimientoNodoPintar();
+    const status = document.getElementById("mantenimiento-nodo-estado");
+    status.textContent = `Enviando la orden a ${name}…`;
+    let rejected = false;
+    try {
+      const operation = await mantenimientoPeticion(`/api/mantenimiento/nodos/${origin}/${action}`, {
+        method: "POST", headers: { "X-ModuLinkr-Maintenance": "1" },
+      });
+      mantenimientoOperacionesVistas.add(operation.id);
+      mantenimientoNodoIncierto = null;
+    } catch (error) {
+      if (error.rechazado) {
+        mantenimientoNodoIncierto = null;
+        rejected = true;
+        status.textContent = error.message;
+      }
+    } finally { mantenimientoNodoEnviando = false; }
+    if (!rejected) mantenimientoNodosCargar();
+    else mantenimientoTimer = setTimeout(mantenimientoNodosCargar, 5000);
+  };
+  const description = restart
+    ? "La comunicación se interrumpirá durante el arranque. Se conservarán la configuración, las muestras pendientes y los contadores."
+    : "Se pondrán a cero los arranques acumulados, las consultas a la radio sin respuesta, las reconfiguraciones de radio, los reinicios de radio y los reinicios automáticos del nodo. Se conservarán la configuración, las muestras, el último fallo y el motivo del último arranque.";
+  cfgDialogo(restart ? `¿Reiniciar ${name}?` : `¿Poner a cero los contadores de ${name}?`,
+    `<p>${description}</p>`, { cancelar: true, confirmar: true, confirmarText: restart ? "Reiniciar" : "Poner a cero", confirmarPeligro: false });
+}
+
+document.querySelectorAll("[data-mantenimiento-tab]").forEach(button => {
+  button.addEventListener("click", () => {
+    mantenimientoTab = button.dataset.mantenimientoTab;
+    mantenimientoRevision++;
+    clearTimeout(mantenimientoTimer);
+    document.querySelectorAll("[data-mantenimiento-tab]").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
+    document.getElementById("mantenimiento-gateway").hidden = mantenimientoTab !== "gateway";
+    document.getElementById("mantenimiento-nodos").hidden = mantenimientoTab !== "nodos";
+    document.body.classList.remove("mantenimiento-reiniciando");
+    mantenimientoCargar();
+  });
+});
+document.getElementById("mantenimiento-nodo").addEventListener("change", mantenimientoNodoPintar);
+document.querySelectorAll("[data-nodo-accion]").forEach(button => {
+  button.addEventListener("click", () => mantenimientoNodoConfirmar(button.dataset.nodoAccion));
+});
 
 function cfgBotones(bloquear) {
   ["cfg-buscar", "cfg-leer", "cfg-archivo-btn", "cfg-enviar",

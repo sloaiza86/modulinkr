@@ -47,6 +47,11 @@ def comparison(installed, available):
 
 def release_notes(component, version):
     notes = {
+        ('node', (0, 0, 68)): [
+            'Reinicio remoto y puesta a cero de contadores de salud por LoRa con confirmación del nodo.',
+            'Protección frente a órdenes repetidas y conservación del último fallo reportado.',
+            'Los relays del recorrido también deben utilizar 0.0.68 o posterior.'
+        ],
         ('node', (0, 0, 61)): ['Registros de diagnóstico con tiempo, nivel, componente y evento, legibles por USB y web.'],
         ('radio', (0, 3, 3)): ['Registros de diagnóstico uniformes. Se conservan las respuestas USB que interpreta el gateway.'],
         ('node', (0, 0, 60)): ['Versión de prueba para verificar la actualización USB y la confirmación del arranque. Sin cambios funcionales respecto a 0.0.59.'],

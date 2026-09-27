@@ -64,6 +64,7 @@ systemd lo relanza.
 
 from __future__ import annotations
 
+import node_maintenance
 import collections
 import hashlib
 import json
@@ -2616,6 +2617,11 @@ class GatewayService:
         # registra en el log y se publica a MQTT, porque a diferencia del
         # debug Modbus interesa fuera del banco: es el histórico de fallos y
         # recuperaciones de radio de cada nodo.
+        if ft == protocol.FRAME_NODE_MAINTENANCE_RESULT:
+            if parsed['dest_id'] == protocol.ADDR_GATEWAY and self.buf is not None:
+                node_maintenance.receive(self, parsed)
+            return
+
         if ft == protocol.FRAME_NODE_HEALTH:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
                 LOG.info("event=node_health.received origin=%s fault=%s boots=%d "
@@ -2644,7 +2650,7 @@ class GatewayService:
                         parsed["origin_id"], parsed["hl_fault"],
                         parsed["hl_reset_reason"], parsed["hl_boots"],
                         parsed["hl_probes"], parsed["hl_reinits"],
-                        parsed["hl_resets"], parsed["hl_reboots"])
+                        parsed["hl_resets"], parsed["hl_reboots"], parsed.get("hl_counters_since", 0))
                 self._publish_node_health(parsed)
             else:
                 self.n_notconf += 1
@@ -3493,6 +3499,7 @@ class GatewayService:
                         # El sondeo va el primero de todos: son 16 bytes, se
                         # resuelve en medio segundo, y de él depende que las
                         # operaciones largas lleguen a encolarse o no.
+                        node_maintenance.tick(self, now)
                         self.probe_tick(now)
                         self.quiet_tick(now)
                         self.config_tick(now)

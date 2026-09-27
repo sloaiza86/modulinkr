@@ -338,7 +338,7 @@ async def maintenance_guard(request: Request, call_next):
     global _active_writes, _scheduling_restart
     if request.method in ('GET', 'HEAD', 'OPTIONS') or not request.url.path.startswith('/api/'):
         return await call_next(request)
-    restart = request.url.path.startswith('/api/mantenimiento/reiniciar/')
+    restart = request.url.path.startswith(('/api/mantenimiento/reiniciar/', '/api/mantenimiento/nodos/'))
     if _scheduling_restart or (restart and _active_writes):
         return JSONResponse(status_code=409, content={'error': 'Hay una operación en curso. Espera a que termine.'})
     if restart:
@@ -346,7 +346,7 @@ async def maintenance_guard(request: Request, call_next):
     _active_writes += 1
     try:
         if await run_in_threadpool(maintenanceapi.pending):
-            return JSONResponse(status_code=409, content={'error': 'Hay un reinicio en curso. Espera a que termine.'})
+            return JSONResponse(status_code=409, content={'error': 'Hay una operación de mantenimiento en curso. Espera a que termine.'})
         return await call_next(request)
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={'error': exc.detail})

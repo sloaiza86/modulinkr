@@ -269,3 +269,15 @@ Se rechaza el reinicio si existe una operación USB, una transferencia o instala
 Las pruebas de `tests/test_maintenance.py` simulan systemd y comprueban selección de acciones, persistencia, recuperación, cabecera de confirmación y bloqueos. `tests/test_maintenance_dom.html` verifica los controles y confirmaciones sin emitir reinicios reales. La validación de systemd, sudoers y arranque completo requiere el gateway operativo.
 
 El visor conserva la espera del reinicio en la sesión del navegador. Una desconexión o una respuesta HTTP 5xx mantiene la consulta automática sin repetir la orden. Al confirmarse la recuperación se habilitan las acciones y se retira el mensaje de progreso. No se muestra un historial persistente ni un botón de comprobación manual. El aviso global conserva una altura ajustada al texto y se oculta en Mantenimiento durante la espera inicial para evitar mensajes duplicados.
+
+## Panel de nodo y mantenimiento por LoRa
+
+El detalle de un nodo muestra la última actividad conocida por cualquier vía y una vía de entrega abreviada. La entrega LoRa se distingue entre directa y mediante relay únicamente cuando existe un recorrido registrado. Sin recorrido se indica que no está disponible. La salida NB-IoT se presenta como directa o mediante el supernodo identificado. Sin comunicación vigente se muestra la última vía de entrega. Se retiran el intervalo estimado entre muestras recibidas y el padre LoRa del panel.
+
+Diagnóstico separa el estado actual de comunicación del último fallo histórico. El motivo del último arranque y cada contador tienen una fila propia. La antigüedad identifica expresamente cuándo se recibió el diagnóstico. Después de poner los contadores a cero se muestra la fecha de inicio de la nueva cuenta.
+
+Mantenimiento se divide en Gateway y Nodos. La selección de nodo permite reiniciar o poner a cero los cinco contadores de salud, con una confirmación específica. La disponibilidad exige LoRa, firmware 0.0.68 o posterior y relays compatibles. La API autenticada encola la operación en `node_maintenance`; el servicio la transmite y recoge la respuesta del nodo. Se distinguen orden pendiente, enviada, aceptada y confirmada. La falta de respuesta se mantiene como resultado sin confirmar. Una desconexión HTTP no provoca el reenvío automático de una nueva orden.
+
+Las operaciones se excluyen entre sí y bloquean otras modificaciones desde la API mientras están activas. También se comprueban las transferencias de firmware, las lecturas y escrituras de configuración, las migraciones de red y las operaciones USB que conoce el visor. No se coordinan operaciones externas realizadas por consola o Web Serial independiente. La migración de SQLite se realiza al arrancar el servicio del gateway; si todavía no está instalada, la GUI mantiene deshabilitadas las acciones de nodo.
+
+Las pruebas `test_node_maintenance_api.py` y `test_node_maintenance_dom.html` cubren disponibilidad, confirmaciones, exclusión, pérdida de conexión y textos. La validación local no ejecuta reinicios reales.
