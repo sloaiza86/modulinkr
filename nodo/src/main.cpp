@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.66"
+#define MODULINKR_FIRMWARE_VERSION "0.0.67"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"

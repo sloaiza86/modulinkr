@@ -2,6 +2,7 @@
 // ModuLinkr, servicio NB-IoT no bloqueante (implementación)
 
 #include "nbiot_service.h"
+#include "nbiot_error.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -58,6 +59,8 @@ void NbiotService::run() {
 
 Nbiot::CeregStatus NbiotService::refreshRegistration() {
     const auto registration = modem_.getCEREG();
+    if (registration == Nbiot::CeregStatus::UNKNOWN || registration == Nbiot::CeregStatus::REGISTRATION_DENIED)
+        logNbiotError("network_registration", modem_.lastResponse().c_str());
     registration_state_ = registration;
     last_registration_check_ms_ = millis();
     diag::log("INFO", "node.nbiot", "nbiot.network_status", "state=%s\n", Nbiot::ceregToString(registration));
@@ -100,7 +103,7 @@ bool NbiotService::step() {
 
         case State::SIM_CHECK: {
             if (!modem_.isSimReady()) {
-                diag::log("INFO", "node.nbiot", "nbiot.sim_not_ready", "\n");
+                logNbiotError("sim_ready", modem_.lastResponse().c_str());
                 return false;
             }
             diag::log("INFO", "node.nbiot", "nbiot.sim_ready", "imsi=%s\n", modem_.readIMSI().c_str());
@@ -110,7 +113,7 @@ bool NbiotService::step() {
 
         case State::APN_CONFIG: {
             if (!modem_.configureAPN(cfg_.apn, cfg_.user, cfg_.pass)) {
-                diag::log("WARNING", "node.nbiot", "nbiot.apn_rejected", "\n");
+                logNbiotError("apn_config", modem_.lastResponse().c_str());
                 // No fatal: algunos operadores registran igual.
             }
             // v2.1: la hora de red NITZ (AT+CTZU / CCLK) sale del diseño;
@@ -124,6 +127,7 @@ bool NbiotService::step() {
 
         case State::REGISTERING: {
             const auto creg = refreshRegistration();
+            const String registration_response = modem_.lastResponse();
             csq_dbm_ = modem_.getCSQ();
             if (isRegistered(creg)) {
                 diag::log("INFO", "node.nbiot", "nbiot.network_registered", "response=%s\n", Nbiot::ceregToString(creg));
@@ -131,7 +135,7 @@ bool NbiotService::step() {
                 return true;
             }
             if ((millis() - register_start_ms_) > kRegisterLimitMs) {
-                diag::log("WARNING", "node.nbiot", "nbiot.network_registration_timeout", "timeout_min=30\n");
+                logNbiotError("network_registration_timeout", registration_response.c_str());
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(kRegisterPollMs));
@@ -141,7 +145,7 @@ bool NbiotService::step() {
         case State::MQTT_START: {
             modem_.mqttReset();
             if (!modem_.mqttBegin(cfg_.client_id, cfg_.tls)) {
-                diag::log("ERROR", "node.nbiot", "nbiot.mqtt_session_start_failed", "response=%s\n", modem_.lastResponse().c_str());
+                logNbiotError("mqtt_start", modem_.lastResponse().c_str());
                 return false;
             }
             state_ = State::MQTT_CONNECT;
@@ -151,7 +155,7 @@ bool NbiotService::step() {
         case State::MQTT_CONNECT: {
             if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                     cfg_.mqtt_user, cfg_.mqtt_pass)) {
-                diag::log("ERROR", "node.nbiot", "nbiot.mqtt_connection_failed", "response=%s\n", modem_.lastResponse().c_str());
+                logNbiotError("mqtt_connect", modem_.lastResponse().c_str());
                 return false;
             }
             diag::log("INFO", "node.nbiot", "nbiot.mqtt_ready", "host=%s port=%u transport=%s\n", cfg_.broker, cfg_.port, cfg_.tls ? "tls" : "tcp");
@@ -171,6 +175,8 @@ bool NbiotService::step() {
                 diag::log("INFO", "node.nbiot", "nbiot.mqtt_status", "state=%s\n", mqtt == Nbiot::MqttState::CONNECTED ? "connected" :
                               mqtt == Nbiot::MqttState::DISCONNECTED ? "disconnected" :
                               "unknown");
+                if (mqtt != Nbiot::MqttState::CONNECTED)
+                    logNbiotError("mqtt_status", modem_.lastResponse().c_str());
                 if (mqtt == Nbiot::MqttState::DISCONNECTED) {
                     state_ = State::MQTT_START;
                     return true;
@@ -196,6 +202,8 @@ bool NbiotService::step() {
                         state_ = State::READY;
                         ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
                         publish_response = modem_.lastResponse();
+                    } else {
+                        logNbiotError("mqtt_reconnect", modem_.lastResponse().c_str());
                     }
                 }
                 if (ok) {
@@ -209,7 +217,8 @@ bool NbiotService::step() {
                     // No se confirma: el batch sigue en el outbox y el loop
                     // lo reintentará (el backend deduplica por origin/ts/seq).
                     published_err_ = published_err_ + 1;
-                    diag::log("ERROR", "node.nbiot", "nbiot.batch_publish_failed", "id=%lu errors=%lu bytes=%u response=%s\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned long>(published_err_), static_cast<unsigned>(strlen(item.json)), publish_response.c_str());
+                    diag::log("ERROR", "node.nbiot", "nbiot.batch_publish_failed", "id=%lu errors=%lu bytes=%u\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned long>(published_err_), static_cast<unsigned>(strlen(item.json)));
+                    logNbiotError("batch_publish", publish_response.c_str());
                 }
                 free(item.json);
                 if (!ok) return false;  // reevalúa la sesión desde el principio
@@ -225,7 +234,7 @@ bool NbiotService::step() {
                     nodeclock::sync(epoch);
                     diag::log("INFO", "node.nbiot", "nbiot.ntp_synchronized", "epoch=%lu\n", static_cast<unsigned long>(epoch));
                 } else {
-                    diag::log("ERROR", "node.nbiot", "nbiot.ntp_failed", "response=%s\n", modem_.lastResponse().c_str());
+                    logNbiotError("ntp", modem_.lastResponse().c_str());
                 }
                 ntp_pending_ = false;
             } else if (ntp_pending_) {

@@ -24,7 +24,8 @@ void log(const char*,const char*,const char* event,const char* format,...) {
 }
 }
 void drain(Stream&) {}
-bool waitForChar(Stream&,char,uint32_t) {
+bool waitForChar(Stream&,char,uint32_t,String& response) {
+    response="+CME ERROR: original prompt failure";
     ++prompts; return !((mode==1 && prompts==1)||(mode==3 && prompts==2));
 }
 String Nbiot::readResponse(uint32_t,const char*) {
@@ -37,6 +38,7 @@ bool Nbiot::sendAT(const char* cmd,const char*,uint32_t) {
     assert(std::string(cmd)=="AT+CMQTTPAYLOAD=?"); ++probes;
     last_response_="+CMQTTPAYLOAD: (0-0),(1-1024) OK"; return true;
 }
+#include "nbiot_error.h"
 // PUBLISH
 int main(int argc,char** argv) {
     mode=argc>1 ? atoi(argv[1]) : 0;
@@ -59,6 +61,7 @@ int main(int argc,char** argv) {
     assert(logs.find(stages[mode])!=std::string::npos);
     assert(logs.find("nbiot.payload_capacity")==std::string::npos);
     assert(modem.lastResponse().indexOf("CMQTTPAYLOAD:")==-1);
+    if (mode==1 || mode==3) assert(modem.lastResponse()=="+CME ERROR: original prompt failure" && logs.find("original prompt failure")!=std::string::npos);
     if (mode==2 || mode==4) assert(modem.lastResponse()=="ERROR original");
     if (mode==5) assert(modem.lastResponse()=="+CMQTTPUB: 0,7");
 }

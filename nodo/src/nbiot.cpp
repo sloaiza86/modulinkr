@@ -2,6 +2,7 @@
 // ModuLinkr, driver NB-IoT (implementación, fase 1 diagnóstico)
 
 #include "nbiot.h"
+#include "nbiot_error.h"
 
 #include <Arduino.h>
 
@@ -147,11 +148,13 @@ String Nbiot::scanOPS(uint32_t timeout_ms) {
 }
 
 namespace {
-bool waitForChar(Stream& s, char target, uint32_t timeout_ms) {
+bool waitForChar(Stream& s, char target, uint32_t timeout_ms, String& response) {
+    response = "";
     const uint32_t start = millis();
     while ((millis() - start) < timeout_ms) {
         if (s.available()) {
             const int c = s.read();
+            if (c >= 0) response += static_cast<char>(c);
             if (c == target) return true;
         }
         delay(5);
@@ -328,8 +331,8 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     const auto failed = [&](const char* stage) {
         const String original = last_response_;
         diag::log("ERROR", "node.nbiot", "nbiot.publish_rejected",
-                  "stage=%s bytes=%u response=%s\n", stage,
-                  static_cast<unsigned>(strlen(payload)), original.c_str());
+                  "stage=%s bytes=%u\n", stage, static_cast<unsigned>(strlen(payload)));
+        logNbiotError(stage, original.c_str());
         last_response_ = original;
         return false;
     };
@@ -342,8 +345,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     drain(*uart_);
     uart_->println(cmd);
-    if (!waitForChar(*uart_, '>', 5000)) {
-        last_response_ = "(timeout > en TOPIC)";
+    if (!waitForChar(*uart_, '>', 5000, last_response_)) {
         return failed("topic_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(topic), topic_len);
@@ -362,8 +364,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
     drain(*uart_);
     uart_->println(cmd);
-    if (!waitForChar(*uart_, '>', 5000)) {
-        last_response_ = "(timeout > en PAYLOAD)";
+    if (!waitForChar(*uart_, '>', 5000, last_response_)) {
         return failed("payload_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(payload), payload_len);
@@ -619,6 +620,13 @@ bool Nbiot::sendAT(const char* cmd, const char* expected, uint32_t timeout_ms) {
 
 done:
     last_response_ = buffer;
+    if (!result) {
+        char operation[48];
+        size_t n = 0;
+        while (cmd[n] && cmd[n] != '=' && cmd[n] != '?' && n < sizeof(operation)-1) { operation[n] = cmd[n]; ++n; }
+        operation[n] = 0;
+        logNbiotError(operation, buffer.c_str());
+    }
     if (verbose_) {
         String t = buffer;
         t.trim();
@@ -661,10 +669,12 @@ String Nbiot::readResponse(uint32_t timeout_ms, const char* terminator) {
             }
             if (buffer.indexOf("ERROR") >= 0) {
                 drain_remaining_line();
+                logNbiotError(terminator ? terminator : "read_response", buffer.c_str());
                 return buffer;
             }
         }
         delay(kReadChunkDelayMs);
     }
+    logNbiotError(terminator ? terminator : "read_timeout", buffer.c_str());
     return buffer;
 }
