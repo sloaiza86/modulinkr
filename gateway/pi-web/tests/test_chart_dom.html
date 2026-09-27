@@ -38,7 +38,7 @@ body { display: block; padding: 12px; }
       let responseMode='data', pendingResolve=null;
       let modalToken=0, modalCanalId=null,modalConsulta=null,modalRangoVisible=null,modalZoomAplicado=false,modalChart=null;
       let modalSel={origin:1,canal:0};
-      let modalPeriodoSegundos=432000; const cacheUltimos={nodes:[{origin:1,channels:[{read_id:'temperature',unit:'°C'}]}]};
+      ${section('const periodosHistorico =', 'let modalSel =')} const cacheUltimos={nodes:[{origin:1,channels:[{read_id:'temperature',unit:'°C'}]}]};
       const pintarModalCabecera=()=>{},actualizarRangoModal=()=>{};
       const htmlSeguro=x=>String(x);
       let lastQuery=''; const fetchApi=async url=>{ lastQuery=url;
@@ -110,11 +110,17 @@ body { display: block; padding: 12px; }
     assert(modalChart.getOption().series.length===2,'El modal carga las dos vías desde la respuesta');
     assert(!document.querySelector('#modal-vias').hidden,'Leyenda de vías visible en el modal');
     const period=document.querySelector('#modal-periodo');
-    for(const seconds of ['3600','31536000']){
-      period.value=seconds;period.dispatchEvent(new Event('change'));
+    assert(period.value==='now-24h','El modal empieza en Últimas 24 horas');
+    const presets=customElements.get('modulinkr-period-selector').presets;
+    assert(JSON.stringify([...period.options].map(o=>[o.value,o.textContent]))===JSON.stringify(presets.map(p=>[p.key,p.label])),'Ambas vistas comparten todas las opciones rápidas sin intervalo personalizado');
+    for(const {key} of presets){
+      period.value=key;period.dispatchEvent(new Event('change'));
       await new Promise(resolve=>setTimeout(resolve,30));
       const q=new URL(api.query(),location.origin).searchParams;
-      assert((new Date(q.get('hasta'))-new Date(q.get('desde')))/1000===Number(seconds),'Consulta del periodo '+seconds+' segundos');
+      const end=new Date(q.get('hasta'));
+      const reference=key==='yesterday'?new Date(end.getTime()+1):end;
+      const expected=customElements.get('modulinkr-period-selector').fromPreset(key,reference);
+      assert(q.get('desde')===expected.start.toISOString()&&q.get('hasta')===expected.end.toISOString(),'Consulta del periodo '+key);
     }
     await api.load('empty');await api.modal();
     assert(document.querySelector('#modal-vias').hidden,'Sin leyenda de vías cuando el modal no tiene datos');

@@ -134,7 +134,6 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | `0x00` | TELEMETRY | uplink | Valores float32 + estado Modbus por read. Ver §3. |
 | `0x01` | ACK | downlink | Referencia a `seq` original + estado. Ver §4. |
 | `0x02` | HEARTBEAT | uplink | Sin payload. Señaliza "vivo" sin lecturas. Ver §6. |
-| `0x03` | ALARM | uplink | Evento asíncrono (sobreumbral, etc.). Spec en futuras versiones. |
 | `0x04` | NODE_REGISTER | uplink | Registro del nodo al arrancar: fw, catálogo de reads y writes. Ver §13. |
 | `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
 | `0x06` | MODBUS_DEBUG | uplink | Transacción Modbus fallida en crudo (v3.2). Ver §15. |
@@ -622,7 +621,6 @@ Cambios contemplados para versiones futuras del schema, listados aquí para que 
 - **Comandos a nodos sin NB-IoT**: ruta principal prevista: backend, Pi del gateway, Heltec, y descenso por el árbol con la misma ruta inversa de los ACKs (§2.4). Ruta de respaldo: entrada por un supernodo vía MQTT y entrega LoRa al vecino, simétrica al flujo de custodia de §8. Requiere resolver fragmentación del JSON en tramas y autenticación de comandos por aire.
 - **ACKs batched**: un ACK que cubre un rango de seqs (`ack_seq_from`, `ack_seq_to`) para abaratar downlink en rutas largas. Requeriría bump de minor de schema.
 - **Fallback multi-salto**: implementado en v3.10 mediante los tipos nuevos y las reglas de §23.
-- **Alarmas** (`frame_type = 0x03`): formato del payload TBD según necesidades del despliegue.
 - **Seguridad del canal (cifrado + autenticación)**: **implementado el 2026-07-11 en v2.2, ver §14**. El `network_id` aísla despliegues vecinos pero no autentica ni cifra; un despliegue hostil requiere MAC y cifrado de aplicación. Decisión de arquitectura del 2026-07-06: el cifrado será **extremo a extremo** entre los nodos y el Pi del gateway, no salto a salto. El Heltec (front-end de radio) **no cifra ni descifra ni tiene claves**: transporta bytes opacos. El modelo previsto aquí era de dos claves inspirado en LoRaWAN (clave de red para el MAC, clave de aplicación para el payload); la implementación final de §14 lo simplifica a **una clave de red con AES-CCM** (justificación en §14.1) y sustituye el anti-replay por `seq` (inviable tras el replanteo del seq efímero de v2.1) por el control de frescura basado en `sec_ts` (§14.5). Sin flag de cifrado en el aire: la activación es de toda la red, para cerrar el ataque de downgrade. La gestión y el aprovisionamiento de claves conecta con el proceso de registro de nodos a la red (**implementado en v2.1 como NODE_REGISTER / WELCOME, ver §13**: el intercambio de registro es el vehículo natural para el futuro aprovisionamiento de claves); la rotación de claves es una mejora opcional fuera del alcance de v2.2 (§14.7).
 
 ## 12. Enlace serial Pi a Heltec (dentro del gateway)

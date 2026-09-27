@@ -972,6 +972,14 @@
   }
 
   class ModuLinkrPeriodSelector extends ModuLinkrElement {
+    static get presets() {
+      return PREAJUSTES_PERIODO.map(([key, label]) => ({ key, label }));
+    }
+
+    static fromPreset(key, reference = new Date()) {
+      return periodoDesdePreset(key, reference);
+    }
+
     connectedCallback() {
       if (this._iniciado) return;
       this._iniciado = true;

@@ -939,7 +939,12 @@ async function refrescarRed() {
 // nunca salen del Pi). Zoom temporal con la rueda del ratón y barra de
 // desplazamiento abajo; el eje de magnitud se ajusta al rango visible.
 
-let modalPeriodoSegundos = 5 * 86400;
+const periodosHistorico = customElements.get("modulinkr-period-selector");
+let modalPeriodoPreset = "now-24h";
+document.getElementById("modal-periodo").replaceChildren(
+  ...periodosHistorico.presets.map(({ key, label }) =>
+    new Option(label, key, key === modalPeriodoPreset, key === modalPeriodoPreset))
+);
 let modalSel = null;     // {origin, canal} de la medida abierta
 let modalChart = null;   // instancia de ECharts del modal
 let modalToken = 0;      // invalida respuestas tardías al cambiar de medida
@@ -1005,7 +1010,7 @@ function fmtHora(d) {
 
 function pintarModalPeriodo() {
   const etiqueta = document.getElementById("modal-periodo");
-  etiqueta.value = String(modalPeriodoSegundos);
+  etiqueta.value = modalPeriodoPreset;
   etiqueta.title = modalRangoVisible
     ? `${fmtDia(modalRangoVisible.desde)}, ${fmtHora(modalRangoVisible.desde)} a ${fmtDia(modalRangoVisible.hasta)}, ${fmtHora(modalRangoVisible.hasta)}`
     : "Seleccionar periodo del histórico";
@@ -1125,8 +1130,7 @@ async function cargarModalGrafica() {
     const cn = catalogo?.find((x) => x.node_id === modalSel.origin);
     const canal = cn?.channels.find((x) => x.read_id === c.read_id);
     if (canal) {
-      const hasta = new Date();
-      const desde = new Date(hasta.getTime() - modalPeriodoSegundos * 1000);
+      const { start: desde, end: hasta } = periodosHistorico.fromPreset(modalPeriodoPreset);
       modalCanalId = canal.channel_id;
       modalConsulta = { desde, hasta };
       modalRangoVisible = { desde: new Date(desde), hasta: new Date(hasta) };
@@ -1211,7 +1215,7 @@ document.getElementById("modal").addEventListener(
   "modulinkr-close-request", cerrarModal);
 document.getElementById("modal-ver-datos").addEventListener("click", verModalEnDatos);
 document.getElementById("modal-periodo").addEventListener("change", (evento) => {
-  modalPeriodoSegundos = Number(evento.target.value);
+  modalPeriodoPreset = evento.target.value;
   if (modalSel !== null) cargarModalGrafica();
 });
 window.addEventListener("resize", () => modalChart?.resize({ animation: { duration: 0 } }));
