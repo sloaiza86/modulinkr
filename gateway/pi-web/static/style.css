@@ -269,10 +269,14 @@ modulinkr-view[hidden], modulinkr-confirm-dialog[hidden] { display: none; }
    compensa para compartir el eje visual con el título de la sección. */
 .tn-estados {
   display: flex; flex: none; flex-wrap: nowrap; justify-content: flex-end;
-  align-items: center; gap: 6px; max-width: 58%; overflow-x: auto;
-  scrollbar-width: none; transform: translateY(-3px);
+  align-items: center; gap: 6px; max-width: 66%; overflow-x: auto;
+  scrollbar-width: none;
 }
 .tn-estados::-webkit-scrollbar { display: none; }
+.tn-estados > .chip { flex: 0 0 auto; }
+.chip.conexion.mantenimiento { width: 18px; height: 32px; justify-content: center; }
+.chip.conexion.mantenimiento modulinkr-icon { width: 18px; height: 18px; }
+.chip.conexion.mantenimiento:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
@@ -1042,7 +1046,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 }
 .archivo-config > h3 { margin: 0; color: var(--text); font-size: 14px; font-weight: 600; }
 .cfg-fila { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; }
-.cfg-fila button, .bc-instalar {
+.cfg-fila button, .ota-button {
   background: var(--card); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 0 16px; height: var(--cfg-control-alto);
   min-height: var(--cfg-control-alto); font: inherit; font-weight: 500; line-height: 1.2;
@@ -1050,7 +1054,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer; transition: background 150ms ease, border-color 150ms ease;
 }
-.cfg-fila button:hover, .bc-instalar:hover { background: var(--bg); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.cfg-fila button:hover, .ota-button:hover { background: var(--bg); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .cfg-fila button.btn-primario {
   background: var(--accent); color: #fff; border: none; font-weight: 600;
 }
@@ -1755,7 +1759,7 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
 .fw-detalles summary { cursor: pointer; }
 #bc-tabla td { white-space: normal; }
 #bc-tabla td:last-child { text-align: right; }
-#bc-tabla .bc-instalar { white-space: nowrap; }
+#bc-tabla .ota-button { white-space: nowrap; }
  .fw-modos { display: flex; gap: 8px; margin-bottom: 16px; }
 .fw-modos button { min-height: 44px; flex: 1; padding: 10px 16px; font: inherit; font-weight: 600; color: var(--text); background: var(--panel, #fff); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
 .fw-modos button[aria-pressed="true"] { color: var(--accent); background: var(--accent-suave); border-color: var(--accent); }
@@ -1802,3 +1806,24 @@ body.mantenimiento-reiniciando #red-observacion { display: none; }
 #mantenimiento-nodos > .card + .card { margin-top: 16px; }
 #mantenimiento-nodos select { width: 100%; margin-top: 8px; }
 .detalle-diagnostico-contenido .texto-ayuda { font-size: 12px; color: var(--dim); }
+
+/* La operación conserva sus detalles sin ensanchar la tabla principal. */
+#bc-tabla { table-layout: auto; }
+#bc-tabla td { vertical-align: top; }
+#bc-tabla small { display: inline-block; max-width: 18rem; }
+.ota-node { display: flex; gap: .65rem; align-items: flex-start; }
+.ota-node input { margin-top: .35rem; }
+.ota-detail { margin-top: .7rem; min-width: 15rem; }
+.ota-detail summary { cursor: pointer; }
+.ota-detail dl { margin: .8rem 0; }
+.ota-detail dt { font-weight: 600; margin-top: .65rem; }
+.ota-detail dd { margin-left: 0; }
+.ota-detail h3 { font-size: 1rem; }
+.ota-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.ota-history { padding-left: 1.2rem; max-height: 20rem; overflow-y: auto; }
+.ota-history li { margin-bottom: .8rem; }
+.ota-auto { flex-basis: 100%; text-align: left; }
+.ota-auto label { display: flex; align-items: center; gap: .6rem; }
+.ota-auto p { margin-top: .35rem; }
+
+.ota-button:focus-visible, .ota-detail summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

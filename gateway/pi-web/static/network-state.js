@@ -19,7 +19,7 @@
       n.transport = active?.transport ?? n.historical_transport;
       n.delivery_online = !!active;
       if (active?.publisher != null) n.via_publisher = active.publisher;
-      n.lora_route_online = n.route_options.some(o => o.transport === "lora" && valid(o));
+      n.lora_route_online = (connected && n.lora_route_until > now) || n.route_options.some(o => o.transport === "lora" && valid(o));
       n.online = connected && n.lora_until > now;
       n.cellular_delivery_recent = n.route_options.some(o => o.transport !== "lora" && valid(o));
       n.cellular_observable = connected && n.observer_until > now;

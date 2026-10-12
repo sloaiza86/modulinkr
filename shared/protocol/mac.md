@@ -177,9 +177,9 @@ driver programa un **reintento rápido** de la última trama tras un backoff
 corto (60 ms base + 0-60 ms de jitter), hasta `kBusyMaxTries` (3). Es
 independiente del backoff de ACK de §4.4, que cubre el ACK perdido *después*
 de transmitir: aquí la trama nunca salió. Si se agotan los reintentos rápidos,
-la recupera el backoff de ACK. Un envío nuevo cancela un reintento rápido
-pendiente de una trama anterior (la vieja, si no salió, la cubre el backoff de
-ACK). Contador `busyEvents()` (`cad_busy=` en el log de tx) como indicador de
+se informa de fallo local para aplicar la política de reintentos de la muestra.
+Un envío nuevo espera en cola mientras hay una transmisión o un intento CAD
+pendiente. El contador `busyEvents()` (`cad_busy=` en el log de tx) indica
 contención del medio.
 
 Nota sobre la limitación de RUI3 (§ arriba): en V4.0.6 el CAD puede, en vez de
@@ -196,16 +196,24 @@ tormenta cuando varios nodos reintentan a la vez y los desincroniza.
 
 **Regla (simple)**: el primer envío espera `ack_timeout` (3 s). Cada reintento
 duplica ese intervalo base con techo de 12 s, y le suma un jitter aleatorio de
-0 a 500 ms. Con `max_retries=2` la secuencia de esperas queda 3 s → ~6 s →
-~12 s (peor caso ~21 s antes de caer a outbox / NB-IoT). El techo no recorta
+0 a 500 ms. Con `max_retries=2` las esperas son 3 s, aproximadamente 6 s y
+aproximadamente 12 s. La suma no limita la duración total: se añade el tiempo
+en cola, CAD y transmisión. El techo no recorta
 con 2 reintentos; es red de seguridad si `max_retries` sube.
 
 **Implementación (nodo)**: `backoffTimeoutMs(retries)` en `main.cpp` calcula
 el intervalo; la cola `PendingQueue` guarda un `timeout_ms` por entrada
 (0 = usar el base en el primer intento) que `firstExpired` respeta. El jitter
 usa `esp_random()` (RNG por hardware). Aplica a las dos rutas de reintento
-(gateway y custodia a supernodo). El log de `retx` imprime `wait=<ms>` para
-observar el backoff y el jitter en banco.
+(gateway y custodia a supernodo). `lora.retry` imprime `wait_ms` para observar
+el backoff y el jitter en banco.
+
+Desde 0.0.78, la entrada espera la confirmación local `TXP2P DONE` antes de
+iniciar cada plazo de ACK. En ese instante se aplica la guarda de recepción
+de 500 ms, también en reintentos y custodia. `lora.tx_complete` identifica la
+secuencia y distingue `sent` de `failed`; el éxito local no equivale a un ACK
+remoto. Un fallo local permite reintentar sin esperar el plazo de ACK. El
+rechazo inmediato por cola llena aplaza el intento sin consumir su contador.
 
 **Relación con CAD (§4.3)**: este backoff es también la política de reintento
 que RUI3 no da cuando `AT+CAD` reporta canal ocupado (`AT_BUSY_ERROR`).

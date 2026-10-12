@@ -28,6 +28,8 @@ constexpr uint8_t kAddrBroadcast = 0x00;
 constexpr uint8_t kAddrGateway   = 0xFF;
 
 // Tipos de trama (frame-format.md §1.6).
+constexpr uint8_t kFrameFwReport = 0x2A;
+constexpr uint8_t kFrameFwReportAck = 0x2B;
 constexpr uint8_t kFrameNodeMaintenance = 0x28;
 constexpr uint8_t kFrameNodeMaintenanceResult = 0x29;
 constexpr uint8_t kFrameTelemetryRoute = 0x25;
@@ -50,8 +52,6 @@ constexpr uint8_t kFrameConfigResult = 0x16;  // uplink: veredicto
 constexpr uint8_t kFrameConfigGet    = 0x17;  // downlink: pide el config
 constexpr uint8_t kFrameConfigData   = 0x18;  // uplink: un fragmento del config
 // Actualización de firmware por LoRa (v3.7, §18).
-constexpr uint8_t kFrameFwOffer      = 0x19;  // downlink: anuncio de imagen
-constexpr uint8_t kFrameFwData       = 0x1A;  // downlink: un trozo de la imagen
 constexpr uint8_t kFrameFwStatus     = 0x1B;  // uplink: por dónde va y en qué estado
 constexpr uint8_t kFrameFwInstall    = 0x1C;  // downlink: orden de instalar
 constexpr uint8_t kFrameFwResult     = 0x1D;  // uplink: veredicto tras arrancar

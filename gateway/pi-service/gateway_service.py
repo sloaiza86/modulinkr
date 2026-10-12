@@ -236,10 +236,6 @@ CFG_QUIET_DELAY_S = 1.5
 CFG_GET_RETRY_S  = 20.0
 CFG_GET_MAX_TRIES = 5
 
-# ----- Actualización de firmware por LoRa (frame-format.md §18) -----
-# Mismo troceado que la configuración: lo que cambia es la escala.
-FW_FRAG_BYTES = 213
-
 # ----- Difusión de firmware (spec §20) -----
 #
 # El margen del anuncio sigue el mismo criterio que el de la ventana de
@@ -248,41 +244,18 @@ FW_FRAG_BYTES = 213
 BCAST_OFFER_LEAD_S  = 30.0
 BCAST_OFFER_EVERY_S = 5.0
 
-# Separación entre fragmentos de difusión. No hay confirmación que esperar, así
-# que el freno de verdad es el presupuesto de aire; este hueco deja sitio a que
-# el nodo hable entre fragmento y fragmento.
-#
-# El hueco NO es una constante, se calcula a partir del tiempo de aire, porque
-# el tiempo de aire cambia con el factor de dispersión y el ancho de banda: los
-# 0,6 s fijos que había antes eran cómodos a SF7 y BW250 y se quedaban cortos a
-# SF9 o BW125, donde un fragmento tarda más de un segundo en salir. La cuenta
-# tiene dos sumandos, y ninguno es negociable:
-#
-#   1. El tiempo de aire del propio fragmento. Es un suelo duro, y no por
-#      prudencia: el contador de ciclo de trabajo apunta el aire cuando el Pi
-#      ESCRIBE la orden, no cuando la trama sale. Escribir más rápido de lo que
-#      la radio emite convierte esa contabilidad en ficción, y con ella el
-#      cumplimiento de la EN 300 220-1. De paso, es también lo que impide que
-#      la UART del Heltec se llene, que era el miedo original.
-#   2. Una subida del nodo. Es el mismo criterio que el SIFS de 802.11, las
-#      ventanas RX1 y RX2 de LoRaWAN o el silencio de 3,5 caracteres de Modbus
-#      RTU: quien monopoliza el medio deja un hueco explícito para que el otro
-#      extremo pueda hablar. Se dimensiona con una telemetría típica, que es la
-#      trama más larga que el nodo emite sin que se le pida.
-#
-# Y un margen en símbolos para el CAD y la decisión del nodo, en símbolos y no
-# en milisegundos para que escale solo con SF y BW como todo lo demás.
+# La separación reserva recepción para una subida con inicio asíncrono y su
+# ACK, con al menos tanto tiempo de escucha como de emisión de firmware.
 BCAST_GAP_UPLINK_BYTES = protocol.SEC_OVERHEAD + 40   # telemetría típica
 BCAST_GAP_MARGIN_SYM   = 8                            # CAD + decisión
 
-# Anulación para banco: con un valor mayor que cero manda ese hueco en segundos
-# en vez del calculado. Sirve para medir la escalera (0,35 · 0,30 · 0,25 · 0,20)
-# y comprobar dónde empieza a perderse. En despliegue no se toca.
+# Separación solicitada para banco, en segundos. Se respeta siempre el
+# mínimo de recepción calculado aunque se solicite un valor menor.
 BCAST_GAP_FORZADO_S = float(os.environ.get("MODULINKR_BCAST_GAP_S", "0"))
 
 # Espera por el mapa de un nodo. Son dos tramas con su hueco, más el camino de
 # vuelta si va por un relay.
-BCAST_POLL_WAIT_S = 12.0
+BCAST_POLL_WAIT_S = 30.0
 
 # Plazo para que el nodo dé su veredicto tras la orden de instalar. La ventana
 # de prueba del nodo son cuatro minutos, así que a los diez está decidido de
@@ -293,9 +266,8 @@ BCAST_INSTALL_VEREDICTO_S = 600.0
 # uno que lleva días sin aparecer solo gasta el plazo de espera.
 BCAST_NODE_SEEN_S = 1800.0
 
-# Tope de pasadas. Si tras estas quedan huecos, lo que falta se entrega nodo a
-# nodo por el camino de §18: a esas alturas los que faltan son pocos y la
-# difusión ya no ahorra nada.
+# Tope de pasadas. Si quedan huecos, se informa de los nodos que necesitan
+# una nueva entrega dirigida con el transporte de §20.
 BCAST_MAX_PASSES = 6
 
 # Ofertas sin respuesta antes de abandonar, solo cuando va dirigida a un nodo.
@@ -308,20 +280,6 @@ BCAST_OFFER_MAX_TRIES = 6
 # fallida, y con la imagen ya emitida entera eso es tirar horas de aire por un
 # mapa que no llegó. Tres rondas cuestan segundos.
 BCAST_POLL_RONDAS = 3
-
-# Fragmentos que el emisor manda como mucho sin una sola noticia del nodo.
-#
-# El nodo confirma por su cuenta cada FW_STATUS_EVERY fragmentos, así que este
-# tope se pone por encima con margen: pasarlo significa que el nodo lleva rato
-# sin poder hablar, y seguir emitiendo es tirar aire.
-#
-# Medido el 1-ago-2026, y no es un caso raro: el nodo perdió el padre cuatro
-# veces durante una subida, y como el FW_STATUS necesita padre para salir, no
-# tenía forma de pedir el rebobinado. El emisor siguió a ciegas hasta ciento
-# treinta fragmentos, unos 28 kB de aire tirados de una sentada. La pérdida de
-# padre es solo UNA de las razones por las que un nodo puede callarse; este
-# tope protege de todas, incluidas las que todavía no se conocen.
-FW_SIN_NOTICIAS_MAX = 48
 
 # Hueco que se deja tras cada beacon antes de seguir emitiendo a granel.
 #
@@ -345,14 +303,6 @@ BEACON_ECHO_HOLE_S = 0.6
 # el 8 % de techo y un tercio reservado quedan unos 190 s de aire por hora para
 # la imagen, que sobre 15,7 minutos de aire total son unas cinco horas.
 FW_RESERVE_PCT = 0.33
-# Espera tras un FW_OFFER antes de darlo por perdido y repetirlo.
-FW_OFFER_RETRY_S = 30.0
-FW_OFFER_MAX_TRIES = 5
-# Sin noticias del nodo en este plazo, la transferencia se da por muerta. Es
-# generoso porque las pausas son normales: fuera de la ventana horaria o con el
-# presupuesto agotado pueden pasar horas sin mandar nada.
-FW_IDLE_TIMEOUT_S = 7200.0
-
 # ----- Ventana de silencio (frame-format.md §19) -----
 # Margen entre programar la ventana y su comienzo. Da tiempo a que el anuncio
 # recorra la malla, incluidos los nodos a más de un salto, antes de que a nadie
@@ -498,7 +448,6 @@ class GatewayService:
         self.mb_debug: dict = {}      # origin -> modo de depuración Modbus
         self.cfg_tx: dict | None = None   # transferencia de config en curso
         self.cfg_rx: dict | None = None   # lectura de config en curso
-        self.fw_tx: dict | None = None    # subida de firmware en curso
         self.quiet: dict | None = None    # ventana de silencio programada
         self.bcast: dict | None = None    # difusión de firmware en curso
         self.bcast_img: bytes | None = None
@@ -1316,86 +1265,6 @@ class GatewayService:
         self.quiet["anuncios"] += 1
         self.quiet["next_ms"] = now + QUIET_ANNOUNCE_S
 
-    # ----- Subida de firmware por LoRa (frame-format.md §18) -----
-
-    def fw_start(self, row: dict) -> bool:
-        """Prepara o retoma una subida. Devuelve si quedó lista para avanzar.
-
-        La imagen no se carga en memoria: son medio mega y el proceso vive en
-        una Raspberry que además hace de gateway. Se abre el archivo y se lee
-        el trozo que toca en cada envío, que es una lectura de disco cada medio
-        segundo y no cuesta nada.
-        """
-        try:
-            tam = os.path.getsize(row["path"])
-        except OSError as e:
-            self.buf.fw_push_state(row["id"], "failed", f"no se puede leer: {e}")
-            return False
-        if tam != row["total_len"]:
-            self.buf.fw_push_state(
-                row["id"], "failed",
-                f"el binario cambió: {tam} B ahora, {row['total_len']} al encolar")
-            return False
-
-        try:
-            sha = bytes.fromhex(row["sha256"])
-        except ValueError:
-            self.buf.fw_push_state(row["id"], "failed", "sha256 mal formado")
-            return False
-        if len(sha) != 32:
-            self.buf.fw_push_state(row["id"], "failed", "sha256 no mide 32 bytes")
-            return False
-
-        toa = protocol.toa_ms(protocol.OVERHEAD + 8 + FW_FRAG_BYTES,
-                              self.sf, self.bw_khz)
-        toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
-        guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
-        gap_s, burst_max, hay_relay = self._ritmo_hacia(
-            row["origin"], toa, guarda)
-
-        self.fw_tx = {
-            "push_id": row["id"], "origin": row["origin"],
-            "version": row["version"], "path": row["path"],
-            "total_len": row["total_len"], "sha": sha,
-            # El identificador son los 4 primeros bytes del sha, igual que en
-            # el canal de configuración: dos ofertas de la misma imagen
-            # comparten identificador y el nodo reanuda en vez de reempezar.
-            "xfer": int.from_bytes(sha[:4], "little"),
-            "written": row["written"],
-            "hour_from": row["hour_from"], "hour_to": row["hour_to"],
-            # Fase de arranque según el estado guardado. Una imagen que ya
-            # estaba lista no vuelve a subirse tras un reinicio del servicio:
-            # sigue en el nodo, y lo único pendiente es la orden de instalar.
-            # `installing` entra aquí porque el servicio puede reiniciarse
-            # entre la orden y el veredicto: sin recordarla, el FW_RESULT del
-            # nodo llegaría a un gateway que ya no sabe de qué le hablan. El
-            # nodo repite ese veredicto tres veces espaciadas un minuto, así
-            # que un reinicio corto se recupera solo.
-            "phase": {"pending": "offer", "sending": "sending",
-                      "ready": "ready", "install_req": "ready",
-                      "installing": "installing"}[row["state"]],
-            "toa_ms": toa, "gap_s": gap_s,
-            "burst_max": burst_max,
-            "burst": 0, "burst_at": -1e9,
-            "next_ms": 0.0, "tries": 0, "last_news": time.monotonic(),
-            "duty_avisado": False, "fuera_avisado": False,
-        }
-        # El estado solo se pisa si aún se está transfiriendo. Una imagen ya
-        # lista o con la instalación pedida conserva el suyo: marcarla como
-        # "sending" al retomar la haría volver a subirse entera.
-        if self.fw_tx["phase"] not in ("ready", "installing"):
-            self.buf.fw_push_state(row["id"], "sending",
-                                   f"{row['version']}, {row['total_len']} B, "
-                                   f"desde {row['written']} B")
-        LOG.info("event=firmware_push.started origin=%d version=%s bytes=%d resume_offset=%d "
-                 "airtime_s=%.2f fragments_per_window=%d%s transfer_id=%08X",
-                 row["origin"], row["version"], row["total_len"],
-                 row["written"], gap_s, burst_max,
-                 f" (via relay {self._config_hop(row['origin'])})"
-                 if hay_relay else "",
-                 self.fw_tx["xfer"])
-        return True
-
     def _fw_en_ventana(self, t: dict) -> bool:
         """Si la hora local cae dentro de la ventana de la tarea.
 
@@ -1444,13 +1313,12 @@ class GatewayService:
             "dest": destino if destino else protocol.ADDR_BROADCAST,
             "hop":  self._config_hop(destino) if destino else protocol.ADDR_BROADCAST,
             # Con destino concreto se espera su aceptación antes de emitir
-            # medio mega: es la misma cautela de §18.1, y ahora el nodo puede
-            # contestar porque todavía no ha empezado la avalancha.
+            # la imagen. El nodo responde antes de recibir los fragmentos.
             "acept": destino is None,
             "ofertas": 0,
             "n_orig": n_orig,
             "n_blocks": (n_orig + op["block_k"] - 1) // op["block_k"],
-            "toa_ms": protocol.toa_ms(protocol.OVERHEAD + 6 + F,
+            "toa_ms": protocol.toa_ms((protocol.SEC_OVERHEAD if self.sec_key else protocol.OVERHEAD) + 6 + F,
                                       self.sf, self.bw_khz),
             "cola": [],          # índices por emitir en esta pasada
             "next_ms": 0.0,
@@ -1459,6 +1327,8 @@ class GatewayService:
             "poll_hasta": 0.0,
         }
         self.bcast["gap_s"] = self._bcast_gap_s(self.bcast["toa_ms"])
+        self.bcast["base_gap_s"] = self.bcast["gap_s"]
+        self.bcast["pace_auto"] = BCAST_GAP_FORZADO_S <= 0
         # Marca para medir la pasada: órdenes escritas y emisiones confirmadas
         # por el Heltec al empezar. La diferencia entre los dos incrementos al
         # cerrar dice cuántas órdenes no llegaron a salir por antena.
@@ -1492,19 +1362,14 @@ class GatewayService:
                  " (forzado)" if BCAST_GAP_FORZADO_S > 0 else "")
 
     def _bcast_gap_s(self, toa_frag_ms: int) -> float:
-        """Hueco entre fragmentos, derivado del tiempo de aire.
-
-        Ver el comentario de BCAST_GAP_UPLINK_BYTES: el tiempo de aire del
-        fragmento más una subida del nodo más un margen en símbolos. A SF7 y
-        BW250 salen unos 245 ms, frente a los 600 fijos de antes.
-        """
-        if BCAST_GAP_FORZADO_S > 0:
-            return BCAST_GAP_FORZADO_S
-        subida_ms = protocol.toa_ms(BCAST_GAP_UPLINK_BYTES,
-                                    self.sf, self.bw_khz)
+        """Separación entre inicios de fragmentos, incluida la ventana RX."""
+        subida_ms = protocol.toa_ms(BCAST_GAP_UPLINK_BYTES, self.sf, self.bw_khz)
+        ack_ms = protocol.toa_ms(protocol.SEC_OVERHEAD + 3, self.sf, self.bw_khz)
         tsym_ms = float(1 << self.sf) / self.bw_khz
-        return (toa_frag_ms + subida_ms
-                + BCAST_GAP_MARGIN_SYM * tsym_ms) / 1000.0
+        escucha_ms = max(toa_frag_ms, 2 * subida_ms + ack_ms +
+                         TX_GUARDA_RX_S * 1000 + BCAST_GAP_MARGIN_SYM * tsym_ms)
+        minimum = (toa_frag_ms + escucha_ms) / 1000.0
+        return max(minimum, BCAST_GAP_FORZADO_S)
 
     def _bcast_cola_completa(self) -> list:
         b = self.bcast
@@ -1541,6 +1406,13 @@ class GatewayService:
         if self.buf is None:
             return
         if self.bcast is None:
+            # La entrega anterior conserva el turno hasta solicitar su instalación.
+            if self.buf.conn.execute(
+                    "SELECT 1 FROM fw_bcast WHERE state='ready' AND auto_install=1 LIMIT 1").fetchone():
+                self.ota_auto_tick()
+            if self.buf.ota_blocks_radio() or self.buf.conn.execute(
+                    "SELECT 1 FROM fw_check WHERE state IN ('pending','checking') LIMIT 1").fetchone():
+                return
             op = self.buf.bcast_active()
             if op is not None:
                 self.bcast_start(op, now)
@@ -1615,6 +1487,13 @@ class GatewayService:
             else:
                 listo = now >= b["hasta"]
 
+            if listo and dirigida and not b.get("mapa_inicial"):
+                b["mapa_inicial"] = True
+                b["consulta_inicial"] = True
+                b["cola"] = []
+                op["state"] = "sending"
+                return
+
             if listo:
                 op["state"] = "sending"
                 self.buf.bcast_state(op["id"], "sending",
@@ -1637,6 +1516,7 @@ class GatewayService:
                 # Pasada terminada: toca preguntar. Se limpian los mapas de la
                 # pasada anterior, que describen un estado ya viejo.
                 self.buf.bcast_maps_clear(op["id"])
+                b["mapa_rx"] = {}
                 b["poll"] = ([op["target"]] if op.get("target")
                              else self._bcast_nodos())
                 # A quién se preguntó, para poder echar en falta al que no
@@ -1661,11 +1541,18 @@ class GatewayService:
             # difusión es tráfico a granel y cede ante beacon, ACK y WELCOME.
             reserva = self.duty.limit_ms * FW_RESERVE_PCT
             if not self.duty.fits(now, b["toa_ms"], headroom_ms=reserva):
+                b["budget_waiting"] = True
+                if now >= b.get("budget_status_at", 0):
+                    self.buf.bcast_state(op["id"], est,
+                        f"Esperando presupuesto de radio; quedan {len(b['cola'])} fragmentos por emitir en esta pasada")
+                    b["budget_status_at"] = now + 5.0
                 b["next_ms"] = now + 1.0
                 return
             if now < self.eco_libre_ms:
                 return      # hueco del eco del beacon
             index = b["cola"].pop(0)
+            if index < b["n_orig"]:
+                b["sent_originals"] = b.get("sent_originals", 0) + 1
             self._tx(protocol.build_fw_bcast_data(
                 op["xfer"], index, self._bcast_payload(index),
                 self._next_gw_seq(), self.net_id, self.max_ttl,
@@ -1673,12 +1560,20 @@ class GatewayService:
             # Separación mínima entre tramas de difusión. No espera confirmación
             # de nadie, así que el único freno es el presupuesto de aire y este
             # hueco, calculado en bcast_start a partir del tiempo de aire.
-            b["next_ms"] = now + b["gap_s"]
+            b["next_ms"] = time.monotonic() + b["gap_s"]
             b["hechos"] = b.get("hechos", 0) + 1
-            if b["hechos"] % 32 == 0:
+            resumed = b.pop("budget_waiting", False)
+            if resumed and est == "sending":
+                self.buf.bcast_state(op["id"], est, "Envío en curso")
+            if est == "repairing" and (resumed or now >= b.get("progress_at", 0) or not b["cola"]):
+                total = b.get("repair_total", len(b["cola"]) + 1)
+                self.buf.bcast_state(op["id"], "repairing",
+                    f"Pasada {op.get('pass_no', 0) + 1}: reenviados {total - len(b['cola'])} de {total} fragmentos; recepción pendiente de comprobar")
+                b["progress_at"] = now + 5.0
+            if est == "sending" and (b["hechos"] % 32 == 0 or not b["cola"]):
                 self.buf.bcast_progress(
                     op["id"], min(op["total_len"],
-                                  b["hechos"] * protocol.BCAST_FRAG_BYTES))
+                                  b.get("sent_originals", 0) * protocol.BCAST_FRAG_BYTES))
             return
 
         if est == "polling":
@@ -1767,7 +1662,8 @@ class GatewayService:
                 if i >> 3 >= len(bits) or not ((bits[i >> 3] >> (i & 7)) & 1):
                     union.add(i)
 
-        pase = op["pass_no"] + 1
+        inicial = b.get("consulta_inicial", False)
+        pase = op["pass_no"] + (0 if inicial else 1)
         if not mapas:
             # Nadie ha contestado. Antes de dar por perdida una imagen que ya
             # está emitida entera, se vuelve a preguntar: lo que falta puede ser
@@ -1780,6 +1676,14 @@ class GatewayService:
                              else self._bcast_nodos())
                 b["poll_hasta"] = 0.0
                 return
+            if inicial:
+                b["consulta_inicial"] = False
+                b["rondas"] = 0
+                b["cola"] = self._bcast_cola_completa()
+                b["next_ms"] = 0.0
+                op["state"] = "sending"
+                self.buf.bcast_state(op["id"], "sending", "sin mapa inicial; envío completo")
+                return
             self.buf.bcast_state(op["id"], "failed",
                                  f"ningún nodo respondió al mapa tras "
                                  f"{BCAST_POLL_RONDAS} rondas")
@@ -1788,7 +1692,17 @@ class GatewayService:
             LOG.warning("event=firmware_broadcast.abandoned id=%d reason=no_responses", op["id"])
             return
         b["rondas"] = 0
+        b["consulta_inicial"] = False
+        if inicial and len(union) == n:
+            b["cola"] = self._bcast_cola_completa()
+            b["next_ms"] = 0.0
+            op["state"] = "sending"
+            self.buf.bcast_state(op["id"], "sending", "recepción nueva; envío completo")
+            return
         self.buf.bcast_progress(op["id"], op["total_len"])
+        if inicial:
+            LOG.info("event=firmware_broadcast.resume_map id=%d missing=%d total=%d",
+                     op["id"], len(union), n)
 
         # Quién fue preguntado y no dijo nada. No es lo mismo que un nodo con
         # huecos, y no se puede tratar igual: de uno que contesta se sabe qué
@@ -1830,18 +1744,31 @@ class GatewayService:
                         op["id"], len(mapas), len(mudos), lista)
             return
         if pase >= BCAST_MAX_PASSES:
+            completos = sum(1 for m in mapas if m['missing'] == 0)
+            estado = "ready" if op.get("target") is None and completos else "failed"
             self.buf.bcast_state(
-                op["id"], "ready",
+                op["id"], estado,
                 f"{len(union)} fragmento(s) sin entregar tras {pase} pasadas; "
                 f"los nodos incompletos necesitan entrega individual",
                 pass_no=pase)
+            LOG.warning("event=firmware_broadcast.incomplete id=%d missing_fragments=%d passes=%d complete_nodes=%d",
+                        op["id"], len(union), pase, completos)
             self.bcast = None
             self.bcast_img = None
             return
 
+        sent = b.pop("sent_originals", 0)
+        if op.get("target") and b.get("pace_auto", True) and sent and len(union) / sent > 0.20:
+            base_gap = b.get("base_gap_s", b["gap_s"])
+            b["gap_s"] = min(base_gap * 4, b["gap_s"] * 1.5)
+            LOG.info("event=firmware_broadcast.pacing id=%d missing=%d sent=%d gap_ms=%.0f",
+                     op["id"], len(union), sent, b["gap_s"] * 1000)
+
         # Reparación: solo originales. Una mezcla perdida no se echa de menos,
         # se sustituye por el original que iba a rellenar (§20.9).
         b["cola"] = sorted(union)
+        b["repair_total"] = len(union)
+        b["progress_at"] = 0.0
         b["next_ms"] = 0.0
         op["pass_no"] = pase
         op["state"] = "repairing"
@@ -1851,26 +1778,114 @@ class GatewayService:
         LOG.info("event=firmware_broadcast.retransmit id=%d missing_fragments=%d nodes=%d",
                  op["id"], len(union), len(mapas))
 
+    def ota_check_tick(self, now: float) -> None:
+        row = self.buf.conn.execute("""SELECT c.id,c.bcast_id,c.origin,b.xfer
+            FROM fw_check c JOIN fw_bcast b ON b.id=c.bcast_id
+            WHERE c.state IN ('pending','checking') AND b.state NOT IN ('install_req','installing')
+              AND NOT EXISTS(SELECT 1 FROM fw_bcast_install i WHERE i.bcast_id=b.id
+                             AND i.origin=c.origin AND i.state IN ('pending','installing'))
+            ORDER BY c.id LIMIT 1""").fetchone()
+        if row is None:
+            return
+        self._install_image_ready(row[1], row[2], row[3], now)
+
+    def ota_auto_tick(self) -> None:
+        if self.buf.ota_blocks_radio() or getattr(self, 'bcast', None) is not None:
+            return
+        # El permiso corresponde a una sola operación y se consume al enviar la orden.
+        with self.buf.conn:
+            self.buf.conn.execute("""UPDATE fw_bcast SET auto_install=0
+                WHERE auto_install=1 AND state IN ('failed','cancelled','done')""")
+            row = self.buf.conn.execute("""SELECT b.id FROM fw_bcast b
+                JOIN fw_bcast_map m ON m.bcast_id=b.id AND m.node_id=b.target
+                WHERE b.state='ready' AND b.auto_install=1 AND m.missing=0 AND m.ts>=b.created_ts
+                  AND NOT EXISTS(SELECT 1 FROM fw_bcast newer WHERE newer.id>b.id
+                      AND newer.target=b.target)
+                  AND NOT EXISTS(SELECT 1 FROM fw_check WHERE state IN ('pending','checking'))
+                ORDER BY b.id LIMIT 1""").fetchone()
+            if row:
+                self.buf.conn.execute("""UPDATE fw_bcast SET state='install_req',updated_ts=?,
+                    detail='Comprobación automática de recepción y verificación antes de instalar'
+                    WHERE id=? AND state='ready' AND auto_install=1""", (time.time(),row[0]))
+
     def _install_image_ready(self, bid, origin, xfer, now):
         checks = getattr(self, '_install_image_checks', None)
         if checks is None:
             checks = self._install_image_checks = {}
         key = (bid, origin)
+        failed = self.buf.conn.execute("""SELECT 1 FROM fw_report r JOIN fw_bcast b
+            ON r.sha256=b.sha256 AND r.xfer=b.xfer
+            WHERE b.id=? AND r.origin=? AND r.phase=2 AND r.cause!=15""", (bid,origin)).fetchone()
+        if failed:
+            checks.pop(key,None)
+            with self.buf.conn:
+                self.buf.conn.execute("""INSERT INTO fw_check(bcast_id,origin,state,created_ts,updated_ts)
+                    SELECT ?,?,'checking',?,? WHERE NOT EXISTS(SELECT 1 FROM fw_check
+                        WHERE bcast_id=? AND origin=? AND state IN ('pending','checking'))""",
+                    (bid,origin,time.time(),time.time(),bid,origin))
+            self._ota_check_finish(bid, origin, 'verification_failed', 'La imagen no supera la verificación.')
+            return False
         check = checks.get(key)
         if check is None:
+            with self.buf.conn:
+                self.buf.conn.execute("""INSERT INTO fw_check(bcast_id,origin,state,created_ts,updated_ts)
+                    SELECT ?,?,'checking',?,? WHERE NOT EXISTS(SELECT 1 FROM fw_check
+                        WHERE bcast_id=? AND origin=? AND state IN ('pending','checking'))""",
+                    (bid,origin,time.time(),time.time(),bid,origin))
+                self.buf.conn.execute("UPDATE fw_check SET state='checking' WHERE bcast_id=? AND origin=? AND state='pending'",(bid,origin))
             row = self.buf.conn.execute(
                 "SELECT total_len FROM fw_bcast WHERE id=?", (bid,)).fetchone()
             check = checks[key] = {'xfer': xfer, 'start': now, 'parts': {},
-                                   'count': (row[0] + 211) // 212, 'result': None}
+                                   'count': (row[0] + 211) // 212, 'result': None, 'attempts': 1}
             self._tx(protocol.build_fw_bcast_poll(
                 origin, self._config_hop(origin), xfer, self._next_gw_seq(),
                 self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts()))
             return None
         result = check['result']
-        if result is None and now - check['start'] < 30:
-            return None
+        automatic = self.buf.conn.execute(
+            "SELECT auto_install FROM fw_bcast WHERE id=?", (bid,)).fetchone()[0]
+        verified = self.buf.conn.execute("""SELECT 1 FROM fw_report r JOIN fw_bcast b
+            ON r.xfer=b.xfer AND r.sha256=b.sha256
+            WHERE b.id=? AND r.origin=? AND r.phase=2 AND r.cause=15""", (bid,origin)).fetchone()
+        waiting_verification = result is True and automatic and not verified
+        if result is None or waiting_verification:
+            if now - check['start'] < BCAST_POLL_WAIT_S:
+                return None
+            if check['attempts'] < BCAST_POLL_RONDAS:
+                check['attempts'] += 1
+                check['start'] = now
+                # Se conservan las partes válidas del mapa entre consultas.
+                self._tx(protocol.build_fw_bcast_poll(
+                    origin, self._config_hop(origin), xfer, self._next_gw_seq(),
+                    self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts()))
+                with self.buf.conn:
+                    self.buf.conn.execute("""UPDATE fw_check SET detail=?,updated_ts=?
+                        WHERE bcast_id=? AND origin=? AND state='checking'""",
+                        (f"Comprobación automática: consulta {check['attempts']} de {BCAST_POLL_RONDAS}.",
+                         time.time(),bid,origin))
+                LOG.info('event=firmware_broadcast.check_retry id=%d origin=%d attempt=%d',
+                         bid,origin,check['attempts'])
+                return None
         del checks[key]
-        return result is True
+        outcome = ('verification_pending' if waiting_verification else 'complete' if result is True
+                   else 'incomplete' if result is False else 'no_response')
+        detail = {'complete':'Recepción completa confirmada por el nodo.',
+                  'incomplete':'El nodo confirma que faltan fragmentos. Se puede reanudar el envío.',
+                  'verification_pending':'Recepción completa, pero no llegó la confirmación de verificación tras las consultas automáticas.',
+                  'no_response':f'El nodo no completó el mapa tras {BCAST_POLL_RONDAS} consultas automáticas. Se conserva el envío para volver a comprobarlo.'}[outcome]
+        self._ota_check_finish(bid, origin, outcome, detail)
+        return outcome == 'complete'
+
+    def _ota_check_finish(self, bid, origin, result, detail):
+        with self.buf.conn:
+            self.buf.conn.execute("""UPDATE fw_check SET state=?,result=?,detail=?,updated_ts=?
+                WHERE bcast_id=? AND origin=? AND state IN ('pending','checking')""",
+                ('done' if result == 'complete' else 'failed',result,detail,time.time(),bid,origin))
+        LOG.info('event=firmware_broadcast.check_result id=%d origin=%d result=%s', bid,origin,result)
+
+    def _ota_check_detail(self, bid, origin):
+        row = self.buf.conn.execute('SELECT detail FROM fw_check WHERE bcast_id=? AND origin=? ORDER BY id DESC LIMIT 1', (bid,origin)).fetchone()
+        return row[0] if row else 'La imagen no supera la comprobación previa a instalar.'
 
     def _install_image_map(self, parsed):
         p = parsed['payload']
@@ -1882,6 +1897,10 @@ class GatewayService:
             return
         for (bid, origin), check in getattr(self, '_install_image_checks', {}).items():
             if origin != parsed['origin_id'] or xfer != check['xfer']:
+                continue
+            nbytes = (check['count'] + 7) // 8
+            if (parts != (nbytes + 211) // 212
+                    or len(p[6:]) != min(212, nbytes - part * 212)):
                 continue
             if check.get('expected_parts', parts) != parts:
                 continue
@@ -1907,6 +1926,8 @@ class GatewayService:
         if now - self._bcast_inst_chk < 2.0:
             return
         self._bcast_inst_chk = now
+        self.ota_check_tick(now)
+        self.ota_auto_tick()
         try:
             fila = self.buf.conn.execute(
                 """SELECT id, xfer, sha256, target FROM fw_bcast
@@ -1922,29 +1943,26 @@ class GatewayService:
         if ready is None:
             return
         if not ready:
-            self.buf.bcast_state(bid, "failed", "No se pudo confirmar la imagen completa en el nodo. Vuelve a enviar el firmware.")
+            with self.buf.conn:
+                self.buf.conn.execute("UPDATE fw_bcast SET auto_install=0 WHERE id=?", (bid,))
+            self.buf.bcast_state(bid, "failed", self._ota_check_detail(bid, destino))
             return
         self._tx(protocol.build_fw_install(
             destino, self._config_hop(destino), xfer, bytes.fromhex(sha_hex),
             self._next_gw_seq(), self.net_id, self.max_ttl,
             self.sec_key, self._gw_sec_ts()))
+        with self.buf.conn:
+            self.buf.conn.execute("UPDATE fw_bcast SET auto_install=0 WHERE id=?", (bid,))
         self.buf.bcast_state(bid, "installing", "orden enviada al nodo")
         LOG.info("event=firmware_broadcast.install_sent id=%d origin=%d transfer_id=%08X",
                  bid, destino, xfer)
 
     def _bcast_install_caducada(self, now: float) -> None:
-        """Cierra una instalación que se quedó sin veredicto.
+        """Conserva la confirmación pendiente si la imagen nueva está ejecutándose.
 
-        Ningún estado puede ser terminal por silencio: si el FW_RESULT se
-        pierde, la fila se queda en `installing`, y una fila en `installing`
-        bloquea el canal entero porque el visor la sigue dando por viva. El
-        plazo es holgado respecto a la ventana de prueba del nodo, que son
-        cuatro minutos: pasado eso, o el nodo volvió con la imagen nueva, o el
-        gestor de arranque ya le devolvió la anterior.
-
-        Y el veredicto no se inventa: se lee la versión que el nodo anuncia en
-        su catálogo. Si es la que se le mandó, la instalación salió bien y lo
-        único que se perdió fue el aviso.
+        Un registro posterior permite liberar otros nodos desde la API, pero
+        no sustituye el veredicto de arranque. Sin ese registro, el plazo
+        cierra la operación como fallida para permitir un intento nuevo.
         """
         try:
             filas = self.buf.conn.execute(
@@ -1957,11 +1975,11 @@ class GatewayService:
         except sqlite3.Error:
             return
         for bid, destino, pedida, corriendo, reported, requested in filas:
-            ok = bool(pedida) and "+" in pedida and pedida == corriendo and reported >= requested
-            self.buf.bcast_state(
-                bid, "done" if ok else "failed",
-                "instalada (confirmada por la version que anuncia el nodo)"
-                if ok else
+            ok = bool(pedida and "+" in pedida and pedida == corriendo
+                      and reported is not None and requested is not None and reported >= requested)
+            if ok:
+                continue
+            self.buf.bcast_state(bid, "failed",
                 f"sin veredicto del nodo tras {BCAST_INSTALL_VEREDICTO_S:.0f} s")
             LOG.warning("event=firmware_broadcast.verdict_timeout id=%d origin=%d "
                         "reported_version=%s requested_version=%s", bid, destino,
@@ -1985,9 +2003,10 @@ class GatewayService:
                WHERE i.state='installing' AND i.updated_ts < ?""",
             (time.time() - BCAST_INSTALL_VEREDICTO_S,)).fetchall()
         for iid, wanted, running, reported, requested in expired:
-            ok = bool(wanted and '+' in wanted and wanted == running and reported >= requested)
-            self.buf.bcast_install_state(iid, 'done' if ok else 'failed',
-                'Instalación confirmada por el nodo.' if ok else 'El nodo no confirmó la instalación.')
+            ok = bool(wanted and '+' in wanted and wanted == running
+                      and reported is not None and requested is not None and reported >= requested)
+            if not ok:
+                self.buf.bcast_install_state(iid, 'failed', 'El nodo no confirmó la instalación.')
         try:
             fila = self.buf.bcast_install_next()
         except sqlite3.Error:
@@ -1999,7 +2018,7 @@ class GatewayService:
             return
         if not ready:
             self.buf.bcast_install_state(fila['id'], 'failed',
-                'No se pudo confirmar la imagen completa en el nodo. Vuelve a enviar el firmware.')
+                self._ota_check_detail(fila['bcast_id'], fila['origin']))
             return
         self._tx(protocol.build_fw_install(
             fila["origin"], self._config_hop(fila["origin"]), fila["xfer"],
@@ -2031,6 +2050,62 @@ class GatewayService:
         LOG.info("event=firmware_broadcast.verdict origin=%d detail=%s",
                  parsed["origin_id"], detalle or "no_detail")
         return True
+
+    def firmware_report(self, parsed: dict) -> None:
+        if self.buf is None:
+            return
+        origin = parsed['origin_id']
+        previous = self.buf.conn.execute('SELECT report_id,xfer,sha256 FROM fw_report WHERE origin=?',(origin,)).fetchone()
+        seen = self.buf.conn.execute("""SELECT 1 FROM fw_event e JOIN fw_bcast b ON b.id=e.bcast_id
+            WHERE e.origin=? AND e.report_id=? AND b.xfer=? AND b.sha256=? LIMIT 1""",
+            (origin,parsed['fw_report_id'],parsed['fw_xfer'],parsed['fw_sha256'])).fetchone()
+        stale = previous and previous[1:] == (parsed['fw_xfer'],parsed['fw_sha256']) and (
+            (parsed['fw_report_id'] - previous[0]) & 0xFFFFFFFF) >= 0x80000000
+        duplicate = previous and previous == (parsed['fw_report_id'],parsed['fw_xfer'],parsed['fw_sha256'])
+        if seen or stale or duplicate:
+            self._tx(protocol.build_fw_report_ack(origin,self._config_hop(origin),
+                parsed['fw_report_id'],parsed['fw_xfer'],self._next_gw_seq(),self.net_id,
+                self.max_ttl,self.sec_key,self._gw_sec_ts()))
+            return
+        with self.buf.conn:
+            self.buf.conn.execute("""INSERT OR IGNORE INTO fw_event
+                (bcast_id,origin,ts,source,kind,report_id,phase,cause,missing,total)
+                SELECT b.id,?,?,'node','report',?,?,?,?,? FROM fw_bcast b
+                WHERE b.xfer=? AND b.sha256=? AND (b.target=? OR b.target IS NULL)
+                  AND NOT EXISTS(SELECT 1 FROM fw_event e WHERE e.origin=? AND e.report_id=?
+                                 AND e.phase=? AND e.cause=?)
+                ORDER BY b.id DESC LIMIT 1""",
+                (origin,time.time(),parsed['fw_report_id'],parsed['fw_phase'],parsed['fw_cause'],
+                 parsed['fw_missing'],parsed['fw_total'],parsed['fw_xfer'],parsed['fw_sha256'],origin,
+                 origin,parsed['fw_report_id'],parsed['fw_phase'],parsed['fw_cause']))
+            self.buf.conn.execute("""INSERT INTO fw_report
+                (origin,report_id,xfer,sha256,phase,cause,missing,total,ts)
+                VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(origin) DO UPDATE SET
+                report_id=excluded.report_id,xfer=excluded.xfer,sha256=excluded.sha256,
+                phase=excluded.phase,cause=excluded.cause,missing=excluded.missing,
+                total=excluded.total,ts=CASE WHEN fw_report.report_id=excluded.report_id AND fw_report.xfer=excluded.xfer
+                    AND fw_report.sha256=excluded.sha256 THEN fw_report.ts ELSE excluded.ts END""",
+                (origin,parsed['fw_report_id'],parsed['fw_xfer'],parsed['fw_sha256'],
+                 parsed['fw_phase'],parsed['fw_cause'],parsed['fw_missing'],parsed['fw_total'],time.time()))
+            # El hash completo vincula el veredicto con la imagen instalada.
+            terminal = (parsed['fw_phase'] == 4 and parsed['fw_cause'] in (0,4,12,16,17)) or parsed['fw_phase'] == 3
+            if terminal:
+                state = 'done' if parsed['fw_cause'] == 0 else 'failed'
+                detail = ('Instalación confirmada' if state == 'done' else
+                          f"Fallo comunicado por el nodo: fase {parsed['fw_phase']}, código {parsed['fw_cause']}")
+                self.buf.conn.execute("""UPDATE fw_bcast SET state=?,detail=?,updated_ts=?
+                    WHERE target=? AND xfer=? AND sha256=? AND state='installing'""",
+                    (state,detail,time.time(),origin,parsed['fw_xfer'],parsed['fw_sha256']))
+                self.buf.conn.execute("""UPDATE fw_bcast_install SET state=?,detail=?
+                    WHERE origin=? AND state='installing' AND bcast_id IN
+                    (SELECT id FROM fw_bcast WHERE xfer=? AND sha256=?)""",
+                    (state,detail,origin,parsed['fw_xfer'],parsed['fw_sha256']))
+        self._tx(protocol.build_fw_report_ack(origin,self._config_hop(origin),
+            parsed['fw_report_id'],parsed['fw_xfer'],self._next_gw_seq(),self.net_id,
+            self.max_ttl,self.sec_key,self._gw_sec_ts()))
+        LOG.info('event=firmware_report.received origin=%d report=%d phase=%d cause=%d missing=%d total=%d',
+                 origin,parsed['fw_report_id'],parsed['fw_phase'],parsed['fw_cause'],
+                 parsed['fw_missing'],parsed['fw_total'])
 
     def bcast_on_result(self, parsed: dict) -> bool:
         """Veredicto tras instalar una imagen entregada por este transporte.
@@ -2076,8 +2151,7 @@ class GatewayService:
     def bcast_on_status(self, parsed: dict) -> bool:
         """Respuesta del nodo a una oferta dirigida (§20.12).
 
-        Devuelve si la trama era para esta operación, para que el llamante
-        sepa si dársela también al transporte secuencial de §18.
+        Devuelve si el identificador y el origen corresponden a la operación.
         """
         b = self.bcast
         if b is None or b["dest"] == protocol.ADDR_BROADCAST:
@@ -2124,6 +2198,12 @@ class GatewayService:
             return
         part, parts, bits = p[4], p[5], bytes(p[6:])
         origen = parsed["origin_id"]
+        nbytes = (self.bcast["n_orig"] + 7) // 8
+        expected_parts = (nbytes + 211) // 212
+        if (parts != expected_parts or part >= parts
+                or len(bits) != min(212, nbytes - part * 212)
+                or origen not in self.bcast.get("preguntados", [])):
+            return
 
         trozos = self.bcast.setdefault("mapa_rx", {}).setdefault(origen, {})
         trozos[part] = bits
@@ -2142,262 +2222,6 @@ class GatewayService:
         # Contestó antes de que venciera su espera: se pasa al siguiente sin
         # gastar el resto del plazo, que con veinte nodos son minutos.
         self.bcast["poll_hasta"] = 0.0
-
-    def fw_tick(self, now: float) -> None:
-        """Avanza la subida en curso, o arranca la siguiente de la cola."""
-        if self.buf is None:
-            return
-        if self.fw_tx is None:
-            pend = self.buf.fw_push_next()
-            if pend is not None:
-                self.fw_start(pend)
-            return
-
-        t = self.fw_tx
-
-        # Sin noticias del nodo en mucho rato: se abandona. El progreso queda
-        # anotado, así que reencolarla continúa donde se quedó.
-        if now - t["last_news"] > FW_IDLE_TIMEOUT_S:
-            self.fw_finish("failed", "el nodo dejó de responder")
-            return
-
-        # Cancelación desde el visor. Como la orden de instalar, viaja por la
-        # tabla y no por una llamada: los dos procesos no se hablan. Se mira
-        # cada pocos segundos y no en cada vuelta, porque lo que se corta son
-        # horas de emisión y un segundo de más no cambia nada.
-        if now - t.get("chk", 0.0) >= 5.0:
-            t["chk"] = now
-            if self.buf.fw_push_state_of(t["push_id"]) == "cancelled":
-                LOG.info("event=firmware_push.cancelled origin=%d source=web "
-                         "bytes_written=%d",
-                         t["origin"], t["written"])
-                self.fw_tx = None
-                return
-
-        # Imagen arriba: se espera a que el operador pida instalar desde el
-        # visor, que lo deja anotado en la tabla. El sondeo es de un segundo
-        # (este tick), y no cuesta nada porque es una consulta a una fila.
-        if t["phase"] == "ready":
-            if self.buf.fw_push_state_of(t["push_id"]) == "install_req":
-                self.fw_install(t["push_id"])
-            return
-
-        if t["phase"] == "installing":
-            return          # esperando el FW_RESULT tras el reinicio del nodo
-
-        if now < t["next_ms"]:
-            return
-
-        # Ventana horaria: es lo primero que se mira, porque estar fuera de
-        # ella no es un fallo sino el estado normal durante el día.
-        if not self._fw_en_ventana(t):
-            if not t["fuera_avisado"]:
-                t["fuera_avisado"] = True
-                LOG.info("event=firmware_push.paused origin=%d reason=outside_window "
-                         "window_start=%02d:00 window_end=%02d:00", t["origin"],
-                         t["hour_from"], t["hour_to"])
-            t["next_ms"] = now + 300.0
-            t["last_news"] = now      # esperar no cuenta como no responder
-            return
-        t["fuera_avisado"] = False
-
-        # Anuncio de la imagen. Hasta que el nodo la acepta no se manda nada:
-        # medio mega a un nodo que la rechaza sería el peor uso posible del aire.
-        if t["phase"] == "offer":
-            if t["tries"] >= FW_OFFER_MAX_TRIES:
-                self.fw_finish("failed",
-                               f"el nodo no respondió a {FW_OFFER_MAX_TRIES} ofertas")
-                return
-            if not self._fw_ventana_nodo(t, now):
-                return
-            frame = protocol.build_fw_offer(
-                t["origin"], self._config_hop(t["origin"]), t["xfer"],
-                t["total_len"], t["sha"], t["version"],
-                self._next_gw_seq(), self.net_id, self.max_ttl,
-                self.sec_key, self._gw_sec_ts())
-            self._tx(frame)
-            t["tries"] += 1
-            t["next_ms"] = now + FW_OFFER_RETRY_S
-            LOG.info("event=firmware_push.offer origin=%d version=%s attempt=%d",
-                     t["origin"], t["version"], t["tries"])
-            return
-
-        # Envío de trozos.
-        # Emitir a ciegas es tirar aire. Si el nodo lleva demasiados fragmentos
-        # sin decir nada, se espera a que hable en vez de seguir llenando el
-        # aire de tramas que quizá esté descartando (ver FW_SIN_NOTICIAS_MAX).
-        if now < self.eco_libre_ms:
-            return          # hueco del eco del beacon
-
-        if t.get("mudos", 0) >= FW_SIN_NOTICIAS_MAX:
-            if not t.get("mudo_avisado"):
-                t["mudo_avisado"] = True
-                LOG.info("event=firmware_push.paused origin=%d reason=node_silent "
-                         "fragments_without_response=%d",
-                         t["origin"], t["mudos"])
-            t["next_ms"] = now + 2.0
-            return
-
-        if not self._fw_ventana_nodo(t, now):
-            return
-
-        # Presupuesto de aire con margen reservado: el firmware se para antes
-        # de agotarlo para que la telemetría y los ACK no compitan con él.
-        reserva = self.duty.limit_ms * FW_RESERVE_PCT
-        if not self.duty.fits(now, t["toa_ms"], headroom_ms=reserva):
-            if not t["duty_avisado"]:
-                t["duty_avisado"] = True
-                LOG.info("event=firmware_push.paused origin=%d reason=duty_cycle "
-                         "used_pct=%.1f",
-                         t["origin"], self.duty.used_pct(now))
-            t["next_ms"] = now + 60.0
-            t["last_news"] = now
-            return
-        t["duty_avisado"] = False
-
-        off = t["written"]
-        if off >= t["total_len"]:
-            t["next_ms"] = now + 10.0    # esperando el FW_STATUS de completada
-            return
-        try:
-            with open(t["path"], "rb") as fh:
-                fh.seek(off)
-                trozo = fh.read(FW_FRAG_BYTES)
-        except OSError as e:
-            self.fw_finish("failed", f"error leyendo el binario: {e}")
-            return
-        if not trozo:
-            t["next_ms"] = now + 10.0
-            return
-
-        frame = protocol.build_fw_data(
-            t["origin"], self._config_hop(t["origin"]), t["xfer"], off, trozo,
-            self._next_gw_seq(), self.net_id, self.max_ttl,
-            self.sec_key, self._gw_sec_ts())
-        self._tx(frame)
-        t["burst"] += 1
-        t["mudos"] = t.get("mudos", 0) + 1
-        # El cursor avanza al enviar, no al confirmar: con entrega secuencial
-        # una pérdida la delata el propio nodo con un FW_STATUS de hueco, y
-        # esperar confirmación de cada trozo costaría 2485 esperas.
-        t["written"] = off + len(trozo)
-        t["next_ms"] = now + self._hueco_con_jitter(t["gap_s"])
-
-    def _fw_ventana_nodo(self, t: dict, now: float) -> bool:
-        """Si toca emitir un fragmento ahora, según la clase del nodo (§21).
-
-        Con clase C no hay ventana ni ráfaga que contar: se emite al ritmo del
-        hueco entre tramas, que es lo que ya frena el bucle. La cuenta de
-        ráfaga existía para no desbordar la ventana de escucha, y sin ventana
-        no tiene nada que limitar.
-
-        Con clase A se conserva la regla anterior entera, porque ahí sí es lo
-        único posible: fuera de su ventana el nodo no oye.
-        """
-        if self._clase_de(t["origin"]) != "A":
-            return True
-        oido = t.get("heard_ms", 0.0)
-        if oido == 0.0 or now < oido + CFG_QUIET_DELAY_S:
-            return False
-        if now > oido + CFG_QUIET_DELAY_S + CFG_WINDOW_S:
-            return False
-        if oido - t["burst_at"] > CFG_WINDOW_S:
-            t["burst_at"] = oido
-            t["burst"] = 0
-        return t["burst"] < t["burst_max"]
-
-    def fw_on_status(self, parsed: dict) -> None:
-        """Por dónde va el nodo. Con entrega secuencial este número lo dice
-        todo: progreso, punto de reanudación y, si es menor que el cursor del
-        gateway, que hubo un hueco y hay que rebobinar."""
-        t = self.fw_tx
-        if t is None or parsed["fw_xfer"] != t["xfer"]:
-            return
-        estado = parsed["fw_state"]
-        escritos = parsed["fw_written"]
-        t["last_news"] = time.monotonic()
-        if t.get("mudo_avisado"):
-            LOG.info("event=firmware_push.resumed origin=%d reason=node_reachable", t["origin"])
-        t["mudos"] = 0
-        t["mudo_avisado"] = False
-
-        if estado == protocol.FW_REJECTED:
-            self.fw_finish("failed", "el nodo rechazó la imagen "
-                                     "(¿ya la tiene, o es anterior a la suya?)")
-            return
-        if estado == protocol.FW_ERROR:
-            self.fw_finish("failed", "el nodo falló escribiendo la imagen")
-            return
-
-        if estado == protocol.FW_ACCEPTED and t["phase"] == "offer":
-            t["phase"] = "sending"
-            t["written"] = escritos
-            t["tries"] = 0
-            LOG.info("event=firmware_push.offer_accepted origin=%d resume_offset=%d",
-                     t["origin"], escritos)
-            self.buf.fw_push_state(t["push_id"], "sending",
-                                   f"aceptada, desde {escritos} B", escritos)
-            return
-
-        if estado == protocol.FW_READY:
-            t["phase"] = "ready"
-            t["written"] = t["total_len"]
-            self.buf.fw_push_state(t["push_id"], "ready",
-                                   "imagen completa y verificada en el nodo",
-                                   t["total_len"])
-            LOG.info("event=firmware_push.image_ready origin=%d action=wait_for_install",
-                     t["origin"])
-            return
-
-        # Hueco, o simple informe de progreso. En los dos casos el número del
-        # nodo manda sobre el del gateway: es el que está escrito de verdad.
-        if escritos < t["written"]:
-            LOG.info("event=firmware_push.rewinding origin=%d from_offset=%d to_offset=%d",
-                     t["origin"], t["written"], escritos)
-        t["written"] = escritos
-        self.buf.fw_push_progress(t["push_id"], escritos)
-        if estado != protocol.FW_GAP:
-            pct = 100.0 * escritos / t["total_len"] if t["total_len"] else 0.0
-            LOG.info("event=firmware_push.progress origin=%d bytes_written=%d total_bytes=%d progress_pct=%.1f airtime_pct=%.1f",
-                     t["origin"], escritos, t["total_len"], pct,
-                     self.duty.used_pct(time.monotonic()))
-
-    def fw_install(self, push_id: int) -> bool:
-        """Manda la orden de instalar. La pide el visor, no la máquina: subir
-        es inocuo y puede correr de noche, instalar reinicia el nodo."""
-        t = self.fw_tx
-        if t is None or t["push_id"] != push_id or t["phase"] != "ready":
-            return False
-        frame = protocol.build_fw_install(
-            t["origin"], self._config_hop(t["origin"]), t["xfer"], t["sha"],
-            self._next_gw_seq(), self.net_id, self.max_ttl,
-            self.sec_key, self._gw_sec_ts())
-        self._tx(frame)
-        t["phase"] = "installing"
-        t["last_news"] = time.monotonic()
-        self.buf.fw_push_state(push_id, "installing", "orden enviada al nodo")
-        LOG.info("event=firmware_install.sent origin=%d transfer_id=%08X", t["origin"], t["xfer"])
-        return True
-
-    def fw_on_result(self, parsed: dict) -> None:
-        """Veredicto tras el reinicio. Lo emite la imagen nueva al confirmarse,
-        o la anterior si el gestor de arranque la devolvió al mando."""
-        t = self.fw_tx
-        if t is None:
-            return
-        detalle = f"{parsed['fw_status_name']}: {parsed['fw_detail']}".strip(": ")
-        LOG.info("event=firmware_result.received origin=%s result=%s",
-                 protocol.addr_name(parsed["origin_id"]), detalle)
-        self.fw_finish("done" if parsed["fw_status"] == 0 else "failed", detalle)
-
-    def fw_finish(self, state: str, detail: str) -> None:
-        if self.fw_tx is None:
-            return
-        self.buf.fw_push_state(self.fw_tx["push_id"], state, detail,
-                               self.fw_tx["written"])
-        LOG.info("event=firmware_push.completed origin=%d state=%s detail=%s",
-                 self.fw_tx["origin"], state, detail)
-        self.fw_tx = None
 
     def config_on_ack(self, parsed: dict) -> None:
         """Mapa de fragmentos recibidos. Un solo mapa dice exactamente qué
@@ -2685,23 +2509,20 @@ class GatewayService:
         # canal que ya va justo de aire.
         if ft == protocol.FRAME_FW_STATUS:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                # La misma trama sirve a los dos transportes: al secuencial de
-                # §18 le informa del progreso, y al de §20 dirigido a un nodo
-                # le trae la aceptación de la oferta. Se mira primero el de
-                # §20 porque solo consume la trama si el identificador cuadra.
-                if not self.bcast_on_status(parsed):
-                    self.fw_on_status(parsed)
+                self.bcast_on_status(parsed)
             else:
                 self.n_notconf += 1
             return
 
+        if ft == protocol.FRAME_FW_REPORT:
+            if parsed["dest_id"] == protocol.ADDR_GATEWAY:
+                self.firmware_report(parsed)
+            return
+
         if ft == protocol.FRAME_FW_RESULT:
             if parsed["dest_id"] == protocol.ADDR_GATEWAY:
-                # Igual que con el estado: primero el transporte de §20, que
-                # solo consume la trama si la transferencia es suya.
-                if not self.bcast_difusion_result(parsed) and \
-                        not self.bcast_on_result(parsed):
-                    self.fw_on_result(parsed)
+                if not self.bcast_difusion_result(parsed):
+                    self.bcast_on_result(parsed)
             else:
                 self.n_notconf += 1
             return
@@ -2863,8 +2684,6 @@ class GatewayService:
             self.cfg_tx["heard_ms"] = time.monotonic()
         if self.cfg_rx is not None and origin == self.cfg_rx["origin"]:
             self.cfg_rx["heard_ms"] = time.monotonic()
-        if self.fw_tx is not None and origin == self.fw_tx["origin"]:
-            self.fw_tx["heard_ms"] = time.monotonic()
 
     # ----- Registro de nodos (v2.1, frame-format.md §13) -----
 
@@ -3456,6 +3275,12 @@ class GatewayService:
                     last_oled   = 0.0   # y estado inmediato a la pantalla
 
                 try:
+                    chunk = self.ser.read(self.ser.in_waiting or 1)
+                    if chunk:
+                        rx_buf += chunk
+                        while b"\n" in rx_buf:
+                            raw, rx_buf = rx_buf.split(b"\n", 1)
+                            self.handle_rx_line(raw.decode(errors="ignore"))
                     now = time.monotonic()
                     self.mqtt.drain_nbiot()
                     # El beacon espera a que el aire quede libre. No se toca
@@ -3508,7 +3333,6 @@ class GatewayService:
                         # propósito: con las dos en cola, la que se resuelve en
                         # segundos pasa primero, en vez de esperar horas detrás
                         # de una imagen.
-                        self.fw_tick(now)
                         # La orden de instalar va ANTES que la emisión, y no
                         # es un detalle de estilo: las dos leen la misma fila,
                         # y la que corre primero decide. Con la emisión delante,
@@ -3534,12 +3358,6 @@ class GatewayService:
                         self.push_radio()
                         self.push_oled()
 
-                    chunk = self.ser.read(self.ser.in_waiting or 1)
-                    if chunk:
-                        rx_buf += chunk
-                        while b"\n" in rx_buf:
-                            raw, rx_buf = rx_buf.split(b"\n", 1)
-                            self.handle_rx_line(raw.decode(errors="ignore"))
                 except (serial.SerialException, OSError) as e:
                     # Heltec desconectado (lectura o TX del beacon): se delata
                     # en el acto en el estado (lora abajo) y se cierra el

@@ -37,7 +37,7 @@ class ReturnRouteTests(unittest.TestCase):
         self.addCleanup(self.buf.close)
         self.sent = []
         self.gateway = types.SimpleNamespace(
-            buf=self.buf, cfg_tx=None, cfg_rx=None, fw_tx=None,
+            buf=self.buf, cfg_tx=None, cfg_rx=None,
             migration_note_rx=lambda origin: None,
             _probe_chk=time.monotonic() - 1, _probe_req=0, _probe_vivo=None,
             gw_seq=0, net_id=1, max_ttl=6, sec_key=None,

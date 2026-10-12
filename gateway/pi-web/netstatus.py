@@ -283,7 +283,7 @@ def _sesiones_firmware(conn) -> dict:
     caso de una difusión sin destinatario concreto.
     """
     sesiones: dict = {}
-    for tabla, col in (("fw_bcast", "target"), ("fw_push", "origin")):
+    for tabla, col in (("fw_bcast", "target"),):
         try:
             filas = conn.execute(
                 f"SELECT {col}, state FROM {tabla} "
@@ -539,6 +539,10 @@ def _delivery_state(nodes: list[dict], now: float, link: dict) -> None:
         n["observed_routes"].append({"source": source, "path": path, "at": at, "until": until, "captured_ts": captured_ts, "seq": seq})
 
     for n in nodes:
+        # La conectividad conserva evidencia LoRa reciente aunque la última
+        # medida use otra ruta. La topología mantiene el recorrido de esa medida.
+        n["lora_route_until"] = max(lora_deadline(n), max(
+            (r["until"] for r in n["observed_routes"] if r["source"] == "lora"), default=0))
         n["observed_routes"] = latest_sample_routes(n["observed_routes"])
         if n["observed_routes"]:
             n["route_options"] = [{"transport": "lora" if r["source"] == "lora" else ("nbiot" if r["path"][-1] == n["origin"] else "relay"),
@@ -600,7 +604,7 @@ def project_state(state: dict, now: float) -> dict:
         n["delivery_online"] = active is not None
         if active and active.get("publisher") is not None:
             n["via_publisher"] = active["publisher"]
-        n["lora_route_online"] = any(o["transport"] == "lora" and o["until"] > now for o in n["route_options"])
+        n["lora_route_online"] = n.get("lora_route_until", 0) > now or any(o["transport"] == "lora" and o["until"] > now for o in n["route_options"])
         n["online"] = n["lora_until"] > now
         n["cellular_delivery_recent"] = any(o["transport"] != "lora" and o["until"] > now for o in n["route_options"])
         for field, options in n["modem_options"].items():

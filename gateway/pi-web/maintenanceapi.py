@@ -44,7 +44,6 @@ def check_operations():
     checks = {
         'fw_bcast': "state NOT IN ('ready','done','failed','cancelled')",
         'fw_bcast_install': "state IN ('pending','installing')",
-        'fw_push': "state NOT IN ('done','failed','cancelled','ready')",
         'net_migration': "state IN ('programada','saltada')",
         'config_read': "state IN ('pending','asking','reading','receiving')",
         'node_maintenance': "state IN ('queued','sent','accepted') AND created > strftime('%s','now') - 180",

@@ -38,7 +38,7 @@ constexpr const char* kStateTmp  = "/fwbcast.tmp";
 constexpr const char* kMapPath   = "/fwbcast.map";
 constexpr const char* kMapTmp    = "/fwbcast.mtmp";
 
-// Mismo criterio que fwota: soltar la RAM tras un rato parado, sin cancelar.
+// Se libera la RAM tras una pausa, conservando el progreso persistente.
 constexpr uint32_t kIdleTimeoutMs = 600000;
 
 const esp_partition_t* part_ = nullptr;
@@ -61,6 +61,8 @@ uint16_t got_       = 0;         // originales recibidos
 // el emisor daría por fallida una entrega que fue perfecta. Pasó en banco el
 // 1-ago-2026, y es un fallo que solo aparece cuando todo sale bien.
 bool     entregada_ = false;
+bool idle_reported_ = false;
+bool activity_seen_ = false;
 
 int32_t  block_     = -1;        // bloque abierto, -1 si ninguno
 uint8_t* acc_       = nullptr;   // r_ acumuladores de kFragBytes
@@ -102,11 +104,15 @@ void freeAll() {
 bool saveMap() {
     if (map_ == nullptr) return false;
     File f = LittleFS.open(kMapTmp, "w");
-    if (!f) return false;
+    if (!f) {
+        fwota::record(xfer_,sha_,fwota::Phase::RECEIVE,fwota::Cause::STORAGE,n_orig_-got_,n_orig_);
+        return false;
+    }
     const size_t n = f.write(map_, map_bytes_);
     f.close();
-    if (n != map_bytes_) { LittleFS.remove(kMapTmp); return false; }
-    return LittleFS.rename(kMapTmp, kMapPath);
+    const bool ok = n == map_bytes_ && LittleFS.rename(kMapTmp,kMapPath);
+    if (!ok) fwota::record(xfer_,sha_,fwota::Phase::RECEIVE,fwota::Cause::STORAGE,n_orig_-got_,n_orig_);
+    return ok;
 }
 
 bool loadMap() {
@@ -132,9 +138,10 @@ bool saveState() {
 
     File f = LittleFS.open(kStateTmp, "w");
     if (!f) return false;
-    serializeJson(doc, f);
+    const size_t expected=measureJson(doc);
+    const size_t written=serializeJson(doc, f);
     f.close();
-    return LittleFS.rename(kStateTmp, kStatePath);
+    return written == expected && LittleFS.rename(kStateTmp, kStatePath);
 }
 
 // El archivo de estado EXISTE SIEMPRE a partir del primer arranque, y "sin
@@ -212,7 +219,10 @@ bool writeOrig(uint16_t i, const uint8_t* data, size_t len) {
         data = buf;
     }
     const uint32_t off = static_cast<uint32_t>(i) * kFragBytes;
-    return esp_partition_write(part_, off, data, n) == ESP_OK;
+    const bool ok = esp_partition_write(part_, off, data, n) == ESP_OK;
+    if (!ok) fwota::record(xfer_,sha_,fwota::Phase::RECEIVE,fwota::Cause::FLASH_WRITE,
+                           n_orig_-got_,n_orig_);
+    return ok;
 }
 
 // Suma (XOR) un original, ya rellenado a kFragBytes con ceros, a las mezclas
@@ -240,6 +250,7 @@ void xorIntoParities(uint16_t idx_in_block, const uint8_t* data, size_t len) {
 // el tamaño, que son detalle de la transferencia y no del despachador.
 void handoverIfComplete() {
     if (entregada_ || map_ == nullptr || n_orig_ == 0 || got_ < n_orig_) return;
+    if (!saveMap()) return;
     entregada_ = true;
     const bool ok = fwota::adoptCompleted(xfer_, total_len_, sha_);
     diag::log("INFO", "node.firmware_broadcast", "firmware_broadcast.image_complete", "source_fragments=%u result=%s\n", n_orig_, ok ? "verified"
@@ -291,6 +302,11 @@ void mask(uint32_t xfer_id, uint16_t block, uint8_t parity,
 // ----- Ciclo de vida -----
 
 void begin(const char* running_version) {
+    freeAll();
+    entregada_ = false;
+    idle_reported_ = false;
+    activity_seen_ = false;
+    last_ms_ = millis();
     strncpy(running_, running_version ? running_version : "",
             sizeof(running_) - 1);
     part_ = esp_ota_get_next_update_partition(nullptr);
@@ -334,17 +350,25 @@ void begin(const char* running_version) {
 
 Offer onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
               const char* version, uint16_t block_k, uint8_t block_r) {
+    auto error = [&](fwota::Cause cause) {
+        fwota::record(xfer,sha,fwota::Phase::RECEIVE,cause);
+        return Offer::ERROR;
+    };
     if (version && strcmp(version, running_) == 0) return Offer::REJECTED;
-    if (part_ == nullptr) return Offer::ERROR;
-    if (total_len == 0 || total_len > fwota::kMaxImageBytes) return Offer::ERROR;
-    if (block_k == 0 || block_k > kMaxK) return Offer::ERROR;
-    if (block_r == 0 || block_r > kMaxR) return Offer::ERROR;
+    if (part_ == nullptr) return error(fwota::Cause::INVALID_OFFER);
+    if (total_len == 0 || total_len > fwota::kMaxImageBytes) return error(fwota::Cause::INVALID_OFFER);
+    if (block_k == 0 || block_k > kMaxK) return error(fwota::Cause::INVALID_OFFER);
+    if (block_r == 0 || block_r > kMaxR) return error(fwota::Cause::INVALID_OFFER);
 
     // Reanudar: mismo identificador y mismos parámetros. Si los parámetros
     // cambiaran, las máscaras ya no serían las mismas y lo escrito valdría de
     // poco, así que se trata como una transferencia distinta.
-    if (xfer_ == xfer && map_ != nullptr && k_ == block_k && r_ == block_r) {
+    if (xfer_ == xfer && map_ != nullptr && k_ == block_k && r_ == block_r &&
+        total_len_ == total_len && memcmp(sha_, sha, 32) == 0 &&
+        (!entregada_ || fwota::verify())) {
         last_ms_ = millis();
+        activity_seen_ = true;
+        idle_reported_ = false;
         return Offer::ACCEPTED;
     }
 
@@ -359,7 +383,7 @@ Offer onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
     r_         = block_r;
     n_orig_    = static_cast<uint16_t>((total_len_ + kFragBytes - 1) / kFragBytes);
     n_blocks_  = static_cast<uint16_t>((n_orig_ + k_ - 1) / k_);
-    if (!allocMap()) { xfer_ = 0; return Offer::ERROR; }
+    if (!allocMap()) { xfer_ = 0; return error(fwota::Cause::NO_MEMORY); }
 
     // La partición se borra ENTERA aquí, una sola vez. Es lo que permite
     // escribir después en cualquier orden. Tarda un par de segundos y bloquea,
@@ -367,11 +391,14 @@ Offer onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
     const esp_err_t e = esp_partition_erase_range(part_, 0, part_->size);
     if (e != ESP_OK) {
         diag::log("ERROR", "node.firmware_broadcast", "firmware_broadcast.partition_erase_failed", "error=%d\n", static_cast<int>(e));
-        xfer_ = 0; freeAll(); return Offer::ERROR;
+        xfer_ = 0; freeAll(); return error(fwota::Cause::FLASH_ERASE);
     }
-    saveState();
-    saveMap();
+    if (!saveState() || !saveMap()) {
+        xfer_ = 0; freeAll(); return error(fwota::Cause::STORAGE);
+    }
     last_ms_ = millis();
+    activity_seen_ = true;
+    idle_reported_ = false;
     diag::log("INFO", "node.firmware_broadcast", "firmware_broadcast.offer_accepted", "transfer_id=%08lX bytes=%lu source_fragments=%u "
                   "K=%u R=%u\n", static_cast<unsigned long>(xfer_), static_cast<unsigned long>(total_len_), n_orig_, k_, r_);
     return Offer::ACCEPTED;
@@ -471,13 +498,15 @@ void closeBlock() {
 
 void onData(uint32_t xfer, uint16_t index, const uint8_t* data, size_t len) {
     if (xfer != xfer_ || map_ == nullptr || len == 0) return;
-    last_ms_ = millis();
 
     const bool es_original = index < n_orig_;
     const uint16_t b = es_original
         ? static_cast<uint16_t>(index / k_)
         : static_cast<uint16_t>((index - n_orig_) / r_);
     if (b >= n_blocks_) return;
+    last_ms_ = millis();
+    activity_seen_ = true;
+    idle_reported_ = false;
 
     // Cambio de bloque: se cierra el anterior antes de tocar nada del nuevo.
     // La difusión va en orden de índice, así que esto ocurre una vez por
@@ -485,7 +514,10 @@ void onData(uint32_t xfer, uint16_t index, const uint8_t* data, size_t len) {
     if (block_ != static_cast<int32_t>(b)) {
         closeBlock();
         openBlock(b);
-        if (acc_ == nullptr) return;    // sin memoria: se sigue sin mezclas
+        if (acc_ == nullptr) {
+            fwota::record(xfer_,sha_,fwota::Phase::RECEIVE,fwota::Cause::NO_MEMORY,n_orig_-got_,n_orig_);
+            return;
+        }
     }
 
     if (es_original) {
@@ -514,7 +546,7 @@ void onData(uint32_t xfer, uint16_t index, const uint8_t* data, size_t len) {
 uint32_t xfer()       { return xfer_; }
 uint16_t totalFrags() { return n_orig_; }
 uint16_t missing()    { return (map_ == nullptr) ? 0 : (n_orig_ - got_); }
-bool receiving(uint32_t now_ms) { return map_ != nullptr && !complete() && now_ms - last_ms_ < 30000; }
+bool receiving(uint32_t now_ms) { return activity_seen_ && !idle_reported_ && map_ != nullptr && !complete() && now_ms - last_ms_ < 30000; }
 bool     complete()   { return map_ != nullptr && got_ == n_orig_ && n_orig_ > 0; }
 
 uint8_t mapParts() {
@@ -541,11 +573,14 @@ void reset() {
 }
 
 void expireIfIdle(uint32_t now_ms) {
-    if (xfer_ == 0 || acc_ == nullptr) return;
+    if (xfer_ == 0 || map_ == nullptr || complete() || idle_reported_) return;
     if (now_ms - last_ms_ < kIdleTimeoutMs) return;
+    idle_reported_ = true;
     // Se cierra el bloque abierto antes de soltar: sus mezclas todavía pueden
     // rellenar huecos, y tirarlas sin usarlas sería regalar aire ya gastado.
     closeBlock();
+    if (!complete()) fwota::record(xfer_,sha_,fwota::Phase::RECEIVE,
+                                   fwota::Cause::RECEIVE_IDLE,n_orig_-got_,n_orig_);
     freeRam();
     diag::log("INFO", "node.firmware_broadcast", "firmware_broadcast.stopped", "memory_released=true source_fragments=%u/%u\n", got_, n_orig_);
 }

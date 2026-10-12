@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.68"
+#define MODULINKR_FIRMWARE_VERSION "0.0.78"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -562,10 +562,7 @@ bool fireLora() {
     if (!sampler.snapshot(values, sts, cfg::kMaxReadsTotal, n_values, millis())) {
         return true;  // sin reads en el config o no caben: nada que enviar
     }
-    if (!g_lora_ready) {
-        diag::log("WARNING", "node.lora", "lora.tx_skipped", "reason=driver_not_initialized");
-        return true;
-    }
+
 
     // Traza de los valores que van en la trama (equivale al log de
     // sensor del firmware previo, una vez por ciclo de envío).
@@ -586,14 +583,14 @@ bool fireLora() {
     const uint32_t capture_ms = millis();
     const uint32_t ts         = nodeclock::epochNow();
 
-    if (!mesh.hasParent()) {
-        // Sin ruta al gateway: la muestra va a la outbox con su seq
+    if (!g_lora_ready || !mesh.hasParent()) {
+        // Sin radio o ruta al gateway: la muestra va a la outbox con su seq
         // asignado. Saldrá por un supernodo (custodia) o por el padre
         // cuando la ruta vuelva.
         nextSeq();
         outbox.push(g_cfg.node_id, g_lora_seq, values, sts, n_values,
                     capture_ms, ts, nodeclock::synced());
-        diag::log("INFO", "node.outbox", "outbox.retained", "reason=no_parent seq=%u size=%u neighbors=%u\n", g_lora_seq, static_cast<unsigned>(outbox.count()), static_cast<unsigned>(mesh.neighborCount()));
+        diag::log("INFO", "node.outbox", "outbox.retained", "reason=%s seq=%u size=%u neighbors=%u\n", g_lora_ready ? "no_parent" : "radio_unavailable", g_lora_seq, static_cast<unsigned>(outbox.count()), static_cast<unsigned>(mesh.neighborCount()));
         return true;   // la medida está tomada y guardada: el turno se gastó
     }
 
@@ -612,24 +609,21 @@ bool fireLora() {
     const auto st = lora.sendTelemetry(g_lora_seq, ts, values, sts, n_values,
                                        mesh.parentId());
     if (st == LoraP2P::Status::OK) {
-        // Ventana de guarda del ACK: nada más sale al aire hasta que llegue
-        // la confirmación de esta muestra. Sin esto, cualquier trama emitida
-        // a continuación (MODBUS_DEBUG, NODE_HEALTH, HEARTBEAT) deja al nodo
-        // sordo justo cuando vuelve su ACK, y la muestra se retransmite
-        // entera. Solo aplica con ACK activo: sin él no hay nada que esperar.
-        if (g_cfg.ack_enabled) lora.holdQueue(kAckGuardMs);
         g_lora_ok++;
         if (!pending.push(g_lora_seq, values, sts, n_values, millis(),
                           protocol::kAddrGateway, capture_ms, ts)) {
             diag::log("WARNING", "node.lora", "lora.queue_full", "oldest_entry_overwritten=true");
         }
-        // psend y done delatan el estado real del transmisor: tx_ok solo
-        // cuenta comandos escritos en la UART, done cuenta tramas que
-        // salieron al aire (salud del TX, ver lora.h).
+        // tx_ok indica aceptación por el driver, incluida su cola. DONE
+        // inicia el plazo de ACK y confirma la transmisión local.
         diag::log("DEBUG", "node.lora", "lora.tx_ok", "seq=%u via=%u hop=%u  pend=%u  tx_ok=%lu tx_err=%lu cad_busy=%lu  psend=%lu done=%lu txq=%u\n", g_lora_seq, mesh.parentId(), mesh.ownHop(), static_cast<unsigned>(pending.count()), static_cast<unsigned long>(g_lora_ok), static_cast<unsigned long>(g_lora_err), static_cast<unsigned long>(lora.busyEvents()), static_cast<unsigned long>(lora.txPsend()), static_cast<unsigned long>(lora.txDone()), static_cast<unsigned>(lora.txQueued()));
     } else {
         g_lora_err++;
+        outbox.push(g_cfg.node_id, g_lora_seq, values, sts, n_values,
+                    capture_ms, ts, nodeclock::synced());
         diag::log("ERROR", "node.lora", "lora.tx_failed", "reason=%s seq=%u  tx_ok=%lu tx_err=%lu\n", LoraP2P::statusToString(st), g_lora_seq, static_cast<unsigned long>(g_lora_ok), static_cast<unsigned long>(g_lora_err));
+        diag::log("INFO", "node.outbox", "outbox.retained", "reason=tx_rejected seq=%u size=%u",
+                  g_lora_seq, static_cast<unsigned>(outbox.count()));
     }
 
     // MODBUS_DEBUG (v3.3, spec §15): el sampler dejó en su buffer las
@@ -652,9 +646,7 @@ bool fireLora() {
     return true;
 }
 
-// Declarada aquí porque la consultan manejadores que están por encima de su
-// definición: durante una transferencia de firmware el nodo calla todo lo que
-// no sea el producto (ver el comentario largo junto a la definición).
+// Los manejadores anteriores consultan si existe recepción activa de firmware.
 bool bajandoFirmware();
 
 // Reenvío de una trama descendente dirigida a OTRO nodo, por la ruta inversa
@@ -1335,29 +1327,15 @@ void quietTick(uint32_t now_ms) {
 
 // ----- Actualización de firmware por LoRa (frame-format.md §18) -----
 
-// Emite un FW_STATUS con el estado que toque. Se aparta en una función porque
-// se llama desde cuatro sitios y siempre con los mismos tres datos: qué
-// transferencia, por dónde va y en qué estado está.
-// Estado de una transferencia hacia el emisor. El identificador y los bytes
-// van por parámetro porque hay dos transportes: el secuencial de §18, cuyo
-// estado vive en fwota, y el de §20, que vive en fwbcast. Los valores por
-// defecto son los del primero, que es quien más veces lo llama.
-void sendFwStatus(fwota::State estado, uint32_t xfer_id = 0xFFFFFFFFu,
-                  uint32_t escritos = 0xFFFFFFFFu) {
+// Respuesta a la oferta dirigida, con el identificador recibido en ella.
+void sendFwStatus(fwota::State estado, uint32_t xfer_id) {
     if (!g_lora_ready || !mesh.hasParent()) return;
-    if (xfer_id  == 0xFFFFFFFFu) xfer_id  = fwota::xfer();
-    if (escritos == 0xFFFFFFFFu) escritos = fwota::written();
     nextSeq();
     lora.sendFwStatus(g_lora_seq, mesh.parentId(), xfer_id,
-                      escritos, static_cast<uint8_t>(estado));
+                      0, static_cast<uint8_t>(estado));
 }
 
 // ----- Difusión de firmware (§20) -----
-//
-// Camino paralelo al de §18, no sustituto. Aquí no se confirma nada durante la
-// transferencia: el nodo escucha, escribe lo que le llega y solo habla cuando
-// le preguntan. Veinte nodos confirmando fragmentos convertirían la difusión
-// en algo más caro que la entrega individual, que es lo que viene a evitar.
 
 // FW_BCAST_OFFER: anuncio de imagen. A toda la red, o a este nodo en concreto.
 //
@@ -1402,7 +1380,7 @@ void handleFwBcastOffer(const LoraP2P::RxFrame& f) {
         sendFwStatus(r == fwbcast::Offer::ACCEPTED ? fwota::State::ACCEPTED
                    : r == fwbcast::Offer::REJECTED ? fwota::State::REJECTED
                                                    : fwota::State::ERROR,
-                     xfer, 0);
+                     xfer);
     }
     // El anuncio se repite durante todo el margen previo (§20.6), así que el
     // log solo habla la primera vez de cada transferencia: si no, serían
@@ -1421,8 +1399,7 @@ void handleFwBcastOffer(const LoraP2P::RxFrame& f) {
 // con lazos multiplica cada fragmento, y cada repetición es una transmisión, o
 // sea un nodo que durante ese rato no escucha: sería romper la ventana de
 // silencio con las propias tramas de la difusión. El precio es que un nodo a
-// dos saltos no recibe la pasada y lo que le falta acaba entregándose por el
-// camino individual de §18.
+// dos saltos necesita una transferencia dirigida con este mismo transporte.
 void handleFwBcastData(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id && f.dest_id != protocol::kAddrBroadcast) {
         relayDownlink(f, "fw-bcast-data");
@@ -1481,65 +1458,6 @@ void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
         lora.holdQueue(600);
     }
     diag::log("DEBUG", "node.firmware_broadcast", "firmware_broadcast.map_sent", "missing=%u total=%u\n", static_cast<unsigned>(fwbcast::missing()), static_cast<unsigned>(fwbcast::totalFrags()));
-}
-
-// FW_OFFER: anuncio de imagen. El nodo decide si la quiere.
-void handleFwOffer(const LoraP2P::RxFrame& f) {
-    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-offer"); return; }
-    if (f.payload_length < 40) return;   // xfer(4) + total(4) + sha256(32)
-
-    uint32_t xfer, total;
-    std::memcpy(&xfer,  &f.payload[0], sizeof(xfer));
-    std::memcpy(&total, &f.payload[4], sizeof(total));
-    const uint8_t* sha = &f.payload[8];
-
-    // La versión viaja sin terminador: la longitud la da payload_length.
-    char version[33] = {0};
-    const size_t vn = f.payload_length - 40;
-    if (vn > 0) std::memcpy(version, &f.payload[40],
-                            vn < sizeof(version) - 1 ? vn : sizeof(version) - 1);
-
-    const fwota::State estado = fwota::onOffer(xfer, total, sha, version);
-    diag::log("INFO", "node.firmware", "firmware.offer", "version=%s bytes=%u result=%s\n", version[0] ? version : "?", static_cast<unsigned>(total), estado == fwota::State::ACCEPTED  ? "accepted"
-                : estado == fwota::State::READY     ? "ready"
-                : estado == fwota::State::REJECTED  ? "rejected"
-                                                    : "error");
-    sendFwStatus(estado);
-}
-
-// FW_DATA: un trozo de la imagen. No se confirma cada uno, que serían 2446
-// subidas de aire para nada; se confirma cada kStatusEvery y en el acto ante
-// un hueco, que es cuando el emisor necesita saberlo.
-void handleFwData(const LoraP2P::RxFrame& f) {
-    if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-data"); return; }
-    if (f.payload_length < 9) return;    // xfer(4) + offset(4) + al menos 1
-
-    uint32_t xfer, offset;
-    std::memcpy(&xfer,   &f.payload[0], sizeof(xfer));
-    std::memcpy(&offset, &f.payload[4], sizeof(offset));
-
-    const fwota::State estado = fwota::onData(
-        xfer, offset, &f.payload[8], f.payload_length - 8);
-
-    switch (estado) {
-        case fwota::State::GAP:
-            diag::log("WARNING", "node.firmware", "firmware.gap", "received_offset=%u expected_offset=%u\n", static_cast<unsigned>(offset), static_cast<unsigned>(fwota::written()));
-            sendFwStatus(estado);
-            break;
-        case fwota::State::READY:
-        case fwota::State::ERROR:
-        case fwota::State::REJECTED:
-            sendFwStatus(estado);
-            break;
-        default:
-            if (fwota::statusDue()) {
-                const uint32_t total = fwota::totalLen();
-                diag::log("DEBUG", "node.firmware", "firmware.progress", "bytes=%u total_bytes=%u progress_pct=%u\n", static_cast<unsigned>(fwota::written()), static_cast<unsigned>(total), total ? static_cast<unsigned>(
-                                          100ull * fwota::written() / total) : 0);
-                sendFwStatus(estado);
-            }
-            break;
-    }
 }
 
 void sendMaintenanceResult(uint32_t id, uint8_t action, uint8_t state) {
@@ -1684,6 +1602,9 @@ void handleFwInstall(const LoraP2P::RxFrame& f) {
     // anterior, y anunciaba que el sha256 no cuadraba justo después de una
     // instalación correcta (medido el 1-ago-2026 al instalar la 0.0.50).
     fwbcast::reset();
+    const bool radio_idle = lora.prepareForRestart();
+    diag::log(radio_idle ? "INFO" : "WARNING", "node.radio", "radio.restart_prepared",
+              "reason=firmware_install result=%s", radio_idle ? "ready" : "unconfirmed");
     diag::log("INFO", "node.firmware", "firmware.installing", "installing=true restarting=true");
     Serial.flush();
     delay(300);
@@ -1698,18 +1619,26 @@ void fwTrialTick(uint32_t now) {
     if (!g_fw_trial_active) return;
 
     if (g_registered) {
-        g_fw_trial_active = false;
-        fwota::confirmRunning();
-        g_health.fw_confirms++;
-        health::save(g_health);
-        diag::log("INFO", "node.firmware", "firmware.image_confirmed", "network_reachable_s=%lu\n", static_cast<unsigned long>((now - g_fw_trial_start) / 1000));
-        // El veredicto se anuncia al gateway con la misma repetición espaciada
-        // de la trama de salud, porque interesa justo cuando el enlace va mal.
-        g_fw_result_xfer = 0;
-        g_fw_result_code = static_cast<uint8_t>(fwota::Result::CONFIRMED);
-        g_fw_result_left = kHealthRepeats;
-        g_fw_result_ms   = now;
-        return;
+        if (!fwota::confirmRunning()) {
+            const auto& r=fwota::report();
+            fwota::record(r.xfer,r.sha,fwota::Phase::BOOT,fwota::Cause::CONFIRM_FAILED);
+            if (now - g_fw_trial_start < kTrialWindowMs) return;
+        } else {
+            g_fw_trial_active = false;
+            const auto& report=fwota::report();
+            if (report.id && report.phase == fwota::Phase::BOOT)
+                fwota::record(report.xfer,report.sha,fwota::Phase::BOOT,fwota::Cause::CONFIRMED);
+            g_health.fw_confirms++;
+            health::save(g_health);
+            diag::log("INFO", "node.firmware", "firmware.image_confirmed", "network_reachable_s=%lu\n", static_cast<unsigned long>((now - g_fw_trial_start) / 1000));
+            // El veredicto se anuncia al gateway con la misma repetición espaciada
+            // de la trama de salud, porque interesa justo cuando el enlace va mal.
+            g_fw_result_xfer = 0;
+            g_fw_result_code = static_cast<uint8_t>(fwota::Result::CONFIRMED);
+            g_fw_result_left = kHealthRepeats;
+            g_fw_result_ms   = now;
+            return;
+        }
     }
 
     if (static_cast<int32_t>(now - g_fw_trial_start) <
@@ -1720,16 +1649,33 @@ void fwTrialTick(uint32_t now) {
     g_fw_trial_active = false;
     g_health.fw_rollbacks++;
     health::save(g_health);
-    diag::log("WARNING", "node.firmware", "firmware.image_rollback", "reason=network_unreachable timeout_s=%lu rollbacks=%lu\n", static_cast<unsigned long>(kTrialWindowMs / 1000), static_cast<unsigned long>(g_health.fw_rollbacks));
+    diag::log("WARNING", "node.firmware", "firmware.image_rollback", "reason=%s timeout_s=%lu rollbacks=%lu\n", g_registered ? "confirmation_failed" : "network_unreachable", static_cast<unsigned long>(kTrialWindowMs / 1000), static_cast<unsigned long>(g_health.fw_rollbacks));
     Serial.flush();
     delay(200);
+    const auto& report=fwota::report();
+    if (report.id && report.phase == fwota::Phase::BOOT)
+        fwota::record(report.xfer,report.sha,fwota::Phase::BOOT,
+                      g_registered ? fwota::Cause::CONFIRM_FAILED : fwota::Cause::TRIAL_TIMEOUT);
     fwota::rollbackRunning();     // no retorna: reinicia con la anterior
 }
 
-// Anuncia el veredicto de la instalación, repetido y espaciado como la trama
-// de salud. Es best-effort: la cola de pendientes solo sabe reconstruir
-// TELEMETRY para el reintento.
+// El informe persistente se repite hasta su acuse. FW_RESULT conserva las
+// repeticiones limitadas para mantener compatibilidad con gateways anteriores.
 void fwResultTick(uint32_t now) {
+    static uint32_t report_due = 0;
+    const auto& report = fwota::report();
+    if (report.pending && g_lora_ready && g_registered && mesh.hasParent() &&
+        static_cast<int32_t>(now-report_due)>=0) {
+        uint8_t p[46];
+        memcpy(p,&report.id,4); memcpy(p+4,&report.xfer,4);
+        p[8]=static_cast<uint8_t>(report.phase); p[9]=static_cast<uint8_t>(report.cause);
+        memcpy(p+10,&report.missing,2); memcpy(p+12,&report.total,2);
+        memcpy(p+14,report.sha,32);
+        nextSeq();
+        lora.sendRoute(mesh.parentId(),protocol::kAddrGateway,g_lora_seq,
+                       protocol::kFrameFwReport,p,sizeof(p));
+        report_due=now+60000;
+    }
     if (g_fw_result_left == 0) return;
     if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
     if (static_cast<int32_t>(now - g_fw_result_ms) < 0) return;
@@ -1870,11 +1816,13 @@ void processLoraRx() {
             case protocol::kFrameConfigGet:
                 handleConfigGet(f);
                 break;
-            case protocol::kFrameFwOffer:
-                handleFwOffer(f);
-                break;
-            case protocol::kFrameFwData:
-                handleFwData(f);
+            case protocol::kFrameFwReportAck:
+                if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "fw-report-ack"); break; }
+                if (f.origin_id == protocol::kAddrGateway && f.payload_length == 8) {
+                    uint32_t id, xfer;
+                    memcpy(&id,f.payload,4); memcpy(&xfer,f.payload+4,4);
+                    fwota::acknowledge(id,xfer);
+                }
                 break;
             case protocol::kFrameFwInstall:
                 handleFwInstall(f);
@@ -1901,6 +1849,7 @@ void processLoraRx() {
             case protocol::kFrameConfigResult:
             case protocol::kFrameConfigData:
             case protocol::kFrameFwStatus:
+            case protocol::kFrameFwReport:
             case protocol::kFrameFwResult:
             case protocol::kFrameFwBcastMap:
             case protocol::kFrameNodeHealth:
@@ -1940,6 +1889,16 @@ uint32_t backoffTimeoutMs(uint8_t retries) {
     return t + (esp_random() % (kBackoffJitterMs + 1));
 }
 
+// La confirmación del módulo inicia la espera del ACK de la aplicación.
+void telemetryTxResult(uint16_t seq, uint8_t dest, uint32_t at_ms, bool sent) {
+    auto* e = pending.txResult(seq, dest, at_ms, sent);
+    if (!e) return;
+    diag::log(sent ? "DEBUG" : "WARNING", "node.lora", "lora.tx_complete",
+              "seq=%u destination=%u result=%s ack_wait_ms=%lu",
+              seq, dest, sent ? "sent" : "failed",
+              static_cast<unsigned long>(sent ? (e->timeout_ms ? e->timeout_ms : g_cfg.ack_timeout_ms) : 0));
+}
+
 // Vencimiento de timeouts: retransmite o retiene (frame-format.md §5.3).
 void processAckTimeouts() {
     const uint32_t now = millis();
@@ -1949,8 +1908,14 @@ void processAckTimeouts() {
     // Entrega en custodia a un supernodo (dest != gateway).
     if (e->dest != protocol::kAddrGateway) {
         if (e->retries < g_cfg.max_retries) {
-            lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->st,
+            const auto st = lora.sendTelemetryCustody(e->seq, e->ts, e->values, e->st,
                                       e->n_values, e->dest, g_sn_path, g_sn_path_len);
+            if (st != LoraP2P::Status::OK) {
+                pending.deferRetry(*e, now);
+                diag::log("WARNING", "node.lora", "lora.retry_deferred",
+                          "seq=%u reason=%s", e->seq, LoraP2P::statusToString(st));
+                return;
+            }
             pending.markRetry(*e, now);
             e->timeout_ms = max(backoffTimeoutMs(e->retries),
                 g_cfg.ack_timeout_ms * uint32_t(g_sn_path_len>1 ? g_sn_path_len-1 : 1));
@@ -1981,6 +1946,12 @@ void processAckTimeouts() {
         // cambiado desde el envío original. Mismo seq y MISMO ts.
         const auto st = lora.sendTelemetry(e->seq, e->ts, e->values, e->st,
                                            e->n_values, mesh.parentId());
+        if (st != LoraP2P::Status::OK) {
+            pending.deferRetry(*e, now);
+            diag::log("WARNING", "node.lora", "lora.retry_deferred",
+                      "seq=%u reason=%s", e->seq, LoraP2P::statusToString(st));
+            return;
+        }
         pending.markRetry(*e, now);
         e->timeout_ms = backoffTimeoutMs(e->retries);  // backoff mac.md §4.4
         g_lora_retx++;
@@ -2078,8 +2049,9 @@ void snClientTick(uint32_t now) {
                 Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
                 const uint32_t ts = fixOutboxTs(*e);  // primera serialización
-                lora.sendTelemetryCustody(e->seq, ts, e->values, e->st,
+                const auto st = lora.sendTelemetryCustody(e->seq, ts, e->values, e->st,
                                           e->n_values, g_sn_target, g_sn_path, g_sn_path_len);
+                if (st != LoraP2P::Status::OK) break;
                 pending.push(e->seq, e->values, e->st, e->n_values, now,
                              g_sn_target, e->capture_ms, ts, g_cfg.ack_timeout_ms * (g_sn_path_len-1));
                 g_outbox_inflight = true;
@@ -2100,8 +2072,9 @@ void outboxDrainTick(uint32_t now) {
     if (e == nullptr) return;
 
     const uint32_t ts = fixOutboxTs(*e);
-    lora.sendTelemetry(e->seq, ts, e->values, e->st, e->n_values,
+    const auto st = lora.sendTelemetry(e->seq, ts, e->values, e->st, e->n_values,
                        mesh.parentId());
+    if (st != LoraP2P::Status::OK) return;
     pending.push(e->seq, e->values, e->st, e->n_values, now,
                  protocol::kAddrGateway, e->capture_ms, ts);
     g_outbox_inflight = true;
@@ -2145,54 +2118,35 @@ void ntpTick() {
     nbsvc.requestNtpSync();
 }
 
-// ¿Hay una imagen bajando ahora mismo? Mientras la hay, el nodo calla todo lo
-// que no sea el producto.
-//
-// Una radio que transmite no puede escuchar: es una sola antena y un solo
-// chip. Cada vez que el nodo abre la boca se pierde el fragmento que estuviera
-// pasando en ese momento. Medido el 1-ago-2026 sobre la imagen 0.0.50: 40
-// transmisiones propias durante la subida (31 heartbeats, 6 NODE_HEALTH y 3
-// telemetrías) y 18 fragmentos perdidos, casi uno de cada dos. Callar los dos
-// primeros deja tres transmisiones en media hora.
-//
-// Es además como resuelve el problema el estándar: en FUOTA de LoRaWAN el
-// dispositivo no emite durante la sesión de fragmentos, y por eso la entrega
-// lleva corrección de errores, que es la misma razón por la que aquí hay
-// mezclas de repuesto. La diferencia con callar por las bravas es que la
-// sesión está declarada en los dos extremos, así que el visor sabe por qué no
-// hay noticias y lo dice en vez de dar alarma (ventana de mantenimiento).
-//
-// El riesgo de quedarse mudo para siempre si una transferencia se cuelga lo
-// cubre fwbcast::expireIfIdle, que la caduca a los diez minutos sin recibir.
+// Una imagen guardada permite reanudar, pero no implica tráfico activo.
+// Tras treinta segundos sin actividad se recuperan las tareas aplazadas.
 bool bajandoFirmware() {
-    return fwbcast::xfer() != 0 && !fwbcast::complete();
+    return fwbcast::receiving(millis());
 }
 
 // HEARTBEAT periódico con el contador de aire (v3.1). Solo con registro y
 // padre: sin ruta no llega y el contador sigue sumando; el primer delta
 // tras recuperar ruta totaliza el periodo oscuro (reintentos incluidos).
 void heartbeatTick(uint32_t now) {
-    static uint32_t last_hb_ms = 0;
+    static uint32_t last_hb_ms = 0, last_attempt_ms = 0;
+    static uint8_t last_flags = 0xFF;
+    static bool sent = false;
     if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
-    // Aplazado, no perdido: al salir sin tocar last_hb_ms el heartbeat sale en
-    // la primera vuelta después de la transferencia. Y no se pierde dato
-    // ninguno, porque el contador de aire que lleva dentro se totaliza por
-    // diferencias entre reportes (§13): el primer heartbeat de después cubre
-    // el periodo entero, reintentos incluidos.
-    if (bajandoFirmware()) return;
-    if (now - last_hb_ms < kHeartbeatPeriodMs) return;
-    last_hb_ms = now;
-
+    const uint8_t flags = g_cfg.super_node ? nbsvc.statusFlags() : 0;
+    // El diagnóstico sigue disponible durante OTA. Los cambios del módem
+    // adelantan el reporte, con un límite de un intento cada cinco segundos.
+    const bool changed = g_cfg.super_node && flags != last_flags;
+    if (sent && !changed && now - last_hb_ms < kHeartbeatPeriodMs) return;
+    if (now - last_attempt_ms < 5000) return;
+    last_attempt_ms = now;
     nextSeq();
     const uint32_t tx_ms = lora.txAirtimeMs();
-    // El supernodo adjunta su estado NB-IoT/MQTT (frame-format.md §6) para
-    // que el visor lo muestre; los nodos normales mandan solo el tx_ms.
-    if (g_cfg.super_node) {
-        lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId(),
-                           true, nbsvc.statusFlags(), nbsvc.csqRaw());
-    } else {
-        lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId());
-    }
+    const auto result = lora.sendHeartbeat(g_lora_seq, tx_ms, mesh.parentId(),
+                                          g_cfg.super_node, flags, nbsvc.csqRaw());
+    if (result != LoraP2P::Status::OK) return;
+    last_hb_ms = now;
+    last_flags = flags;
+    sent = true;
     diag::log("DEBUG", "node.duty", "duty.heartbeat", "seq=%u tx_ms=%lu tx_pct_since_boot=%.2f psend=%lu done=%lu busy=%lu err=%lu timeout=%lu drop=%lu micfail=%lu stale=%lu\n", g_lora_seq, static_cast<unsigned long>(tx_ms), now > 0 ? (100.0 * tx_ms / now) : 0.0, static_cast<unsigned long>(lora.txPsend()), static_cast<unsigned long>(lora.txDone()), static_cast<unsigned long>(lora.busyEvents()), static_cast<unsigned long>(lora.txErrors()), static_cast<unsigned long>(lora.txTimeouts()), static_cast<unsigned long>(lora.txDropped()), static_cast<unsigned long>(lora.rxMicFail()), static_cast<unsigned long>(lora.rxStale()));
 }
 
@@ -2578,7 +2532,7 @@ void statusLedTick(uint32_t now) {
     statusled::Input state;
     state.configured = g_configured;
     state.fatal = !g_lora_ready && (!g_cfg.super_node || !g_led_nb_started);
-    state.updating = fwbcast::receiving(now) || fwota::receiving(now);
+    state.updating = fwbcast::receiving(now);
     state.synchronized = nodeclock::synced();
     state.modbusFault = g_led_modbus_failures >= 3;
     if (g_lora_ready && mesh.hasParent()) {
@@ -2595,6 +2549,57 @@ void statusLedTick(uint32_t now) {
     static uint32_t previous = 0xFFFFFFFF;
     const uint32_t current = statusled::color(state, now);
     if (current != previous) { setLed(current); previous = current; }
+}
+
+uint32_t g_lora_start_attempt_ms = 0;
+
+bool startLora() {
+    if (lora.begin(Serial1,
+                   kLoraRxPin, kLoraTxPin,
+                   g_cfg.freq_hz,
+                   g_cfg.sf, g_cfg.bw_khz, kLoraCrIndex,
+                   g_cfg.tx_dbm,
+                   g_cfg.network_id, g_cfg.node_id, g_cfg.max_ttl)) {
+        g_lora_ready = true;
+        // Seguridad de la interfaz aire (v2.2, frame-format.md §14): del
+        // bloque security del config. Ajuste de TODA la red; el Pi del
+        // gateway debe llevar la misma clave.
+        lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
+        lora.setTelemetryTxCallback(telemetryTxResult, g_cfg.ack_enabled ? kAckGuardMs : 0);
+
+        // El detector de receptor mudo sigue al beacon_timeout del despliegue,
+        // no a una constante que asuma el valor por defecto: debe saltar
+        // DESPUÉS de que la capa mesh dé el padre por perdido, nunca antes.
+        lora.setRxSilenceWindow(2 * g_cfg.beacon_timeout_ms);
+        g_recovery_verify_ms = lora.rxSilenceWindow() + kRecoveryVerifyMarginMs;
+        diag::log("INFO", "node.init", "init.lora_ready", "firmware=%s cad=%s security=%s",
+                      lora.firmwareVersion(),
+                      lora.cadEnabled() ? "on" : "off",
+                      lora.securityEnabled() ? "AES-CCM" : "off");
+        return true;
+    }
+    diag::log("ERROR", "node.init", "init.lora_failed", "available=false retry_ms=30000");
+    return false;
+}
+
+void radioStartupTick(uint32_t now) {
+    if (g_lora_ready || g_maintenance_restart_ms || now - g_lora_start_attempt_ms < 30000) return;
+    diag::log("INFO", "node.radio", "radio.startup_retry", "retry_ms=30000");
+    if (startLora()) {
+        diag::log("INFO", "node.radio", "radio.startup_recovered", "available=true");
+    }
+    // El plazo empieza al terminar el intento, incluso si el módulo no responde.
+    g_lora_start_attempt_ms = millis();
+}
+
+void independentTick(uint32_t now) {
+    // La hora y la publicación celular no dependen del arranque de LoRa.
+    static uint32_t last_tick_ms = 0;
+    if (now - last_tick_ms < 1000) return;
+    last_tick_ms = now;
+    ntpTick();
+    batchTick(now);
+    radioStartupTick(now);
 }
 
 void setup() {
@@ -2678,7 +2683,8 @@ void setup() {
         if (outbox.count() > 0) {
             diag::log("INFO", "node.outbox", "outbox.recovered_after_boot", "samples=%u\n", static_cast<unsigned>(outbox.count()));
         }
-        fwota::begin(firmwareIdentity());
+        fwota::beginReport();
+        fwota::begin();
         fwbcast::begin(firmwareIdentity());
         if (fwota::pendingVerify()) {
             g_fw_trial_active = true;
@@ -2743,30 +2749,8 @@ void setup() {
 
     // ----- LoRa sobre Serial1 -----
     diag::log("INFO", "node.init", "init.lora_starting", "");
-    if (lora.begin(Serial1,
-                   kLoraRxPin, kLoraTxPin,
-                   g_cfg.freq_hz,
-                   g_cfg.sf, g_cfg.bw_khz, kLoraCrIndex,
-                   g_cfg.tx_dbm,
-                   g_cfg.network_id, g_cfg.node_id, g_cfg.max_ttl)) {
-        g_lora_ready = true;
-        // Seguridad de la interfaz aire (v2.2, frame-format.md §14): del
-        // bloque security del config. Ajuste de TODA la red; el Pi del
-        // gateway debe llevar la misma clave.
-        lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
-
-        // El detector de receptor mudo sigue al beacon_timeout del despliegue,
-        // no a una constante que asuma el valor por defecto: debe saltar
-        // DESPUÉS de que la capa mesh dé el padre por perdido, nunca antes.
-        lora.setRxSilenceWindow(2 * g_cfg.beacon_timeout_ms);
-        g_recovery_verify_ms = lora.rxSilenceWindow() + kRecoveryVerifyMarginMs;
-        diag::log("INFO", "node.init", "init.lora_ready", "firmware=%s cad=%s security=%s",
-                      lora.firmwareVersion(),
-                      lora.cadEnabled() ? "on" : "off",
-                      lora.securityEnabled() ? "AES-CCM" : "off");
-    } else {
-        diag::log("ERROR", "node.init", "init.lora_failed", "available=false");
-    }
+    startLora();
+    g_lora_start_attempt_ms = millis();
 
     // ----- NB-IoT en segundo plano (tarea del nucleo 0) -----
     // El rol lo decide node.type del config en runtime: un mismo binario
@@ -2839,6 +2823,8 @@ void loop() {
         return;
     }
 
+    independentTick(millis());
+
     static uint32_t last_lora_ms = 0;
     static bool     first_loop   = true;
     const uint32_t now = millis();
@@ -2861,7 +2847,9 @@ void loop() {
         // segundos del arranque, cuando el nodo aún no tenía hora, se gastó
         // en vacío, y la primera medida no llegó hasta 600 segundos después.
         if (fireLora()) {
-            last_lora_ms += g_cfg.send_interval_ms;
+            // El tiempo sin muestrear no representa muestras pendientes.
+            // Se espera un intervalo completo desde el final de esta captura.
+            last_lora_ms = millis();
         }
     }
 
@@ -2892,7 +2880,6 @@ void loop() {
             registrationTick(tnow);
             snClientTick(tnow);
             if (!g_maintenance_restart_ms) outboxDrainTick(tnow);
-            ntpTick();
             heartbeatTick(tnow);
             radioHealthTick(tnow);
             nodeHealthTick(tnow);
@@ -2901,10 +2888,8 @@ void loop() {
             }
             cfgReadTick(tnow);
             quietTick(tnow);
-            fwota::expireIfIdle(tnow);
             fwbcast::expireIfIdle(tnow);
             fwResultTick(tnow);
-            batchTick(tnow);
         }
 
         // Re-emisión de beacon pendiente (jitter vencido). Solo con padre

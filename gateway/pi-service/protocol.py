@@ -135,10 +135,10 @@ FRAME_CONFIG_COMMIT = 0x15
 FRAME_CONFIG_RESULT = 0x16
 FRAME_CONFIG_GET    = 0x17
 FRAME_CONFIG_DATA   = 0x18
-FRAME_FW_OFFER      = 0x19
-FRAME_FW_DATA       = 0x1A
 FRAME_FW_STATUS     = 0x1B
 FRAME_FW_INSTALL    = 0x1C
+FRAME_FW_REPORT = 0x2A
+FRAME_FW_REPORT_ACK = 0x2B
 FRAME_FW_RESULT     = 0x1D
 FRAME_QUIET         = 0x1E
 FRAME_FW_BCAST_OFFER = 0x1F
@@ -192,10 +192,10 @@ FRAME_TYPE_NAMES = {
     FRAME_CONFIG_RESULT: 'CONFIG_RESULT',
     FRAME_CONFIG_GET:    'CONFIG_GET',
     FRAME_CONFIG_DATA:   'CONFIG_DATA',
-    FRAME_FW_OFFER:      'FW_OFFER',
-    FRAME_FW_DATA:       'FW_DATA',
     FRAME_FW_STATUS:     'FW_STATUS',
     FRAME_FW_INSTALL:    'FW_INSTALL',
+    FRAME_FW_REPORT: 'FW_REPORT',
+    FRAME_FW_REPORT_ACK: 'FW_REPORT_ACK',
     FRAME_FW_RESULT:     'FW_RESULT',
     FRAME_QUIET:         'QUIET',
     FRAME_NODE_PING:     'NODE_PING',
@@ -258,16 +258,10 @@ CFG_RESULT_NAMES = {
 
 # Estados del FW_STATUS (spec §18.3).
 FW_ACCEPTED  = 0
-FW_RECEIVING = 1
-FW_GAP       = 2
-FW_READY     = 3
 FW_REJECTED  = 4
 FW_ERROR     = 5
 FW_STATE_NAMES = {
     FW_ACCEPTED:  'aceptada',
-    FW_RECEIVING: 'recibiendo',
-    FW_GAP:       'hueco',
-    FW_READY:     'lista',
     FW_REJECTED:  'rechazada',
     FW_ERROR:     'error',
 }
@@ -618,12 +612,7 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['cfg_chunk']  = payload[8:]
 
     elif frame_type == FRAME_FW_STATUS:
-        # v3.7 (spec §18.3): xfer_id + bytes escritos + estado.
-        #
-        # El contador es de 32 bits, no de 16 como el desplazamiento del canal
-        # de configuración: una imagen de 508 kB no cabe en 16. Y no hay mapa
-        # de fragmentos porque la entrega es secuencial, así que un solo número
-        # dice a la vez por dónde va y desde dónde reanudar.
+        # Respuesta a una oferta dirigida. El campo written conserva su tamaño.
         if payload_length != 9:
             out['error'] = f'FW_STATUS payload_length={payload_length}, esperado 9'
             return out
@@ -632,6 +621,18 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['fw_state']      = payload[8]
         out['fw_state_name'] = FW_STATE_NAMES.get(
             payload[8], f'unknown(0x{payload[8]:02X})')
+
+    elif frame_type == FRAME_FW_REPORT:
+        if payload_length != 46:
+            out['error'] = 'FW_REPORT requiere 46 bytes'
+            return out
+        report_id, xfer, phase, cause, missing, total = struct.unpack_from('<IIBBHH', payload)
+        if not report_id or phase not in (1, 2, 3, 4) or cause > 17 or missing > total:
+            out['error'] = 'FW_REPORT contiene valores inválidos'
+            return out
+        out.update(fw_report_id=report_id, fw_xfer=xfer, fw_phase=phase,
+                   fw_cause=cause, fw_missing=missing, fw_total=total,
+                   fw_sha256=bytes(payload[14:46]).hex())
 
     elif frame_type == FRAME_FW_RESULT:
         # v3.7 (spec §18.5): misma forma que el CONFIG_RESULT.
@@ -1031,7 +1032,7 @@ def build_fw_bcast_data(xfer_id: int, index: int, chunk: bytes, gw_seq: int,
                         hop_dst: int = ADDR_BROADCAST) -> bytes:
     """Un fragmento de la difusión, original o mezcla (§20.7).
 
-    Índice y no desplazamiento, al revés que §18.2, porque hay que numerar
+    Se utiliza un índice porque hay que numerar
     también las mezclas, que no ocupan sitio en la imagen. Dos bytes en vez de
     cuatro ahorran 5,4 kB de aire en una pasada completa.
     """
@@ -1112,66 +1113,6 @@ def build_node_ping(dest_id: int, hop_dst: int, req_id: int, para_que: int,
     frame[OFF_PAYLOAD_LEN] = 3
     struct.pack_into('<H', frame, OFF_PAYLOAD, req_id & 0xFFFF)
     frame[OFF_PAYLOAD + 2] = para_que & 0xFF
-    return _finalize(frame, key, sec_ts)
-
-
-def build_fw_offer(dest_id: int, hop_dst: int, xfer_id: int, total_len: int,
-                   sha256: bytes, version: str, gw_seq: int, network_id: int,
-                   ttl: int, key: Optional[bytes] = None,
-                   sec_ts: int = 0) -> bytes:
-    """Anuncia una imagen antes de mandar nada (frame-format.md §18.1).
-
-    Lleva la versión para que el nodo pueda rechazar lo que ya tiene o algo
-    anterior, con la misma comparación numérica que hace el visor para no
-    ofrecer un binario que haría retroceder al nodo. El sha256 completo viaja
-    aquí y en el FW_INSTALL, no en cada trozo: repetir 32 bytes en 2483
-    fragmentos se comería el 15 % del aire.
-    """
-    if len(sha256) != 32:
-        raise ValueError('sha256 debe medir 32 bytes')
-    ver = version.encode('utf-8')[:32]
-    frame = bytearray(HEADER_BYTES + 40 + len(ver))
-    frame[OFF_SCHEMA]      = SCHEMA_VERSION
-    frame[OFF_NETWORK_ID]  = network_id
-    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
-    frame[OFF_HOP_DST]     = hop_dst
-    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
-    frame[OFF_DEST_ID]     = dest_id
-    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
-    frame[OFF_FRAME_TYPE]  = FRAME_FW_OFFER
-    frame[OFF_TTL]         = ttl
-    frame[OFF_PAYLOAD_LEN] = 40 + len(ver)
-    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
-    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, total_len & 0xFFFFFFFF)
-    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 40] = sha256
-    frame[OFF_PAYLOAD + 40:OFF_PAYLOAD + 40 + len(ver)] = ver
-    return _finalize(frame, key, sec_ts)
-
-
-def build_fw_data(dest_id: int, hop_dst: int, xfer_id: int, offset: int,
-                  chunk: bytes, gw_seq: int, network_id: int, ttl: int,
-                  key: Optional[bytes] = None, sec_ts: int = 0) -> bytes:
-    """Un trozo de la imagen (frame-format.md §18.2).
-
-    El desplazamiento es de 32 bits, frente a los 16 del CONFIG_PUSH, porque
-    508 kB no caben en 16. A cambio no lleva índice ni total de fragmentos: con
-    2483 no cabrían en un byte, y la entrega secuencial no los necesita, porque
-    el desplazamiento ya dice dónde va cada trozo.
-    """
-    frame = bytearray(HEADER_BYTES + 8 + len(chunk))
-    frame[OFF_SCHEMA]      = SCHEMA_VERSION
-    frame[OFF_NETWORK_ID]  = network_id
-    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
-    frame[OFF_HOP_DST]     = hop_dst
-    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
-    frame[OFF_DEST_ID]     = dest_id
-    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
-    frame[OFF_FRAME_TYPE]  = FRAME_FW_DATA
-    frame[OFF_TTL]         = ttl
-    frame[OFF_PAYLOAD_LEN] = 8 + len(chunk)
-    struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
-    struct.pack_into('<I', frame, OFF_PAYLOAD + 4, offset & 0xFFFFFFFF)
-    frame[OFF_PAYLOAD + 8:OFF_PAYLOAD + 8 + len(chunk)] = chunk
     return _finalize(frame, key, sec_ts)
 
 
@@ -1297,3 +1238,22 @@ def build_welcome(dest_id: int, hop_dst: int, epoch: int, status: int,
     struct.pack_into('<I', frame, OFF_PAYLOAD, epoch & 0xFFFFFFFF)
     frame[OFF_PAYLOAD + 4] = status & 0xFF
     return _finalize(frame, key, sec_ts)
+
+
+def build_fw_report_ack(dest_id: int, hop_dst: int, report_id: int, xfer_id: int, gw_seq: int,
+                        network_id: int, ttl: int, key: Optional[bytes] = None,
+                        sec_ts: int = 0) -> bytes:
+    frame = bytearray(HEADER_BYTES + 8)
+    frame[OFF_SCHEMA]      = SCHEMA_VERSION
+    frame[OFF_NETWORK_ID]  = network_id
+    frame[OFF_HOP_SRC]     = ADDR_GATEWAY
+    frame[OFF_HOP_DST]     = hop_dst
+    frame[OFF_ORIGIN_ID]   = ADDR_GATEWAY
+    frame[OFF_DEST_ID]     = dest_id
+    struct.pack_into('<H', frame, OFF_SEQ, gw_seq & 0xFFFF)
+    frame[OFF_FRAME_TYPE]  = FRAME_FW_REPORT_ACK
+    frame[OFF_TTL]         = ttl
+    frame[OFF_PAYLOAD_LEN] = 8
+    struct.pack_into('<II', frame, OFF_PAYLOAD, report_id, xfer_id)
+    return _finalize(frame, key, sec_ts)
+

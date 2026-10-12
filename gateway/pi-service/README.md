@@ -161,3 +161,9 @@ sudo systemctl stop modulinkr-gateway
 sudo systemctl start modulinkr-gateway
 # el nodo recupera al gateway como padre y vuelve a la ruta LoRa
 ```
+
+## Confirmaciones MQTT y atención de LoRa
+
+La publicación MQTT se encola sin esperar al PUBACK en el bucle de radio. Paho gestiona la red en su hilo y el servicio recoge las confirmaciones sin bloquear. Solo entonces se marcan las muestras correspondientes como publicadas en SQLite; las medidas recibidas mientras un lote está en vuelo quedan para otro lote. Un catálogo actualizado durante una publicación conserva su estado pendiente hasta confirmar el contenido nuevo.
+
+El umbral `MODULINKR_MQTT_PUB_TIMEOUT` produce un aviso cuando falta el PUBACK, sin liberar la custodia ni crear copias del lote en cada vuelta. Paho conserva el mensaje QoS 1 durante una desconexión y lo reenvía al reconectar. Un reinicio del servicio recupera las muestras pendientes desde SQLite. El diagnóstico de salud conserva en memoria el último informe pendiente por nodo además del mensaje en vuelo; esa cola no sustituye al registro local de salud.

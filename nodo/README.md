@@ -4,7 +4,7 @@ El directorio contiene el firmware común de los dispositivos de campo ModuLinkr
 
 ## Estado actual
 
-La versión declarada en `src/main.cpp` es `0.0.58-difusion-red`. El firmware usa la trama LoRa `0x39` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
+La versión declarada en `src/main.cpp` es `0.0.78`, con correcciones de cadencia de muestreo y espera de ACK. El firmware usa la trama LoRa `0x3A` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
 
 El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
@@ -20,6 +20,12 @@ El Atom Lite usa SoftwareSerial para Modbus y reserva las UART hardware para LoR
 ## Comportamiento
 
 El dispositivo obtiene hora antes de muestrear, se registra en la red y anuncia su catálogo. La telemetría incluye timestamp, valores y estado de cada transacción Modbus. Las muestras no confirmadas permanecen en la outbox y pueden entregarse mediante custodia NB-IoT.
+
+Desde 0.0.78, el primer muestreo se realiza en cuanto se permite y el siguiente espera un intervalo completo desde el final de la captura anterior. El tiempo bloqueado no genera una ráfaga de capturas atrasadas. Los valores y timestamps de muestras ya tomadas se conservan al retransmitir.
+
+Una trama aceptada por el driver puede estar todavía en cola. La espera del ACK empieza al recibir `TXP2P DONE`, que confirma la transmisión local del módulo. En ese momento se reserva también la guarda de recepción de 500 ms cuando el ACK está habilitado. Se aplica a telemetría propia nueva, reintentos, drenaje de outbox y custodia; las tramas ajenas retransmitidas como relay no activan el temporizador de muestras propias. La guarda no acorta una retención OTA existente.
+
+El evento `lora.tx_complete` identifica secuencia, destino, resultado local y plazo de ACK. `result=sent` no confirma entrega al gateway: esa confirmación sigue siendo `lora.ack`. Un error, el agotamiento de CAD, la ausencia de DONE o el descarte durante una recuperación liberan la espera local para reintentar o retener la muestra. Una cola llena aplaza el reintento sin consumir su presupuesto y una muestra nueva rechazada se guarda en la outbox. `lora.tx_ok` conserva su nombre y representa aceptación por el driver, incluida la cola.
 
 El firmware también implementa relay LoRa, diagnóstico Modbus, salud y recuperación de la radio, configuración por USB y LoRa, lectura remota de configuración, actualización de firmware y reversión de configuraciones o imágenes que no vuelven a registrarse.
 
@@ -44,6 +50,16 @@ El banco dispone de un solo monitor serie USB, por lo que las capturas de dos no
 ## Artefactos de distribución
 
 Después de compilar en VS Code, `make_dist.sh` genera los binarios que consume el gateway para aprovisionamiento USB y actualización por radio. El empaquetado no sustituye la compilación.
+
+## Recuperación LoRa tras un reinicio
+
+Desde 0.0.77, el arranque intenta detener la recepción con `AT+PRECV=0` y reiniciar el módulo con `ATZ` aunque el sondeo inicial `AT` no reciba `OK`. El módulo LoRa permanece alimentado cuando se reinicia solo el ESP32. Por eso un fallo del sondeo no debe impedir el intento de recuperación. Si no se consigue inicializar la radio, se repite el procedimiento 30 segundos después de terminar el intento, mientras se mantiene disponible la salida NB-IoT del supernodo.
+
+El evento `radio.startup_recovery` identifica un sondeo fallido seguido del intento de recuperación. `radio.reset_observed` reconoce el banner de arranque del RAK como respuesta al comando `ATZ`, sin exigir un `OK` en esa misma respuesta. La radio solo queda disponible tras responder al sondeo posterior y aceptar su configuración y recepción. Un banner sin respuesta posterior sigue siendo un fallo. `radio.init_failed` conserva etapa, comando, motivo y respuesta parcial.
+
+Una instalación OTA aceptada prepara también la radio externa antes de reiniciar el ESP32: detiene RX, intenta ATZ, comprueba AT y vuelve a detener RX. `radio.restart_prepared` muestra `result=ready` si se confirman el sondeo final y la parada de recepción, o `result=unconfirmed` si no se confirman. Este último caso no bloquea el arranque de la imagen seleccionada ni anula la comprobación de registro y reversión existentes. La imagen nueva vuelve a ejecutar la secuencia de inicialización completa.
+
+La preparación previa al reinicio requiere que la aplicación que ejecuta la orden de instalar ya contenga esta corrección. Al actualizar desde 0.0.75 o 0.0.76 solo actúa la recuperación de arranque incluida en la imagen nueva. Para comprobar ambos extremos se requiere una base 0.0.77 y otra imagen de prueba posterior. Las pruebas nativas con UART simulada verifican la secuencia, las respuestas y los límites de espera; no demuestran la recuperación física de un módulo que ignore todos los comandos. El banco actual no dispone de control de alimentación o reset del módulo desde el ESP32.
 
 ## Documentos relacionados
 

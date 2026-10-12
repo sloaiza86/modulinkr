@@ -55,6 +55,9 @@ function htmlSeguro(valor) {
 
 function chipConexion(c) {
   const detalle = c.txt;
+  if (c.maintenance) {
+    return `<span class="chip conexion mantenimiento ${c.cls}" role="img" tabindex="0" title="${htmlSeguro(detalle)}" aria-label="${htmlSeguro(detalle)}">${iconoMdi("clock-outline")}</span>`;
+  }
   let nombre = detalle;
   let icono = "information-outline";
   let tecnologia = "";
@@ -569,20 +572,20 @@ function tarjetaGateway(data) {
 // propia voz. Se sigue midiendo y guardando todo igual, lo que se suspende es
 // la alarma, que es la regla de las ventanas de mantenimiento en supervisión.
 const FW_FASE_TXT = {
-  offering:    "Preparando",
+  offering:    "Preparando el envío",
   pending:     "En espera",
-  sending:     "Actualizando",
-  polling:     "Comprobando",
-  repairing:   "Completando",
+  sending:     "Enviando firmware",
+  polling:     "Comprobando la recepción",
+  repairing:   "Reenviando fragmentos pendientes",
   committing:  "Comprobando",
-  install_req: "Instalando",
-  installing:  "Instalando",
+  install_req: "Comprobando recepción y verificación antes de instalar",
+  installing:  "Instalando; esperando el arranque del nodo",
 };
 
 function chipMantenimiento(n) {
   if (!n.fw_session) return null;
   const fase = FW_FASE_TXT[n.fw_session] || n.fw_session;
-  return { cls: "ambar", txt: "Actualización · " + fase };
+  return { cls: "ambar", maintenance: true, txt: "Actualizando: " + fase };
 }
 
 function chipEstado(n, ult, onlineS) {
@@ -635,12 +638,12 @@ function chipsNodo(n, ult, onlineS) {
   // la actualización y la comunicación LoRa responden preguntas distintas.
   const porRelay = n.transport === "relay" && n.delivery_online;
   const lora = n.lora_route_online ?? n.online;
-  const chips = [porRelay
+  const chips = [porRelay && !lora
     ? { cls: "ambar", txt: `LoRa: entrega mediante ${nombreNodoRuta(n.via_publisher)}` }
-    : lora ? { cls: "on", txt: "LoRa: conectado al gateway" }
+    : lora ? { cls: "on", txt: "LoRa: comunicación reciente con el gateway" }
     : n.relay_active ? { cls: "ambar", txt: "LoRa: relay activo; entrega datos de otros nodos por NB-IoT" }
            : { cls: "gris", txt: "LoRa: sin ruta confirmada al gateway" }];
-  if (mant) chips.push(mant);
+
 
   if (!(n.delivery_online ?? n.online)) {
     const correcta = ult?.channels?.length && ult.channels.every(c => !c.st_code);
@@ -676,16 +679,16 @@ function chipsNodo(n, ult, onlineS) {
     if (n.mqtt_recent) {
       chips.push({ cls: "on", txt: "NB-IoT: entrega confirmada" });
       chips.push({ cls: "on", txt: "MQTT: publicación recibida" });
-      return chips;
+      return mant ? [...chips, mant] : chips;
     }
     if (n.nbiot_state != null) {
       for (const [field, label] of [["nbiot", "NB-IoT"], ["mqtt", "MQTT"]]) {
         const state = n[field + "_state"];
         const text = state === "up" ? "conectado" : state === "down" ? "sin conexión confirmada por el nodo"
-          : !n.cellular_observable && !n.lora_route_online ? "estado no observable" : "estado desconocido";
+          : !n.cellular_observable && !n.lora_route_online ? "estado no observable" : !nbFresco ? "estado desconocido; sin informe reciente del nodo" : "estado desconocido";
         chips.push({ cls: state === "up" ? "on" : "gris", txt: `${label}: ${text}` });
       }
-      return chips;
+      return mant ? [...chips, mant] : chips;
     }
     chips.push(!nbFresco || nbDesconocido
       ? { cls: "gris", txt: "NB-IoT: estado desconocido" }
@@ -704,7 +707,7 @@ function chipsNodo(n, ult, onlineS) {
       chips.push({ cls: "on", txt: "MQTT: conectado" });
     }
   }
-  return chips;
+  return mant ? [...chips, mant] : chips;
 }
 
 function textoRuta(n) {
@@ -4661,6 +4664,32 @@ function bcSeleccionBoton() {
   btn.textContent = bcSeleccion.size ? `Enviar actualización a ${bcSeleccion.size} ${bcSeleccion.size === 1 ? "nodo" : "nodos"}` : "Selecciona los nodos";
 }
 
+function bcFecha(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString("es-ES") : "Sin fecha registrada";
+}
+
+function bcEvento(e) {
+  const fases = {1:"Recepción", 2:"Verificación", 3:"Instalación", 4:"Arranque"};
+  const causas = {0:"Instalación confirmada",1:"No hay imagen instalable",2:"El hash no coincide",
+    3:"No se pudo seleccionar la imagen de arranque",4:"Arranque revertido",5:"Reinicio solicitado",
+    6:"Recepción sin actividad",7:"Error al escribir flash",8:"Error al borrar flash",9:"RAM insuficiente",
+    10:"No se pudo guardar el estado",11:"Oferta no válida",12:"No se pudo confirmar el arranque",
+    13:"Error al leer flash",14:"Error al calcular el hash",15:"Imagen verificada",
+    16:"Arrancó la imagen anterior",17:"La nueva imagen no logró registrarse"};
+  if (e.kind === "map") return e.missing === 0 ? "Recepción completa confirmada" : `Recepción incompleta: faltan ${e.missing} fragmentos`;
+  if (e.kind === "report") return `${fases[e.phase] || "Firmware"}: ${causas[e.cause] || "Resultado desconocido"}${e.total ? `. Faltan ${e.missing} de ${e.total} fragmentos` : ""}`;
+  const estados = {offering:"Envío solicitado",sending:"Envío iniciado",polling:"Comprobando recepción",
+    repairing:"Reparación iniciada",ready:"Recepción completada",install_req:"Instalación solicitada",
+    installing:"Orden de instalación emitida",done:"Instalación confirmada",failed:"Intento fallido",cancelled:"Envío cancelado"};
+  return e.detail || estados[e.kind] || "Cambio de estado";
+}
+
+function bcBoton(n, action) {
+  const labels = {install:"Instalar",check:"Comprobar recepción",send:n.operation?.version === n.available_version ? "Reanudar envío" : "Enviar",
+    disable_auto:"Desactivar instalación automática",cancel:"Cancelar envío"};
+  return `<button type="button" class="ota-button" data-origin="${n.node_id}" data-action="${action}">${labels[action]}</button>`;
+}
+
 function bcPintar(d) {
   bcDatos = d;
   const nodes = d.nodos || [];
@@ -4669,22 +4698,43 @@ function bcPintar(d) {
   document.getElementById("bc-cancelar").hidden = !d.activa;
   document.getElementById("bc-lanzar").hidden = !d.can_start;
   document.getElementById("bc-radio-aviso").hidden = d.radio_available !== false;
-  document.getElementById("bc-estado").innerHTML = "";
+  document.getElementById("bc-estado").textContent = d.waiting_for_restart?.length
+    ? `Esperando el regreso de: ${d.waiting_for_restart.map(id => `nodo ${id}`).join(", ")}.` : "";
   fwNotas("bc-notas", d.release_notes);
   const tb = document.querySelector("#bc-tabla tbody");
-  const estados = {queued: "En cola", offering: "Preparando envío", sending: "Enviando firmware", polling: "Comprobando recepción",
-    repairing: "Completando envío", ready: "Listo para instalar", pending: "Comprobando la imagen",
-    install_req: "Comprobando la imagen", installing: "Instalando; esperando confirmación", done: "Instalación confirmada",
-    failed: "No se pudo completar", cancelled: "Envío cancelado"};
+  const opened = new Set([...tb.querySelectorAll("details[open]")].map(el => el.dataset.origin));
+  const focused = document.activeElement;
+  const focus = focused?.dataset?.origin;
+  const focusAction = focused?.dataset?.action;
   const rows = nodes.map(n => {
-    const estado = !n.online ? "Sin conexión" : n.comparison === "current" ? "Actualizado"
-      : (n.operation_state === "sending" && n.progress != null ? `Enviando firmware (${n.progress} %)` : estados[n.operation_state]) || (n.received ? "Listo para instalar" : n.comparison === "older" ? "Sin una versión más reciente"
-      : n.comparison === "unknown" ? "No se pudo comprobar la versión" : n.comparison === "unavailable" ? "Sin firmware disponible" : "Actualización disponible");
-    return `<tr><td>${n.can_send ? `<input type="checkbox" class="bc-elegir" data-origin="${n.node_id}" aria-label="Seleccionar ${htmlSeguro(n.name || "nodo")} (${n.node_id})" ${bcSeleccion.has(n.node_id) ? "checked" : ""}>` : ""}</td>`
-      + `<td>${htmlSeguro(n.name || "Nodo")} (${n.node_id})</td><td>${htmlSeguro(fwVersionTexto(n.installed_version))}</td><td>${htmlSeguro(fwVersionTexto(n.available_version))}</td>`
-      + `<td>${htmlSeguro(estado)}</td><td>${n.can_install ? `<button class="bc-instalar" data-origin="${n.node_id}">Instalar ${fwVersionTexto(n.available_version)}</button>` : ""}</td></tr>`;
-  }).join("") || '<tr><td colspan="6">No hay nodos registrados.</td></tr>';
-  const focus = document.activeElement?.dataset?.origin;
+    const op = n.operation;
+    const button = n.primary_action ? bcBoton(n, n.primary_action) : "";
+    let detail = "";
+    if (op) {
+      const receipt = op.received ? "Completa, según la última respuesta" : op.missing != null ? `Faltan ${op.missing} fragmentos` : "Sin confirmar";
+      const history = (n.history || []).map(e => `<li><time>${htmlSeguro(bcFecha(e.ts))}</time> · ${htmlSeguro(fwVersionTexto(e.version))} · Operación ${e.bcast_id} · ${e.source === "node" ? "Nodo" : e.source === "operator" ? "Solicitud" : "Gateway"}<br>${htmlSeguro(bcEvento(e))}</li>`).join("");
+      const secondary = [n.can_check && n.primary_action !== "check" ? bcBoton(n,"check") : "",
+        n.can_send && n.primary_action !== "send" ? bcBoton(n,"send") : "",
+        n.can_disable_auto ? bcBoton(n,"disable_auto") : "",
+        ["queued","offering","sending","repairing","polling"].includes(op.state) ? bcBoton(n,"cancel") : ""].join("");
+      detail = `<details class="ota-detail" data-origin="${n.node_id}" ${opened.has(String(n.node_id)) ? "open" : ""}><summary data-origin="${n.node_id}" data-action="details">Ver detalle</summary>
+        <dl><dt>Versión de la operación</dt><dd>${htmlSeguro(fwVersionTexto(op.version))}</dd>
+        <dt>Última respuesta de recepción</dt><dd>${htmlSeguro(receipt)}<br><small>${htmlSeguro(bcFecha(op.received_at))}</small></dd>
+        <dt>Verificación</dt><dd>${op.verified ? "Imagen verificada" : "Sin confirmación de verificación vigente"}${op.verified_at ? `<br><small>${htmlSeguro(bcFecha(op.verified_at))}</small>` : ""}</dd>
+        <dt>Instalación</dt><dd>${htmlSeguro(op.installation)}</dd>
+        <dt>Último resultado de la operación</dt><dd>${htmlSeguro(op.last_result || op.detail || "Sin resultado registrado")}</dd></dl>
+        ${op.report_text ? `<p>Informe del nodo (${htmlSeguro(bcFecha(op.report_at))}): ${htmlSeguro(op.report_text)}</p>` : ""}
+        <div class="ota-actions">${secondary}</div>
+        <h3>Historial de intentos</h3>${history ? `<ol class="ota-history">${history}</ol>` : "<p>No hay historial de pasos para esta operación anterior.</p>"}
+        </details>`;
+    }
+    return `<tr><td><div class="ota-node">${n.can_send ? `<input type="checkbox" class="bc-elegir" data-origin="${n.node_id}" data-action="select" aria-label="Seleccionar ${htmlSeguro(n.name || "nodo")} (${n.node_id})" ${bcSeleccion.has(n.node_id) ? "checked" : ""}>` : ""}<span>${htmlSeguro(n.name || "Nodo")} (${n.node_id})<br><small>${n.online ? "Conectado" : "Sin conexión"}</small></span></div></td>
+      <td>${htmlSeguro(fwVersionTexto(n.installed_version))}<br><small>Último registro: ${htmlSeguro(bcFecha(n.running_observed_at))}</small></td>
+      <td>${htmlSeguro(fwVersionTexto(n.available_version))}</td>
+      <td>${op ? `<strong>Versión ${htmlSeguro(fwVersionTexto(op.version))}</strong><br>` : ""}${htmlSeguro(n.summary || "Sin operación de actualización")}
+        ${op?.auto_install ? "<p>Instalación automática activada</p>" : ""}
+        ${n.blocked_reason ? `<p class="texto-ayuda">${htmlSeguro(n.blocked_reason)}</p>` : ""}${detail}</td><td>${button}</td></tr>`;
+  }).join("") || '<tr><td colspan="5">No hay nodos registrados.</td></tr>';
   if (tb.innerHTML !== rows) {
     tb.innerHTML = rows;
     tb.querySelectorAll(".bc-elegir").forEach(b => b.addEventListener("change", () => {
@@ -4692,37 +4742,59 @@ function bcPintar(d) {
       if (b.checked) bcSeleccion.add(id); else bcSeleccion.delete(id);
       bcSeleccionBoton();
     }));
-    tb.querySelectorAll(".bc-instalar").forEach(b => b.addEventListener("click", () => bcInstalar(Number(b.dataset.origin))));
-    if (focus) tb.querySelector(`[data-origin="${Number(focus)}"]`)?.focus();
+    tb.querySelectorAll("button[data-action]").forEach(b => b.addEventListener("click", () => bcAccion(Number(b.dataset.origin), b.dataset.action)));
+    if (focus && focusAction) (tb.querySelector(`[data-origin="${Number(focus)}"][data-action="${focusAction}"]`)
+      || tb.querySelector(`summary[data-origin="${Number(focus)}"]`))?.focus();
   }
+  const announcement = nodes.map(n => `${n.name || "Nodo"} ${n.node_id}: ${n.summary || "Sin operación"}`).join(". ");
+  const live = document.getElementById("bc-progreso-accesible");
+  if (live.textContent !== announcement) live.textContent = announcement;
   bcSeleccionBoton();
 }
 
-async function bcInstalar(origin) {
-  const aviso = document.getElementById("bc-aviso");
-  const seguir = await new Promise((resolve) => {
-    cfgConfirmarCb = () => resolve(true);
-    cfgDialogo(`Actualizar nodo ${origin}`,
-      "<p>El nodo no estará disponible durante unos minutos.</p>"
-      + "<p>Si la actualización no puede completarse, conservará la versión anterior. "
-      + "Los demás nodos no se verán afectados.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Instalar actualización",
-        onCancelar: () => resolve(false) });
-  });
-  if (!seguir) { cfgDialogoCerrar(); return; }
-  cfgDialogoCerrar();
+async function bcAccion(origin, action) {
+  if (bcOcupada) return;
+  const node = bcDatos?.nodos.find(n => n.node_id === origin);
+  if (!node) return;
+  if (action === "install") return bcInstalar(origin);
+  if (action === "send") { bcSeleccion = new Set([origin]); return bcLanzar(); }
+  const urls = {check:"comprobar", disable_auto:"automatico/desactivar", cancel:"difusion/cancelar"};
+  if (!urls[action]) return;
+  bcOcupada = true;
   try {
-    const node = bcDatos?.nodos.find(n => n.node_id === origin);
-    if (!node?.can_install) return;
-    const r = await fetchApi(node.broadcast ? "/api/config/lora/firmware/difusion/instalar" : "/api/config/lora/firmware/instalar", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(node.broadcast ? {origin} : {id: node.job_id}) });
-    const d = await r.json();
-    fwMensaje(aviso, r.ok ? `Instalación solicitada en el nodo ${origin}.` : textoError(new Error(d.error || "No se pudo iniciar la instalación.")), r.ok ? "info" : "error");
+    const r = await fetchApi(`/api/config/lora/firmware/${urls[action]}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:node.job_id,origin})});
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || "No se pudo guardar la acción.");
+    fwMensaje(document.getElementById("bc-aviso"), {check:"Comprobación solicitada. No se instalará ni reiniciará el nodo.",disable_auto:"Instalación automática desactivada.",cancel:"Envío cancelado."}[action], "info");
     await bcRefrescar();
-  } catch (e) {
-    fwMensaje(aviso, textoError(e), "error");
-  }
+  } catch (e) { fwMensaje(document.getElementById("bc-aviso"),textoError(e),"error"); }
+  finally { bcOcupada=false; }
+}
+
+async function bcInstalar(origin) {
+  if (bcOcupada) return;
+  const node = bcDatos?.nodos.find(n => n.node_id === origin);
+  if (!node?.can_install) return;
+  const id = node.job_id;
+  const aviso = document.getElementById("bc-aviso");
+  bcOcupada = true;
+  try {
+    const seguir = await new Promise(resolve => {
+      cfgConfirmarCb = () => resolve(true);
+      cfgDialogo("Instalar firmware", `<p>Nodo: ${htmlSeguro(node.name || String(origin))}.</p>`
+        + `<p>En ejecución: ${htmlSeguro(fwVersionTexto(node.installed_version))}.<br>Imagen recibida para instalar: ${htmlSeguro(fwVersionTexto(node.operation.version))}.</p>`
+        + "<p>Se comprobará la recepción antes de instalar. El equipo se reiniciará; el resultado quedará pendiente hasta confirmar el arranque.</p>",
+        {cancelar:true,confirmar:true,confirmarText:"Instalar",onCancelar:()=>resolve(false)});
+    });
+    cfgDialogoCerrar();
+    if (!seguir) return;
+    const r = await fetchApi(node.broadcast ? "/api/config/lora/firmware/difusion/instalar" : "/api/config/lora/firmware/instalar", {
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,origin})});
+    const result = await r.json();
+    fwMensaje(aviso, r.ok ? "Instalación solicitada." : result.error || "No se pudo solicitar la instalación.",r.ok ? "info":"error");
+    await bcRefrescar();
+  } catch(e) { fwMensaje(aviso,textoError(e),"error"); }
+  finally { bcOcupada=false; }
 }
 
 async function bcRefrescar() {
@@ -4749,25 +4821,29 @@ function bcSondeoParar() {
 
 async function bcLanzar() {
   if (bcOcupada || !bcDatos?.can_start || !bcSeleccion.size) return;
+  bcOcupada = true;
   const origins = [...bcSeleccion];
   const expected_version = bcDatos.version;
+  const auto_install = document.getElementById("bc-auto-install").checked;
   const nombres = bcDatos.nodos.filter(n => origins.includes(n.node_id)).map(n => htmlSeguro(n.name || `Nodo ${n.node_id}`)).join(", ");
   const seguir = await new Promise(resolve => {
     cfgConfirmarCb = () => resolve(true);
     cfgDialogo("Enviar firmware por LoRa", `<p>Versión ${fwVersionTexto(bcDatos.version)} para: ${nombres}.</p>`
-      + "<p>El envío se realizará por turnos y puede tardar varias horas. La instalación se confirmará después en cada nodo.</p>",
+      + "<p>El firmware se enviará a cada nodo por separado. El envío puede tardar varias horas.</p>"
+      + (auto_install ? "<p>Instalación automática activada: al confirmar la recepción completa y la verificación, cada nodo se instalará y reiniciará antes de empezar el envío al siguiente.</p>" : "<p>Al terminar la recepción, la instalación esperará tu confirmación.</p>"),
       {cancelar: true, confirmar: true, confirmarText: "Enviar actualización", onCancelar: () => resolve(false)});
   });
   cfgDialogoCerrar();
-  if (!seguir) return;
-  bcOcupada = true; bcSeleccionBoton();
+  if (!seguir) { bcOcupada=false; bcSeleccionBoton(); return; }
+  bcSeleccionBoton();
   const res = document.getElementById("bc-aviso");
   fwMensaje(res, "Guardando el envío en el gateway...", "progreso");
   try {
-    const r = await fetchApi("/api/config/lora/firmware/seleccion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({origins, expected_version})});
+    const r = await fetchApi("/api/config/lora/firmware/seleccion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({origins, expected_version, auto_install})});
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "No se pudo iniciar el envío.");
     bcSeleccion.clear();
+    document.getElementById("bc-auto-install").checked = false;
     fwMensaje(res, "Envío guardado. Puedes seguir el progreso en la tabla.", "info");
     await bcRefrescar();
   } catch (e) { fwMensaje(res, textoError(e), "error"); }
@@ -4778,9 +4854,9 @@ async function bcCancelar() {
   const res = document.getElementById("bc-aviso");
   const seguir = await new Promise((resolve) => {
     cfgConfirmarCb = () => resolve(true);
-    cfgDialogo("Cancelar la actualización",
+    cfgDialogo("Cancelar envíos pendientes",
       "<p>Se detendrán el envío en curso y los que están en cola. Las imágenes ya recibidas se conservarán.</p>",
-      { cancelar: true, confirmar: true, confirmarText: "Cancelar actualización",
+      { cancelar: true, confirmar: true, confirmarText: "Cancelar envíos",
         onCancelar: () => resolve(false) });
   });
   if (!seguir) { cfgDialogoCerrar(); return; }

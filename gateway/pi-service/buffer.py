@@ -234,36 +234,10 @@ class GatewayBuffer:
                 apply_at    INTEGER NOT NULL DEFAULT 0
             )
         """)
-        # Cola de actualizaciones de firmware por LoRa (frame-format.md §18).
-        # Tabla propia y no una columna más en config_push: una transferencia
-        # de firmware dura horas, tiene ventana horaria y se instala con una
-        # orden aparte, así que su ciclo de vida no se parece en nada al de un
-        # config, que va y vuelve en segundos.
-        #
-        # `written` es lo único que hace falta guardar del progreso, porque la
-        # entrega es secuencial. Sobrevivir a un reinicio del servicio es
-        # entonces gratis: se retoma en ese número.
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS fw_push (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                origin      INTEGER NOT NULL,
-                version     TEXT    NOT NULL,
-                total_len   INTEGER NOT NULL,
-                sha256      TEXT    NOT NULL,
-                path        TEXT    NOT NULL,
-                created_ts  REAL    NOT NULL,
-                state       TEXT    NOT NULL DEFAULT 'pending',
-                written     INTEGER NOT NULL DEFAULT 0,
-                hour_from   INTEGER,
-                hour_to     INTEGER,
-                detail      TEXT,
-                updated_ts  REAL
-            )
-        """)
         # Ventanas de silencio pedidas desde el visor (frame-format.md §19).
         # Una fila por petición, que el servicio consume y marca. Es el mismo
         # patrón de encuentro entre los dos procesos que usan config_push y
-        # fw_push: el visor no habla por radio, solo deja la intención.
+        # fw_bcast: el visor no habla por radio, solo deja la intención.
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS quiet_req (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -373,7 +347,14 @@ class GatewayBuffer:
                 PRIMARY KEY (bcast_id, node_id)
             )
         """)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS fw_report (
+            origin INTEGER PRIMARY KEY, report_id INTEGER NOT NULL,
+            xfer INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            phase INTEGER NOT NULL, cause INTEGER NOT NULL,
+            missing INTEGER NOT NULL, total INTEGER NOT NULL, ts REAL NOT NULL
+        )""")
         self._migrate_fw_bcast_target()
+        self._migrate_ota_operations()
         self._migrate_node_status_nbiot()
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(node_status)")}
         if 'hl_counters_since' not in cols:
@@ -391,6 +372,103 @@ class GatewayBuffer:
             self.conn.execute(
                 "ALTER TABLE buffer RENAME TO buffer_v20_legacy")
             self.conn.commit()
+
+    def _migrate_ota_operations(self) -> None:
+        """Conserva hitos de OTA aunque el visor o el servicio cambien el estado."""
+        cols = {r[1] for r in self.conn.execute('PRAGMA table_info(fw_bcast)')}
+        if 'auto_install' not in cols:
+            self.conn.execute('ALTER TABLE fw_bcast ADD COLUMN auto_install INTEGER NOT NULL DEFAULT 0')
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS fw_check (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, bcast_id INTEGER NOT NULL,
+                origin INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                result TEXT, detail TEXT, created_ts REAL NOT NULL, updated_ts REAL);
+            CREATE UNIQUE INDEX IF NOT EXISTS fw_check_pending ON fw_check(bcast_id,origin)
+                WHERE state IN ('pending','checking');
+            CREATE TABLE IF NOT EXISTS fw_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, bcast_id INTEGER NOT NULL,
+                origin INTEGER, ts REAL NOT NULL, source TEXT NOT NULL,
+                kind TEXT NOT NULL, detail TEXT, report_id INTEGER, phase INTEGER,
+                cause INTEGER, missing INTEGER, total INTEGER);
+            CREATE INDEX IF NOT EXISTS fw_event_operation ON fw_event(bcast_id,origin,id);
+            CREATE UNIQUE INDEX IF NOT EXISTS fw_event_report ON fw_event(origin,report_id,bcast_id,phase,cause)
+                WHERE report_id IS NOT NULL;
+            CREATE TRIGGER IF NOT EXISTS ota_map_insert AFTER INSERT ON fw_bcast_map BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail,missing)
+                VALUES(NEW.bcast_id,NEW.node_id,NEW.ts,'node','map','Respuesta de recepción',NEW.missing);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_map_update AFTER UPDATE ON fw_bcast_map
+            WHEN OLD.missing != NEW.missing BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail,missing)
+                VALUES(NEW.bcast_id,NEW.node_id,NEW.ts,'node','map','Respuesta de recepción',NEW.missing);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_running AFTER UPDATE OF fw_version,t_updated ON node_catalog BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                SELECT b.id,NEW.origin_id,NEW.t_updated,'node','running','Versión solicitada registrada; confirmación de arranque pendiente'
+                FROM fw_bcast b WHERE b.version=NEW.fw_version AND instr(b.version,'+')>0
+                    AND (b.target=NEW.origin_id OR b.target IS NULL)
+                    AND (b.state='installing' AND NEW.t_updated>=b.updated_ts OR EXISTS(
+                        SELECT 1 FROM fw_bcast_install i WHERE i.bcast_id=b.id AND i.origin=NEW.origin_id
+                        AND i.state='installing' AND NEW.t_updated>=i.updated_ts))
+                    AND NOT EXISTS(SELECT 1 FROM fw_event e WHERE e.bcast_id=b.id AND e.origin=NEW.origin_id AND e.kind='running');
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_created AFTER INSERT ON fw_bcast BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.id,NEW.target,NEW.created_ts,'gateway','offering','Envío solicitado');
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_state AFTER UPDATE OF state ON fw_bcast
+            WHEN OLD.state != NEW.state BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.id,NEW.target,COALESCE(NEW.updated_ts,NEW.created_ts),'gateway',NEW.state,NEW.detail);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_auto AFTER UPDATE OF auto_install ON fw_bcast
+            WHEN OLD.auto_install != NEW.auto_install BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.id,NEW.target,CAST(strftime('%s','now') AS REAL),'operator','auto',
+                    CASE WHEN NEW.auto_install=1 THEN 'Instalación automática activada' WHEN NEW.state='install_req' THEN 'Instalación automática solicitada' ELSE 'Instalación automática desactivada' END);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_check_created AFTER INSERT ON fw_check BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.bcast_id,NEW.origin,NEW.created_ts,'operator','check_requested','Comprobación de recepción solicitada');
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_check_result AFTER UPDATE OF state ON fw_check
+            WHEN NEW.state IN ('done','failed') AND OLD.state != NEW.state BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.bcast_id,NEW.origin,NEW.updated_ts,'gateway',NEW.result,NEW.detail);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_install_created AFTER INSERT ON fw_bcast_install BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.bcast_id,NEW.origin,NEW.created_ts,'operator','install_req','Instalación solicitada');
+            END;
+            CREATE TRIGGER IF NOT EXISTS ota_install_state AFTER UPDATE OF state ON fw_bcast_install
+            WHEN OLD.state != NEW.state BEGIN
+                INSERT INTO fw_event(bcast_id,origin,ts,source,kind,detail)
+                VALUES(NEW.bcast_id,NEW.origin,COALESCE(NEW.updated_ts,NEW.created_ts),'gateway',NEW.state,NEW.detail);
+            END;
+        """)
+
+        self.conn.execute("""INSERT OR IGNORE INTO fw_event
+            (bcast_id,origin,ts,source,kind,report_id,phase,cause,missing,total)
+            SELECT b.id,r.origin,r.ts,'node','report',r.report_id,r.phase,r.cause,r.missing,r.total
+            FROM fw_report r JOIN fw_bcast b ON b.id=(SELECT MAX(j.id) FROM fw_bcast j
+                WHERE j.xfer=r.xfer AND j.sha256=r.sha256 AND (j.target=r.origin OR j.target IS NULL)
+                  AND j.created_ts<=r.ts)
+            WHERE NOT EXISTS(SELECT 1 FROM fw_event e WHERE e.origin=r.origin AND e.report_id=r.report_id
+                             AND e.phase=r.phase AND e.cause=r.cause)""")
+
+    def ota_blocks_radio(self) -> bool:
+        """Reserva el turno hasta observar la imagen solicitada después de instalar."""
+        return self.conn.execute("""SELECT 1 FROM (
+            SELECT b.version,b.state,b.updated_ts,k.fw_version,k.t_updated
+              FROM fw_bcast b LEFT JOIN node_catalog k ON k.origin_id=b.target
+              WHERE b.state IN ('install_req','installing')
+            UNION ALL
+            SELECT b.version,i.state,i.updated_ts,k.fw_version,k.t_updated
+              FROM fw_bcast_install i JOIN fw_bcast b ON b.id=i.bcast_id
+              LEFT JOIN node_catalog k ON k.origin_id=i.origin
+              WHERE i.state IN ('pending','installing'))
+            WHERE state != 'installing' OR instr(COALESCE(version,''),'+')=0
+               OR COALESCE(version=fw_version AND t_updated>=updated_ts,0)=0 LIMIT 1""").fetchone() is not None
 
     def _migrate_fw_bcast_target(self) -> None:
         """Añade `target` a fw_bcast si falta. NULL significa toda la red, que
@@ -589,8 +667,7 @@ class GatewayBuffer:
         """Siguiente petición que atender, o None. La toma el servicio del
         gateway; el visor solo inserta y consulta el estado.
 
-        Incluye las que quedaron en `sending`, por el mismo motivo por el que
-        lo hace fw_push_next: el estado de una transferencia en vuelo vive en
+        Incluye las que quedaron en `sending`: el estado de una transferencia vive en
         la memoria del servicio, así que un reinicio la deja huérfana, ni en
         memoria ni recogible. Y como el visor no deja encolar otra al mismo
         nodo mientras haya una viva, esa fila bloqueaba el canal de ese nodo
@@ -871,67 +948,6 @@ class GatewayBuffer:
                                               "nuevo": None, "viejo": None})
             e[profile] = ts
         return list(out.values())
-
-    # ----- Cola de firmware por LoRa (spec §18) -----
-
-    def fw_push_next(self) -> dict | None:
-        """Siguiente actualización que toca atender.
-
-        Devuelve tanto las pendientes como las que quedaron a medias: una
-        transferencia de horas atraviesa reinicios del servicio, y retomarla es
-        justo el caso normal, no la excepción.
-        """
-        cur = self.conn.execute(
-            """SELECT id, origin, version, total_len, sha256, path, written,
-                      hour_from, hour_to, state
-                 FROM fw_push
-                WHERE state IN ('pending', 'sending', 'ready', 'install_req',
-                                'installing')
-                ORDER BY id LIMIT 1""")
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return {"id": row[0], "origin": row[1], "version": row[2],
-                "total_len": row[3], "sha256": row[4], "path": row[5],
-                "written": row[6], "hour_from": row[7], "hour_to": row[8],
-                "state": row[9]}
-
-    def fw_push_state(self, push_id: int, state: str,
-                      detail: str | None = None,
-                      written: int | None = None) -> None:
-        """Avanza el estado: sending, ready, installing, done o failed.
-
-        `written` se actualiza solo cuando llega, para que un cambio de estado
-        no pise el progreso con un valor viejo.
-        """
-        if written is None:
-            self.conn.execute(
-                """UPDATE fw_push SET state = ?, detail = ?, updated_ts = ?
-                    WHERE id = ?""", (state, detail, time.time(), push_id))
-        else:
-            self.conn.execute(
-                """UPDATE fw_push
-                      SET state = ?, detail = ?, written = ?, updated_ts = ?
-                    WHERE id = ?""",
-                (state, detail, written, time.time(), push_id))
-        self.conn.commit()
-
-    def fw_push_state_of(self, push_id: int) -> str | None:
-        """Estado actual de una actualización. Lo consulta el servicio para
-        enterarse de que el visor pidió instalar: los dos procesos no se hablan
-        directamente, la tabla es el punto de encuentro."""
-        cur = self.conn.execute("SELECT state FROM fw_push WHERE id = ?",
-                                (push_id,))
-        row = cur.fetchone()
-        return row[0] if row else None
-
-    def fw_push_progress(self, push_id: int, written: int) -> None:
-        """Solo el progreso, sin tocar estado ni detalle. Se llama a menudo
-        (cada FW_STATUS), de ahí que sea una escritura mínima."""
-        self.conn.execute(
-            "UPDATE fw_push SET written = ?, updated_ts = ? WHERE id = ?",
-            (written, time.time(), push_id))
-        self.conn.commit()
 
     def config_push_state(self, push_id: int, state: str,
                           detail: str | None = None) -> None:

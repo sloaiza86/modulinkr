@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.3.3"
+#define MODULINKR_FIRMWARE_VERSION "0.3.4"
 #include "../../../shared/diagnostic_log.h"
 #include "../../../shared/firmware_identity.h"
 // ModuLinkr, gateway-radio (Heltec WiFi LoRa 32 v3).
@@ -127,7 +127,10 @@ void dumpFrame(const uint8_t* buf, size_t len, float rssi, float snr) {
 
 // Transmite por LoRa una trama ya construida por el Pi. La radio sale de
 // RX durante el TX y se rearma después.
+void pollRadioRx();
+
 void txRaw(const uint8_t* frame, size_t len) {
+    pollRadioRx();
     const int16_t state = radio.transmit(const_cast<uint8_t*>(frame), len);
 
     // El fin del TX dispara DIO1 y deja g_rx_flag en true (paquete fantasma:
@@ -320,6 +323,7 @@ void pollInput() {
             g_in_line[g_in_len] = '\0';
             handleInLine(g_in_line, g_in_len);
             g_in_len = 0;
+            return;  // Se atiende RX entre órdenes, aunque el USB tenga cola.
         } else if (g_in_len < kInLineMax - 1) {
             g_in_line[g_in_len++] = static_cast<char>(c);
         } else {
@@ -425,14 +429,8 @@ void setup() {
     diag::log("INFO", "radio.init", "init.radio_ready", "interfaces=LoRa,USB");
 }
 
-void loop() {
-    // Atiende órdenes de transmisión del Pi.
-    pollInput();
-
-    if (!g_rx_flag) {
-        delay(2);
-        return;
-    }
+void pollRadioRx() {
+    if (!g_rx_flag) return;
     g_rx_flag = false;
 
     uint8_t buf[256];
@@ -458,4 +456,12 @@ void loop() {
     if (restart != RADIOLIB_ERR_NONE) {
         Serial.printf("[rx] startReceive failed code=%d\n", restart);
     }
+}
+
+void loop() {
+    // Se recoge la recepción pendiente antes de cambiar la radio a TX.
+    pollRadioRx();
+    pollInput();
+    pollRadioRx();
+    delay(2);
 }

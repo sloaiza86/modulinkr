@@ -108,3 +108,13 @@ test("el relay del publicador caduca con la evidencia de los nodos y se pierde s
   assert.equal(network.project(snapshot,10).state.nodes[1].relay_active,false);
   assert.equal(network.project(snapshot,5,false).state.nodes[1].relay_active,false);
 });
+
+test("la última medida celular no apaga LoRa hasta que caduque su propia evidencia", () => {
+  const snapshot = fixture();
+  const node = snapshot.state.nodes[0];
+  node.route_options = [{transport:"nbiot",until:1010}];
+  node.lora_route_until = 1005;
+  assert.equal(network.project(snapshot, 1).state.nodes[0].lora_route_online, true);
+  assert.equal(network.project(snapshot, 5).state.nodes[0].lora_route_online, false);
+  assert.equal(network.project(snapshot, 1, false).state.nodes[0].lora_route_online, false);
+});

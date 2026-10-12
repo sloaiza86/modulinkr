@@ -1,25 +1,5 @@
 #include "../../shared/diagnostic_log.h"
-// ModuLinkr, recepción de firmware por LoRa (implementación)
-//
-// Nota sobre por qué no se usa la API esp_ota_begin/write/end
-// -----------------------------------------------------------
-// Sería la vía natural, pero `esp_ota_begin` borra la partición al abrirla, y
-// aquí la transferencia dura horas y atraviesa reinicios. Reabrirla tras cada
-// reinicio destruiría todo lo recibido, que es justo lo que se quiere
-// conservar.
-//
-// Se escribe entonces sobre la partición directamente: se borra cada sector
-// justo antes de usarlo y se escribe en él. Reanudar es continuar donde se
-// quedó, sin ceremonia. La validación de la imagen no se pierde por ello: la
-// hace `esp_ota_set_boot_partition`, que verifica la imagen entera antes de
-// aceptarla como arranque, además del sha256 propio que se comprueba aquí.
-//
-// La escritura en flash exige alineación y trabaja por sectores de 4 kB,
-// mientras que los fragmentos de radio miden 213 bytes y caen en cualquier
-// desplazamiento. De ahí el búfer intermedio: se acumulan fragmentos hasta
-// completar un sector y se vuelca de una vez. Cuesta 4 kB de RAM mientras hay
-// transferencia, y a cambio evita 2446 escrituras desalineadas.
-
+// ModuLinkr, verificación e instalación de la imagen recibida por FW_BCAST.
 #include "fwota.h"
 
 #include <Arduino.h>
@@ -29,7 +9,6 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 
-#include <cstdlib>
 #include <cstring>
 
 namespace fwota {
@@ -37,25 +16,34 @@ namespace {
 
 constexpr const char* kPath    = "/fwota.json";
 constexpr const char* kTmpPath = "/fwota.tmp";
-constexpr size_t kSector       = 4096;
 
 const esp_partition_t* part_ = nullptr;   // partición dormida de destino
-const char* running_  = "";               // versión del firmware que corre
 uint32_t  xfer_       = 0;
 uint32_t  total_      = 0;
 uint8_t   sha_[32]    = {0};
-uint32_t  flushed_    = 0;   // bytes ya en flash (múltiplo de kSector, o el final)
-uint8_t*  buf_        = nullptr;
-size_t    staged_     = 0;   // bytes en el búfer, aún sin volcar
 bool      ready_      = false;
-bool      failed_     = false;
-uint32_t  last_ms_    = 0;
-uint16_t  since_stat_ = 0;
+Report report_;
+bool report_saved_ = true;
+char boot_target_[17] = {};
+Cause verify_cause_ = Cause::SHA_MISMATCH;
 
-bool sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
-    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (info == nullptr) return false;
-    return mbedtls_md(info, data, len, out) == 0;
+bool saveReport() {
+    JsonDocument doc;
+    doc["id"] = report_.id; doc["xfer"] = report_.xfer;
+    doc["phase"] = static_cast<uint8_t>(report_.phase);
+    doc["cause"] = static_cast<uint8_t>(report_.cause);
+    doc["missing"] = report_.missing; doc["total"] = report_.total;
+    doc["pending"] = report_.pending; doc["boot"] = boot_target_;
+    char hex[65];
+    const char* digits = "0123456789abcdef";
+    for (size_t i=0; i<32; ++i) { hex[2*i]=digits[report_.sha[i]>>4]; hex[2*i+1]=digits[report_.sha[i]&15]; }
+    hex[64]=0; doc["sha"]=hex;
+    File f = LittleFS.open("/fwreport.tmp", "w");
+    if (!f) return false;
+    const size_t expected = measureJson(doc);
+    const size_t written = serializeJson(doc, f);
+    f.close();
+    return written == expected && LittleFS.rename("/fwreport.tmp", "/fwreport.json");
 }
 
 void hexToBytes(const char* hex, uint8_t* out, size_t n) {
@@ -89,7 +77,7 @@ bool saveProgress() {
     bytesToHex(sha_, sizeof(sha_), hex);
     doc["xfer"]    = xfer_;
     doc["total"]   = total_;
-    doc["flushed"] = flushed_;
+    doc["flushed"] = ready_ ? total_ : 0;
     doc["sha"]     = hex;
     doc["ready"]   = ready_;
 
@@ -115,62 +103,64 @@ void clearProgress() {
     LittleFS.rename(kTmpPath, kPath);
 }
 
-// Vuelca el búfer a flash, borrando antes los sectores que va a ocupar. El
-// borrado va aquí y no al aceptar la oferta porque borrar los 1280 kB de la
-// partición de una vez bloquearía el bucle más de diez segundos; sector a
-// sector son unas decenas de milisegundos cada diez, que no se notan.
-bool flush() {
-    if (staged_ == 0) return true;
-    if (part_ == nullptr) return false;
-
-    const size_t bytes = staged_;
-    const size_t hasta = ((bytes + kSector - 1) / kSector) * kSector;
-    if (esp_partition_erase_range(part_, flushed_, hasta) != ESP_OK) return false;
-    // El último volcado no llena el sector: se rellena con 0xFF, que es lo que
-    // deja el borrado, para no escribir basura de RAM en el hueco.
-    if (hasta > bytes) std::memset(buf_ + bytes, 0xFF, hasta - bytes);
-    if (esp_partition_write(part_, flushed_, buf_, hasta) != ESP_OK) return false;
-
-    flushed_ += bytes;
-    staged_ = 0;
-    return saveProgress();
-}
-
-void freeBuf() {
-    if (buf_ != nullptr) { std::free(buf_); buf_ = nullptr; }
-    staged_ = 0;
-}
-
-bool ensureBuf() {
-    if (buf_ != nullptr) return true;
-    buf_ = static_cast<uint8_t*>(std::malloc(kSector));
-    staged_ = 0;
-    return buf_ != nullptr;
-}
-
-// Compara dos versiones "0.0.39-cfg-ota-read" por su serie numérica. Devuelve
-// -1 si a es anterior a b, 0 si son la misma, 1 si posterior, y 0 si alguna no
-// se puede interpretar (ante la duda, no se rechaza: decide el operador).
-int cmpVersion(const char* a, const char* b) {
-    if (a == nullptr || b == nullptr) return 0;
-    for (int i = 0; i < 3; i++) {
-        char* fa = nullptr;
-        char* fb = nullptr;
-        const long va = std::strtol(a, &fa, 10);
-        const long vb = std::strtol(b, &fb, 10);
-        if (fa == a || fb == b) return 0;         // no había número
-        if (va != vb) return va < vb ? -1 : 1;
-        if (*fa != '.' || *fb != '.') break;
-        a = fa + 1;
-        b = fb + 1;
-    }
-    return 0;
-}
-
 }  // namespace
 
-void begin(const char* running_version) {
-    running_ = (running_version != nullptr) ? running_version : "";
+const Report& report() { return report_; }
+
+bool record(uint32_t xfer, const uint8_t sha[32], Phase phase, Cause cause,
+            uint16_t missing, uint16_t total) {
+    if (report_.id && report_.xfer == xfer && report_.phase == phase &&
+        report_.cause == cause && report_.missing == missing && report_.total == total &&
+        (!sha || memcmp(report_.sha, sha, 32) == 0)) {
+        if (!report_saved_) report_saved_=saveReport();
+        return report_saved_;
+    }
+    ++report_.id;
+    if (!report_.id) ++report_.id;
+    report_.xfer=xfer; report_.phase=phase; report_.cause=cause;
+    report_.missing=missing; report_.total=total; report_.pending=true;
+    if (sha) memmove(report_.sha, sha, 32);
+    else memset(report_.sha, 0, 32);
+    const bool saved=saveReport();
+    report_saved_=saved;
+    if (!saved) diag::log("ERROR", "node.firmware", "firmware.report_save_failed", "report_id=%lu", static_cast<unsigned long>(report_.id));
+    return saved;
+}
+
+bool acknowledge(uint32_t id, uint32_t xfer) {
+    if (id != report_.id || xfer != report_.xfer || !report_.pending) return false;
+    report_.pending=false;
+    if (saveReport()) { report_saved_=true; return true; }
+    report_.pending=true;
+    return false;
+}
+
+void beginReport() {
+    report_=Report{};
+    report_saved_=true;
+    boot_target_[0]=0;
+    File f=LittleFS.open("/fwreport.json", "r");
+    if (!f) { saveReport(); return; }
+    JsonDocument doc;
+    const bool ok=deserializeJson(doc,f)==DeserializationError::Ok;
+    f.close();
+    if (!ok) return;
+    report_.id=doc["id"] | 0u; report_.xfer=doc["xfer"] | 0u;
+    report_.phase=static_cast<Phase>(doc["phase"] | 1);
+    report_.cause=static_cast<Cause>(doc["cause"] | 1);
+    report_.missing=doc["missing"] | 0; report_.total=doc["total"] | 0;
+    report_.pending=doc["pending"] | false;
+    const char* hex=doc["sha"] | "";
+    if (strlen(hex)==64) hexToBytes(hex,report_.sha,32);
+    strncpy(boot_target_,doc["boot"] | "",sizeof(boot_target_)-1);
+    const auto* running=esp_ota_get_running_partition();
+    if (report_.cause==Cause::INSTALLING && running && boot_target_[0] &&
+        strcmp(running->label,boot_target_)!=0) {
+        record(report_.xfer,report_.sha,Phase::BOOT,Cause::PREVIOUS_IMAGE);
+    }
+}
+
+void begin() {
     part_ = esp_ota_get_next_update_partition(nullptr);
     if (part_ == nullptr) {
         diag::log("ERROR", "node.firmware_update", "firmware_update.target_partition_missing", "radio_update_available=false");
@@ -192,148 +182,42 @@ void begin(const char* running_version) {
 
     xfer_    = doc["xfer"]    | 0u;
     total_   = doc["total"]   | 0u;
-    flushed_ = doc["flushed"] | 0u;
     ready_   = doc["ready"]   | false;
     const char* hex = doc["sha"] | "";
     if (std::strlen(hex) == 64) hexToBytes(hex, sha_, sizeof(sha_));
 
-    if (xfer_ != 0 && total_ != 0) {
-        diag::log("INFO", "node.firmware_update", "firmware_update.transfer_recovered", "bytes=%u/%u progress_pct=%u%s\n", static_cast<unsigned>(flushed_), static_cast<unsigned>(total_), static_cast<unsigned>(100ull * flushed_ / total_), ready_ ? " verified=true" : "");
+    // Solo se conserva una imagen completa pendiente de instalación.
+    // Un registro parcial anterior no permite reanudar una recepción.
+    if (!ready_ || total_ == 0 || total_ > kMaxImageBytes ||
+        total_ > part_->size || (doc["flushed"] | 0u) != total_) {
+        xfer_ = 0;
+        total_ = 0;
+        ready_ = false;
+        clearProgress();
     }
-}
-
-State onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
-              const char* version) {
-    if (part_ == nullptr) return State::ERROR;
-    if (total_len == 0 || total_len > kMaxImageBytes ||
-        total_len > part_->size) {
-        return State::REJECTED;
-    }
-    // No se acepta retroceder: la comparación es la misma que hace el visor
-    // para no ofrecer un binario anterior al que ya lleva el nodo. Ante una
-    // versión que no se puede interpretar, cmpVersion devuelve 0 y la oferta
-    // pasa: decide el operador, que sabe más que esta comparación.
-    if (version != nullptr && *version != '\0' && *running_ != '\0' &&
-        cmpVersion(version, running_) < 0) {
-        diag::log("WARNING", "node.firmware_update", "firmware_update.offer_rejected", "version=%s reason=already_installed current_version=%s\n", version, running_);
-        return State::REJECTED;
-    }
-
-    last_ms_ = millis();
-    if (xfer == xfer_ && total_len == total_ &&
-        std::memcmp(sha, sha_, 32) == 0) {
-        // Misma imagen que la de antes: se reanuda donde se quedó.
-        if (ready_) return State::READY;
-        if (!ensureBuf()) return State::ERROR;
-        failed_ = false;
-        diag::log("INFO", "node.firmware_update", "firmware_update.resumed", "offset=%u total_bytes=%u\n", static_cast<unsigned>(flushed_), static_cast<unsigned>(total_));
-        return State::ACCEPTED;
-    }
-
-    // Imagen distinta: lo anterior no sirve de nada.
-    freeBuf();
-    if (!ensureBuf()) return State::ERROR;
-    xfer_    = xfer;
-    total_   = total_len;
-    flushed_ = 0;
-    ready_   = false;
-    failed_  = false;
-    since_stat_ = 0;
-    std::memcpy(sha_, sha, sizeof(sha_));
-    saveProgress();
-    diag::log("INFO", "node.firmware_update", "firmware_update.image_accepted", "version=%s bytes=%u transfer_id=%08lX\n", version ? version : "?", static_cast<unsigned>(total_), static_cast<unsigned long>(xfer_));
-    return State::ACCEPTED;
-}
-
-State onData(uint32_t xfer, uint32_t offset, const uint8_t* data, size_t len) {
-    if (part_ == nullptr || failed_) return State::ERROR;
-    if (xfer != xfer_ || total_ == 0) return State::REJECTED;
-    if (ready_) return State::READY;
-    if (!ensureBuf()) return State::ERROR;
-
-    last_ms_ = millis();
-    const uint32_t esperado = flushed_ + staged_;
-
-    // Repetido: ya se tenía. Se confirma por dónde se va y no se toca nada.
-    if (offset + len <= esperado) return State::RECEIVING;
-    // Adelantado: hay un hueco. El emisor tiene que rebobinar.
-    if (offset > esperado) return State::GAP;
-
-    // Solapado por delante (un reenvío que empieza antes): se descarta lo que
-    // ya se tiene y se aprovecha el resto.
-    const uint32_t salto = esperado - offset;
-    data += salto;
-    len  -= salto;
-
-    if (esperado + len > total_) len = total_ - esperado;   // sobrante final
-
-    while (len > 0) {
-        const size_t hueco = kSector - staged_;
-        const size_t n = len < hueco ? len : hueco;
-        std::memcpy(buf_ + staged_, data, n);
-        staged_ += n;
-        data += n;
-        len  -= n;
-        if (staged_ == kSector && !flush()) {
-            failed_ = true;
-            diag::log("ERROR", "node.firmware_update", "firmware_update.partition_write_failed", "");
-            return State::ERROR;
-        }
-    }
-
-    since_stat_++;
-    if (flushed_ + staged_ >= total_) {
-        if (!flush()) { failed_ = true; return State::ERROR; }
-        freeBuf();
-        if (!verify()) {
-            diag::log("ERROR", "node.firmware_update", "firmware_update.image_verification_failed", "reason=sha256_mismatch");
-            reset();
-            return State::ERROR;
-        }
-        ready_ = true;
-        saveProgress();
-        diag::log("INFO", "node.firmware_update", "firmware_update.image_verified", "bytes=%u\n", static_cast<unsigned>(total_));
-        return State::READY;
-    }
-    return State::RECEIVING;
-}
-
-uint32_t written()  { return flushed_ + staged_; }
-uint32_t totalLen() { return total_; }
-bool receiving(uint32_t now_ms) { return xfer_ != 0 && !ready_ && !failed_ && now_ms - last_ms_ < 30000; }
-uint32_t xfer()     { return xfer_; }
-bool     ready()    { return ready_; }
-
-bool statusDue() {
-    if (since_stat_ < kStatusEvery) return false;
-    since_stat_ = 0;
-    return true;
 }
 
 bool adoptCompleted(uint32_t xfer, uint32_t total_len, const uint8_t sha[32]) {
-    if (part_ == nullptr || total_len == 0 || total_len > kMaxImageBytes) {
+    if (part_ == nullptr || total_len == 0 || total_len > kMaxImageBytes ||
+        total_len > part_->size) {
         return false;
     }
-    // Se suelta lo que hubiera a medias por el camino individual: la imagen
-    // que está en la partición es la de la difusión, y cualquier contabilidad
-    // anterior se refiere a bytes que ya no están.
-    free(buf_);
-    buf_ = nullptr;
-    staged_ = 0;
-
     xfer_    = xfer;
     total_   = total_len;
     std::memcpy(sha_, sha, 32);
-    flushed_ = total_len;      // entera en flash, nada pendiente de volcar
-    failed_  = false;
     ready_   = verify();       // la comprobación del sha decide, no la palabra
-    last_ms_ = millis();
-    saveProgress();
+    if (!saveProgress()) {
+        ready_ = false;
+        record(xfer_,sha_,Phase::VERIFY,Cause::STORAGE);
+    } else if (!ready_) record(xfer_,sha_,Phase::VERIFY,verify_cause_);
+    else record(xfer_,sha_,Phase::VERIFY,Cause::VERIFIED);
     return ready_;
 }
 
 bool verify() {
+    verify_cause_ = Cause::NO_IMAGE;
     if (part_ == nullptr || total_ == 0) return false;
+    verify_cause_ = Cause::HASH_ENGINE;
 
     // Se relee de la flash en vez de recordar lo escrito: lo que va a arrancar
     // es lo que hay en la partición, y eso es lo que hay que comprobar.
@@ -348,56 +232,39 @@ bool verify() {
     for (uint32_t off = 0; ok && off < total_; off += sizeof(trozo)) {
         const size_t n = (total_ - off) < sizeof(trozo) ? (total_ - off)
                                                         : sizeof(trozo);
-        ok = esp_partition_read(part_, off, trozo, n) == ESP_OK &&
-             mbedtls_md_update(&ctx, trozo, n) == 0;
+        if (esp_partition_read(part_, off, trozo, n) != ESP_OK) {
+            verify_cause_ = Cause::FLASH_READ;
+            ok = false;
+        } else ok = mbedtls_md_update(&ctx, trozo, n) == 0;
     }
     uint8_t calc[32] = {0};
     ok = ok && mbedtls_md_finish(&ctx, calc) == 0;
     mbedtls_md_free(&ctx);
-    return ok && std::memcmp(calc, sha_, sizeof(calc)) == 0;
+    if (!ok) return false;
+    verify_cause_ = Cause::SHA_MISMATCH;
+    return std::memcmp(calc, sha_, sizeof(calc)) == 0;
 }
 
 Result install(uint32_t xfer, const uint8_t sha[32]) {
-    if (part_ == nullptr || !ready_ || total_ == 0) return Result::NO_IMAGE;
-    if (xfer != xfer_) return Result::NO_IMAGE;
-    if (std::memcmp(sha, sha_, 32) != 0) return Result::SHA_MISMATCH;
+    auto fail = [&](Result result, Cause cause) {
+        record(xfer,sha,Phase::INSTALL,cause);
+        return result;
+    };
+    if (part_ == nullptr || !ready_ || total_ == 0 || xfer != xfer_)
+        return fail(Result::NO_IMAGE,Cause::NO_IMAGE);
+    if (std::memcmp(sha, sha_, 32) != 0)
+        return fail(Result::SHA_MISMATCH,Cause::SHA_MISMATCH);
     // Se reverifica contra la flash aunque ya se hiciera al completar: entre
     // una cosa y la otra pueden haber pasado horas y un reinicio.
-    if (!verify()) return Result::SHA_MISMATCH;
-    if (esp_ota_set_boot_partition(part_) != ESP_OK) return Result::SET_FAILED;
+    if (!verify()) return fail(Result::SHA_MISMATCH,verify_cause_);
+    strncpy(boot_target_,part_->label,sizeof(boot_target_)-1);
+    if (!record(xfer,sha,Phase::BOOT,Cause::INSTALLING))
+        return fail(Result::SET_FAILED,Cause::STORAGE);
+    if (esp_ota_set_boot_partition(part_) != ESP_OK)
+        return fail(Result::SET_FAILED,Cause::SET_FAILED);
     clearProgress();
     diag::log("INFO", "node.firmware_update", "firmware_update.restarting", "boot_partition=%s restarting=true\n", part_->label);
     return Result::INSTALLING;
-}
-
-void reset() {
-    freeBuf();
-    xfer_ = 0; total_ = 0; flushed_ = 0; staged_ = 0;
-    ready_ = false; failed_ = false; since_stat_ = 0;
-    std::memset(sha_, 0, sizeof(sha_));
-    clearProgress();
-}
-
-void expireIfIdle(uint32_t now_ms) {
-    if (xfer_ == 0 || ready_ || buf_ == nullptr) return;
-    if (now_ms - last_ms_ < kIdleTimeoutMs) return;
-
-    // Una pausa larga NO cancela la transferencia, solo suelta la RAM.
-    //
-    // El canal de configuración sí abandona al quedarse parado, porque allí lo
-    // recibido vive en memoria y esa memoria hace falta para otras cosas. Aquí
-    // vive en una partición de flash que no se usa para nada más, así que
-    // tirarlo no libera nada y en cambio cuesta horas de radio rehacerlo.
-    //
-    // Y la pausa larga es el caso NORMAL, no la excepción: con una ventana
-    // nocturna de 23:00 a 06:00 hay diecisiete horas de silencio cada día.
-    // Caducar aquí haría que la transferencia fallase todas las mañanas.
-    //
-    // Solo se suelta el búfer intermedio, y con él los bytes que aún no habían
-    // llegado a flash: menos de un sector, que el emisor reenvía al reanudar
-    // porque el número que se le contesta es el que sí está escrito.
-    freeBuf();
-    diag::log("INFO", "node.firmware_update", "firmware_update.transfer_paused", "bytes_written=%u total_bytes=%u\n", static_cast<unsigned>(flushed_), static_cast<unsigned>(total_));
 }
 
 bool pendingVerify() {

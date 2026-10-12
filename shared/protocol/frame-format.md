@@ -45,7 +45,7 @@ La segunda regla expresa la intención original, pero las revisiones históricas
 
 **v3.6 (2026-07-31)**: lectura del `config.json` por LoRa (§17.5), con CONFIG_GET (`0x17`) y CONFIG_DATA (`0x18`). Cierra el canal en los dos sentidos: hasta aquí solo se podía escribir. Hace falta porque el catálogo del NODE_REGISTER **no** es la configuración: lleva el nombre y la unidad de cada lectura, pero ni la función Modbus, ni la dirección, ni el tipo, ni la escala, ni los tiempos, ni el bloque mesh, ni el de NB-IoT. Un config reconstruido con lo que el gateway sabe sería válido, el nodo lo aplicaría y seguiría registrándose, así que la ventana de prueba de §17.6 lo confirmaría: el nodo quedaría vivo, en línea y midiendo nada. Bump aditivo.
 
-**v3.7 (2026-07-31)**: actualización de firmware por LoRa (§18), con FW_OFFER (`0x19`), FW_DATA (`0x1A`), FW_STATUS (`0x1B`), FW_INSTALL (`0x1C`) y FW_RESULT (`0x1D`). La entrega es secuencial y no lleva mapa de fragmentos: el mapa de 32 bits del canal de configuración no escala a los 2485 fragmentos de una imagen, y la escritura en la partición es secuencial de todos modos, así que un único número (por qué byte va el nodo) resuelve a la vez el progreso, la reanudación tras un reinicio y la detección de huecos. Bump aditivo.
+**v3.7 (2026-07-31)**: incorpora la actualización de firmware por LoRa. La transferencia vigente se describe en §20 y la aceptación e instalación en §18.
 
 **v3.8 (2026-07-31)**: ventana de silencio (§19), con la trama QUIET (`0x1E`). El gateway anuncia un intervalo durante el cual los nodos retienen su cola de transmisión, para poder emitir algo a toda la red sin que se lo tapen entre ellos. Trama propia y no un campo del BEACON, porque el payload del beacon es de tamaño fijo y validado: ensancharlo dejaría a un nodo anterior descartando todos los beacons, sin hora ni padre, huérfano en 90 s. Bump aditivo.
 
@@ -133,27 +133,38 @@ Los campos `hop_src`, `hop_dst`, `origin_id` y `dest_id` comparten el mismo espa
 | --- | --- | --- | --- |
 | `0x00` | TELEMETRY | uplink | Valores float32 + estado Modbus por read. Ver §3. |
 | `0x01` | ACK | downlink | Referencia a `seq` original + estado. Ver §4. |
-| `0x02` | HEARTBEAT | uplink | Sin payload. Señaliza "vivo" sin lecturas. Ver §6. |
+| `0x02` | HEARTBEAT | uplink | Tiempo de transmisión acumulado (4 B); el supernodo añade estado celular y calidad de señal (6 B). Ver §6. |
 | `0x04` | NODE_REGISTER | uplink | Registro del nodo al arrancar: fw, catálogo de reads y writes. Ver §13. |
 | `0x05` | WELCOME | downlink | Respuesta al registro: hora y estado. Ver §13. |
 | `0x06` | MODBUS_DEBUG | uplink | Transacción Modbus fallida en crudo (v3.2). Ver §15. |
 | `0x07` | NODE_HEALTH | uplink | Estado de la radio del nodo y recuperaciones (v3.3). Ver §16. |
+| `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
+| `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
+| `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
 | `0x13` | CONFIG_PUSH | downlink | Un fragmento del `config.json` (v3.5). Ver §17. |
 | `0x14` | CONFIG_ACK | uplink | Mapa de fragmentos ya recibidos (v3.5). Ver §17. |
 | `0x15` | CONFIG_COMMIT | downlink | Orden de aplicar lo reensamblado (v3.5). Ver §17. |
 | `0x16` | CONFIG_RESULT | uplink | Veredicto de la aplicación (v3.5). Ver §17. |
 | `0x17` | CONFIG_GET | downlink | Pide a un nodo su `config.json` (v3.6). Ver §17.5. |
 | `0x18` | CONFIG_DATA | uplink | Un fragmento del `config.json` del nodo (v3.6). Ver §17.5. |
-| `0x19` | FW_OFFER | downlink | Anuncio de una imagen de firmware (v3.7). Ver §18. |
-| `0x1A` | FW_DATA | downlink | Un trozo de la imagen (v3.7). Ver §18.2. |
 | `0x1B` | FW_STATUS | uplink | Por dónde va el nodo y en qué estado (v3.7). Ver §18.3. |
 | `0x1C` | FW_INSTALL | downlink | Orden de instalar la imagen subida (v3.7). Ver §18.4. |
 | `0x1D` | FW_RESULT | uplink | Veredicto tras arrancar con ella (v3.7). Ver §18.5. |
 | `0x1E` | QUIET | downlink (broadcast) | Reserva el aire durante una ventana (v3.8). Ver §19. |
-| `0x10` | BEACON | downlink (broadcast) | Mantenimiento del árbol de rutas. Ver §7. |
-| `0x11` | SN_REQUEST | broadcast local | Búsqueda de supernodo con salida NB-IoT. Ver §8. |
-| `0x12` | SN_OFFER | unicast local | Respuesta de un supernodo disponible. Ver §8. |
-| `0x1F`-`0x7F` | reservados |  | Disponibles para extensiones futuras. |
+| `0x1F` | FW_BCAST_OFFER | downlink, dirigido o broadcast | Anuncio de imagen, parámetros de fragmentación y reparación. Ver §20.6 y §20.12. |
+| `0x20` | FW_BCAST_DATA | downlink, dirigido o broadcast | Fragmento original o mezcla de reparación. Ver §20.7. |
+| `0x21` | FW_BCAST_POLL | downlink | Solicitud del mapa de fragmentos recibidos. Ver §20.8. |
+| `0x22` | FW_BCAST_MAP | uplink | Parte del mapa de fragmentos recibidos. Ver §20.9. |
+| `0x23` | NODE_PING | downlink | Consulta de disponibilidad para una operación. Ver §22.1. |
+| `0x24` | NODE_PONG | uplink | Disponibilidad y motivo de ocupación. Ver §22.2. |
+| `0x25` | TELEMETRY_ROUTE | uplink | Telemetría con recorrido observado y ruta prevista de custodia. Ver §23, recorrido observado. |
+| `0x26` | SN_ROUTE_REQUEST | broadcast con TTL limitado | Búsqueda de salida por supernodo mediante varios saltos. Ver §23, recorrido observado. |
+| `0x27` | SN_ROUTE_OFFER | retorno por ruta inversa | Oferta de supernodo con la ruta descubierta. Ver §23, recorrido observado. |
+| `0x28` | NODE_MAINTENANCE | downlink | Reinicio o puesta a cero de contadores de salud. Ver §24. |
+| `0x29` | NODE_MAINTENANCE_RESULT | uplink | Resultado de mantenimiento y diagnóstico del nodo. Ver §24. |
+| `0x2A` | FW_REPORT | uplink | Último resultado persistente de actualización. Ver §18.6. |
+| `0x2B` | FW_REPORT_ACK | downlink | Acuse del informe guardado por el gateway. Ver §18.6. |
+| `0x2A`-`0x7F` | reservados |  | Disponibles para extensiones futuras. |
 | `0x80`-`0xFF` | propios del despliegue |  | Espacio para custom sin colisionar con el estándar. |
 
 ## 2. Red mesh en árbol
@@ -370,7 +381,7 @@ Esta sección formaliza el algoritmo que el nodo (o supernodo) ejecuta para llev
 Cada nodo mantiene una **cola de tramas no confirmadas**. Cada entrada guarda:
 
 - `seq` de la trama.
-- Timestamp de envío y contador de reintentos.
+- Estado de transmisión local, instante de su confirmación y contador de reintentos.
 - Payload completo (`ts` de captura + valores serializados, para poder reempaquetar en batch NB-IoT o reenviar a un supernodo si toca). El `ts` de captura viaja tal cual se fijó al construir la trama (§3.1): un reintento o una entrega en custodia nunca lo recalcula, aunque el nodo haya sincronizado su reloj entre medias.
 
 La cola tiene tamaño máximo (recomendado: 256 entradas). Si se llena, se descarta la entrada más antigua (FIFO con sobrescritura).
@@ -389,11 +400,15 @@ Cuando llega un ACK al nodo:
 
 ### 5.3 Timeout, reintentos y escalada
 
-Por cada trama enviada se arranca un temporizador de `lora.ack_timeout_ms`. El valor configurado debe cubrir la ruta completa: como referencia, al menos `2 × mesh.max_ttl × ToA` más el margen de procesamiento (con los tamaños de §9 y `max_ttl = 4`, el valor de ejemplo de 5000 ms es holgado).
+Desde el firmware 0.0.78, el temporizador de `lora.ack_timeout_ms` empieza al recibir `TXP2P DONE` del módulo para la telemetría propia correspondiente. La aceptación por el driver, la espera en cola y los intentos CAD sin transmisión no consumen ese plazo. El valor configurado debe cubrir la ruta completa: como referencia, al menos `2 × mesh.max_ttl × ToA` más el margen de procesamiento (con los tamaños de §9 y `max_ttl = 4`, el valor de ejemplo de 5000 ms es holgado).
+
+La confirmación local reserva una guarda de recepción de 500 ms cuando el ACK está habilitado. Se aplica a nuevos envíos, reintentos y entregas desde outbox o en custodia. No acorta una retención de cola más larga ya existente. Las tramas de otros emisores retransmitidas como relay no modifican los temporizadores de muestras propias. `TXP2P DONE` confirma transmisión local, no recepción remota; esta última requiere el ACK de §4.
+
+Un fallo local del módulo, la ausencia de DONE, el agotamiento de los intentos CAD o el descarte de la cola durante una recuperación dejan la entrada disponible para reintentar o retener, sin esperar un ACK imposible. Si el driver rechaza un reintento por falta de capacidad, se aplaza sin consumir el contador. Una muestra nueva rechazada se conserva en la outbox. Una confirmación local tardía no recrea entradas ya liberadas por ACK.
 
 La escalada al vencer el timeout:
 
-1. Si la trama lleva menos de `lora.max_retries` reintentos: se retransmite con el **mismo `seq`** y se rearma el temporizador.
+1. Si la trama lleva menos de `lora.max_retries` reintentos: se solicita retransmisión con el **mismo `seq`** y los mismos datos. Si el driver la acepta, se espera su confirmación local para rearmar el temporizador del ACK con el backoff correspondiente.
 2. Agotados los reintentos, la entrada queda "no confirmada": se incrementa el contador de fallo de padre (`mesh.parent_missed_frames`, dispara la reselección de §2.2) y la muestra pasa al buzón de reenvío, del que sale por el respaldo NB-IoT propio si el nodo lo tiene, o por la búsqueda de supernodo de §8 si no (ver `node-config.md` §4.4).
 
 Las tramas no confirmadas **permanecen en la cola** hasta que: (a) lleguen tarde sus ACKs, (b) se vacíen por el batch NB-IoT propio, (c) se entreguen en custodia a un supernodo, o (d) se purguen por límite de tamaño de cola.
@@ -421,7 +436,7 @@ tx_ms
 
 `tx_ms` es el **aire acumulado del transmisor desde el boot**, en milisegundos: la suma del Time-on-Air de cada trama realmente transmitida (el conteo ocurre en el evento de TX completada; los intentos abortados por CAD no ocuparon aire y no cuentan). Es la medida del duty cycle **en el lugar que define EN 300 220-1**: `Ton_cum / Tobs` por equipo transmisor, con ventana de observación de 1 hora. El contador es efímero (sin persistencia, como el `seq`): el receptor totaliza por **deltas** entre reportes consecutivos, con lo que los reportes perdidos no corrompen nada (el siguiente delta cubre el hueco, reintentos invisibles incluidos) y un delta negativo delata el reinicio del nodo (nueva línea base). El gateway lleva su propio contador equivalente para lo que él emite (beacons, ACKs, WELCOME).
 
-Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay). Desde v3.1 **no se confirma**: sin ACK, sin reintentos y sin paso por la cola de pendientes; la tolerancia a pérdidas ya la da el esquema de deltas. Cadencia: fija, cada 60 s, solo con registro completado y padre válido.
+Direccionamiento idéntico a TELEMETRY (`dest_id = 0xFF`, vía padre, con relay). Desde v3.1 **no se confirma**: sin ACK, sin reintentos y sin paso por la cola de pendientes; la tolerancia a pérdidas ya la da el esquema de deltas. Cadencia periódica de 60 s, solo con registro completado y padre válido. El primer informe y los cambios de estado celular adelantan el envío, con un máximo de un intento cada 5 s. Un fallo al encolar no consume el periodo de 60 s. El heartbeat se mantiene durante una recepción de firmware.
 
 Tamaño: **17 bytes** (25 con seguridad v2.2). Coste de aire del propio reporte: ~50 ms/min a SF7, ~0,08 % de duty, y queda contado en el contador que transporta.
 
@@ -442,7 +457,7 @@ El registro celular también se consulta cada 60 s, incluso durante los intentos
 
 Los bits 2 y 3 se incorporan de forma aditiva el 2026-09-05, sin cambiar la longitud del heartbeat ni el significado de los bits 0 y 1. Un visor anterior no distingue desconocido de desconectado. La consulta refleja el estado conocido por el módem; una pérdida silenciosa del enlace puede detectarse después, mediante el mantenimiento de la sesión MQTT. La semántica de `disc_state` está definida en el [manual MQTT(S) del SIM7028, §3.2.9](https://files.waveshare.com/wiki/SIM7028-NB-IoT-HAT/SIM7028%20Series_MQTT%28S%29_Application%20Note_V1.03.pdf). Queda pendiente comprobar la respuesta del módem y los tiempos de detección en el banco.
 
-El receptor distingue por longitud del payload: 4 bytes es un nodo normal (solo `tx_ms`), 6 un supernodo con su estado. Un nodo que jamás manda los 2 bytes no es supernodo, así que el visor solo pinta el chip NB-IoT a quien los reporta. La cadencia es la del propio heartbeat (cada 60 s), suficiente para un estado de conectividad de respaldo. El estado NB-IoT y MQTT del supernodo también viaja a la nube por su propia telemetría MQTT; estos 2 bytes son la vía LoRa, para que el gateway lo conozca aunque no observe el broker cloud.
+El receptor distingue por longitud del payload: 4 bytes es un nodo normal (solo `tx_ms`), 6 un supernodo con su estado. Un nodo que jamás manda los 2 bytes no es supernodo, así que el visor solo pinta el chip NB-IoT a quien los reporta. Se utiliza la cadencia periódica del heartbeat y el adelanto por cambio de estado. El estado NB-IoT y MQTT del supernodo también viaja a la nube por su propia telemetría MQTT; estos 2 bytes son la vía LoRa, para que el gateway lo conozca aunque no observe el broker cloud.
 
 ## 7. Trama BEACON (downlink broadcast, `frame_type = 0x10`)
 
@@ -607,7 +622,7 @@ Al recibir una trama, el receptor (gateway o nodo) la procesa en este orden y la
 4. El CRC16 sobre los bytes `0..(10 + payload_length)` no coincide con los dos bytes finales.
 5. El major del `schema_version` no coincide con el suyo.
 6. `hop_dst` no es ni `0x00` ni el id propio. Descarte silencioso: es tráfico ajeno legítimo de la misma red.
-7. El `frame_type` está en el rango reservado (`0x13`-`0x7F`) y no lo entiende.
+7. El `frame_type` no está implementado por el receptor. El rango `0x2A`-`0x7F` permanece reservado; los tipos implementados se recogen en §1.6.
 8. El payload no encaja en tamaño con el `frame_type` declarado (TELEMETRY con `payload_length < 9` o con `payload_length - 4` no múltiplo de 5 (v3.2: 4 B de valor + 1 B de estado por read), ACK con `payload_length != 3`, BEACON con `payload_length != 7`, WELCOME con `payload_length != 5`, SN_REQUEST con `payload_length != 2`, SN_OFFER con `payload_length ∉ {2, 6}` (2 = legado sin hora, 6 = con `epoch`, v2.3), HEARTBEAT con `payload_length ∉ {0, 4}` (0 = legado v3.0, 4 = con `tx_ms`, v3.1), MODBUS_DEBUG con `payload_length < 4` o `payload_length != 4 + req_len + resp_len` (§15), NODE_REGISTER con payload menor que el mínimo de §13.2).
 9. La trama requiere relay (`dest_id` no propio) y `ttl == 0` o el receptor no tiene `mesh.relay_enabled` o no tiene padre / ruta inversa.
 10. Para TELEMETRY en el gateway: el número de `reads` derivado de `(payload_length - 4) / 5` no coincide con el `len(reads[])` del catálogo del `origin_id` (ACK con `status = DECODE_ERROR`).
@@ -783,7 +798,9 @@ Tamaño: **18 bytes**.
 | 1 | `epoch` del WELCOME | todos | al registrarse, en cada boot |
 | 2 | `epoch` del BEACON | todos | resincronización continua cada periodo de beacon |
 | 3 | `epoch` del SN_OFFER | nodos huérfanos sin NB-IoT | al solicitar supernodo, también con cola vacía (§8.1) |
-| 4 | NTP sobre NB-IoT | solo supernodos | **activo desde el arranque** si no hay hora por las vías 1-2: primer intento en cuanto el módem está registrado, reintentos al ritmo del cooldown del servicio NB-IoT (5 min) mientras `synced == false`. |
+| 4 | NTP sobre NB-IoT | solo supernodos | **activo desde el arranque** si no hay hora por las vías 1-2: primer intento cuando el servicio NB-IoT está listo, con MQTT conectado; reintentos al ritmo del cooldown del servicio NB-IoT (5 min) mientras `synced == false`. |
+
+Desde el firmware 0.0.75, la solicitud NTP y la gestión de lotes celulares se ejecutan aunque la inicialización LoRa falle. El supernodo conserva la condición de hora válida y la espera `gateway_wait_ms` antes de muestrear autónomamente. Si la radio no está disponible, la lectura se guarda en la outbox y puede salir por NB-IoT; no se descarta por el estado del driver. La inicialización LoRa se reintenta 30 s después de cada intento fallido, con diagnóstico por etapa en el monitor serie. Esto no modifica el formato de las tramas ni el procedimiento de registro con WELCOME.
 
 El reloj local corre sobre el oscilador del nodo como `epoch_offset` respecto a `millis()`; cada fuente de las de arriba lo corrige. La hora de red LTE por `AT+CCLK?` (NITZ) queda **eliminada** del diseño: dependía de que el operador la implementara y en banco nunca la entregó.
 
@@ -1134,67 +1151,27 @@ Quitada la cita, el procedimiento se reduce a esto, y no cambia el formato de ni
 
 **Cierre.** Al cerrar la operación, los parámetros nuevos se escriben en la configuración del gateway y pasan a ser el estado normal de la instalación. Si quedan nodos sin migrar, la respuesta honesta es que ahí hace falta cable, y el panel debe decirlo con nombres.
 
-## 18. Actualización de firmware por LoRa (v3.7)
+## 18. Aceptación e instalación de firmware por LoRa
 
-La imagen de aplicación del nodo son unos 520 kB, 545 veces un `config.json`. Por radio eso son 2485 fragmentos y unos 16 minutos de tiempo de aire, que respetando el ciclo de trabajo se reparten en varias horas. El canal está pensado para eso: subir de fondo durante una ventana nocturna, cediendo el aire a la telemetría, y dejar la instalación para una orden aparte.
+La imagen se recibe mediante FW_BCAST (§20), tanto en una transferencia dirigida a un nodo como por difusión. El módulo `fwbcast` escribe los fragmentos y entrega la imagen completa a `fwota`, que verifica el hash y conserva los metadatos necesarios para instalarla. La instalación requiere una orden separada.
 
-### 18.0 Entrega secuencial, y por qué no hay mapa
-
-El canal de configuración usa un mapa de bits de lo recibido (§17.2), que permite entregar en cualquier orden y reparar huecos con una sola trama. Aquí no vale: son 32 bits para 32 fragmentos y una imagen tiene 2485. Ampliar el mapa tampoco tendría sentido, porque la escritura en la partición del ESP32 es secuencial de todos modos.
-
-Prescindir del mapa deja el estado en un único número, por qué byte va el nodo, y ese número resuelve tres cosas a la vez:
-
-- **Progreso**: es directamente lo que hay que enseñar.
-- **Reanudación**: lo recibido está en flash, no en memoria, así que tras un reinicio basta con continuar en ese byte. Una transferencia de horas los va a ver.
-- **Detección de huecos**: si llega un fragmento con desplazamiento mayor del esperado, falta algo en medio. El nodo contesta el desplazamiento que sí tiene y el emisor rebobina. No hacen falta rondas de reenvío ni listas de pendientes.
-
-Una pausa larga no cancela nada. El emisor cede el aire y respeta la ventana horaria, así que con una ventana nocturna hay diecisiete horas de silencio cada día: caducar la transferencia por inactividad la haría fallar todas las mañanas. Lo recibido vive en una partición que no se usa para nada más, de modo que conservarlo no retiene ningún recurso. Lo único que el nodo suelta tras una pausa es el búfer intermedio de RAM, y con él los bytes que aún no habían llegado a flash, menos de un sector, que el emisor reenvía solo al reanudar.
-
-El nodo escribe en la partición OTA dormida y arranca desde la otra, así que en ningún momento se toca el firmware que está corriendo. Lo que se envía es la aplicación sola, no el binario completo que se flashea por USB: ese lleva además gestor de arranque y tabla de particiones, que en caliente no se tocan, y es la mitad de grande.
-
-### 18.1 FW_OFFER (downlink, `frame_type = 0x19`)
-
-Anuncia la imagen antes de mandar nada. Medio mega a un nodo que la va a rechazar sería el peor uso posible del aire.
-
-| Offset | Campo | Tamaño | Descripción |
-| --- | --- | --- | --- |
-| 0 | `xfer_id` | 4 | Los 4 primeros bytes del sha256 de la imagen. Dos ofertas de la misma imagen comparten identificador, y el nodo reanuda en vez de reempezar. |
-| 4 | `total_len` | 4 | Tamaño de la imagen en bytes. |
-| 8 | `sha256` | 32 | Hash de la imagen completa. |
-| 40 | `version` | 0-32 | Versión del firmware ofrecido, sin terminador. |
-
-El sha completo viaja aquí y en el FW_INSTALL, no en cada trozo: repetir 32 bytes en 2485 fragmentos se comería el 15 % del aire.
-
-La versión permite al nodo rechazar lo que ya tiene o algo anterior, con la misma comparación numérica que usa el visor para no ofrecer un binario que haría retroceder al nodo. Ante una versión que no se puede interpretar, la oferta se acepta: decide el operador, que sabe más que esa comparación.
-
-### 18.2 FW_DATA (downlink, `frame_type = 0x1A`)
-
-| Offset | Campo | Tamaño | Descripción |
-| --- | --- | --- | --- |
-| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
-| 4 | `offset` | 4 | Desplazamiento del trozo dentro de la imagen. |
-| 8 | `data` | 1-213 | Los bytes. |
-
-El desplazamiento es de 32 bits y no de 16 como en CONFIG_PUSH (§17.1), porque 520 kB no caben en 16. A cambio desaparecen el índice y el total de fragmentos, que con 2485 tampoco cabrían en un byte y que la entrega secuencial no necesita.
+Los identificadores `0x19` y `0x1A` no se utilizan. No se reasignan a otras funciones. Se conserva la numeración de los apartados siguientes para mantener sus referencias.
 
 ### 18.3 FW_STATUS (uplink, `frame_type = 0x1B`)
 
+Responde a una oferta FW_BCAST dirigida al nodo. No se emite como confirmación periódica de fragmentos ni como respuesta a una oferta broadcast. Los mapas FW_BCAST_MAP indican qué fragmentos se han recibido.
+
 | Offset | Campo | Tamaño | Descripción |
 | --- | --- | --- | --- |
-| 0 | `xfer_id` | 4 | Identificador de la transferencia. |
-| 4 | `written` | 4 | Bytes ya escritos en la partición, que es por donde debe continuar el emisor. |
-| 8 | `state` | 1 | Ver tabla. |
+| 0 | `xfer_id` | 4 | Identificador de la oferta recibida. |
+| 4 | `written` | 4 | Cero en la respuesta vigente; se conserva el campo para mantener el formato. |
+| 8 | `state` | 1 | Aceptación o rechazo de la oferta. |
 
 | Valor | Estado | Significado |
 | --- | --- | --- |
-| `0x00` | ACCEPTED | Oferta aceptada, listo para recibir desde `written`. |
-| `0x01` | RECEIVING | Progreso normal. |
-| `0x02` | GAP | Llegó un fragmento adelantado: rebobinar a `written`. |
-| `0x03` | READY | Imagen completa y sha256 verificado, a la espera de la orden. |
-| `0x04` | REJECTED | Oferta rechazada (ya se tiene esa versión, o una posterior). |
-| `0x05` | ERROR | Fallo escribiendo o abriendo la partición. |
-
-El nodo no confirma cada trozo: serían 2485 subidas de aire para nada. Emite un FW_STATUS cada 32 fragmentos, uno inmediato ante un hueco, y uno final al completar y verificar.
+| `0x00` | ACCEPTED | Oferta aceptada. |
+| `0x04` | REJECTED | Oferta rechazada. |
+| `0x05` | ERROR | Fallo al preparar la recepción. |
 
 ### 18.4 FW_INSTALL (downlink, `frame_type = 0x1C`)
 
@@ -1230,6 +1207,10 @@ La segunda la pone el firmware, y consiste en **aplazar** esa confirmación. El 
 
 Si la ventana vence sin registro, el nodo pide la reversión y reinicia con la imagen anterior. El registro de salud del nodo (§16) anota instalaciones, confirmaciones y reversiones.
 
+El visor distingue la versión en ejecución de la confirmación de arranque. Si el catálogo registra, después de la orden de instalación, la identidad completa solicitada con su sufijo de compilación, se permite actualizar otro nodo. La instalación original permanece pendiente hasta recibir el resultado explícito de arranque por FW_REPORT o FW_RESULT; ni el registro de versión ni el vencimiento del plazo sustituyen esa confirmación. Sin evidencia de ejecución de la imagen solicitada, la instalación vence como fallida tras 600 s.
+
+Una operación fallida o cancelada permite reenviar la imagen disponible. Si la recepción actual resulta incierta, se ofrece primero una comprobación independiente, sin instalar ni reiniciar. Para habilitar la instalación se exige recepción completa, verificación satisfactoria de la imagen y, tras un fallo, una comprobación posterior al fallo. Antes de emitir FW_INSTALL se consulta de nuevo el mapa. Se distingue una respuesta incompleta de la ausencia de respuesta durante 30 s; esta última no demuestra que el nodo haya perdido la imagen.
+
 Orden entre las dos ventanas cuando coinciden: primero la de configuración, porque esa se revierte con un simple reinicio, mientras que revertir una imagen exige que la imagen llegue a ejecutarse.
 
 ### 18.7 Reparto del aire
@@ -1237,6 +1218,50 @@ Orden entre las dos ventanas cuando coinciden: primero la de configuración, por
 El emisor es el consumidor de menor prioridad de la red. Lleva un presupuesto de aire en ventana deslizante de una hora (§17.6) y se para dejando un margen reservado, de forma que la telemetría, los ACK y los beacons nunca compitan con la subida. Además respeta una ventana horaria, pensada para que la transferencia ocurra de noche.
 
 La restricción que decide hasta dónde escala esto no es el tamaño de la imagen sino el ACK que el gateway emite por cada telemetría, que crece con el número de nodos y con la frecuencia de muestreo. Con un intervalo de 5 segundos, el gateway agota su propio presupuesto a partir de ocho nodos sin haber enviado un solo byte de firmware; con un intervalo de un minuto, veinte nodos siguen dejando sitio para una imagen por noche.
+
+
+### 18.6 Informe persistente de actualización
+
+Desde el firmware 0.0.71, FW_REPORT (`0x2A`) conserva el último resultado de recepción, verificación, instalación o arranque. Se mantiene FW_RESULT para compatibilidad. La cabecera y el cifrado de red no cambian. El informe se guarda en `/fwreport.json` mediante temporal y renombrado, separado del mapa de recepción. Un resultado posterior sustituye al anterior; no se conserva un historial completo de incidentes en el nodo.
+
+El payload de FW_REPORT tiene 46 bytes. Los enteros multibyte se codifican en little-endian.
+
+| Offset | Bytes | Campo |
+| --- | --- | --- |
+| 0 | 4 | Identificador del informe, distinto de cero |
+| 4 | 4 | Identificador de transferencia |
+| 8 | 1 | Fase: 1 recepción, 2 verificación, 3 instalación, 4 arranque |
+| 9 | 1 | Código de resultado |
+| 10 | 2 | Originales pendientes al detectar el resultado |
+| 12 | 2 | Originales totales; cero si el resultado no incluye contadores |
+| 14 | 32 | SHA-256 completo de la imagen |
+
+| Código | Resultado observado |
+| --- | --- |
+| 0 | Imagen de arranque confirmada |
+| 1 | No existe una imagen instalable para la orden |
+| 2 | El hash de la imagen no coincide |
+| 3 | Fallo al seleccionar la partición de arranque |
+| 4 | Reversión, valor conservado del resultado de instalación |
+| 5 | Instalación preparada; arranque pendiente |
+| 6 | Recepción incompleta sin actividad durante 600 segundos |
+| 7 | Fallo de escritura en flash |
+| 8 | Fallo de borrado de flash |
+| 9 | No se pudo reservar memoria |
+| 10 | No se pudo persistir el estado |
+| 11 | Oferta no válida o partición no disponible |
+| 12 | Fallo al confirmar la imagen de arranque |
+| 13 | Fallo al leer flash durante la verificación |
+| 14 | Fallo al calcular el hash |
+| 15 | Imagen recibida y verificada |
+| 16 | Arranque con la partición anterior tras preparar la instalación |
+| 17 | La imagen nueva no se registró en la red dentro de su ventana de prueba |
+
+El código 16 no atribuye una causa física: puede observarse tras una reversión automática o un corte antes de activar la imagen. La falta de fragmentos no se interpreta como interferencia. El código 6 conserva el mapa y permite reanudar. Si falla el almacenamiento del propio informe, se conserva en RAM mientras el nodo siga encendido; no se garantiza su recuperación tras un corte.
+
+Con radio operativa, registro y padre disponible, se repite el último informe pendiente cada 60 segundos hasta recibir FW_REPORT_ACK (`0x2B`). Su payload contiene el identificador de informe (4 bytes) y el identificador de transferencia (4 bytes). El nodo solo acepta el acuse del gateway para ambos identificadores coincidentes. El gateway guarda el informe en SQLite antes de emitir el acuse; una repetición vuelve a confirmarse. El último informe se consulta en la API de firmware y se muestra en la tabla de la GUI, incluso sin una operación activa.
+
+La selección de partición requiere haber persistido primero el intento de instalación. Al reiniciar se conserva la asociación con la transferencia y el hash. Solo el resultado de esa misma imagen puede cerrar la instalación correspondiente. Un fallo de verificación conocido bloquea tanto la GUI como las peticiones de instalación de la API y del servicio. Los firmwares anteriores no generan estos informes ni reconstruyen retroactivamente el motivo de sus fallos.
 
 ## 19. Ventana de silencio (v3.8)
 
@@ -1298,27 +1323,19 @@ Por eso el recorte va en el origen. El emisor no pregunta el intervalo de muestr
 
 El anuncio se hace con un margen antes de que la ventana empiece, para que recorra la malla entera: si callaran los nodos cercanos y los lejanos no, se tendría la mitad del coste sin la mitad del beneficio. Durante ese margen el anuncio se repite cada pocos segundos, porque no hay confirmación y la única defensa contra un anuncio perdido es repetirlo. Una vez empezada la ventana, deja de anunciarse.
 
-## 20. Difusión de firmware (v4.0)
+## 20. Transferencia de firmware mediante FW_BCAST
 
-La entrega de §18 va nodo a nodo. Con la red en la mesa eso basta, pero el coste crece con el número de nodos: la imagen entera por cada uno. Medido con el ciclo de trabajo del 8 % mandando, veinte nodos son 65 horas de emisión, y esa cifra no es un inconveniente sino una imposibilidad práctica.
+El servicio del gateway envía la imagen mediante FW_BCAST_OFFER y FW_BCAST_DATA. La recepción se comprueba con FW_BCAST_POLL y FW_BCAST_MAP. El mismo transporte admite un destino individual o broadcast.
 
-La difusión emite la imagen **una vez para todos**. El suelo son 3,2 horas, que es lo que cuesta emitir 2498 fragmentos, y ese suelo no depende del número de nodos. Todo lo que aparece por encima es reparación.
+### 20.0 Difusión y entrega dirigida
 
-### 20.0 A quién alcanza, y por qué no reemplaza a §18
+La difusión alcanza a los nodos en clase C que reciben directamente al gateway. Con un destino individual, las tramas pueden reenviarse por la ruta descendente. La GUI web utiliza esta modalidad para enviar una imagen a un solo nodo (§20.12).
 
-**Solo alcanza a nodos en clase C** (§21.6). Un nodo que solo escucha tras haber hablado no puede recibir una emisión para todos, porque su ventana no coincide con la de nadie. El panel debe decirlo antes de emitir, no después.
+La recepción por índices corresponde a `fwbcast`; la comprobación de la imagen, instalación y reversión corresponden a `fwota`. Solo existe un transporte de fragmentos de firmware por LoRa.
 
+### 20.1 Fragmentos de 212 bytes
 
-
-Sigue haciendo falta la entrega individual, y por tres motivos que no desaparecen: actualizar un solo nodo, reponer lo que a un nodo concreto le falte cuando ya no compensa emitirlo a todos, y atender a los nodos en clase A, que quedan fuera de la difusión por construcción. La difusión es un atajo para el caso de "todos a la vez", no un sustituto. El lado del nodo (escribir en la partición, instalar, ventana de prueba y vuelta atrás) es el mismo en los dos caminos.
-
-### 20.1 Fragmentos de 212 bytes, y por qué no 213
-
-En §18 la entrega es secuencial, así que el nodo acumula fragmentos hasta completar un sector de 4 kB y lo vuelca de una vez, porque la escritura en flash exige alineación a 4 bytes y 213 no lo es. Ese truco no vale aquí: en difusión los fragmentos llegan repartidos por toda la imagen y con huecos, de modo que harían falta los 124 sectores a la vez.
-
-La salida es bajar el fragmento a **212 bytes**, que sí es múltiplo de cuatro. Entonces el fragmento `i` cae en el desplazamiento `212·i`, que está alineado, y se puede escribir directamente donde le toque llegue cuando llegue. La partición se borra entera al aceptar la oferta, y a partir de ahí cada fragmento se escribe una sola vez sobre flash ya borrada.
-
-Cuesta un byte por fragmento, un 0,5 % de aire. A cambio **desaparece el búfer intermedio de 4 kB**: recibir por difusión gasta menos memoria que recibir por el camino individual.
+Los fragmentos pueden llegar fuera de orden. Cada original se escribe en el desplazamiento `212·i`, alineado a cuatro bytes. La partición se borra al aceptar una imagen nueva y el mapa permite conservar los originales recibidos para completar los huecos con mezclas o reenvíos.
 
 ### 20.2 Corrección de errores sistemática
 
@@ -1383,7 +1400,7 @@ Es el mismo patrón que el mapa de fragmentos de §17.4, y por el mismo motivo: 
 
 | Offset | Campo | Tamaño | Descripción |
 | --- | --- | --- | --- |
-| 0 | `xfer_id` | 4 | Los 4 primeros bytes del sha256, como en §18.1. |
+| 0 | `xfer_id` | 4 | Los 4 primeros bytes del sha256 de la imagen. |
 | 4 | `total_len` | 4 | Tamaño de la imagen en bytes. |
 | 8 | `sha256` | 32 | Hash de la imagen completa. |
 | 40 | `block_k` | 2 | Originales por bloque. |
@@ -1402,17 +1419,13 @@ Se emite repetido durante el margen previo, como el anuncio de §19: no hay conf
 | 4 | `index` | 2 | Número de fragmento. Ver abajo. |
 | 6 | `data` | 1-212 | Los bytes. |
 
-Índice y no desplazamiento, al revés que §18.2, porque aquí hace falta numerar también las mezclas, que no tienen desplazamiento en la imagen. Con `n_orig` originales: los índices `0` a `n_orig−1` son originales, y el original `i` va al desplazamiento `212·i`. Los índices desde `n_orig` en adelante son mezclas: la mezcla `p` del bloque `b` tiene el índice `n_orig + b·R + p`.
+Se utiliza un índice para numerar tanto los originales como las mezclas, que no tienen desplazamiento propio en la imagen. Con `n_orig` originales: los índices `0` a `n_orig−1` son originales, y el original `i` va al desplazamiento `212·i`. Los índices desde `n_orig` en adelante son mezclas: la mezcla `p` del bloque `b` tiene el índice `n_orig + b·R + p`.
 
 Dos bytes bastan (2498 originales más 200 mezclas) y ahorran dos frente al desplazamiento de 32 bits, que a 2698 fragmentos son 5,4 kB de aire.
 
-**Ritmo de emisión.** El hueco entre fragmentos se deriva del tiempo de aire y no es una constante, por el mismo motivo que en §17.6. Suma tres cosas: el tiempo de aire del propio fragmento, el de una subida típica del nodo y un margen de ocho símbolos para el CAD.
+**Ritmo de emisión.** La separación se mide entre los inicios de dos fragmentos. Se suma su tiempo de aire, incluido el sobre de seguridad cuando esté activo, y una ventana de recepción. Esta ventana dura como mínimo tanto como el propio fragmento y cubre dos tiempos de telemetría típica, un ACK, la guarda de recepción y ocho símbolos de margen. El segundo tiempo de telemetría permite un inicio asíncrono dentro del intervalo; no establece turnos coordinados ni elimina todas las colisiones.
 
-El primer sumando es un suelo duro, y no por prudencia. El contador de ciclo de trabajo del gateway apunta el aire cuando escribe la orden al Heltec, no cuando la trama sale, así que emitir órdenes más deprisa de lo que la radio las convierte en aire falsearía la contabilidad sobre la que se sostiene el cumplimiento de EN 300 220-1. De paso es lo que impide que se llene la UART del Heltec, que era la única razón que se dio al fijar el valor a ojo.
-
-El segundo aplica el criterio que ya usan otros protocolos con el mismo problema: quien ocupa el medio de forma continuada deja un hueco explícito para que el otro extremo pueda hablar, como el SIFS de 802.11, las ventanas RX1 y RX2 de LoRaWAN o el silencio de 3,5 caracteres de Modbus RTU. Se dimensiona con una telemetría, que es la trama más larga que el nodo emite sin que se le pida.
-
-A SF7 y 250 kHz la cuenta da 243 ms (182 de fragmento, 57 de telemetría, 4 de margen), y a SF9 y 125 kHz, 1551 ms. Ninguna constante cubre los dos casos: los 0,6 s fijos que se usaron hasta el 2026-08-01 sobraban en el primero, donde alargaban una imagen de 541 kB de 11 a 27 minutos, y se quedaban muy cortos en el segundo, donde el hueco ni siquiera cubría el tiempo de aire de la trama anterior. El recorte solo se nota mientras el ciclo de trabajo no sea la restricción: al 8 % legal el presupuesto de aire manda y la imagen tarda lo mismo se ponga el hueco como se ponga.
+El presupuesto de aire sigue limitando la emisión. `MODULINKR_BCAST_GAP_S` puede ampliar la separación, pero no reducirla por debajo del mínimo calculado. Los ACK y beacons conservan prioridad; el servicio recoge las líneas recibidas antes de programar nuevas transmisiones. El Heltec recoge una recepción pendiente antes de transmitir y atiende una sola orden USB por vuelta, para evitar que una cola de órdenes posponga indefinidamente la recepción.
 
 ### 20.8 FW_BCAST_POLL (downlink, `frame_type = 0x21`)
 
@@ -1439,34 +1452,43 @@ La difusión se emite dentro de las ventanas de silencio de §19, troceada segú
 
 ### 20.11 Convivencia con el relay
 
-Difusión y relay juntos son inundación. Si cada nodo repitiera lo que oye, en una malla con lazos cada fragmento se multiplicaría, y además cada repetición es una transmisión, o sea un nodo que durante ese rato no escucha. Sería romper la ventana de silencio de §19 con las propias tramas de la difusión, que es exactamente lo que esa ventana existe para impedir.
+Las ofertas y los fragmentos FW_BCAST con destino broadcast se consumen localmente y no se reenvían. La difusión alcanza a los nodos que reciben directamente al gateway. Las consultas de mapas y sus respuestas utilizan direccionamiento individual.
 
-**Regla: las tramas de difusión no se repiten.** Ni el anuncio ni los fragmentos. Sale gratis de la estructura que ya hay, porque el reenvío de bajada busca una ruta hacia el destino y una trama de difusión no tiene destino concreto, pero conviene que esté escrita: es una decisión, no una casualidad, y sin dejarla anotada el primer intento de "mejorar el alcance" la desharía.
+Con un destino individual, los manejadores de FW_BCAST_OFFER y FW_BCAST_DATA reenvían la trama por la ruta descendente cuando el destinatario es otro nodo. La entrega dirigida permite alcanzar nodos mediante relay sin convertir la difusión en una retransmisión general por la malla. Si una difusión termina con nodos incompletos, el servicio informa de que necesitan entrega individual; no crea automáticamente una nueva transferencia dirigida.
 
-**Consecuencia, que hay que asumir con los ojos abiertos:** la difusión llega a los nodos que oyen al gateway directamente. Un nodo a dos saltos no recibe nada de la pasada, su mapa sale vacío, y lo que le falta acaba entregándose por el camino individual de §18. O sea que la difusión ahorra proporcionalmente a cuántos nodos estén a un salto, no a cuántos haya.
+### 20.12 Transporte utilizado por la GUI web
 
-En el despliegue de este trabajo eso cubre el caso real. Para una malla profunda, la continuación natural no es inundar sino **repetir por niveles**: un nodo que ya tiene la imagen entera y verificada puede reemitirla a sus hijos en su propia ventana de silencio, con la misma numeración de fragmentos y las mismas mezclas, porque el generador solo depende del identificador de transferencia. Queda apuntado y fuera del alcance de v4.0.
+La API del visor (`otaapi.py`, función `firmware_enviar`) encola las transferencias individuales en `fw_bcast` con el nodo en el campo `target`. El servicio emite FW_BCAST_OFFER y FW_BCAST_DATA dirigidas a ese nodo, consulta la recepción mediante FW_BCAST_POLL y procesa FW_BCAST_MAP para reparar los fragmentos pendientes.
 
-### 20.12 El envío a un solo nodo usa este mismo transporte (v4.0)
+El nodo responde a una oferta dirigida mediante FW_STATUS con aceptación o rechazo. A una oferta broadcast no responde con esa trama. La recepción por índices admite fragmentos fuera de orden y conserva un mapa de recibidos; la reparación se realiza tras consultar ese mapa. FW_INSTALL y FW_RESULT mantienen la orden de instalación y su resultado separados de la transferencia.
 
-Este apartado deja sin uso el camino secuencial de §18, y conviene el porqué entero porque la conclusión es contraria a lo que parecía obvio.
+La recepción completa se determina con el mapa del nodo, no con el estado general de la operación. Al agotar seis pasadas con fragmentos pendientes, una transferencia dirigida termina como fallida. En una difusión parcial solo se permite instalar en los nodos cuyo mapa confirma cero fragmentos pendientes. Las operaciones antiguas marcadas como listas sin un mapa completo no habilitan la instalación. Antes de emitir FW_INSTALL se solicita además un mapa nuevo, para comprobar que la imagen sigue disponible.
 
-§18 entrega la imagen en orden y el nodo solo acepta el fragmento que le toca. Si se pierde uno, todo lo que llega después se descarta y hay que rebobinar. Para pedir ese rebobinado **el nodo tiene que hablar**, y ahí está el problema: una radio que transmite no oye, así que cada vez que el nodo abre la boca pierde el fragmento que llegaba en ese instante.
+Antes de transmitir los fragmentos de una operación dirigida se consulta el mapa después de recibir la aceptación de la oferta. Si hay recepción parcial, se encolan únicamente los originales pendientes, sin consumir una pasada por esa consulta inicial. Un mapa completo evita reenviar datos. Un mapa vacío inicia el envío completo con sus mezclas; si no llega mapa tras tres consultas, también se utiliza el envío completo. La reanudación del nodo exige coincidencia de identificador, SHA-256 completo, tamaño y parámetros de bloque. Una imagen completa que ya no supera la verificación se descarta al recibir una nueva oferta y vuelve a transferirse.
 
-Medido en banco el 2026-08-01, con el resto de fallos ya corregidos, quedó un patrón perfectamente periódico: un rebobinado cada 32 fragmentos exactos, que es cada cuántos el nodo emite su reporte de progreso. **El propio informe de progreso era lo que provocaba la pérdida siguiente.** Se puede paliar dejando un hueco tras cada informe, que es lo que hacen SIFS en 802.11 o el silencio de 3,5 caracteres de Modbus RTU, pero eso mitiga el síntoma.
+En las reparaciones dirigidas, si quedan pendientes más del 20 % de los originales emitidos en la pasada, se multiplica por 1,5 la separación entre fragmentos, con un máximo de cuatro veces el valor inicial. Este ajuste conserva el presupuesto de aire y los huecos de tráfico de control; no modifica potencia, modulación ni parámetros de mezclas. Una separación forzada por configuración desactiva el ajuste. Su efecto sobre la duración total requiere validación de radio; la presencia de pérdidas no identifica por sí sola su causa.
 
-El transporte de §20 no tiene ese problema en absoluto, y no por casualidad: **el receptor no habla en toda la transferencia**. Recibe en cualquier orden, escribe cada fragmento en su sitio porque están alineados, lleva un mapa de bits de lo recibido, y solo al final, cuando le preguntan, dice qué le falta. Cero transmisiones durante la emisión, cero sordera propia, cero rebobinados, porque no hay nada que rebobinar.
+La recepción activa del nodo se distingue de la imagen parcial conservada para reanudar. Restaurar esa imagen al arrancar no activa la supresión de tareas. La actividad se reconoce tras una oferta o datos válidos y deja de considerarse activa después de 30 s sin tráfico. A los 10 min se libera la memoria temporal y se informa de inactividad, conservando los fragmentos. El heartbeat permanece habilitado incluso durante la recepción; las otras tareas aplazadas recuperan su ejecución cuando cesa la actividad.
 
-**Así que el envío a un nodo pasa a ser una difusión con un solo destinatario.** Todo lo de §20.1 a §20.9 vale igual, y las únicas diferencias son dos:
+La GUI presenta la reparación como reenvío de fragmentos pendientes, con la pasada y el número de fragmentos emitidos en ella. Estos contadores describen emisiones, no recepción confirmada. La recepción se vuelve a comprobar mediante el mapa al terminar la pasada. Si el presupuesto de radio obliga a esperar, se muestra esa espera. El porcentaje del envío inicial cuenta originales, sin sumar las mezclas como bytes de imagen recibidos.
 
-1. **La trama va dirigida.** `dest_id` lleva el identificador del nodo en vez del de difusión, y el `hop_dst` la ruta hacia él. Nada más cambia en el formato.
-2. **La oferta se contesta.** A la difusión no se responde, porque veinte nodos contestando a la vez costarían más que el propio anuncio. A la dirigida sí, una sola vez y antes de que empiecen a llegar datos, con el FW_STATUS de §18.3 que el emisor ya sabe leer. Sirve para lo de siempre: no gastar medio mega en un nodo que va a rechazar la imagen por tener ya esa versión. Y no rompe el silencio de la transferencia, porque ocurre antes de que empiece.
+La conectividad LoRa reciente conserva su propio plazo de validez, aunque una medida posterior llegue por NB-IoT. La ruta de la última medida se mantiene como información distinta. Un diagnóstico celular vencido se presenta como desconocido; la ausencia de publicaciones no demuestra desconexión.
 
-De ahí sale además el margen de anuncio: en difusión el aviso se repite durante un rato para que recorra la malla, porque nadie contesta. Dirigido no hace falta esperar nada, se empieza en cuanto el destinatario acepta.
+El servicio solo consume la cola `fw_bcast` para transferir imágenes. Una tabla antigua de transferencias, si existe en una base de datos previa, no se consulta ni provoca emisiones. La actualización no borra esos registros históricos.
 
-**Lo que se gana, más allá de la velocidad:** un solo receptor de firmware en el nodo en vez de dos que hacen casi lo mismo de formas distintas. Dos implementaciones del mismo mecanismo siempre acaban con una de las dos vieja, y con el firmware de un nodo remoto esa es la peor forma posible de descubrir un fallo.
+### 20.13 Seguimiento de operaciones e instalación automática
 
-**Lo que no cambia:** la instalación. Sigue siendo el FW_INSTALL de §18.4 y el FW_RESULT de §18.5, con su verificación del sha, su ventana de prueba y su vuelta atrás. Dos transportes para traer los bytes, uno solo para instalarlos, que es la parte delicada.
+El visor separa la versión anunciada por el nodo, la imagen disponible en el gateway y la imagen asociada a cada operación. Cambiar la distribución del gateway no cambia la identidad de una operación anterior. La conexión se muestra junto al nodo sin sustituir el resultado de transferencia o instalación. El porcentaje de emisión no se interpreta como recepción confirmada.
+
+La tabla presenta nodo, versión en ejecución, versión disponible, operación y acción principal. El detalle conserva las fechas de recepción y verificación, el resultado de instalación y el historial de hitos. La acción «Comprobar recepción» encola una consulta FW_BCAST_POLL independiente y nunca emite FW_INSTALL. «Instalar» mantiene una confirmación con el nodo y las versiones implicadas. La reanudación utiliza la distribución disponible y los parámetros de identidad ya definidos; si la imagen disponible cambió, se presenta como un envío nuevo.
+
+La opción de instalación automática está desactivada por defecto. Se guarda en `fw_bcast.auto_install` para cada nodo seleccionado, junto a su operación. Cerrar el navegador no la modifica. Al terminar la recepción, el servicio exige un mapa completo observado durante esa operación y un informe de verificación satisfactoria de la misma imagen e identificador de transferencia. La operación conserva el turno de radio al terminar la entrega y vuelve a consultar el mapa antes de emitir FW_INSTALL. La comprobación realiza hasta tres consultas separadas por 30 s y conserva las partes válidas del mapa entre consultas. Si el informe de verificación todavía no ha llegado, se espera dentro de ese mismo plazo; una recepción completa por sí sola no autoriza la instalación. Un informe de verificación conservado puede reutilizarse para la misma imagen, pero no sustituye esa consulta actual. Una falta de respuesta, una recepción incompleta o una verificación fallida impiden instalar. Una consulta perdida se reintenta dentro de ese límite. Al agotarlo se registra la falta de mapa o de verificación y se detiene la instalación; no se repite una orden de instalación fallida. Con instalación automática, se descarga e instala cada nodo antes de empezar la descarga del siguiente. El regreso registrado con la identidad completa solicitada libera el turno, mientras el veredicto de arranque permanece separado. Se puede retirar la autorización automática antes de que el servicio solicite la instalación.
+
+El servicio conserva los turnos durante la instalación. Antes de iniciar otro envío se exige que el nodo haya registrado la identidad completa esperada después de la orden, o que el intento haya terminado. Registrar la versión nueva no equivale a confirmar el arranque: el resultado explícito sigue siendo necesario para cerrar satisfactoriamente la operación.
+
+En SQLite, `fw_check` conserva las solicitudes y resultados de comprobación, con un único intento pendiente por operación y nodo. `fw_event` conserva hitos de estado, respuestas de recepción, informes del nodo, solicitudes y cambios de autorización automática. Cada evento identifica la operación, el nodo, la fecha y su origen. Los informes repetidos se confirman sin duplicar eventos ni resolver un intento posterior con el mismo informe ya conocido. El último informe compatible que existía antes de la migración se incorpora con su fecha original; no se reconstruyen los pasos históricos que no se conservaron. La GUI muestra hasta los cien eventos más recientes por nodo, sin borrar los anteriores de la base.
+
+La API valida la identidad de la operación y serializa las solicitudes para impedir acciones duplicadas o sobre operaciones sustituidas. Los cambios de estado se anuncian de forma accesible y el refresco conserva el detalle abierto y el foco en la acción cuando sigue disponible. No se añaden tramas ni se modifica el firmware del nodo para este flujo.
 
 ## 21. Clases de nodo y latencia de bajada (v4.0)
 

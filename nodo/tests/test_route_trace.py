@@ -73,6 +73,7 @@ int main() {
     assert(legacy.oldest()->ts==1000 && disk["/outbox.bin"][3]=='2');
     PendingQueue pending; uint8_t dest=0;
     pending.push(7,v,st,1,0,1,0,1000,6000);
+    pending.txResult(7,1,0,true);
     assert(!pending.firstExpired(3000,3000));
     assert(pending.firstExpired(6000,3000));
     assert(!pending.ack(7,dest,2));

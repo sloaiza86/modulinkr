@@ -47,6 +47,19 @@ def comparison(installed, available):
 
 def release_notes(component, version):
     notes = {
+        ('node', (0, 0, 78)): ['Muestreo sin ráfagas al completar el registro o tras una espera.',
+                              'Espera del ACK desde la confirmación de transmisión del módulo, también en reintentos.',
+                              'Protección de la recepción del ACK y recuperación ante fallos de transmisión local.'],
+        ('node', (0, 0, 77)): ['Recuperación del arranque LoRa aunque falle el primer sondeo AT.',
+                              'Preparación del módulo LoRa antes del reinicio por instalación OTA.',
+                              'Reconocimiento del banner de reinicio y comprobación posterior de disponibilidad.'],
+        ('node', (0, 0, 76)): ['Versión de prueba OTA desde 0.0.75, sin cambios funcionales.'],
+        ('node', (0, 0, 75)): ['Diagnóstico permanente de comandos y respuestas del arranque LoRa por serie.',
+                              'Reintento de arranque y respaldo NB-IoT independiente de la disponibilidad de LoRa.'],
+        ('node', (0, 0, 73)): ['Diagnóstico celular durante OTA y al cambiar el estado del módem.',
+                              'Una descarga guardada sin actividad no bloquea las tareas del nodo.'],
+        ('node', (0, 0, 74)): ['Versión de prueba OTA con las correcciones de 0.0.73.'],
+        ('radio', (0, 3, 4)): ['Recepciones pendientes atendidas antes de transmitir y entre órdenes USB.'],
         ('node', (0, 0, 68)): [
             'Reinicio remoto y puesta a cero de contadores de salud por LoRa con confirmación del nodo.',
             'Protección frente a órdenes repetidas y conservación del último fallo reportado.',

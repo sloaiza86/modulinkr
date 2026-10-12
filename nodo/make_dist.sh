@@ -92,4 +92,4 @@ echo
 echo "[ OK ] Archivo generado: $APP_OUT"
 echo "  tamaño: $APP_BYTES B ($((APP_BYTES / 1024)) kB, $((APP_BYTES * 100 / 1310720))% de app1)"
 echo "  sha256: $APP_SHA"
-echo "  fragmentos por radio: $(( (APP_BYTES + 212) / 213 ))"
+echo "  fragmentos por radio: $(( (APP_BYTES + 211) / 212 ))"

@@ -1,23 +1,8 @@
 // ModuLinkr, driver LoRa P2P sobre el STM32WLE5 del Atom DTU LoRaWAN
 //
-// Wrapper sobre la librería oficial M5-LoRaWAN-RAK (clase RAK3172P2P)
-// que serializa tramas según shared/protocol/frame-format.md (schema
-// v2.0) y las emite por LoRa P2P.
-//
-// Alcance H4 (fase 1, ACK + seq):
-//   - Modo P2P_TX_RX: el módulo queda escuchando y transmite bajo demanda.
-//   - Envía tramas TELEMETRY con cabecera v2.0 (destino directo al
-//     gateway; la selección de padre mesh llega en fase 2).
-//   - Recibe y valida tramas entrantes (ACKs del gateway).
-//
-// La librería se usa SOLO para la inicialización (init, config, modo).
-// Ni la recepción ni la transmisión pasan por ella, por dos defectos:
-//
-//   1. RX: su decodeMsg() pasa el payload por un String de C, y cualquier
-//      byte 0x00 (frecuentes en tramas binarias) lo trunca.
-//   2. TX: su write() bloquea leyendo la UART hasta 200 ms de silencio
-//      tras el OK, y en esa ventana llega el ACK del gateway (~150 ms
-//      tras el envío): se lo tragaría casi siempre.
+// Inicialización y recuperación mediante comandos AT con diagnóstico por etapa.
+// Las respuestas de arranque se leen con un plazo máximo; la recepción y
+// transmisión de datos usan el lector no bloqueante de poll().
 //
 // Este driver escribe el comando AT+PSEND directamente (no bloqueante) y
 // lee las líneas "+EVT:RXP2P:rssi:snr:HEX" de la UART en poll(),
@@ -29,7 +14,6 @@
 
 #include <Arduino.h>
 #include <mbedtls/ccm.h>
-#include "rak3172_p2p.hpp"
 #include "protocol.h"
 
 class LoraP2P {
@@ -87,6 +71,13 @@ public:
                uint8_t ttl);
 
     bool isReady() const { return initialized_; }
+
+    using TelemetryTxCallback = void (*)(uint16_t seq, uint8_t dest, uint32_t at_ms, bool sent);
+    // Solo telemetría propia: DONE inicia el plazo de ACK y su guarda.
+    void setTelemetryTxCallback(TelemetryTxCallback callback, uint32_t ack_guard_ms) {
+        telemetry_tx_callback_ = callback;
+        ack_guard_ms_ = ack_guard_ms;
+    }
 
     // Seguridad de la interfaz aire (v2.2, frame-format.md §14). Llamar
     // tras begin() con los valores del config. Con enabled == true toda
@@ -204,11 +195,8 @@ public:
     // por UART, sin línea de reset ni control de alimentación, así que estos
     // tres niveles son todo lo que cabe hacer sin reiniciar el propio nodo.
 
-    // Sondeo: escribe AT y espera OK. Distingue la UART muerta, en la que no
-    // hay respuesta a nada, del camino de transmisión colgado con el módulo
-    // despierto, que es lo observado en los dos incidentes. No arregla nada
-    // por sí solo, así que NO es un nivel de la escalera: lo ejecuta
-    // reinitRadio antes de reconfigurar, y su resultado queda en el log.
+    // Sondeo: escribe AT y espera OK. Un timeout indica ausencia de OK, no
+    // necesariamente silencio de la UART. No es un nivel de recuperación.
     //
     // Tenerlo como nivel propio era un error: a diferencia de los demás no
     // limpiaba las faltas, así que el detector seguía disparado y la escalera
@@ -216,20 +204,21 @@ public:
     // dar tiempo a nada (observado en banco el 29-jul-2026).
     bool probeModule();
 
-    // Nivel 1: repite la secuencia de configuración con los parámetros de
-    // begin(). Reaplica canal, SF, ancho de banda, potencia, CAD y modo TX+RX.
+    // Nivel 1: repite begin(), incluido ATZ, y reaplica los parámetros guardados.
     bool reinitRadio();
 
-    // Nivel 2: ATZ, reset por software del módulo, seguido del nivel 1,
-    // porque el reset lo devuelve a su configuración por defecto y sin
-    // reconfigurar quedaría fuera del canal del despliegue.
+    // Nivel 2: repite el reset y la configuración sin duplicar ATZ en un intento.
     bool resetModule();
+
+    // Reinicia la radio y detiene RX antes del reinicio OTA del ESP32.
+    // Devuelve false si no se confirma el estado, sin impedir el reinicio OTA.
+    bool prepareForRestart();
 
     // Da por buena la radio y reabre las ventanas de los dos detectores.
     void clearFaults();
 
     // Resultado del último sondeo AT hecho dentro de reinitRadio: true si el
-    // módulo respondió por la UART.
+    // módulo respondió OK al sondeo por la UART.
     bool lastProbeOk() const { return probe_ok_; }
 
     // Construye una trama TELEMETRY v3.2 y la emite hacia el padre.
@@ -325,23 +314,16 @@ public:
 
     // ----- Actualización de firmware (v3.7, frame-format.md §18) -----
 
-    // FW_STATUS: por qué byte va la imagen y en qué estado está. Sustituye al
-    // mapa de bits del canal de configuración, que no escala a los 2446
-    // fragmentos de una imagen: con entrega secuencial basta un número, y ese
-    // número sirve a la vez para reanudar, informar del progreso y pedir que
-    // el emisor rebobine cuando llega un fragmento adelantado.
+    // Respuesta a una oferta dirigida; written se mantiene en cero.
     Status sendFwStatus(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
                         uint32_t written, uint8_t state);
 
-    // FW_BCAST_MAP: qué originales de la difusión han llegado (§20.9). Aquí sí
-    // hay mapa de bits, al revés que en el FW_STATUS de arriba, porque en
-    // difusión los huecos están repartidos por toda la imagen y un número no
-    // los describe. Va troceado: 313 bytes no caben en una trama.
     // Respuesta al sondeo de disponibilidad (§22.2): la petición que se
     // contesta, si se puede o no, y por qué no cuando no.
     Status sendNodePong(uint16_t seq, uint8_t hop_dst, uint16_t req_id,
                         uint8_t veredicto, uint8_t motivo);
 
+    // Mapa de originales recibidos, repartido entre varias tramas (§20.9).
     Status sendFwBcastMap(uint16_t seq, uint8_t hop_dst, uint32_t xfer_id,
                           uint8_t part, uint8_t parts,
                           const uint8_t* bits, size_t len);
@@ -432,7 +414,6 @@ public:
     static constexpr uint8_t kMaxValues = 56;
 
 private:
-    RAK3172P2P module_;
     HardwareSerial* uart_ = nullptr;
     bool initialized_ = false;
 
@@ -507,6 +488,7 @@ private:
 
     // Aplica la configuración de radio al módulo. La usan begin() y L2.
     bool applyRadioConfig();
+    bool radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required = true);
 
     // Vacía la cola de transmisión contabilizando lo que se pierde.
     void discardTxQueue();
@@ -533,6 +515,9 @@ private:
     uint32_t in_flight_guard_ms_ = 0;  // margen antes de darla por perdida
     uint32_t tx_dropped_         = 0;  // encoladas descartadas (cola llena)
     uint32_t tx_timeouts_        = 0;  // en vuelo sin DONE dentro del margen
+    TelemetryTxCallback telemetry_tx_callback_ = nullptr;
+    uint32_t ack_guard_ms_ = 0;
+    bool notifyTelemetryTx(const uint8_t* frame, size_t len, bool sent);
 
     // Emite la trama ya, marcándola en vuelo y fijando su margen.
     void startTx(const uint8_t* frame, size_t len);

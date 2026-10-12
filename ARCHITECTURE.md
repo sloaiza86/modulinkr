@@ -44,7 +44,7 @@ La entrega del catálogo de un nodo normal a través del supernodo está especif
 
 El `config.json` vive en LittleFS y define identidad, radio, mesh, NB-IoT y dispositivos Modbus. Puede cargarse por USB o transferirse por LoRa. Una configuración nueva queda a prueba y se revierte si el nodo no vuelve a registrarse.
 
-El firmware puede entregarse individualmente o por difusión. Ambos caminos comparten instalación, verificación de arranque y reversión. El transporte secuencial anterior sigue presente y está pendiente de retirada después de validar de forma deliberada la reversión del gestor de arranque.
+El firmware se entrega mediante FW_BCAST, dirigido a un nodo o por difusión. La recepción por índices y mapas corresponde a fwbcast; fwota verifica la imagen y gestiona la instalación, la confirmación de arranque y la reversión. No se conserva un transporte secuencial paralelo.
 
 El cambio de frecuencia, ancho de banda, Network ID, TTL o clave requiere coordinación. El gateway distribuye a cada nodo una modificación de su propia configuración y cambia su radio cuando terminan las confirmaciones.
 

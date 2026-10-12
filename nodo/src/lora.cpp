@@ -9,6 +9,7 @@
 #include <esp_random.h>
 
 #include "nodeclock.h"
+#include "../../shared/diagnostic_log.h"
 
 namespace {
 
@@ -63,40 +64,89 @@ bool LoraP2P::begin(HardwareSerial& uart,
     return true;
 }
 
+bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required) {
+    if (uart_ == nullptr) return false;
+    const uint32_t drain_start = millis();
+    for (size_t n = 0; n < 512 && uart_->available() > 0 && millis() - drain_start < 20; ++n) uart_->read();
+    diag::log("DEBUG", "node.radio", "radio.init_command", "stage=%s command=%s timeout_ms=%lu",
+              stage, command, static_cast<unsigned long>(timeout_ms));
+    uart_->print(command);
+    uart_->print("\r\n");
+    char line[192] = {};
+    size_t length = 0;
+    bool truncated = false;
+    const uint32_t start = millis();
+    while (millis() - start < timeout_ms) {
+        while (uart_->available() > 0 && millis() - start < timeout_ms) {
+            const char c = static_cast<char>(uart_->read());
+            if (c == '\r') continue;
+            if (c != '\n') {
+                if (length < sizeof(line) - 1) line[length++] = c;
+                else truncated = true;
+                continue;
+            }
+            line[length] = '\0';
+            if (length) {
+                // Los eventos de recepción no son respuestas al comando.
+                if (strncmp(line, "+EVT:", 5) != 0) {
+                    diag::log("DEBUG", "node.radio", "radio.init_response", "stage=%s response=%s truncated=%s",
+                              stage, line, truncated ? "true" : "false");
+                    if (!truncated && strcmp(line, "OK") == 0) return true;
+                    // ATZ puede responder con el banner en vez de OK. La
+                    // disponibilidad se comprueba con otro AT tras la espera.
+                    if (!truncated && strcmp(command, "ATZ") == 0 &&
+                        strncmp(line, "RAKwireless RAK", 15) == 0) {
+                        diag::log("INFO", "node.radio", "radio.reset_observed",
+                                  "stage=%s evidence=boot_banner", stage);
+                        return true;
+                    }
+                    if (strstr(line, "ERROR") != nullptr) {
+                        diag::log(required ? "ERROR" : "WARNING", "node.radio", "radio.init_failed",
+                                  "stage=%s command=%s reason=rejected response=%s", stage, command, line);
+                        return false;
+                    }
+                }
+                length = 0;
+                truncated = false;
+            }
+        }
+        delay(1);
+    }
+    line[length] = '\0';
+    diag::log(required ? "ERROR" : "WARNING", "node.radio", "radio.init_failed",
+              "stage=%s command=%s reason=timeout elapsed_ms=%lu partial=%s truncated=%s",
+              stage, command, static_cast<unsigned long>(millis() - start),
+              length ? line : "none", truncated ? "true" : "false");
+    return false;
+}
+
 bool LoraP2P::applyRadioConfig() {
     if (uart_ == nullptr) return false;
-
-    if (!module_.init(uart_, rx_pin_, tx_pin_, RAK3172_BPS_115200)) {
-        return false;
+    // El control de arranque usa respuestas completas y plazos acotados.
+    // No crea un mutex nuevo por cada reintento de inicialización.
+    uart_->begin(115200, SERIAL_8N1, rx_pin_, tx_pin_);
+    cad_ok_ = false;
+    // El ESP32 puede reiniciarse mientras el módulo sigue alimentado y en RX.
+    // Un sondeo fallido no debe impedir detener RX e intentar ATZ.
+    probe_ok_ = radioCommand("probe", "AT", 1500, false);
+    if (!probe_ok_) {
+        diag::log("WARNING", "node.radio", "radio.startup_recovery",
+                  "reason=probe_failed action=stop_receive_reset");
     }
-
-    if (!module_.config(static_cast<long>(freq_hz_),
-                        sf_,
-                        bw_khz_,
-                        cr_index_,
-                        kPreambleSymbols,
-                        tx_dbm_)) {
-        return false;
-    }
-
-    // Versión de firmware del módulo, antes de entrar en modo P2P (el
-    // AT+VER=? responde igual, pero así queda antes de la escucha continua).
+    radioCommand("stop_receive", "AT+PRECV=0", 1500, false);
+    radioCommand("reset", "ATZ", 1000, false);
+    delay(kResetSettleMs);
+    if (!radioCommand("after_reset", "AT", 1500)) return false;
+    if (!radioCommand("p2p_mode", "AT+NWM=0", 1500)) return false;
+    delay(kResetSettleMs);
+    if (!radioCommand("after_mode", "AT", 1500)) return false;
+    char command[96];
+    snprintf(command, sizeof(command), "AT+P2P=%lu:%u:%u:%u:%u:%u",
+             freq_hz_, sf_, bw_khz_, cr_index_, kPreambleSymbols, tx_dbm_);
+    if (!radioCommand("parameters", command, 1500)) return false;
     queryVersion();
-
-    // LBT por CAD (mac.md §4.3): el módulo escucha el canal antes de cada
-    // AT+PSEND y solo transmite si está libre (~32 ms). Persistente en flash;
-    // se fija explícito en cada arranque. Requiere RUI3 >= V4.0.6 (verificado
-    // en banco: RUI_4.0.6). Si el módulo trae firmware anterior, sendCommand
-    // devuelve false y seguimos sin CAD (cad_ok_ lo refleja en el banner).
-    cad_ok_ = module_.sendCommand("AT+CAD=1");
-
-    // Modo TX+RX: el módulo queda en escucha continua (AT+PRECV=65533)
-    // y permite transmitir sin salir de recepción.
-    if (!module_.setMode(P2P_TX_RX_MODE)) {
-        return false;
-    }
-
-    return true;
+    cad_ok_ = radioCommand("cad", "AT+CAD=1", 1500, false);
+    return radioCommand("receive", "AT+PRECV=65533", 1500);
 }
 
 void LoraP2P::clearFaults() {
@@ -118,47 +168,32 @@ void LoraP2P::clearFaults() {
 void LoraP2P::discardTxQueue() {
     // Las tramas encoladas no sobreviven a una reinicialización de la radio:
     // se contabilizan en vez de desaparecer sin rastro.
+    if (tx_in_flight_) notifyTelemetryTx(last_tx_, last_tx_len_, false);
+    for (size_t i = 0; i < txq_count_; ++i) {
+        const auto& slot = txq_[(txq_head_ + i) % kTxQueue];
+        notifyTelemetryTx(slot.buf, slot.len, false);
+    }
     tx_dropped_   += txq_count_;
     txq_head_      = 0;
     txq_count_     = 0;
     tx_in_flight_  = false;
+    busy_at_ms_    = 0;
+    busy_tries_    = 0;
+    last_tx_len_   = 0;
     hold_until_ms_ = 0;
     line_len_      = 0;
 }
 
 bool LoraP2P::probeModule() {
-    if (uart_ == nullptr) return false;
-
-    // Bloquea una ventana corta. Solo se llama con la radio ya en falta, y
-    // puede tragarse un evento RXP2P que estuviera a medias en el buffer:
-    // coste asumible en ese estado, y el emisor lo reintentará.
-    while (uart_->available() > 0) uart_->read();
     line_len_ = 0;
-    uart_->print("AT\r\n");
-
-    char   buf[64];
-    size_t n = 0;
-    const uint32_t t0 = millis();
-    while (millis() - t0 < kProbeTimeoutMs) {
-        while (uart_->available() > 0) {
-            const char c = static_cast<char>(uart_->read());
-            if (n < sizeof(buf) - 1) buf[n++] = c;
-        }
-        buf[n] = '\0';
-        if (strstr(buf, "OK") != nullptr) return true;
-    }
-    return false;
+    return radioCommand("recovery_probe", "AT", kProbeTimeoutMs, false);
 }
 
 bool LoraP2P::reinitRadio() {
     initialized_ = false;
     discardTxQueue();
 
-    // Sondeo AT antes de reconfigurar: no arregla nada, pero distingue en el
-    // log una UART muerta de un módulo despierto con el camino de datos
-    // colgado, que es la primera pregunta al diagnosticar.
-    probe_ok_ = probeModule();
-
+    // La secuencia registra el sondeo y continúa hasta el reset aunque falle.
     if (!applyRadioConfig()) return false;
 
     clearFaults();
@@ -167,16 +202,21 @@ bool LoraP2P::reinitRadio() {
 }
 
 bool LoraP2P::resetModule() {
-    if (uart_ == nullptr) return false;
-
-    initialized_ = false;
-    uart_->print("ATZ\r\n");
-    delay(kResetSettleMs);
-    while (uart_->available() > 0) uart_->read();
-
-    // El reset devuelve el módulo a su configuración por defecto: sin la
-    // reinicialización posterior quedaría fuera del canal del despliegue.
+    // La reconfiguración ya incluye ATZ y su comprobación posterior.
     return reinitRadio();
+}
+
+bool LoraP2P::prepareForRestart() {
+    initialized_ = false;
+    discardTxQueue();
+    if (uart_ == nullptr) return false;
+    // La radio externa no pierde alimentación con ESP.restart(). Se deja
+    // reiniciada y sin recepción para el arranque de la nueva aplicación.
+    radioCommand("restart_stop_receive", "AT+PRECV=0", 1500, false);
+    radioCommand("restart_reset", "ATZ", 1000, false);
+    delay(kResetSettleMs);
+    if (!radioCommand("restart_probe", "AT", 1500, false)) return false;
+    return radioCommand("restart_idle", "AT+PRECV=0", 1500, false);
 }
 
 void LoraP2P::queryVersion() {
@@ -184,11 +224,9 @@ void LoraP2P::queryVersion() {
     fw_version_[sizeof(fw_version_) - 1] = '\0';
     if (uart_ == nullptr) return;
 
-    // Despierta el módulo y vacía cualquier eco/OK pendiente de la config.
-    uart_->print("AT\r\n");
-    delay(100);
-    while (uart_->available() > 0) uart_->read();
+    radioCommand("version_probe", "AT", 1500, false);
 
+    diag::log("DEBUG", "node.radio", "radio.init_command", "stage=version command=AT+VER=? timeout_ms=1500");
     uart_->print("AT+VER=?\r\n");
 
     // Acumula la respuesta CRUDA durante una ventana amplia (el timeout de
@@ -197,12 +235,15 @@ void LoraP2P::queryVersion() {
     size_t rlen = 0;
     const uint32_t t0 = millis();
     while (millis() - t0 < 1500) {
-        while (uart_->available() > 0) {
+        while (uart_->available() > 0 && millis() - t0 < 1500) {
             const char c = static_cast<char>(uart_->read());
             if (rlen < sizeof(raw) - 1) raw[rlen++] = c;
         }
+        delay(1);
     }
     raw[rlen] = '\0';
+    diag::log("DEBUG", "node.radio", "radio.init_response", "stage=version response=%s truncated=%s",
+              rlen ? raw : "none", rlen == sizeof(raw) - 1 ? "true" : "false");
     if (rlen == 0) return;  // módulo mudo: queda "sin respuesta"
 
     // RUI3 responde a la consulta con la forma "AT+VER=<valor>" (p. ej.
@@ -933,6 +974,16 @@ bool LoraP2P::enqueueTx(const uint8_t* frame, size_t len) {
     return true;
 }
 
+bool LoraP2P::notifyTelemetryTx(const uint8_t* frame, size_t len, bool sent) {
+    using namespace protocol;
+    if (len < kHeaderBytes || frame[kOffFrameType] != kFrameTelemetryRoute ||
+        frame[kOffOriginId] != node_id_) return false;
+    const uint16_t seq = static_cast<uint16_t>(frame[kOffSeqLow]) |
+                         (static_cast<uint16_t>(frame[kOffSeqHigh]) << 8);
+    if (telemetry_tx_callback_) telemetry_tx_callback_(seq, frame[kOffDestId], millis(), sent);
+    return true;
+}
+
 void LoraP2P::clearInFlight() {
     tx_in_flight_ = false;
     startNextQueued();
@@ -950,7 +1001,10 @@ void LoraP2P::startNextQueued() {
 }
 
 void LoraP2P::holdQueue(uint32_t ms) {
-    hold_until_ms_ = millis() + ms;
+    const uint32_t until = millis() + ms;
+    // Una guarda de ACK no debe acortar una retención OTA más larga.
+    if (queueHeld() && static_cast<int32_t>(until - hold_until_ms_) <= 0) return;
+    hold_until_ms_ = until;
     if (hold_until_ms_ == 0) hold_until_ms_ = 1;  // 0 significa sin retención
 }
 
@@ -1004,6 +1058,7 @@ void LoraP2P::poll() {
         static_cast<int32_t>(millis() - in_flight_at_ms_) >=
             static_cast<int32_t>(in_flight_guard_ms_)) {
         tx_timeouts_++;
+        notifyTelemetryTx(last_tx_, last_tx_len_, false);
         clearInFlight();
     }
 
@@ -1083,6 +1138,7 @@ void LoraP2P::handleLine(const char* line) {
     // independiente del backoff de ACK de main.cpp (que cubre el ACK perdido
     // DESPUÉS de transmitir); aquí la trama nunca salió al aire.
     if (strstr(line, "BUSY") != nullptr) {
+        if (!tx_in_flight_) return;
         busy_events_++;
         // La trama no llegó a salir: esa escritura ya no espera un DONE y no
         // debe contar como silencio del transmisor. El reintento rápido de
@@ -1112,9 +1168,10 @@ void LoraP2P::handleLine(const char* line) {
             busy_at_ms_ = millis() + kBusyBackoffMs +
                           (esp_random() % (kBusyJitterMs + 1));
         } else {
-            // Agotados los reintentos rápidos: que lo recupere el backoff
-            // de ACK cuando venza el timeout de la trama.
+            // Sin transmisión no se espera un ACK: se comunica el fallo
+            // para reintentar la muestra o conservarla en la outbox.
             tx_errors_++;
+            if (tx_in_flight_) notifyTelemetryTx(last_tx_, last_tx_len_, false);
             clearInFlight();
         }
         return;
@@ -1125,6 +1182,7 @@ void LoraP2P::handleLine(const char* line) {
     // aquí y solo aquí se acumula el ToA de la última trama enviada. Los
     // intentos abortados por CAD (BUSY, arriba) no ocuparon aire.
     if (strstr(line, "TXP2P DONE") != nullptr) {
+        if (!tx_in_flight_) return;
         if (last_tx_len_ > 0) tx_air_ms_ += airtimeMs(last_tx_len_);
         // Única prueba de que el transmisor está vivo: limpia la sospecha
         // de radio muda y la cuenta de escrituras sin confirmar.
@@ -1132,6 +1190,9 @@ void LoraP2P::handleLine(const char* line) {
         last_done_ms_  = millis();
         psend_no_done_ = 0;
         mute_flagged_  = false;
+        if (notifyTelemetryTx(last_tx_, last_tx_len_, true) && ack_guard_ms_ > 0) {
+            holdQueue(ack_guard_ms_);
+        }
         clearInFlight();
         return;
     }
@@ -1139,6 +1200,7 @@ void LoraP2P::handleLine(const char* line) {
     // Otros errores asíncronos del módulo (AT_PARAM_ERROR, ...).
     if (strstr(line, "ERROR") != nullptr) {
         tx_errors_++;
+        if (tx_in_flight_) notifyTelemetryTx(last_tx_, last_tx_len_, false);
         // El módulo respondió: la escritura queda resuelta, aunque sea con
         // error, y deja de contar como pendiente de confirmación.
         if (psend_no_done_ > 0) {

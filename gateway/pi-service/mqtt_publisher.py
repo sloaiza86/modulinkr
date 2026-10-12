@@ -54,7 +54,7 @@ clave se pregunta al ejecutar, nunca se escribe en el código):
   MODULINKR_MQTT_TLS_INSECURE (default 0) 1 = no valida el hostname del
                               cert (solo para banco con cert autofirmado)
   MODULINKR_MQTT_DRAIN_MAX    (default 50) muestras por vuelta de drenado
-  MODULINKR_MQTT_PUB_TIMEOUT  (default 5.0) espera del PUBACK, segundos
+  MODULINKR_MQTT_PUB_TIMEOUT  (default 5.0) umbral de aviso sin PUBACK, segundos
   MODULINKR_MQTT_DEBUG        (default 1) 1 = el mensaje de telemetría
                               lleva el sobre debug (batch-format.md §5)
 
@@ -114,6 +114,8 @@ class MqttPublisher:
         self.n_pub_cat = 0   # catálogos republicados (con PUBACK)
         self.n_pub_hlt = 0   # tramas de salud publicadas (con PUBACK)
         self.batch_id  = 0   # mensajes de telemetría enviados en esta sesión
+        self._publishing = {}
+        self._health_pending = {}
 
         # Cola del camino NB-IoT: on_message corre en el hilo de paho y no
         # puede tocar el SQLite del buffer (un solo hilo). Encola y el bucle
@@ -225,6 +227,7 @@ class MqttPublisher:
         """Vuelca la cola del camino NB-IoT al buffer (hilo principal). Marca
         la actividad del supernodo (mqtt_seen) y el último dato de cada origin
         (nbiot_last). Barato: se llama cada vuelta del bucle del servicio."""
+        self.poll_publications()
         while True:
             try:
                 publisher, samples, received_at = self._nbiot_q.popleft()
@@ -238,43 +241,39 @@ class MqttPublisher:
     # ----- Drenado -----
 
     def drain(self) -> int:
-        """Publica catálogos y telemetría pendientes. No bloquea si no hay
-        conexión (return 0). Marca published=1 solo tras el PUBACK. Devuelve
-        cuántos mensajes se confirmaron en esta vuelta. Pensado para llamarse
-        periódicamente desde el bucle del servicio."""
+        """Encola catálogos y telemetría. La confirmación se recoge sin bloquear."""
         if not self.enabled or not self.connected:
             return 0
 
-        confirmed = 0
-        # Primero los catálogos (la leyenda antes que los datos, §10.1).
-        confirmed += self._drain_catalogs()
-        confirmed += self._drain_telemetry()
-        return confirmed
+        self.poll_publications()
+        self._drain_catalogs()
+        self._drain_health()
+        return self._drain_telemetry()
 
     def _drain_catalogs(self) -> int:
-        cats = self.buf.fetch_pending_catalogs()
-        confirmed = 0
-        for c in cats:
-            origin  = c["origin_id"]
+        for c in self.buf.fetch_pending_catalogs():
+            origin = c["origin_id"]
             payload = self._register_payload(origin, c["catalog"])
-            topic   = REGISTER_TOPIC.format(origin=origin)
-            if self._publish(topic, payload, qos=1, retain=True):
-                self.buf.mark_catalog_published(origin)
+            topic = REGISTER_TOPIC.format(origin=origin)
+            def confirmed(origin=origin, payload=payload):
+                # Un registro nuevo durante el envío necesita su propio PUBACK.
+                current = next((c for c in self.buf.fetch_pending_catalogs()
+                                if c["origin_id"] == origin), None)
+                if current and self._register_payload(origin, current["catalog"]) == payload:
+                    self.buf.mark_catalog_published(origin)
                 self.n_pub_cat += 1
-                confirmed += 1
                 LOG.info("event=mqtt.register_published origin=%d", origin)
-            else:
-                # Sin PUBACK: se queda pendiente y se reintenta la próxima
-                # vuelta. No se sigue si el broker no confirma.
-                break
-        return confirmed
+            self._publish(topic, payload, qos=1, retain=True, confirmed=confirmed)
+        return 0
 
     def _drain_telemetry(self) -> int:
         """Publica las muestras pendientes de la vuelta como UN mensaje
         unificado (batch-format.md §3): un solo publish y un solo PUBACK
         para hasta drain_max muestras. Solo tras el PUBACK se marcan
-        published; sin PUBACK, todas quedan pendientes y se rearma el
-        mensaje en la vuelta siguiente (el consumidor deduplica)."""
+        published; sin PUBACK, el mismo lote permanece en vuelo y las
+        muestras nuevas esperan al siguiente lote."""
+        if TELEMETRY_TOPIC in self._publishing:
+            return 0
         rows = self.buf.fetch_pending(self.drain_max)
         if not rows:
             return 0
@@ -308,36 +307,61 @@ class MqttPublisher:
             }
 
         payload = json.dumps(msg, separators=(",", ":"))
-        if not self._publish(TELEMETRY_TOPIC, payload, qos=1, retain=False):
-            return 0
-
-        self.batch_id += 1
         keys = [(r["origin_id"], r["ts"], r["seq"]) for r in rows]
-        self.buf.mark_published(keys)
-        self.n_pub_tel += len(keys)
-        LOG.info("event=mqtt.telemetry_published samples=%d messages=1 batch_id=%d",
-                 len(keys), self.batch_id)
-        return len(keys)
+        batch_id = self.batch_id + 1
+        def confirmed():
+            self.buf.mark_published(keys)
+            self.n_pub_tel += len(keys)
+            LOG.info("event=mqtt.telemetry_published samples=%d messages=1 batch_id=%d",
+                     len(keys), batch_id)
+        if self._publish(TELEMETRY_TOPIC, payload, qos=1, retain=False, confirmed=confirmed):
+            self.batch_id = batch_id
+        return 0
 
     def _publish(self, topic: str, payload: str, qos: int,
-                 retain: bool) -> bool:
-        """Publica y espera el PUBACK hasta pub_timeout. Devuelve True si el
-        broker confirmó. Ante fallo (sin conexión, timeout) devuelve False:
-        el llamador deja la entrada pendiente."""
+                 retain: bool, confirmed=None) -> bool:
+        """Encola sin esperar al broker. SQLite se confirma desde poll_publications."""
+        if not self.enabled or not self.connected or topic in self._publishing:
+            return False
         try:
             info = self.client.publish(topic, payload, qos=qos, retain=retain)
-        except Exception as e:                       # noqa: BLE001
+        except Exception as e:
             LOG.warning("event=mqtt.publish_failed topic=%s error=%s", topic, e)
             return False
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             LOG.warning("event=mqtt.publish_rejected rc=%s topic=%s", info.rc, topic)
             return False
-        try:
-            info.wait_for_publish(self.pub_timeout)
-        except (ValueError, RuntimeError) as e:
-            LOG.warning("event=mqtt.puback_timeout topic=%s error=%s", topic, e)
-            return False
-        return info.is_published()
+        self._publishing[topic] = {"info": info, "confirmed": confirmed,
+                                   "started": time.monotonic(), "warned": False}
+        return True
+
+    def poll_publications(self) -> None:
+        # Paho recibe los PUBACK en su hilo; este hilo conserva todas las
+        # escrituras SQLite. El lote en vuelo no incorpora medidas posteriores.
+        for topic, flight in list(self._publishing.items()):
+            try:
+                done = flight["info"].is_published()
+            except (ValueError, RuntimeError):
+                del self._publishing[topic]
+                continue
+            if done:
+                if flight["confirmed"]:
+                    flight["confirmed"]()
+                del self._publishing[topic]
+            elif not flight["warned"] and time.monotonic() - flight["started"] >= self.pub_timeout:
+                flight["warned"] = True
+                # Se conserva la custodia y el mensaje QoS 1 de Paho, que se
+                # reenvía al reconectar. No se acumulan copias por cada vuelta.
+                LOG.warning("event=mqtt.puback_timeout topic=%s pending=true", topic)
+
+    def _drain_health(self) -> None:
+        for origin, payload in list(self._health_pending.items()):
+            def confirmed(origin=origin, payload=payload):
+                if self._health_pending.get(origin) == payload:
+                    del self._health_pending[origin]
+                self.n_pub_hlt += 1
+            self._publish(HEALTH_TOPIC.format(origin=origin), payload, qos=1,
+                          retain=False, confirmed=confirmed)
 
     def publish_health(self, origin: int, health: dict) -> bool:
         """Publica una trama NODE_HEALTH (frame-format.md §16) al topic de
@@ -366,10 +390,8 @@ class MqttPublisher:
             },
         }, separators=(",", ":"))
 
-        if not self._publish(HEALTH_TOPIC.format(origin=origin),
-                             payload, qos=1, retain=False):
-            return False
-        self.n_pub_hlt += 1
+        self._health_pending[origin] = payload
+        self._drain_health()
         return True
 
     def _register_payload(self, origin: int, catalog: dict) -> str:

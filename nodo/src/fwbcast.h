@@ -1,32 +1,8 @@
-// ModuLinkr, recepción de firmware por difusión (frame-format.md §20)
-//
-// Qué hace distinto de fwota.h, que recibe la misma imagen nodo a nodo:
-//
-//   1. Los fragmentos llegan DESORDENADOS y con huecos, porque nadie confirma
-//      nada. En vez de un puntero de escritura hay un mapa de bits de lo
-//      recibido, y en vez de un búfer que alinea sectores, cada fragmento se
-//      escribe directamente donde le toca. Eso exige que el fragmento mida
-//      212 bytes y no 213: múltiplo de cuatro, de modo que el fragmento i cae
-//      en el desplazamiento 212·i, que está alineado (§20.1).
-//
-//   2. La partición se borra ENTERA al aceptar la oferta, una sola vez. Sin
-//      eso no se podría escribir en cualquier orden, porque un sector solo
-//      admite escritura después de borrarlo y borrarlo tira lo que ya hubiera.
-//
-//   3. Llegan además mezclas de repuesto que permiten rellenar huecos sin
-//      pedirlos (§20.2). Son sistemáticas: primero los K originales tal cual y
-//      luego R mezclas. Lo que llega bien se queda escrito pase lo que pase, y
-//      las mezclas solo suman capacidad de recuperación.
-//
-// Coste en memoria: el mapa (313 B para una imagen de 517 kB), las R mezclas
-// del bloque en curso (2120 B) y sus máscaras (160 B). Unos 2,6 kB, y solo
-// mientras hay transferencia. Es MENOS que los 4 kB que gasta el camino de
-// §18 en su búfer de alineación, que aquí no hace falta.
-//
-// La instalación no se duplica: al completarse, la transferencia se le entrega
-// a fwota (adoptCompleted) y a partir de ahí el FW_INSTALL, la verificación
-// del sha, la ventana de prueba y la vuelta atrás son exactamente los mismos.
-// Dos caminos para traer los bytes, uno solo para instalarlos.
+// ModuLinkr, recepción de firmware por índices (frame-format.md §20).
+// Los fragmentos de 212 bytes se escriben en su posición y el mapa conserva
+// los originales recibidos. Las mezclas y las rondas de reparación completan
+// los huecos. Al terminar se entrega la imagen a fwota para verificarla e
+// instalarla mediante una orden separada.
 
 #pragma once
 
@@ -57,7 +33,7 @@ enum class Offer : uint8_t {
 void begin(const char* running_version);
 
 // Anuncio de difusión (FW_BCAST_OFFER, §20.6). Con el mismo identificador que
-// una transferencia a medias, se reanuda conservando lo ya escrito; con otro,
+// una transferencia a medias y el mismo tamaño, hash y parámetros, se reanuda; con otro,
 // la anterior se descarta y la partición se borra entera.
 Offer onOffer(uint32_t xfer, uint32_t total_len, const uint8_t sha[32],
               const char* version, uint16_t block_k, uint8_t block_r);
@@ -92,8 +68,7 @@ size_t  mapPart(uint8_t n, uint8_t* out, size_t out_max);
 void reset();
 
 // Suelta la memoria de una transferencia parada, conservando lo escrito en
-// flash y el mapa. Mismo criterio que fwota: una difusión puede tardar horas
-// y atravesar la noche, así que caducar no puede significar perder.
+// flash y el mapa para poder continuar después de una pausa larga.
 void expireIfIdle(uint32_t now_ms);
 
 // ----- El generador de las mezclas (§20.3) -----

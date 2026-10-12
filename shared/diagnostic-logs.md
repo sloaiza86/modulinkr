@@ -26,7 +26,17 @@ El servicio del gateway conserva el nivel y el evento del diagnóstico estructur
 
 Las respuestas `CFG:*`, las líneas `[rx]` y `[tx]`, la respuesta `[fw] version=...` y la identidad de arranque de la radio conservan su formato porque otras herramientas las interpretan. El marcador `modbus-debug origin=... mode=...` también permanece en el journal, acompañado del evento `modbus.frame`. Los mensajes de ROM, bibliotecas y herramientas externas quedan fuera del emisor de aplicación. No se les asigna una severidad inventada en el visor.
 
-Los registros no modifican tramas LoRa, consultas al módem, temporizadores de red ni configuración persistida. El cambio añade trabajo de formato y bytes al puerto de diagnóstico; su impacto en el banco requiere comprobación con el firmware compilado.
+El formato de registros no modifica tramas LoRa ni configuración persistida. La instrumentación añade trabajo de formato y bytes al puerto de diagnóstico; su impacto en el banco requiere comprobación con el firmware compilado. Los cambios del procedimiento de arranque y sus plazos desde 0.0.75 se describen a continuación.
+
+## Arranque y recuperación LoRa del nodo
+
+Desde 0.0.75, el nodo y el supernodo emiten el diagnóstico del arranque de radio de forma permanente por el puerto serie, sin activar una compilación de depuración. Se conserva el emisor común, con tiempo, nivel, componente `node.radio`, evento y atributos. No se registran claves de seguridad.
+
+`radio.init_command` identifica la etapa, el comando AT y el plazo máximo. `radio.init_response` registra las respuestas con longitud limitada y marca su truncamiento. `radio.init_failed` distingue un rechazo explícito (`reason=rejected`) de la ausencia de una respuesta completa dentro del plazo (`reason=timeout`). Las etapas cubren el sondeo, reinicio, modo P2P, parámetros de radio, versión, CAD y escucha. Un fallo de CAD se registra como advertencia y conserva la posibilidad de operar sin CAD; un fallo obligatorio detiene ese intento. Los eventos de recepción espontáneos no se aceptan como confirmación de comandos.
+
+Si el arranque falla, `init.lora_failed` anuncia `retry_ms=30000`. El siguiente intento se registra con `radio.startup_retry`; al recuperar la radio aparece `radio.startup_recovered` y se reaplican la seguridad y los plazos de supervisión. La separación de 30 s se mide desde el final de cada intento. No se reinicia el ESP32 para resolver un fallo inicial. Los comandos tienen plazos acotados y se respetan 2 s de estabilización tras el reinicio y la selección de modo; esos intentos pueden ocupar varios segundos del bucle principal. La tarea del módem mantiene su ejecución independiente.
+
+La solicitud de hora y la gestión de publicaciones NB-IoT se ejecutan aunque LoRa no haya arrancado. Con hora válida y después de `gateway_wait_ms`, el supernodo puede muestrear en modo autónomo. Las muestras se retienen con `outbox.retained reason=radio_unavailable` y solo se liberan después de confirmar su publicación. La corrección no atribuye todo fallo de radio al firmware: una UART sin respuesta o un problema físico siguen requiriendo comprobación en banco.
 
 ## Visor web
 

@@ -416,11 +416,37 @@ def _firmware_nodes(available):
             for n in nodes if 1 <= n['origin'] <= 254]
 
 
+def _firmware_verification_failed(c, bid, origin):
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fw_report'").fetchone():
+        return False
+    return bool(c.execute("""SELECT 1 FROM fw_report r JOIN fw_bcast b
+        ON r.sha256=b.sha256 AND r.xfer=b.xfer
+        WHERE b.id=? AND r.origin=? AND r.phase=2 AND r.cause!=15""", (bid,origin)).fetchone())
+
+
+def _firmware_install_status(c):
+    """Instalaciones pendientes y evidencia de ejecución posterior a la orden."""
+    rows = c.execute("""SELECT b.id,b.target,b.version,b.state,b.updated_ts,k.fw_version,k.t_updated
+        FROM fw_bcast b LEFT JOIN node_catalog k ON k.origin_id=b.target
+        WHERE b.target IS NOT NULL AND b.state IN ('install_req','installing')
+        UNION ALL
+        SELECT b.id,i.origin,b.version,i.state,i.updated_ts,k.fw_version,k.t_updated
+        FROM fw_bcast_install i JOIN fw_bcast b ON b.id=i.bcast_id
+        LEFT JOIN node_catalog k ON k.origin_id=i.origin
+        WHERE i.state IN ('pending','installing')""").fetchall()
+    return {(bid, origin): bool(state == 'installing' and wanted and '+' in wanted
+                and wanted == running and requested is not None and reported is not None
+                and reported >= requested)
+            for bid,origin,wanted,state,requested,running,reported in rows}
+
+
 def _firmware_guard(origin, available):
     error = _radio_error()
     if error:
         return _config_error(error)
     with _conn() as c:
+        if any(target == origin for _,target in _firmware_install_status(c)):
+            return JSONResponse(status_code=409, content={'error': 'Este nodo aún está pendiente de confirmar su instalación.'})
         row = c.execute('SELECT fw_version FROM node_catalog WHERE origin_id=?', (origin,)).fetchone()
     if firmwaremeta.comparison(row[0] if row else None, available) != 'different':
         return JSONResponse(status_code=409, content={
@@ -511,10 +537,6 @@ def firmware_enviar(body: dict = Body(...)):
     # nodo y reparación al final. Lo único que cambia frente a la difusión es
     # el destinatario.
     #
-    # El camino secuencial de §18 sigue en el código pero ya no se usa desde
-    # aquí. Se conserva a propósito hasta que el nuevo esté validado en banco:
-    # meter la unificación y el borrado del anterior en el mismo cambio es la
-    # forma más segura de quedarse sin ninguno de los dos.
     try:
         with _conn() as c:
             fila = c.execute(
@@ -679,8 +701,13 @@ def firmware_instalar(body: dict = Body(...)):
     push_id = body.get("id")
     if not isinstance(push_id, int):
         return JSONResponse(status_code=400, content={"error": "falta id"})
+    status = firmware_difusion()
+    candidate = next((n for n in status['nodos'] if n.get('job_id') == push_id and not n.get('broadcast')), None)
+    if not candidate or not candidate.get('can_install'):
+        return JSONResponse(status_code=409, content={'error':'Comprueba la recepción y el estado del nodo antes de instalar.'})
     try:
         with _conn() as c:
+            c.execute('BEGIN IMMEDIATE')
             fila = c.execute("SELECT state, target, version FROM fw_bcast WHERE id = ?",
                              (push_id,)).fetchone()
             if fila is None:
@@ -691,15 +718,28 @@ def firmware_instalar(body: dict = Body(...)):
                     status_code=409,
                     content={"error": "eso es una difusión, no un envío a un "
                                       "nodo: la orden de instalar va nodo a nodo."})
+            if _ota_busy(c):
+                return JSONResponse(status_code=409, content={'error':'Hay otra operación usando la radio.'})
+            if c.execute('SELECT 1 FROM fw_bcast WHERE id>? AND (target=? OR target IS NULL)',(push_id,fila[1])).fetchone():
+                return JSONResponse(status_code=409,content={'error':'Hay una operación posterior para este nodo.'})
             guard = _firmware_guard(fila[1], fila[2])
             if guard is not None:
                 return guard
-            if fila[0] != "ready":
+            if fila[0] not in ("ready", "failed", "cancelled"):
                 return JSONResponse(
                     status_code=409,
                     content={"error": f"la imagen no está lista (estado: {fila[0]}). "
                                       "Solo se instala lo que el nodo ya tiene "
                                       "entero y verificado."})
+            if _firmware_verification_failed(c,push_id,fila[1]):
+                return JSONResponse(status_code=409, content={'error': 'El nodo informó un fallo al verificar la imagen. Vuelve a enviarla.'})
+            mapa = c.execute(
+                "SELECT missing FROM fw_bcast_map WHERE bcast_id=? AND node_id=?",
+                (push_id, fila[1])).fetchone()
+            if mapa is None or mapa[0] != 0:
+                detail = ("El nodo no ha confirmado la recepción completa." if mapa is None
+                          else f"Al nodo le faltan {mapa[0]} fragmentos.")
+                return JSONResponse(status_code=409, content={"error": detail})
             c.execute(
                 "UPDATE fw_bcast SET state = 'install_req', updated_ts = ? "
                 "WHERE id = ?", (time.time(), push_id))
@@ -827,6 +867,9 @@ def firmware_difundir(body: dict = Body(default={})):
 
 @router.post("/firmware/seleccion")
 def firmware_seleccion(body: dict = Body(...)):
+    auto_install = body.get('auto_install', False)
+    if type(auto_install) is not bool:
+        return JSONResponse(status_code=400, content={'error':'La instalación automática debe ser activada o desactivada.'})
     origins = body.get('origins')
     if (not isinstance(origins, list) or not origins or len(origins) > 254
             or any(type(n) is not int or not 1 <= n <= 254 for n in origins)
@@ -848,9 +891,10 @@ def firmware_seleccion(body: dict = Body(...)):
             return JSONResponse(status_code=409, content={'error': 'El archivo de firmware no supera la comprobación de integridad.'})
         with _conn() as c:
             c.execute('BEGIN IMMEDIATE')
-            busy = c.execute("SELECT 1 FROM fw_bcast WHERE state NOT IN ('ready','done','failed','cancelled')").fetchone()
-            installing = c.execute("SELECT 1 FROM fw_bcast_install WHERE state IN ('pending','installing')").fetchone()
-            if busy or installing:
+            busy = c.execute("SELECT 1 FROM fw_bcast WHERE state NOT IN ('ready','install_req','installing','done','failed','cancelled')").fetchone()
+            pending = _firmware_install_status(c)
+            busy_check = c.execute("SELECT 1 FROM fw_check WHERE state IN ('pending','checking') LIMIT 1").fetchone()
+            if busy or busy_check or any(not running for running in pending.values()) or any(origin in origins for _,origin in pending):
                 return JSONResponse(status_code=409, content={'error': 'Espera a que termine el envío o la instalación en curso.'})
             ids = []
             xfer = int.from_bytes(bytes.fromhex(info['sha256'])[:4], 'little')
@@ -860,15 +904,146 @@ def firmware_seleccion(body: dict = Body(...)):
                     c.rollback()
                     return guard
                 cur = c.execute("""INSERT INTO fw_bcast
-                    (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target)
-                    VALUES (?,?,?,?,?,128,10,'offering',?,?)""",
-                    (xfer, str(APP_BIN), info['version'], info['bytes'], info['sha256'], time.time(), origin))
+                    (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target,auto_install)
+                    VALUES (?,?,?,?,?,128,10,'offering',?,?,?)""",
+                    (xfer, str(APP_BIN), info['version'], info['bytes'], info['sha256'], time.time(), origin, int(auto_install)))
                 ids.append(cur.lastrowid)
             c.commit()
     except (OSError, sqlite3.Error) as error:
         LOG.warning('event=firmware_selection.failed error=%s', error)
         return JSONResponse(status_code=503, content={'error': 'No se pudo guardar el envío en el gateway.'})
     return {'ids': ids, 'version': info['version'], 'origins': origins}
+
+
+def _ota_busy(c):
+    return (c.execute("SELECT 1 FROM fw_bcast WHERE state NOT IN ('ready','failed','cancelled','done','installing') LIMIT 1").fetchone()
+            or c.execute("SELECT 1 FROM fw_check WHERE state IN ('pending','checking') LIMIT 1").fetchone()
+            or any(not value for value in _firmware_install_status(c).values()))
+
+
+def _ota_project_node(c, node, job, report, active, busy_install):
+    """Presenta evidencias y acciones sin confundir inventario con una operación."""
+    origin = node['node_id']
+    node.update(can_check=False, can_disable_auto=False, history=[], operation=None,
+                primary_action=None, blocked_reason=None)
+    checks_busy = c.execute("SELECT 1 FROM fw_check WHERE state IN ('pending','checking') LIMIT 1").fetchone()
+    if checks_busy:
+        node['can_send'] = node['can_install'] = False
+    if not job:
+        node['summary'] = 'Actualización disponible' if node['can_send'] else 'Sin operación de actualización'
+    else:
+        events = [dict(r) for r in c.execute("""SELECT e.*,b.version FROM fw_event e
+            JOIN fw_bcast b ON b.id=e.bcast_id WHERE e.origin=? OR (e.origin IS NULL AND b.target IS NULL)
+            ORDER BY e.id DESC LIMIT 100""", (origin,))]
+        node['history'] = events
+        check = c.execute('SELECT * FROM fw_check WHERE bcast_id=? AND origin=? ORDER BY id DESC LIMIT 1', (job['id'],origin)).fetchone()
+        check = dict(check) if check else None
+        matching = report and report['sha256'] == job['sha256'] and report['xfer'] == job['xfer']
+        verification = c.execute("""SELECT cause,ts FROM fw_event WHERE bcast_id=? AND origin=?
+            AND kind='report' AND phase=2 ORDER BY id DESC LIMIT 1""", (job['id'],origin)).fetchone()
+        if matching and report['phase'] == 2:
+            verification = report
+        verified = bool(verification and verification['cause'] == 15)
+        verified_at = verification['ts'] if verified else None
+        if not matching:
+            node['report_text'] = None
+        state = node['operation_state'] or job['state']
+        maprow = c.execute('SELECT missing,ts FROM fw_bcast_map WHERE bcast_id=? AND node_id=?',(job['id'],origin)).fetchone()
+        missing = maprow['missing'] if maprow else None
+        terminal = state in ('failed','cancelled')
+        uncertain = bool(terminal and (not check or check['result'] != 'complete'
+            or (check['updated_ts'] or 0) < (job['updated_ts'] or job['created_ts'])))
+        if check and check['state'] in ('pending','checking'):
+            summary = 'Comprobando recepción'
+        elif check and check['result'] == 'no_response' and state not in ('install_req','installing','done'):
+            summary = 'Recepción sin confirmar: falta respuesta del nodo'
+        elif verification and not verified and state not in ('pending','install_req','installing','done'):
+            summary = 'Verificación fallida; volver a enviar la imagen'
+        elif node['boot_pending']:
+            summary = 'En ejecución; pendiente de confirmación de arranque'
+        elif state in ('pending','install_req'):
+            summary = 'Comprobando antes de instalar'
+        elif state == 'installing':
+            summary = 'Instalación solicitada; esperando arranque'
+        elif state == 'done':
+            summary = 'Instalación confirmada'
+        elif state == 'sending':
+            summary = f"Enviando: {node.get('progress',0)} % emitido; recepción pendiente"
+        elif state == 'repairing':
+            summary = 'Reenviando fragmentos pendientes'
+        elif state in ('queued','offering','polling'):
+            summary = {'queued':'En cola','offering':'Preparando envío','polling':'Comprobando recepción'}[state]
+        elif missing is not None and missing > 0:
+            summary = f'Envío incompleto: faltan {missing} fragmentos'
+        elif terminal and uncertain:
+            summary = 'Operación detenida; comprobar recepción'
+        elif node['received'] and verified:
+            summary = 'Listo para instalar'
+        elif node['received']:
+            summary = 'Recepción completa; verificación pendiente'
+        else:
+            summary = 'Recepción sin confirmar'
+        node['summary'] = summary
+        node['can_install'] = bool(node['can_install'] and not uncertain and verified)
+        eligible = (node['online'] and not active and not busy_install and not checks_busy
+                    and not any(target == origin for _,target in _firmware_install_status(c)))
+        node['can_check'] = bool(eligible and not (verification and not verified) and state in ('ready','failed','cancelled') and node['comparison']=='different')
+        node['can_disable_auto'] = bool(job['auto_install'] and job['state'] not in ('install_req','installing','done','failed','cancelled'))
+        node['operation'] = {'id':job['id'], 'version':job['version'], 'state':state,
+            'auto_install':bool(job['auto_install']), 'created_at':job['created_ts'],
+            'updated_at':job['updated_ts'], 'detail':node.get('detail'),
+            'last_result':check['detail'] if check and (check['updated_ts'] or 0) > (job['updated_ts'] or job['created_ts'])
+                and state not in ('installing','done') else node.get('detail'),
+            'received':missing==0, 'missing':missing, 'received_at':maprow['ts'] if maprow else None,
+            'verified':verified, 'verified_at':verified_at,
+            'check':check, 'report_text':node.get('report_text'), 'report_at':report['ts'] if matching else None,
+            'installation':('Instalación confirmada' if state=='done' else
+                'Confirmación de arranque pendiente' if state=='installing' else
+                'Comprobación previa en curso' if state in ('pending','install_req') else
+                'Sin confirmación de instalación; ver detalle' if state=='failed' else 'No solicitada')}
+    if not node['online']:
+        node['blocked_reason'] = 'El nodo no está conectado. Se conserva la última información recibida.'
+    elif active and (not job or active['id'] != job['id']):
+        node['blocked_reason'] = 'Hay un envío en curso; espera a que termine.'
+    elif busy_install and not node['boot_pending']:
+        node['blocked_reason'] = 'Se está esperando el regreso de un nodo tras instalar.'
+    if job and node['comparison'] != 'different' and node.get('operation_state') == 'failed':
+        node['blocked_reason'] = 'El nodo no anuncia una versión anterior a esta imagen. Revisa el diagnóstico de arranque en el detalle.'
+    if node['can_install']:
+        node['primary_action'] = 'install'
+    elif node['can_check'] and (not node.get('missing') or not node['can_send']):
+        node['primary_action'] = 'check'
+    elif node['can_send']:
+        node['primary_action'] = 'send'
+
+
+@router.post('/firmware/comprobar')
+def firmware_comprobar(body: dict = Body(...)):
+    if type(body.get('id')) is not int or type(body.get('origin')) is not int:
+        return JSONResponse(status_code=400,content={'error':'Operación y nodo no válidos.'})
+    data = firmware_difusion()
+    node = next((n for n in data['nodos'] if n['node_id']==body.get('origin') and n['job_id']==body.get('id')), None)
+    if not node or not node['can_check']:
+        return JSONResponse(status_code=409,content={'error':'La comprobación no está disponible para esta operación.'})
+    with _conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if _ota_busy(c) or c.execute('SELECT 1 FROM fw_bcast WHERE id>? AND (target=? OR target IS NULL)',(body['id'],body['origin'])).fetchone():
+            return JSONResponse(status_code=409,content={'error':'La operación ha cambiado. Actualiza el estado.'})
+        c.execute('INSERT INTO fw_check(bcast_id,origin,created_ts) VALUES(?,?,?)',(body['id'],body['origin'],time.time()))
+    return {'ok':True}
+
+
+@router.post('/firmware/automatico/desactivar')
+def firmware_auto_desactivar(body: dict = Body(...)):
+    if type(body.get('id')) is not int or type(body.get('origin')) is not int:
+        return JSONResponse(status_code=400,content={'error':'Operación y nodo no válidos.'})
+    with _conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        cur = c.execute("""UPDATE fw_bcast SET auto_install=0 WHERE id=? AND target=?
+            AND auto_install=1 AND state NOT IN ('install_req','installing','done','failed','cancelled')""",(body.get('id'),body.get('origin')))
+        if not cur.rowcount:
+            return JSONResponse(status_code=409,content={'error':'La instalación automática ya no se puede desactivar en esta operación.'})
+    return {'ok':True}
 
 
 @router.get("/firmware/difusion")
@@ -882,52 +1057,94 @@ def firmware_difusion():
         active_jobs = [j for j in jobs if j['state'] not in ('ready','install_req','installing','done','failed','cancelled')]
         active = min(active_jobs, key=lambda j: j['id']) if active_jobs else None
         installs = {(r['bcast_id'], r['origin']): dict(r) for r in c.execute('SELECT * FROM fw_bcast_install ORDER BY id')}
-        busy_install = any(i['state'] in ('pending','installing') for i in installs.values()) or any(j['state'] in ('install_req','installing') for j in jobs)
+        pending = _firmware_install_status(c)
+        busy_install = any(not running for running in pending.values())
+        catalog = {r['origin_id']: r['t_updated'] for r in c.execute('SELECT origin_id,t_updated FROM node_catalog')}
+        reports = {}
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fw_report'").fetchone():
+            reports = {r['origin']: dict(r) for r in c.execute('SELECT * FROM fw_report')}
+        causes = {0: 'Instalación confirmada', 1: 'No hay una imagen instalable',
+                  2: 'La imagen no coincide con su hash', 3: 'No se pudo seleccionar la imagen de arranque',
+                  4: 'Arranque revertido a la imagen anterior', 5: 'Arranque de la nueva imagen pendiente',
+                  6: 'Recepción sin actividad durante 10 minutos', 7: 'Error al escribir la memoria flash',
+                  8: 'Error al borrar la memoria flash', 9: 'Memoria RAM insuficiente',
+                  10: 'No se pudo guardar el estado', 11: 'Oferta de firmware no válida',
+                  12: 'No se pudo confirmar la imagen de arranque', 13: 'Error al leer la memoria flash',
+                  14: 'No se pudo calcular el hash', 15: 'Imagen verificada',
+                  16: 'Arrancó la imagen anterior; la nueva no quedó activa',
+                  17: 'La imagen nueva no logró registrarse en la red durante la prueba'}
+        phases = {1: 'Recepción', 2: 'Verificación', 3: 'Instalación', 4: 'Arranque'}
         shown = []
         for node in nodes:
             origin = node['node_id']
-            job = next((j for j in jobs if j['target'] in (None, origin) and (
-                j['state'] not in ('ready','done','failed','cancelled')
-                or installs.get((j['id'],origin), {}).get('state') in ('pending','installing')
-                or (now - (j['updated_ts'] or j['created_ts']) < 86400 and j['version'] == available))), None)
-            node.update(operation_state=None, received=False, missing=None, can_install=False, job_id=None)
+            job = next((j for j in jobs if j['target'] in (None, origin)), None)
+            node['running_observed_at'] = catalog.get(origin)
+            report = reports.get(origin)
+            node['firmware_report'] = report
+            node['report_text'] = None
+            if report:
+                node['report_text'] = f"{phases.get(report['phase'], 'Firmware')}: {causes.get(report['cause'], 'Resultado desconocido')}"
+                if report['total']:
+                    node['report_text'] += f". Faltan {report['missing']} de {report['total']} fragmentos"
+            node.update(operation_state=None, received=False, missing=None, can_install=False, job_id=None, boot_pending=False)
+            own_pending = any(target == origin for _,target in pending)
             if job:
                 shown.append(job)
                 node['job_id'] = job['id']
                 node['broadcast'] = job['target'] is None
-                node['available_version'] = job['version']
+                node['operation_version'] = job['version']
                 node['comparison'] = firmwaremeta.comparison(node['installed_version'], job['version'])
                 mapping = c.execute('SELECT missing FROM fw_bcast_map WHERE bcast_id=? AND node_id=?', (job['id'],origin)).fetchone()
                 node['missing'] = mapping[0] if mapping else None
-                node['received'] = node['missing'] == 0 or (job['target'] == origin and job['state'] in ('ready','install_req','installing','done'))
+                node['received'] = node['missing'] == 0
                 inst = installs.get((job['id'],origin), {})
                 state = inst.get('state') if job['target'] is None else job['state']
                 node['operation_state'] = 'queued' if state == 'offering' and active and job['id'] != active['id'] else state
                 node['detail'] = inst.get('detail') or job['detail']
+                node['boot_pending'] = pending.get((job['id'],origin), False)
+                # Una fila antigua marcada ready no sustituye al mapa del nodo.
+                if job['state'] == 'ready' and not node['received'] and state not in ('pending','installing','done'):
+                    node['operation_state'] = 'failed'
+                    node['detail'] = (f"Faltan {node['missing']} fragmentos."
+                                      if node['missing'] is not None
+                                      else 'El nodo no ha confirmado la recepción completa.')
                 node['progress'] = round(100 * min(job['sent'] or 0, job['total_len']) / job['total_len']) if job['total_len'] else 0
-                node['can_install'] = bool((job['state'] == 'ready' or (job['target'] is None and job['state'] == 'done')) and node['received']
-                    and node['comparison'] == 'different' and node['online'] and not active and not busy_install
+                node['can_install'] = bool((job['state'] in ('ready','failed','cancelled') or (job['target'] is None and job['state'] == 'done')) and node['received']
+                    and node['comparison'] == 'different' and node['online'] and not active and not busy_install and not own_pending
                     and inst.get('state') not in ('pending','installing','done'))
+            if job and report and report['sha256'] == job['sha256'] and report['xfer'] == job['xfer'] and report['phase'] == 2 and report['cause'] != 15:
+                node['can_install'] = False
+                node['received'] = False
             node['can_send'] = bool(node['online'] and firmwaremeta.comparison(node['installed_version'], available) == 'different'
-                and not node['received'] and not active and not busy_install)
+                and (not node['received'] or node['operation_state'] in ('failed','cancelled') or (job and job['version'] != available))
+                and not active and not busy_install and not own_pending)
+            _ota_project_node(c, node, job, report, active, busy_install)
     radio_available = not bool(_radio_error())
     for node in nodes:
         node['can_send'] = node['can_send'] and radio_available
         node['can_install'] = node['can_install'] and radio_available
+        node['can_check'] = node['can_check'] and radio_available
+        if not radio_available:
+            node['primary_action'] = None
+            node['blocked_reason'] = 'La radio del gateway no está disponible.'
     return {'id': active['id'] if active else shown[0]['id'] if shown else None,
             'activa': bool(active), 'radio_available': radio_available,
             'state': active['state'] if active else None, 'version': available,
             'elapsed_s': max(0, now - active['created_ts']) if active else None,
+            'waiting_for_restart': sorted({origin for (_,origin),running in pending.items() if not running}),
             'nodos': nodes, 'can_start': any(n['can_send'] for n in nodes),
             'release_notes': firmwaremeta.release_notes('node', available)}
 
 
 @router.post("/firmware/difusion/cancelar")
-def firmware_difusion_cancelar():
+def firmware_difusion_cancelar(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        body = {}
     try:
         with _conn() as c:
-            cur = c.execute("""UPDATE fw_bcast SET state='cancelled', updated_ts=?, detail='cancelada desde el visor'
-                WHERE state NOT IN ('ready','install_req','installing','done','failed','cancelled')""", (time.time(),))
+            cur = c.execute("""UPDATE fw_bcast SET state='cancelled', auto_install=0, updated_ts=?, detail='Envío cancelado desde el visor'
+                WHERE state NOT IN ('ready','install_req','installing','done','failed','cancelled')
+                  AND (? IS NULL OR (id=? AND (target=? OR target IS NULL)))""", (time.time(),body.get('id'),body.get('id'),body.get('origin')))
             c.commit()
     except sqlite3.Error:
         return JSONResponse(status_code=503, content={'error': 'No se pudo cancelar el envío.'})
@@ -1007,16 +1224,23 @@ def difusion_instalar(body: dict = Body(...)):
     if not isinstance(origin, int) or not 1 <= origin <= 254:
         return JSONResponse(status_code=400,
                             content={"error": "origin fuera de 1-254"})
+    candidate = next((n for n in firmware_difusion()['nodos'] if n['node_id']==origin
+                      and n.get('job_id')==body.get('id') and n.get('can_install')), None)
+    if not candidate:
+        return JSONResponse(status_code=409,content={'error':'Comprueba la recepción antes de instalar.'})
     try:
         with _conn() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if _ota_busy(c):
+                return JSONResponse(status_code=409,content={'error':'Hay otra operación usando la radio.'})
             fila = c.execute(
                 """SELECT id, state, version FROM fw_bcast
-                    WHERE target IS NULL ORDER BY id DESC LIMIT 1""").fetchone()
+                    WHERE target IS NULL AND id=?""", (body.get("id"),)).fetchone()
             if fila is None:
                 return JSONResponse(status_code=404,
                                     content={"error": "no hay ninguna difusión"})
             bcast_id, state, version = fila
-            if state not in ("ready", "done"):
+            if state not in ("ready", "done", "failed", "cancelled"):
                 return JSONResponse(
                     status_code=409,
                     content={"error": f"la difusión no ha terminado "
@@ -1024,6 +1248,8 @@ def difusion_instalar(body: dict = Body(...)):
             guard = _firmware_guard(origin, version)
             if guard is not None:
                 return guard
+            if _firmware_verification_failed(c,bcast_id,origin):
+                return JSONResponse(status_code=409, content={'error': 'El nodo informó un fallo al verificar la imagen. Vuelve a enviarla.'})
             existing = c.execute("SELECT id FROM fw_bcast_install WHERE bcast_id=? AND origin=? AND state IN ('pending','installing')", (bcast_id, origin)).fetchone()
             if existing:
                 return JSONResponse(status_code=409, content={'error': 'La instalación de este nodo ya está en curso.'})

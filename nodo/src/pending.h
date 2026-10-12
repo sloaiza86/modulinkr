@@ -4,9 +4,8 @@
 // TELEMETRY enviada entra aquí y sale cuando llega su ACK, o cuando agota
 // timeout y reintentos.
 //
-// Alcance H4 (fase 1): al agotar reintentos la entrada se libera y solo
-// queda el contador. La fase 3 (respaldo NB-IoT) cambiará ese destino:
-// las no confirmadas pasarán al batch NB-IoT o a la entrega en custodia.
+// Las muestras no confirmadas pasan a la outbox para respaldo NB-IoT o
+// custodia. La espera del ACK empieza tras la confirmación TX del módulo.
 
 #pragma once
 
@@ -25,7 +24,9 @@ public:
     struct Entry {
         bool     in_use  = false;
         uint16_t seq     = 0;
-        uint32_t sent_ms = 0;   // millis() del último envío (se actualiza al reintentar)
+        uint32_t sent_ms = 0;   // millis() de TXP2P DONE o del último aplazamiento
+        bool awaiting_tx = true;  // en cola o esperando la respuesta del módulo
+        bool tx_failed = false;  // fallo local, sin esperar un ACK imposible
         uint32_t capture_ms = 0;  // millis() de la captura de la muestra
         uint32_t ts      = 0;   // epoch de captura tal como viajó en la trama
                                 // (v2.1, INMUTABLE: los reintentos y la outbox
@@ -39,7 +40,8 @@ public:
                                        // reintentos reutilizan los mismos
     };
 
-    // Registra una trama recién enviada. Si la cola está llena, sobrescribe
+    // Registra una trama aceptada por el driver, todavía sin plazo de ACK.
+    // Si la cola está llena, sobrescribe
     // la entrada más antigua (FIFO con sobrescritura, spec §5.1) y lo
     // reporta devolviendo false.
     //   dest        0xFF para la ruta normal al gateway; el id de un
@@ -60,8 +62,14 @@ public:
     // El llamante decide: reintentar (markRetry) o abandonar (drop).
     Entry* firstExpired(uint32_t now_ms, uint32_t timeout_ms);
 
-    // Reinicia el temporizador de una entrada tras retransmitirla.
+    // Reserva un reintento aceptado por el driver. El plazo empieza con DONE.
     void markRetry(Entry& e, uint32_t now_ms);
+
+    // Resuelve la transmisión local sin recrear entradas ya confirmadas por ACK.
+    Entry* txResult(uint16_t seq, uint8_t dest, uint32_t now_ms, bool sent);
+
+    // Una cola llena aplaza el intento sin consumir el presupuesto de radio.
+    void deferRetry(Entry& e, uint32_t now_ms);
 
     // Libera una entrada (ACK tardío imposible: ya no se reconocerá).
     void drop(Entry& e);

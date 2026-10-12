@@ -7,7 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 SERVICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE))
@@ -28,6 +28,73 @@ class ObservationTests(unittest.TestCase):
         self.addCleanup(self.buf.close)
         with patch.dict(os.environ, {}, clear=True):
             self.pub = publisher.MqttPublisher(self.buf)
+
+    def connect_fake(self):
+        self.pub.enabled = self.pub.connected = True
+        publisher.mqtt.MQTT_ERR_SUCCESS = 0
+        self.info = Mock(rc=0)
+        self.info.is_published.return_value = False
+        self.info.wait_for_publish.side_effect = AssertionError("No debe esperar al broker")
+        self.pub.client = Mock()
+        self.pub.client.publish.return_value = self.info
+
+    def sample(self, seq):
+        self.buf.accept({"origin_id":2,"ts":1000+seq,"seq":seq,"reads":[21.0],
+                         "payload":b"", "frame_type":1, "schema_version":3, "hop_src":2, "ttl":6}, -50, 12)
+
+    def test_puback_stall_keeps_exact_batch_and_never_blocks_radio_loop(self):
+        self.connect_fake()
+        self.sample(1)
+        self.pub.drain()
+        self.sample(2)
+        for _ in range(20):
+            self.pub.drain_nbiot()
+            self.pub.drain()
+        self.assertEqual(self.pub.client.publish.call_count, 1)
+        self.assertEqual(len(self.buf.fetch_pending(10)), 2)
+        self.info.wait_for_publish.assert_not_called()
+        self.info.is_published.return_value = True
+        self.pub.drain_nbiot()
+        self.assertEqual([r["seq"] for r in self.buf.fetch_pending(10)], [2])
+        self.assertEqual(self.pub.n_pub_tel, 1)
+
+    def test_timeout_and_disconnect_do_not_drop_unconfirmed_custody(self):
+        self.connect_fake()
+        self.sample(1)
+        self.pub.drain()
+        self.pub.connected = False
+        with patch.object(publisher.time, "monotonic", return_value=10**12):
+            self.pub.drain_nbiot()
+        self.assertEqual(len(self.buf.fetch_pending(10)),1)
+        self.pub.connected = True
+        self.info.is_published.return_value = True
+        self.pub.drain_nbiot()
+        self.assertEqual(len(self.buf.fetch_pending(10)),0)
+
+    def test_health_puback_confirms_only_the_message_in_flight(self):
+        self.connect_fake()
+        self.pub.publish_health(2,{"hl_fault_name":"receptor mudo"})
+        self.pub.publish_health(2,{"hl_fault_name":"ninguno"})
+        self.assertEqual(self.pub.client.publish.call_count,1)
+        self.info.is_published.return_value = True
+        self.pub.poll_publications()
+        self.assertIn(2,self.pub._health_pending)
+        self.pub._drain_health()
+        self.pub.poll_publications()
+        self.assertNotIn(2,self.pub._health_pending)
+        self.assertEqual(self.pub.n_pub_hlt,2)
+
+    def test_old_catalog_puback_does_not_confirm_a_new_registration(self):
+        self.connect_fake()
+        self.buf.catalog_upsert(2,{"fw_version":"0.0.73","node_name":"Supernodo"})
+        self.pub.drain()
+        self.buf.catalog_upsert(2,{"fw_version":"0.0.74","node_name":"Supernodo"})
+        self.info.is_published.return_value = True
+        self.pub.poll_publications()
+        self.assertEqual(len(self.buf.fetch_pending_catalogs()),1)
+        self.pub.drain()
+        self.pub.poll_publications()
+        self.assertEqual(len(self.buf.fetch_pending_catalogs()),0)
 
     def message(self, retain=False, origin=2, source=1, samples=True):
         return types.SimpleNamespace(topic=f"modulinkr/v1/{source}/telemetry", retain=retain,

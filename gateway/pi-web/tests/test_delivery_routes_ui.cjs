@@ -105,3 +105,26 @@ test("LoRa activo se distingue del último recorrido desconectado", () => {
   assert.equal(c.aristaVisualTopologia({...route, online:true}).color.color, "blue");
   assert.equal(c.aristaVisualTopologia({...route, online:false}).color.color, "grey");
 });
+
+test("el reloj OTA queda al extremo, sin texto visible y con detalle de fase", () => {
+  const ctx = vm.createContext({ cacheEstado:null, fmtEdadEnVivo:s=>`${s} s` });
+  vm.runInContext(section("function iconoMdi(", "// ----- Utilidades -----")
+    + section("const FW_FASE_TXT", "function chipEstado(")
+    + section("function nombreNodoRuta(", "let masonryRaf"), ctx);
+  for (const phase of ["sending","repairing","polling","install_req","installing"]) {
+    for (const modem of [false,true]) {
+      const chips=ctx.chipsNodo({ online:true, fw_session:phase,
+        nbiot_flags:modem?3:null, nbiot_ago_s:1 },null,135);
+      const last=chips[chips.length-1];
+      assert.equal(last.maintenance,true);
+      const html=ctx.chipConexion(last);
+      assert.match(html,/mdi:clock-outline/);
+      assert.match(html,/aria-label="Actualizando: /);
+      assert.doesNotMatch(html,/<span>Actualizando<\/span>/);
+      assert.equal(chips.filter(x=>x.maintenance).length,1);
+      if (phase==="sending") assert.match(html,/Enviando firmware/);
+      if (phase==="installing") assert.match(html,/esperando el arranque/);
+    }
+  }
+  assert.match(ctx.chipConexion({maintenance:true,cls:"ambar",txt:'Actualizando: <x> "y"'}), /&lt;x&gt; &quot;y&quot;/);
+});

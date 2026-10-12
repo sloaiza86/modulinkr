@@ -50,6 +50,19 @@ class DeliveryTests(unittest.TestCase):
     def edge(self, origin, target):
         return next(e for e in net.topology()["edges"] if e["from"] == origin and e["to"] == target)
 
+    def test_cellular_sample_does_not_erase_recent_lora_connectivity(self):
+        self.buf.observe_route(1,self.now,10,"lora",255,[1,255],self.now,self.now)
+        self.now += 1
+        self.publish(origin=1,publisher=1)
+        self.buf.observe_route(1,self.now,11,"nbiot",1,[1],self.now,self.now)
+        state = self.nodes()[1]
+        self.assertEqual(state["transport"], "nbiot")
+        self.assertTrue(state["lora_route_online"])
+        self.assertTrue(state["mqtt_recent"])
+        self.now += 135
+        self.link(True)
+        self.assertFalse(self.nodes()[1]["lora_route_online"])
+
     def test_exact_publication_time_and_relay_expiry(self):
         self.now += 400
         self.link(False)

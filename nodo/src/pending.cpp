@@ -14,6 +14,8 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
             e.in_use     = true;
             e.seq        = seq;
             e.sent_ms    = now_ms;
+            e.awaiting_tx = true;
+            e.tx_failed = false;
             e.capture_ms = capture_ms;
             e.ts         = ts;
             e.timeout_ms = timeout_ms;
@@ -35,6 +37,8 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
     next_slot_ = (next_slot_ + 1) % kCapacity;
     e.seq        = seq;
     e.sent_ms    = now_ms;
+    e.awaiting_tx = true;
+    e.tx_failed = false;
     e.capture_ms = capture_ms;
     e.ts         = ts;
     e.timeout_ms = timeout_ms;
@@ -63,7 +67,8 @@ bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out, uint8_t expected) {
 PendingQueue::Entry* PendingQueue::firstExpired(uint32_t now_ms,
                                                 uint32_t timeout_ms) {
     for (size_t i = 0; i < kCapacity; ++i) {
-        if (!entries_[i].in_use) continue;
+        if (!entries_[i].in_use || entries_[i].awaiting_tx) continue;
+        if (entries_[i].tx_failed) return &entries_[i];
         // Backoff por entrada (mac.md §4.4): si la entrada trae su propio
         // vencimiento (reintentos), se usa; si no (primer intento), el base.
         const uint32_t thr = entries_[i].timeout_ms != 0
@@ -79,6 +84,26 @@ PendingQueue::Entry* PendingQueue::firstExpired(uint32_t now_ms,
 void PendingQueue::markRetry(Entry& e, uint32_t now_ms) {
     e.retries++;
     e.sent_ms = now_ms;
+    e.awaiting_tx = true;
+    e.tx_failed = false;
+}
+
+PendingQueue::Entry* PendingQueue::txResult(uint16_t seq, uint8_t dest, uint32_t now_ms, bool sent) {
+    for (auto& e : entries_) {
+        if (e.in_use && e.awaiting_tx && e.seq == seq && e.dest == dest) {
+            e.sent_ms = now_ms;
+            e.awaiting_tx = false;
+            e.tx_failed = !sent;
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+void PendingQueue::deferRetry(Entry& e, uint32_t now_ms) {
+    e.sent_ms = now_ms;
+    e.awaiting_tx = false;
+    e.tx_failed = false;
 }
 
 void PendingQueue::drop(Entry& e) {
