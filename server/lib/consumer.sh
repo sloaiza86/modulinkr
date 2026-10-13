@@ -65,7 +65,7 @@ consumer_install_code() {
     if [ ! -x "$CONSUMER_DIR/.venv/bin/python3" ]; then
         python3 -m venv "$CONSUMER_DIR/.venv"
     fi
-    "$CONSUMER_DIR/.venv/bin/pip" install -q --upgrade paho-mqtt psycopg2-binary
+    "$CONSUMER_DIR/.venv/bin/pip" install --upgrade 'paho-mqtt>=2.1,<3' psycopg2-binary
     ok "Código en $CONSUMER_DIR, venv con paho-mqtt y psycopg2"
 }
 
@@ -106,5 +106,6 @@ install_consumer() {
     consumer_db_credentials
     consumer_install_code
     consumer_write_env
+    MODULINKR_SERVER_SOURCE="$SERVER_DIR" bash "$SERVER_DIR/install_supervision.sh"
     consumer_install_service
 }

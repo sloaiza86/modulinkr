@@ -41,6 +41,7 @@ class Db:
                 host=self.host, port=self.port, dbname=self.name,
                 user=self.user, password=self.password,
                 connect_timeout=10,
+                options='-c statement_timeout=10000',
             )
             self._conn.autocommit = False
             LOG.info("event=postgres.connected user=%s host=%s database=%s",

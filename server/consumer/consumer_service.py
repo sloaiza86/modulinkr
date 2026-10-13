@@ -16,11 +16,9 @@ Diseño:
     retained: llegan al suscribirse aunque sean anteriores al arranque.
   - Transacción por mensaje; deduplicación por el índice único
     (origin, ts, seq) de la base (ON CONFLICT DO NOTHING).
-  - Un error de datos nunca tumba el servicio (log y contador); un error
-    de infraestructura (BBDD caída) hace rollback y deja que el mensaje
-    se pierda de esta entrega: systemd y la sesión persistente sostienen
-    la operación, y las rutas de reintento del sistema (batch NB-IoT,
-    buffer del gateway) reentregan lo importante.
+  - Los datos rechazados se contabilizan y confirman. Un fallo de
+    infraestructura revierte la transacción y conserva el mensaje sin
+    confirmar. La reconexión solicita su reentrega en la sesión persistente.
 
 Config por variables de entorno (/etc/modulinkr/consumer.env):
   MODULINKR_MQTT_HOST         host del broker (obligatorio)
@@ -50,6 +48,7 @@ from db import Db
 from ingest import ingest_message
 from catalog import process_register
 from health import process_health
+from consumer_status import ConsumerStatus
 
 LOG = logging.getLogger("modulinkr.consumer")
 
@@ -79,6 +78,8 @@ class Consumer:
         self.db      = Db()
         self.stats   = {k: 0 for k in STATS_KEYS}
         self.running = True
+        self.status = ConsumerStatus()
+        self._retry_at = 0
 
         # clean_session=False + client_id fijo: el broker guarda la
         # suscripción y los QoS 1 pendientes entre reinicios del servicio.
@@ -102,6 +103,7 @@ class Consumer:
                 self.client.tls_insecure_set(True)
 
         self.client.on_connect    = self._on_connect
+        self.client.manual_ack_set(True)
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message    = self._on_message
         self.client.reconnect_delay_set(min_delay=1, max_delay=60)
@@ -114,6 +116,7 @@ class Consumer:
             return
         LOG.info("event=mqtt.connected host=%s port=%d session_present=%s",
                  self.host, self.port, bool(flags.get("session present")))
+        self.status.update(mqtt_connected=True)
         # La suscripción se (re)emite en cada conexión: con sesión
         # persistente es redundante pero inocua, y cubre el primer
         # arranque y los brokers reiniciados sin estado.
@@ -122,6 +125,7 @@ class Consumer:
                           ("modulinkr/v1/+/health", 1)])
 
     def _on_disconnect(self, client, userdata, rc) -> None:
+        self.status.update(mqtt_connected=False)
         if rc != 0:
             LOG.warning("event=mqtt.disconnected rc=%s retry=true", rc)
 
@@ -129,6 +133,7 @@ class Consumer:
         m = TOPIC_RE.match(msg.topic)
         if m is None:
             LOG.warning("event=mqtt.topic_rejected topic=%s", msg.topic)
+            client.ack(msg.mid, msg.qos)
             return
         publisher, kind = int(m.group(1)), m.group(2)
 
@@ -139,8 +144,11 @@ class Consumer:
         except (ValueError, UnicodeDecodeError) as e:
             self.stats[_BAD_KEY[kind]] += 1
             LOG.warning("event=payload.parse_failed topic=%s error=%s", msg.topic, e)
+            client.ack(msg.mid, msg.qos)
             return
 
+        before = {key: self.stats[key] for key in ('inserted', 'quarantined', 'dup',
+                                                  'reg_ok', 'reg_synced', 'materialized', 'hlt_ok', 'hlt_dup')}
         try:
             if kind == "telemetry":
                 self.stats["msg_tel"] += 1
@@ -149,12 +157,19 @@ class Consumer:
                 process_health(self.db, publisher, payload, self.stats)
             else:
                 process_register(self.db, publisher, payload, self.stats)
+            if any(self.stats[key] != value for key, value in before.items()):
+                self.status.update(write_error=False, last_saved=time.time())
+            client.ack(msg.mid, msg.qos)
         except Exception:                            # noqa: BLE001
-            # Infraestructura (BBDD caída, etc.): rollback y a seguir. El
-            # detalle queda en el log; el dato lo reentrega el sistema.
             self.stats["infra_err"] += 1
+            for key, value in before.items():
+                self.stats[key] = value
             self.db.rollback()
+            self.status.failed()
             LOG.exception("event=message.processing_failed topic=%s", msg.topic)
+            # Sin confirmación, la sesión persistente reentrega al reconectar.
+            self._retry_at = time.monotonic() + 5
+            client.disconnect()
 
     # ----- Ciclo de vida -----
 
@@ -177,6 +192,15 @@ class Consumer:
         while self.running:
             time.sleep(0.5)
             now = time.monotonic()
+            if self._retry_at and now >= self._retry_at:
+                self.client.loop_stop()
+                try:
+                    self.client.reconnect()
+                    self.client.loop_start()
+                    self._retry_at = 0
+                except Exception:
+                    self._retry_at = now + 5
+                    LOG.warning('event=mqtt.redelivery_reconnect_failed')
             if now - last_stats >= self.stats_s:
                 last_stats = now
                 self.report_stats()
@@ -194,6 +218,7 @@ class Consumer:
         self.running = False
 
     def report_stats(self) -> None:
+        self.status.update()
         s = self.stats
         LOG.info("STATS msgs=%d bad=%d test=%d | ins=%d dup=%d quar=%d "
                  "sbad=%d | reg ok=%d sync=%d bad=%d mat=%d | "

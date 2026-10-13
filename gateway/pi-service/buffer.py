@@ -50,6 +50,11 @@ class GatewayBuffer:
         self.max_entries = max_entries
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute('CREATE TABLE IF NOT EXISTS buffer_runtime '
+                          '(id INTEGER PRIMARY KEY, capacity INTEGER NOT NULL, '
+                          'dropped INTEGER NOT NULL DEFAULT 0, last_drop REAL)')
+        self.conn.execute('INSERT INTO buffer_runtime(id,capacity) VALUES(1,?) '
+                          'ON CONFLICT(id) DO UPDATE SET capacity=excluded.capacity', (max_entries,))
         self.conn.execute("""CREATE TABLE IF NOT EXISTS modbus_commands (
             id INTEGER PRIMARY KEY, origin INTEGER NOT NULL, device INTEGER NOT NULL,
             action TEXT NOT NULL, value_json TEXT NOT NULL, body BLOB NOT NULL,
@@ -1163,6 +1168,11 @@ class GatewayBuffer:
         if count <= self.max_entries:
             return
         to_drop = count - self.max_entries
+        lost = self.conn.execute('SELECT COUNT(*) FROM (SELECT published FROM buffer '
+                                 'ORDER BY t_recv ASC LIMIT ?) WHERE published=0', (to_drop,)).fetchone()[0]
+        if lost:
+            self.conn.execute('UPDATE buffer_runtime SET dropped=dropped+?,last_drop=? WHERE id=1',
+                              (lost, time.time()))
         self.conn.execute(
             """DELETE FROM buffer WHERE rowid IN (
                    SELECT rowid FROM buffer ORDER BY t_recv ASC LIMIT ?

@@ -1949,3 +1949,71 @@ modulinkr-operation-editor { display: block; }
 .operacion-estado[data-state="error"] { color: var(--bad); }
 .operacion-estado[data-state="verified"] { color: var(--ok); }
 @media(max-width:380px) { .detalle-tabs { gap: 0; } .detalle-tabs button { padding-inline: 2px; } }
+
+/* La lectura de un aviso no sustituye la recuperación de la incidencia. */
+.sb-pie .notificaciones-abrir { border: 0; background: transparent; position: relative; text-align: left; font: inherit; }
+.notificaciones-cuenta { background: var(--accent-suave); color: var(--accent); border-radius: 20px; padding: 1px 6px; margin-left: auto; font-size: 12px; font-weight: 600; }
+.notificaciones-punto { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-left: 5px; }
+.notificaciones-punto.critical { background: var(--bad); }
+body.sb-contraida .notificaciones-cuenta { position: absolute; top: 0; right: 0; font-size: 11px; }
+body.sb-contraida .notificaciones-punto { position: absolute; bottom: 5px; right: 8px; }
+.supervision-estado { display: grid; place-items: center; background: none; border: 0; width: 44px; height: 44px; padding: 0; color: var(--dim); border-radius: 50%; }
+.supervision-estado.sin-supervision { color: var(--warn); background: var(--warn-suave); }
+.supervision-estado modulinkr-icon { width: 20px; height: 20px; }
+.notificaciones-movil { display: none; position: relative; }
+#notificaciones-panel { position: fixed; inset: 56px 0 0 auto; width: 440px; max-width: 100vw; height: calc(100dvh - 56px); max-height: none; margin: 0; padding: 20px; border: 0; border-left: 1px solid var(--border); color: var(--text); background: var(--card); box-shadow: -6px 0 24px rgba(20,40,60,.12); }
+#notificaciones-panel[open] { display: flex; flex-direction: column; gap: 16px; }
+#notificaciones-panel::backdrop { background: rgba(20,40,60,.08); }
+.notificaciones-cabecera { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.notificaciones-cabecera h2 { font-size: 18px; margin: 0; }
+.notificaciones-tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--border); }
+.notificaciones-tabs button { border: 0; border-radius: 0; background: none; color: var(--dim); padding: 8px 0; min-height: 44px; border-bottom: 2px solid transparent; }
+.notificaciones-tabs button[aria-selected=true] { color: var(--accent); border-bottom-color: var(--accent); }
+.notificaciones-tabs b { font-size: 12px; font-weight: 500; }
+#notificaciones-contenido { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.notificacion { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 10px; border-bottom: 1px solid var(--border); padding: 16px 0; }
+.notificacion > modulinkr-icon { width: 22px; height: 22px; color: var(--warn); }
+.notificacion.critical > modulinkr-icon { color: var(--bad); }
+.notificacion.ok > modulinkr-icon { color: var(--ok); }
+.notificacion h3 { font-size: 14px; margin: 0 0 5px; font-weight: 600; }
+.notificacion.sin-leer h3::after { content: ''; display: inline-block; margin-left: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.notificacion p { margin: 8px 0; overflow-wrap: anywhere; }
+.notificacion-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+.notificacion-meta span { color: var(--warn); }
+.notificacion.critical .notificacion-meta span { color: var(--bad); }
+.notificacion.ok .notificacion-meta span { color: var(--ok); }
+.notificacion summary { color: var(--accent); min-height: 44px; padding: 10px 0; cursor: pointer; }
+.notificacion details a, .notificacion details button { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 0; margin-right: 14px; border: 0; color: var(--accent); background: transparent; }
+.notificaciones-pie { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+.notificaciones-pie button { border: 0; color: var(--accent); padding: 8px 0; background: transparent; min-height: 44px; }
+.notificaciones-vacio { color: var(--dim); padding: 24px 0; }
+#notificaciones-error { margin: 0; color: var(--bad); }
+.capacidad-lista { display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
+.capacidad-card { padding: 20px; }
+.capacidad-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.capacidad-card h2 { font-size: 16px; margin: 0; }
+.capacidad-estado { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+.capacidad-estado.ok { color: var(--ok); }
+.capacidad-estado.warning { color: var(--warn); }
+.capacidad-estado.critical { color: var(--bad); }
+.capacidad-cifras { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
+.capacidad-cifra { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.capacidad-cifra > span { color: var(--dim); font-size: 12px; }
+.capacidad-cifra strong { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.capacidad-barra { height: 8px; background: var(--bg); border-radius: 8px; overflow: hidden; margin: 18px 0 8px; }
+.capacidad-barra span { display: block; height: 100%; background: var(--accent); }
+.capacidad-barra.warning span { background: var(--warn); }
+.capacidad-barra.critical span { background: var(--bad); }
+.capacidad-barra.neutral span { background: var(--off); }
+.capacidad-leyenda { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+.capacidad-fecha { color: var(--dim); font-size: 12px; margin: 14px 0 0; }
+.capacidad-fila { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.capacidad-fila > span { color: var(--dim); }
+.capacidad-fila strong { font-weight: 500; text-align: right; }
+.capacidad-enlace { display: flex; align-items: center; width: fit-content; min-height: 44px; color: var(--accent); }
+@media(max-width:700px) { .notificaciones-movil { display: inline-grid; } #notificaciones-panel { inset: 0; width: 100%; height: 100dvh; border: 0; padding: 16px; } }
+@media(max-width:430px) { .capacidad-card { padding: 16px; } .capacidad-cifras { grid-template-columns: 1fr; gap: 12px; } .capacidad-cifra { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; } .capacidad-cifra strong { font-size: 18px; text-align: right; } }
+body.en-configuracion .header-derecha { display: flex; }
+body.en-configuracion #clock { display: none; }
+@media(max-width:700px) { modulinkr-app-header .header-derecha { display: flex; gap: 4px; } modulinkr-app-header #clock { display: none; } }
+.notificacion.info > modulinkr-icon, .notificacion.info .notificacion-meta span { color: var(--accent); }

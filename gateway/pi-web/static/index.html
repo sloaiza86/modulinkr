@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=cuarentena-alineacion-20261013">
+  <link rel="stylesheet" href="/static/style.css?v=supervision-20261013">
 </head>
 <body>
 
@@ -34,6 +34,12 @@
     </a>
   </nav>
   <div class="sb-pie">
+    <button class="nav-item notificaciones-abrir" type="button" aria-haspopup="dialog"
+            aria-controls="notificaciones-panel" aria-expanded="false">
+      <modulinkr-icon name="mdi:bell-outline"></modulinkr-icon>
+      <span>Notificaciones</span><b class="notificaciones-cuenta" hidden></b>
+      <i class="notificaciones-punto" aria-label="Incidencias activas" hidden></i>
+    </button>
     <a class="nav-item" href="#/configuracion" data-view="configuracion" title="Configuración">
       <modulinkr-icon name="mdi:tune-variant"></modulinkr-icon>
       <span>Configuración</span>
@@ -60,10 +66,19 @@
     <h1 id="titulo-vista" tabindex="-1">Resumen de red</h1>
     <span id="badge-red" class="badge" hidden></span>
     <div class="header-derecha">
+      <button id="supervision-estado" class="supervision-estado" type="button"
+              aria-label="Consultar estado de supervisión" title="Estado de supervisión">
+        <modulinkr-icon name="mdi:access-point-check"></modulinkr-icon>
+      </button>
+      <button class="icono-btn notificaciones-abrir notificaciones-movil" type="button"
+              aria-label="Abrir notificaciones" aria-haspopup="dialog"
+              aria-controls="notificaciones-panel" aria-expanded="false">
+        <modulinkr-icon name="mdi:bell-outline"></modulinkr-icon>
+        <b class="notificaciones-cuenta" hidden></b>
+      </button>
       <span id="clock"></span>
     </div>
   </modulinkr-app-header>
-  <p id="red-observacion" class="aviso" role="status" hidden></p>
 
   <modulinkr-view-router>
     <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Resumen de red">
@@ -307,6 +322,12 @@
         <section class="ajustes-grupo" aria-labelledby="cfg-grupo-sistema">
           <h2 id="cfg-grupo-sistema">Sistema</h2>
           <div class="card lista-ajustes">
+          <a class="ajuste-item" href="#/configuracion/sistema">
+            <div class="ai-icono"><modulinkr-icon name="mdi:harddisk"></modulinkr-icon></div>
+            <div class="ai-texto"><div class="ai-titulo">Estado del sistema</div>
+              <div class="ai-sub">Almacenamiento, datos locales y servicios del gateway</div></div>
+            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
+          </a>
           <a class="ajuste-item" href="#/configuracion/wifi">
             <div class="ai-icono">
               <modulinkr-icon name="mdi:wifi"></modulinkr-icon>
@@ -356,6 +377,11 @@
           </div>
         </section>
         </div>
+
+      <div class="ajustes" id="cfg-sistema" hidden>
+        <div id="sistema-capacidad" class="capacidad-lista"></div>
+        <a class="capacidad-enlace" href="#/configuracion/bd">Ver base de datos de la nube</a>
+      </div>
 
       <div class="ajustes" id="cfg-mantenimiento" hidden>
         <div class="ajustes-cabecera">
@@ -793,6 +819,7 @@
         </div>
 
         <div id="servidor-panel-bd" role="tabpanel" aria-labelledby="servidor-tab-bd">
+          <div id="bd-capacidad" class="capacidad-lista"></div>
           <div class="card cfg-card">
             <h2>Datos en cuarentena</h2>
             <p class="texto-ayuda">Muestras recibidas pendientes de incorporarse al histórico.</p>
@@ -1427,6 +1454,27 @@
 <script src="/static/components.js?v=cuarentena-alineacion-20261013"></script>
 <script src="/static/network-state.js?v=ota-convivencia-20261002"></script>
 <script src="/static/quarantine.js?v=cuarentena-alineacion-20261013"></script>
-<script src="/static/app.js?v=cuarentena-alineacion-20261013"></script>
+<dialog id="notificaciones-panel" aria-labelledby="notificaciones-titulo">
+  <header class="notificaciones-cabecera">
+    <h2 id="notificaciones-titulo">Notificaciones</h2>
+    <button id="notificaciones-cerrar" class="icono-btn" type="button" aria-label="Cerrar notificaciones">
+      <modulinkr-icon name="mdi:close"></modulinkr-icon>
+    </button>
+  </header>
+  <div class="notificaciones-tabs" role="tablist" aria-label="Contenido de notificaciones">
+    <button type="button" role="tab" id="notificaciones-tab-activas" data-notificaciones-tab="activas"
+            aria-controls="notificaciones-contenido" aria-selected="true">Activas <b id="notificaciones-activas-cuenta">0</b></button>
+    <button type="button" role="tab" id="notificaciones-tab-historial" data-notificaciones-tab="historial"
+            aria-controls="notificaciones-contenido" aria-selected="false" tabindex="-1">Historial</button>
+    <button type="button" role="tab" id="notificaciones-tab-sistema" data-notificaciones-tab="sistema"
+            aria-controls="notificaciones-contenido" aria-selected="false" tabindex="-1">Sistema</button>
+  </div>
+  <div id="notificaciones-contenido" role="tabpanel" aria-labelledby="notificaciones-tab-activas"></div>
+  <p id="notificaciones-error" role="status" hidden></p>
+  <footer class="notificaciones-pie"><span id="notificaciones-resumen" aria-live="polite"></span>
+    <button id="notificaciones-leidas" type="button">Marcar todas como leídas</button></footer>
+</dialog>
+<script src="/static/supervision.js?v=supervision-20261013"></script>
+<script src="/static/app.js?v=supervision-20261013"></script>
 </body>
 </html>

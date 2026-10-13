@@ -416,6 +416,7 @@ const TITULOS = { red: "Resumen de red", topologia: "Topología de red", datos: 
 let vistaNavegada = null;
 
 const RUTAS_CONFIG = {
+  "sistema":       { panel: "cfg-sistema", titulo: "Estado del sistema", volver: "#/configuracion" },
   "mantenimiento": { panel: "cfg-mantenimiento", titulo: "Mantenimiento", volver: "#/configuracion" },
   "":              { panel: "cfg-menu",     titulo: "Configuración",           volver: null },
   "nodo":          { panel: "cfg-sub-nodo", titulo: "Nodos",                   volver: "#/configuracion" },
@@ -909,12 +910,7 @@ function proyectarRed() {
   redAhora = projected.now;
   formRadioActualizar(redConectada ? cacheEstado : null);
   pintarBadge(cacheEstado);
-  const aviso = document.getElementById("red-observacion");
-  aviso.textContent = !redConectada ? "Sin conexión con el gateway. Se conserva la última información recibida con su antigüedad."
-    : !cacheEstado.service_online ? "No se puede confirmar el estado del servicio del gateway."
-    : cacheEstado.mqtt_enabled && !cacheEstado.mqtt_connected
-      ? "Sin conexión del gateway al broker. El estado celular solo puede confirmarse si llega por LoRa." : "";
-  aviso.hidden = !aviso.textContent;
+  window.ModulinkrSupervision?.network(redConectada, cacheEstado.service_online);
   const porOrigen = new Map(cacheUltimos.nodes.map(n => [n.origin, n]));
   const catalogos = new Map((cacheCatalogosRed ?? []).map(n => [n.origin, n]));
   const html = tarjetaGateway(cacheEstado) + cacheEstado.nodes.map(n =>
@@ -953,9 +949,7 @@ async function refrescarRed() {
     } catch (error) {
       redConectada = false;
       formRadioActualizar(null);
-      const aviso = document.getElementById("red-observacion");
-      aviso.textContent = "Sin conexión con el gateway. Se conserva la última información recibida con su antigüedad.";
-      aviso.hidden = false;
+      window.ModulinkrSupervision?.network(false, null);
     } finally {
       clearTimeout(timeout);
       redAbort = null;
@@ -7932,6 +7926,7 @@ tarjetas.innerHTML =
   '<div class="skeleton"></div>'.repeat(3);
 
 navegar();
+window.ModulinkrSupervision?.init();
 // La zona de visualización se carga antes del primer repintado con hora;
 // hasta que llega, el reloj y las gráficas usan la del navegador.
 cargarAjustes().then(refrescarRed);

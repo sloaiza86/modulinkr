@@ -1,0 +1,17 @@
+[Unit]
+Description=ModuLinkr storage monitor
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=modulinkr-consumer
+WorkingDirectory=/opt/modulinkr/consumer
+EnvironmentFile=/etc/modulinkr/consumer.env
+EnvironmentFile=/etc/modulinkr/monitor.env
+ExecStart=/opt/modulinkr/consumer/.venv/bin/python3 /opt/modulinkr/consumer/monitor_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

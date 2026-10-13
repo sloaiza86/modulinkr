@@ -67,6 +67,7 @@ import logging
 import os
 import secrets
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -140,7 +141,16 @@ def require_auth(request: Request):
                             detail="Sesión requerida")
 
 
-app = FastAPI(title="ModuLinkr", docs_url=None, redoc_url=None,
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    systemapi.supervisor.start()
+    try:
+        yield
+    finally:
+        await run_in_threadpool(systemapi.supervisor.close)
+
+
+app = FastAPI(title="ModuLinkr", lifespan=lifespan, docs_url=None, redoc_url=None,
               openapi_url=None)
 
 
@@ -300,10 +310,12 @@ import debugapi  # noqa: E402
 import maintenanceapi  # noqa: E402
 
 import commandapi  # noqa: E402
+import systemapi  # noqa: E402
 
 for r in (red, topo, cats):
     app.include_router(r)
 app.include_router(commandapi.router, dependencies=[Depends(require_auth)])
+app.include_router(systemapi.router, dependencies=[Depends(require_auth)])
 # Los routers de datos y comisionamiento viven en sus módulos; la auth se
 # aplica al incluirlos (las dependencias de router se fijan en el include,
 # no a posteriori).

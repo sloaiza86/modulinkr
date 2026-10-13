@@ -8,6 +8,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=modulinkr-consumer
+StateDirectory=modulinkr-consumer
+StateDirectoryMode=0700
 WorkingDirectory=/opt/modulinkr/consumer
 # Credenciales fuera del repo (solo root), escritas por el instalador.
 EnvironmentFile=/etc/modulinkr/consumer.env
