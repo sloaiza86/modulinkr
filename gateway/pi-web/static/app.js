@@ -425,6 +425,7 @@ const RUTAS_CONFIG = {
   "radio":         { panel: "cfg-radio",    titulo: "Radio LoRa local",        volver: "#/configuracion" },
   "red-lora":      { panel: "cfg-red-lora", titulo: "Parámetros de red LoRa",  volver: "#/configuracion" },
   "servidor":      { panel: "cfg-servidor", titulo: "Servidor",                volver: "#/configuracion" },
+  "servidor/cuarentena": { panel: "cfg-cuarentena", titulo: "Datos en cuarentena", volver: "#/configuracion/bd" },
   "ia":            { panel: "cfg-ia",       titulo: "Asistente de IA",         volver: "#/configuracion" },
   "wifi":          { panel: "cfg-wifi",     titulo: "Red Wi-Fi",               volver: "#/configuracion" },
   "zona":          { panel: "cfg-zona",     titulo: "Zona horaria",            volver: "#/configuracion" },
@@ -453,6 +454,7 @@ function vistaActual() {
 function navegar() {
   const v = vistaActual();
   if (vistaNavegada === "configuracion" && v !== "configuracion") {
+    window.ModulinkrQuarantine.close();
     cfgLocalCerrar();
     migSondeoParar();
     debugStop();
@@ -2768,6 +2770,7 @@ let cfgSchemas = "";
 let servidorTab = "bd";
 
 function servidorSetTab(tab) {
+  window.ModulinkrQuarantine.close();
   servidorTab = tab === "mqtt" ? "mqtt" : "bd";
   document.querySelectorAll(".cfg-tab").forEach((boton) => {
     const activa = boton.dataset.tab === servidorTab;
@@ -2783,6 +2786,7 @@ function servidorSetTab(tab) {
 // Panel visible según la subruta: menú, "Configurar nodo", la página USB
 // o la radio LoRa (esta última carga su estado al entrar).
 function cfgRuta() {
+  window.ModulinkrQuarantine.close();
   const solicitada = location.hash.replace("#/", "").split("/").slice(1).join("/");
   const sub = Object.prototype.hasOwnProperty.call(RUTAS_CONFIG, solicitada) ? solicitada : "";
   const ruta = RUTAS_CONFIG[sub];
@@ -2804,6 +2808,7 @@ function cfgRuta() {
   if (sub === "servidor") servidorSetTab(servidorTab);
   if (sub === "bd") servidorSetTab("bd");
   if (sub === "mqtt") servidorSetTab("mqtt");
+  if (sub === "servidor/cuarentena") window.ModulinkrQuarantine.open();
   if (sub === "nodo/firmware") { fwCargar(); bcSondeoArrancar(); }
   else bcSondeoParar();
   if (sub === "nodo/form") formInit();
@@ -4061,6 +4066,7 @@ function bdEstadoHtml(d) {
 }
 
 async function bdCargar() {
+  window.ModulinkrQuarantine.loadSummary();
   const res = document.getElementById("bd-resultado");
   res.textContent = "";
   const est = document.getElementById("bd-estado");

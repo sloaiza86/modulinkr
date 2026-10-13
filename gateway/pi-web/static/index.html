@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=historico-continuo-20261013">
+  <link rel="stylesheet" href="/static/style.css?v=cuarentena-espaciado-20261013">
 </head>
 <body>
 
@@ -794,6 +794,15 @@
 
         <div id="servidor-panel-bd" role="tabpanel" aria-labelledby="servidor-tab-bd">
           <div class="card cfg-card">
+            <h2>Datos en cuarentena</h2>
+            <p class="texto-ayuda">Muestras recibidas pendientes de incorporarse al histórico.</p>
+            <div id="quar-card-summary" class="quar-summary"></div>
+            <p id="quar-card-status" class="texto-ayuda" role="status"></p>
+            <div class="cfg-fila">
+              <a class="ota-button" href="#/configuracion/servidor/cuarentena">Ver cuarentena</a>
+            </div>
+          </div>
+          <div class="card cfg-card">
             <h2>Configuración</h2>
             <div id="bd-estado" class="cfg-nodo" aria-live="polite"><p class="aviso">Cargando estado...</p></div>
           </div>
@@ -881,6 +890,68 @@
       </div>
 
       <!-- Nivel 2: herramientas de depuración (logs en vivo por SSE) -->
+      <div class="ajustes ajustes-amplios" id="cfg-cuarentena" hidden>
+        <div class="ajustes-cabecera">
+          <a class="volver" href="#/configuracion/bd" aria-label="Volver a Base de datos">
+            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
+          </a>
+          <h2>Datos en cuarentena</h2>
+        </div>
+        <div class="card cfg-card">
+          <p class="texto-ayuda">Muestras recibidas que todavía no pueden incorporarse al histórico. Se reintentan al procesar el catálogo del nodo.</p>
+          <div id="quar-summary" class="quar-summary"></div>
+          <div class="cfg-fila">
+            <button id="quar-refresh" type="button">Actualizar</button>
+            <span id="quar-time" class="texto-ayuda"></span>
+          </div>
+          <div id="quar-status" class="mensaje-slot" role="status" aria-live="polite"></div>
+        </div>
+        <div class="card cfg-card">
+          <div class="cfg-form quar-filters">
+            <label class="cfg-campo"><span>Nodo</span><select id="quar-node"><option value="0">Todos los nodos</option></select></label>
+            <label class="cfg-campo"><span>Motivo</span><select id="quar-reason">
+              <option value="">Todos los motivos</option>
+              <option value="unknown_node">Catálogo del nodo pendiente</option>
+              <option value="no_channels">Sin medidas definidas para esa fecha</option>
+              <option value="length_mismatch">Cantidad de valores incompatible con el catálogo</option>
+            </select></label>
+          </div>
+          <p id="quar-empty" class="texto-ayuda" hidden></p>
+          <div class="cfg-fila">
+            <label class="quar-page-selection"><input id="quar-select-page" type="checkbox">Seleccionar esta página</label>
+            <span id="quar-selection-count" class="texto-ayuda">0 seleccionados en esta página</span>
+          </div>
+          <div id="quar-table-wrap" class="quar-table-wrap" tabindex="0" role="region" aria-label="Registros en cuarentena" hidden>
+            <table class="quar-table">
+              <caption>Registros pendientes, por fecha de captura más reciente</caption>
+              <thead><tr><th scope="col">Selección</th><th scope="col">Nodo</th><th scope="col">Captura</th><th scope="col">Motivo</th><th scope="col">Vía</th><th scope="col">Detalle</th></tr></thead>
+              <tbody id="quar-rows"></tbody>
+            </table>
+          </div>
+          <div class="cfg-fila quar-pagination">
+            <button id="quar-prev" type="button" disabled>Anterior</button>
+            <span id="quar-page" class="texto-ayuda"></span>
+            <button id="quar-next" type="button" disabled>Siguiente</button>
+          </div>
+          <details class="quar-delete-tools">
+            <summary>Eliminar registros</summary>
+            <p id="quar-delete-permission" class="texto-ayuda"></p>
+            <div class="cfg-fila">
+              <button id="quar-delete-selected" class="peligro-borde" type="button" disabled>Borrar seleccionados</button>
+              <button id="quar-delete-filtered" class="peligro-borde" type="button" disabled>Borrar resultados del filtro</button>
+              <button id="quar-delete-all" class="peligro-borde" type="button" disabled>Vaciar cuarentena</button>
+            </div>
+            <p class="texto-ayuda">Se revisará el alcance antes de borrar. El borrado elimina muestras pendientes de entrar en el histórico.</p>
+          </details>
+          <div id="quar-delete-result" class="mensaje-slot" role="status" aria-live="polite"></div>
+        </div>
+        <section id="quar-detail" class="card cfg-card" aria-labelledby="quar-detail-title" hidden>
+          <h2 id="quar-detail-title" tabindex="-1">Detalle de la muestra</h2>
+          <div id="quar-detail-body"></div>
+          <div class="cfg-fila"><button id="quar-detail-close" type="button">Cerrar detalle</button></div>
+        </section>
+      </div>
+
       <div class="ajustes ajustes-amplios" id="cfg-debug" hidden>
         <div class="ajustes-cabecera">
           <a class="volver" href="#/configuracion" title="Volver">
@@ -1353,8 +1424,9 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=historico-continuo-20261013"></script>
+<script src="/static/components.js?v=cuarentena-espaciado-20261013"></script>
 <script src="/static/network-state.js?v=ota-convivencia-20261002"></script>
-<script src="/static/app.js?v=historico-continuo-20261013"></script>
+<script src="/static/quarantine.js?v=cuarentena-espaciado-20261013"></script>
+<script src="/static/app.js?v=cuarentena-espaciado-20261013"></script>
 </body>
 </html>

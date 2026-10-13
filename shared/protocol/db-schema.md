@@ -149,6 +149,12 @@ Si el paso 1 o el 2 fallan (origen sin alta, sin canales resolubles en `ts`, o l
 
 Al procesar un register (§3 paso 6), o bajo demanda, el consumidor repasa `quarantine` para ese origen y reintenta los pasos 1-4 de la ingesta con cada muestra retenida. Las que ahora resuelven canales se insertan en `samples`/`sample_values` (la deduplicación las protege de dobles materializaciones) y se borran de `quarantine`. Las que sigan sin resolver, se quedan. Métrica de salud del sistema: `SELECT origin, count(*) FROM quarantine GROUP BY origin` distinto de vacío = alerta.
 
+### 4.2 Borrado manual de cuarentena
+
+El visor permite borrar registros seleccionados de una página, todos los registros de un filtro por origen o motivo, o toda la cuarentena. Se revisa y confirma el alcance antes de ejecutar el borrado. La revisión conserva los identificadores exactos disponibles en ese instante; las llegadas posteriores y las filas nuevas creadas por un reintento quedan fuera. Los registros que el consumidor haya materializado entre revisión y confirmación no se vuelven a borrar. El resultado informa de las filas realmente eliminadas y de las revisadas que ya no estaban retenidas.
+
+El borrado elimina muestras pendientes y el catálogo por sí solo no puede recuperarlas. No incorpora los valores al histórico, no corrige la causa de la cuarentena y no modifica `samples`, `sample_values`, nodos ni canales. La ingesta puede volver a retener muestras nuevas si continúa el problema de catálogo. El rol del visor mantiene lectura sobre la telemetría y admite `DELETE` únicamente sobre `quarantine`; no utiliza `TRUNCATE`. La migración `004_quarantine_delete.sql` concede ese permiso al rol operativo `modulinkr_ro`.
+
 ## 5. Consultas de referencia
 
 Serie de un sensor físico concreto (un canal):

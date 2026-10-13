@@ -202,7 +202,7 @@ EOF
     ok "Credenciales guardadas en $DB_ENV_FILE (solo root)"
 }
 
-# db_load_or_make_ro_password: contraseña del rol de solo lectura, con la
+# db_load_or_make_ro_password: contraseña del rol del visor, con la
 # misma política que la del rol de aplicación (estable entre reejecuciones).
 db_load_or_make_ro_password() {
     if [ -z "${MODULINKR_DB_RO_PASSWORD:-}" ] && [ -f "$DB_ENV_FILE" ]; then
@@ -212,19 +212,19 @@ db_load_or_make_ro_password() {
     fi
     if [ -z "${MODULINKR_DB_RO_PASSWORD:-}" ]; then
         MODULINKR_DB_RO_PASSWORD="$(rand_secret)"
-        log "Contraseña del rol de solo lectura generada automáticamente"
+        log "Contraseña del rol del visor generada automáticamente"
     fi
 }
 
-# db_enable_remote_ro: acceso remoto de SOLO LECTURA para el visor del Pi
-# (pi-web/README.md §2). Rol modulinkr_ro con SELECT únicamente, listener
+# db_enable_remote_ro: lectura remota y borrado limitado a cuarentena para el visor.
+# El rol modulinkr_ro conserva su nombre operativo y permite DELETE solo en quarantine, listener
 # en todas las interfaces y una regla hostssl restringida a ese rol y esta
 # base. El cifrado lo da el ssl=on por defecto de Ubuntu (cert snakeoil):
 # el cliente conecta con sslmode=require (canal cifrado; la identidad del
 # servidor no se verifica, la protección de acceso es la contraseña).
 # Nota de operación: falta abrir 5432 en el firewall de la nube (NSG).
 db_enable_remote_ro() {
-    step "Acceso remoto de solo lectura (visor del Pi)"
+    step "Acceso remoto del visor y borrado de cuarentena"
     local u="modulinkr_ro" d="$MODULINKR_DB_NAME"
     local pesc="${MODULINKR_DB_RO_PASSWORD//\'/\'\'}"
 
@@ -240,16 +240,17 @@ db_enable_remote_ro() {
 GRANT CONNECT ON DATABASE "$d" TO "$u";
 GRANT USAGE ON SCHEMA public TO "$u";
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$u";
+GRANT DELETE ON TABLE public.quarantine TO "$u";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "$u";
 SQL
-    ok "Permisos de solo lectura concedidos a '$u'"
+    ok "Lectura de tablas y borrado de quarantine concedidos a '$u'"
 
     # Listener en todas las interfaces (drop-in propio, separado del de
     # tuning porque aquel se reescribe entero en cada pasada).
     local confd="${PG_CONFD:-/etc/postgresql/$PG_VERSION/main/conf.d}"
     if [ ! -f "$confd/98-modulinkr-remote.conf" ]; then
         cat > "$confd/98-modulinkr-remote.conf" <<EOF
-# Acceso remoto de solo lectura para el visor del Pi. Generado por el
+# Acceso remoto del visor del Pi. Generado por el
 # instalador; la restricción de quién entra vive en pg_hba.conf.
 listen_addresses = '*'
 EOF
@@ -264,7 +265,7 @@ EOF
         backup_once "$hba"
         cat >> "$hba" <<EOF
 
-# ModuLinkr: visor del Pi, solo lectura (generado por el instalador)
+# ModuLinkr: rol del visor del Pi (generado por el instalador)
 hostssl $d $u 0.0.0.0/0 scram-sha-256
 hostssl $d $u ::/0      scram-sha-256
 EOF

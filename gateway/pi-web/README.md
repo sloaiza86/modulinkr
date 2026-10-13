@@ -28,7 +28,7 @@ Interfaz web servida desde el Raspberry Pi del gateway y organizada en cuatro fu
 - **Corre en el Pi** (`modulinkr-web`, servicio systemd separado del gateway). El Pi es el dueño de la verdad viva de la red; las funciones 2 y 4 operan 100 % en local y sobreviven sin Internet. La función 1 consulta la base remota y degrada con aviso si no hay conexión.
 - **Stack**: FastAPI + uvicorn (Python, coherente con el resto del proyecto), frontend estático servido por el propio backend, sin build ni Node: ECharts para gráficos, vis-network para el mapa. Presupuesto de memoria ~40-60 MB (los gráficos los renderiza el navegador del cliente; el Pi solo sirve JSON y estáticos).
 - **Modularidad**: un router de API por función (`/api/datos`, `/api/red`, `/api/topologia`, `/api/comandos`), cada uno con su vista. Añadir una función es añadir un módulo, sin tocar los demás.
-- **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol **solo lectura** dedicado (`modulinkr_ro`, únicamente `SELECT` sobre la base de telemetría; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
+- **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol dedicado (`modulinkr_ro`, `SELECT` sobre la base de telemetría y `DELETE` únicamente sobre `quarantine` para el borrado confirmado; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
 - **Autenticación**: página de login propia con cookie de sesión firmada (HMAC SHA-256 con `MODULINKR_WEB_SECRET`; usuario y contraseña preguntados en la instalación, la clave de firma autogenerada). Sustituye al basic auth de la primera iteración: misma protección, sin el diálogo del navegador y con logout. Desde el 2026-07-25 el visor sirve HTTPS con certificado autofirmado (§8); la cookie se marca `Secure` cuando hay TLS.
 
 ### 2.1 Componentes web (2026-08-13)
@@ -125,7 +125,7 @@ Al configurar un nodo por LoRa, importar y enviar requieren que el servicio y la
 
 La página se bloquea si el visor no tiene usuario y contraseña o no dispone del par de certificado y clave TLS. `MODULINKR_AI_ALLOW_INSECURE_DEV=1` habilita una excepción explícita para desarrollo local y permite una API compatible por HTTP solo en loopback. Cada conexión resuelve y comprueba el destino, rechaza direcciones locales o privadas y fija el socket a una de las IP aprobadas para evitar redirecciones o cambios de resolución. Solo se admite una consulta simultánea. El cuerpo se envía con `store=false`; el tratamiento y la retención que todavía aplique el proveedor dependen de la cuenta configurada. Guardar indica que existen parámetros, pero la primera consulta real sigue siendo la comprobación efectiva de modelo, credencial y capacidades.
 
-**Configurar base de datos** (`dbapi.py`, `/api/db`): parámetros de conexión al PostgreSQL de la VM que el módulo de datos (`dataapi.py`) usa para el histórico. Es la conexión de SOLO LECTURA (rol `modulinkr_ro`): alimenta la vista de Datos, el export CSV y el valor congelado de las tarjetas de red; la escritura la hace el consumer del servidor, con otro rol y su propio instalador. Los parámetros los consume el propio proceso del visor, así que se aplican en caliente: `set_db.sh` reescribe `web.env` (durabilidad) y, sin reiniciar el visor, se actualizan los globals de `dataapi` para que la próxima consulta use la conexión nueva. Botón de prueba con una conexión real (`psycopg2`, `SELECT 1`).
+**Configurar base de datos** (`dbapi.py`, `/api/db`): parámetros de conexión al PostgreSQL de la VM que el módulo de datos (`dataapi.py`) usa para el histórico. La conexión del rol `modulinkr_ro` alimenta Datos, el CSV, las tarjetas de red y la consulta de cuarentena. El rol conserva su nombre operativo y añade permiso de borrado únicamente sobre `quarantine`. La inserción de telemetría corresponde al consumidor del servidor, con otro rol y su propio instalador. Los parámetros los consume el propio proceso del visor, así que se aplican en caliente: `set_db.sh` reescribe `web.env` (durabilidad) y, sin reiniciar el visor, se actualizan los globals de `dataapi` para que la próxima consulta use la conexión nueva. Botón de prueba con una conexión real (`psycopg2`, `SELECT 1`).
 
 **Configurar MQTT** (`mqttapi.py`, `/api/mqtt`): parámetros del broker cloud al que el gateway publica la telemetría. A diferencia de la base de datos, estos los consume el servicio del gateway (un proceso aparte que los lee de `gateway.env` al arrancar), así que aplicar pasa por `set_mqtt.sh` (reescribe `gateway.env` y reinicia el servicio del gateway). El formulario muestra los parámetros desde una sombra no secreta guardada en los ajustes del visor, y el estado vivo de la conexión sale del latido del servicio (`gateway_status`). Botón de prueba con una conexión MQTT real (`paho`, en el venv del visor).
 
@@ -361,3 +361,110 @@ La consulta de gráfica, el histórico del resumen y el CSV solicitan `unificar=
 La descarga CSV conserva sus seis columnas iniciales y añade `channel_id`, `measure`, `active_from` y `active_to`. Los valores se exportan sin agregar y cada fila conserva su canal original, aunque la consulta abarque varias versiones. El nombre del nodo procede de `nodes.name`, que conserva únicamente el último nombre registrado. El esquema no almacena una identidad física de dispositivo Modbus; la continuidad se establece por los metadatos de la lectura. Un cambio de nodo, identificador, nombre o unidad mantiene otra medida. No se altera la ingesta, el versionado del catálogo, las muestras existentes ni el esquema de la base.
 
 `install_history.sh` actualiza únicamente `dataapi.py`, `static/app.js`, `static/components.js`, `static/index.html` y `static/style.css`. Obtiene la ruta instalada desde la unidad `modulinkr-web.service`, conserva una copia previa y recupera los archivos si el reinicio no queda activo. Requiere un paquete con esos archivos bajo `gateway/pi-web/`; no cambia credenciales ni reinicia el servicio de radio.
+
+
+### Consulta de cuarentena, 2026-10-13
+
+Configuración, Servidor, Base de datos incorpora una tarjeta «Datos en cuarentena» con los recuentos y la fecha de consulta. «Ver cuarentena» abre una pantalla propia con filtros por origen y motivo, páginas de 50 registros y detalle de valores. Se muestran inicialmente todos los pendientes, sin un límite temporal que pueda ocultar capturas antiguas. La actualización se solicita al entrar o mediante «Actualizar», sin sondeo periódico. Se conservan los filtros y el detalle disponible y se cancelan las respuestas pendientes al abandonar la pantalla. Si falla una consulta de filtros o página, se recuperan los controles de la última consulta correcta para mantener su correspondencia con el listado conservado.
+
+La API reutiliza la conexión cloud y la autenticación del visor. `GET /api/datos/cuarentena/resumen` devuelve los recuentos globales y `GET /api/datos/cuarentena` añade el listado filtrado. Los parámetros son `origin` (0 para todos, hasta 254), `motivo` (vacío o uno de los tres motivos de ingesta), `limit` (1-100) y `offset` (0-10000000). Las consultas parametrizadas se ejecutan en una transacción de solo lectura y aislamiento REPEATABLE READ, con un límite de cinco segundos por consulta. El resumen y la página proceden de la misma instantánea. Si desaparece la última página, se devuelve la última todavía disponible. La conexión se cierra también ante errores.
+
+Se utiliza una asociación opcional con `nodes` para no ocultar orígenes todavía sin alta. Los recuentos corresponden a filas retenidas, incluidas posibles repeticiones, y no al contador acumulado del consumidor. Los valores permanecen asociados a posiciones, sin inventar nombres ni unidades. Las fechas se presentan en la zona horaria del visor. `received_at` queda en el detalle técnico como fecha de almacenamiento del registro: el consumidor puede renovarla al reintentar y no permite calcular el tiempo desde la primera entrada. La interfaz distingue cuarentena vacía, filtros sin resultados y consulta fallida; si conserva una respuesta anterior, indica que puede haber cambiado. No modifica muestras, catálogos ni la lógica de materialización.
+
+`install_quarantine.sh` obtiene la ruta del visor desde systemd y actualiza `dataapi.py`, `static/app.js`, `static/components.js`, `static/index.html`, `static/style.css` y `static/quarantine.js`. Se incluye la versión local de los componentes compartidos para mantener la compatibilidad de la interfaz. El instalador conserva una copia previa; si falla el reinicio, restaura los archivos y retira el recurso nuevo cuando no existía antes. No actualiza firmware ni credenciales. El permiso de lectura de la tabla está contemplado por el instalador del servidor; permanece pendiente contrastarlo en la base operativa.
+
+En el Mac:
+
+```bash
+scp "/private/tmp/modulinkr-cuarentena-20261013.tar.gz" modulinkr@Gateway.local:~/modulinkr-cuarentena-20261013.tar.gz
+```
+
+En la sesión Termius del gateway:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-cuarentena-20261013.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install_quarantine.sh"
+sudo journalctl -u modulinkr-web.service --since "5 minutes ago" --no-pager
+SH
+```
+
+Después del despliegue se recarga la GUI y se consulta Configuración, Servidor, Base de datos. Se comprueba el resumen contra la tabla operativa, el filtrado, un detalle y el comportamiento al resolverse una muestra. No se requiere compilación de firmware ni migración del esquema.
+
+
+### Borrado confirmado de cuarentena, 2026-10-13
+
+«Eliminar registros» incorpora tres acciones: borrar los seleccionados de la página actual, todos los registros de un filtro por nodo o motivo, o toda la cuarentena. La selección se retira al cambiar de página o filtro para no incluir filas ocultas. Sin filtro aplicado se utiliza «Vaciar cuarentena». Cada acción abre una revisión con alcance, cantidad real y nodos afectados. Cancelar conserva los registros y recibe el foco inicial del diálogo. La confirmación informa de la pérdida de muestras pendientes y de que las llegadas posteriores quedarán fuera.
+
+`POST /api/datos/cuarentena/borrado/preparar` conserva en memoria los identificadores exactos disponibles en una transacción de solo lectura. Se devuelve un identificador de revisión de uso único, vinculado a la cookie de sesión y a la conexión PostgreSQL observada, con vigencia de cinco minutos. `POST /api/datos/cuarentena/borrado/confirmar` elimina únicamente esos identificadores mediante una transacción de escritura y devuelve las cantidades revisada, borrada y ausente. No se utiliza TRUNCATE, no se altera el histórico y no se incluyen filas nuevas creadas por el consumidor al reintentar muestras. Un reinicio del visor, una conexión de base distinta o una revisión caducada requieren preparar otra revisión. Se mantienen como máximo ocho revisiones y 200000 identificadores por operación; un alcance mayor requiere reducir el borrado mediante filtros y no produce una eliminación parcial silenciosa.
+
+La API exige inicio de sesión configurado, la cookie validada por la dependencia común del visor y la cabecera `X-Modulinkr-Quarantine: 1`. La consulta devuelve `can_delete`, que combina autenticación configurada y permiso real DELETE sobre public.quarantine. Los botones se bloquean ante falta de permiso, datos sin actualizar y operaciones en curso. Si la respuesta del borrado falla, se consulta de nuevo el estado sin repetir automáticamente la orden; se informa de que el resultado no pudo confirmarse. Se registran en el log alcance y cantidades, sin valores de muestras ni identificadores de revisión.
+
+El rol `modulinkr_ro` conserva su nombre operativo y sus permisos de lectura. Se añade DELETE exclusivamente sobre quarantine mediante la migración `004_quarantine_delete.sql`; la provisión del rol en el instalador del servidor aplica también ese permiso para una instalación nueva. La ingesta del consumidor y sus credenciales permanecen separadas.
+
+El despliegue utiliza dos paquetes: `modulinkr-cuarentena-borrado-vm-20261013.tar.gz` activa y comprueba el permiso en la VM sin borrar muestras; `modulinkr-cuarentena-borrado-gateway-20261013.tar.gz` actualiza el visor con la recuperación de archivos del instalador de cuarentena. Se aplica primero el paquete de la VM y después el del gateway. Se recarga la GUI para solicitar los recursos `cuarentena-borrado-20261013`. No se requiere compilar firmware. La validación operativa debe comprobar el permiso y, con registros de prueba, la cancelación, los tres alcances y la conservación de llegadas nuevas. El despliegue y el borrado sobre la base operativa permanecen pendientes.
+
+
+En el Mac, el bloque de copia solicita el usuario y servidor SSH de la VM, que no constan en la configuración del proyecto. Se introducen como usuario@servidor, sin contraseña ni clave dentro del comando:
+
+```bash
+bash -euo pipefail <<'SH'
+IFS= read -r -p 'SSH de la VM (usuario@servidor): ' ml_vm_ssh </dev/tty
+if [[ ! "$ml_vm_ssh" =~ ^[A-Za-z_][A-Za-z0-9._-]*@[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+  printf 'ERROR: introduce usuario@servidor sin espacios.\n' >&2
+  exit 1
+fi
+scp "/private/tmp/modulinkr-cuarentena-borrado-vm-20261013.tar.gz" "${ml_vm_ssh}:~/modulinkr-cuarentena-borrado-vm-20261013.tar.gz"
+scp "/private/tmp/modulinkr-cuarentena-borrado-gateway-20261013.tar.gz" modulinkr@Gateway.local:~/modulinkr-cuarentena-borrado-gateway-20261013.tar.gz
+SH
+```
+
+En la sesión Termius de la VM:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-cuarentena-borrado-vm-20261013.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install_quarantine_delete.sh"
+SH
+```
+
+El resultado esperado del instalador es borrar_cuarentena verdadero, borrar_muestras falso y borrar_valores falso para el rol del visor. Se muestra el estado real para comprobarlo antes de utilizar el borrado.
+
+En la sesión Termius del gateway:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-cuarentena-borrado-gateway-20261013.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install_quarantine.sh"
+sudo journalctl -u modulinkr-web.service --since "5 minutes ago" --no-pager
+SH
+```
+
+
+### Estado vacío después de un borrado, 2026-10-13
+
+El mensaje de filtro sin resultados utiliza un margen superior propio de 16 píxeles para conservar su separación respecto a los selectores. Se evita el margen negativo de la ayuda situada debajo de un título. Se conserva el filtro seleccionado y se mantiene separado el recuento global: un nodo sin pendientes puede coexistir con registros retenidos de otro origen.
+
+Los recursos utilizan la identidad `cuarentena-espaciado-20261013`. El paquete `modulinkr-cuarentena-espaciado-20261013.tar.gz` actualiza el visor mediante install_quarantine.sh, con la recuperación de archivos existente. No requiere otro permiso en la VM ni compilación de firmware. La prueba de interfaz verifica la separación tras un borrado simulado en escritorio y móvil; la comprobación del espaciado desplegado permanece pendiente.
+
+En el Mac:
+
+```bash
+scp "/private/tmp/modulinkr-cuarentena-espaciado-20261013.tar.gz" modulinkr@Gateway.local:~/modulinkr-cuarentena-espaciado-20261013.tar.gz
+```
+
+En la sesión Termius del gateway:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-cuarentena-espaciado-20261013.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install_quarantine.sh"
+sudo journalctl -u modulinkr-web.service --since "5 minutes ago" --no-pager
+SH
+```
+
+Se recarga la GUI y se comprueba el mensaje cuando el nodo seleccionado ya no tenga registros pendientes. No es necesario ejecutar otro borrado para verificar ese estado.

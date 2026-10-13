@@ -1082,6 +1082,58 @@ a.ajuste-item:hover { background: var(--accent-suave); }
   gap: 16px; margin: 12px 0 0; max-width: none;
 }
 .cfg-form-compacta { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.quar-summary { display: flex; flex-wrap: wrap; gap: 12px 28px; }
+.quar-summary strong { font-size: 22px; margin-right: 5px; }
+.quar-table-wrap { overflow-x: auto; margin-top: 20px; }
+.quar-table, .quar-values { width: 100%; border-collapse: collapse; text-align: left; }
+.quar-table { min-width: 740px; table-layout: fixed; }
+.quar-table th:first-child { width: 76px; white-space: nowrap; }
+.quar-table th:nth-child(2) { width: 170px; }
+.quar-table th:nth-child(3) { width: 180px; }
+.quar-table th:nth-child(5) { width: 80px; }
+.quar-table th:last-child { width: 130px; }
+.quar-table th, .quar-table td, .quar-values th, .quar-values td {
+  padding: 12px 8px; border-bottom: 1px solid var(--border); vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.quar-table th { color: var(--dim); font-size: 12px; }
+.quar-table caption { text-align: left; color: var(--dim); font-size: 12px; padding: 0 0 12px; }
+.quar-table td.cfg-fila { display: table-cell; margin: 0; }
+.quar-table button { white-space: nowrap; }
+.quar-values { max-width: 440px; margin: 16px 0; }
+.quar-values caption { text-align: left; font-weight: 600; margin-bottom: 8px; }
+.quar-technical { margin-top: 20px; }
+.quar-technical summary { cursor: pointer; min-height: 44px; padding: 12px 0; }
+.quar-technical dl { display: grid; grid-template-columns: minmax(100px, 1fr) 2fr; gap: 10px; }
+.quar-technical dd { margin: 0; overflow-wrap: anywhere; }
+.quar-pagination { justify-content: space-between; }
+.quar-pagination span { flex: 1; text-align: center; }
+.quar-filters { margin-top: 0; }
+#quar-empty { margin: 16px 0 0; }
+.quar-delete-tools { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 8px; }
+.quar-delete-tools > summary { cursor: pointer; padding: 12px 0; min-height: 44px; font-weight: 600; }
+.quar-delete-tools .cfg-fila button { height: auto; min-height: 44px; padding-block: 10px; }
+.quar-table input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; }
+.quar-select-label { display: inline-flex; gap: 10px; align-items: center; min-height: 44px; }
+.quar-page-selection { display: inline-flex; gap: 10px; align-items: center; min-height: 44px; }
+.quar-page-selection input { width: 20px; height: 20px; accent-color: var(--accent); }
+.quar-select-label span { display: none; }
+@media (max-width: 640px) {
+  .quar-filters { grid-template-columns: 1fr; }
+  .quar-table thead { position: absolute; clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; }
+  .quar-table, .quar-table tbody, .quar-table tr { display: block; min-width: 0; }
+  .quar-table caption { display: block; width: 100%; }
+  .quar-table tr { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .quar-table td, .quar-table td.cfg-fila { display: block; border: 0; padding: 5px 0; }
+  .quar-table td[data-label]::before { content: attr(data-label) ": "; color: var(--dim); font-size: 12px; }
+  .quar-table td.cfg-fila { padding-top: 10px; }
+  .quar-select-label span { display: inline; }
+  .quar-delete-tools .cfg-fila button { width: 100%; }
+  .quar-technical dl { grid-template-columns: 1fr; gap: 6px; }
+  .quar-technical dd { margin-bottom: 8px; }
+  .quar-pagination { display: grid; grid-template-columns: 1fr 1fr; }
+  .quar-pagination span { grid-column: 1 / -1; grid-row: 1; }
+}
 .cfg-campo { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
 .cfg-fila > .cfg-campo { flex: 1 1 260px; }
 .cfg-campo > span { color: var(--dim); font-size: 13px; font-weight: 500; line-height: 1.35; }

@@ -67,3 +67,12 @@ server/
 ## Estado
 
 La base de datos, el broker y el consumidor están desplegados en la VM de Azure (`modulinkr.loaiza.co`). PostgreSQL mantiene las cinco tablas del esquema más `schema_migrations`; Mosquitto sirve TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. El handshake TLS del SIM7028 y la ingestión del consumidor cloud quedaron validados en el despliegue registrado en la bitácora.
+
+
+## Permiso de borrado de cuarentena, 2026-10-13
+
+El rol del visor conserva el nombre `modulinkr_ro`, sus permisos SELECT y su autenticación existente. La migración `004_quarantine_delete.sql` añade DELETE únicamente sobre public.quarantine. No concede DELETE sobre samples o sample_values ni TRUNCATE. La función db_enable_remote_ro concede también ese permiso cuando provisiona el rol después de las migraciones en una instalación nueva.
+
+El paquete `modulinkr-cuarentena-borrado-vm-20261013.tar.gz` contiene la migración, el runner y `install_quarantine_delete.sh`. El instalador obtiene el nombre de la base desde `/etc/modulinkr/database.env`, comprueba que existen quarantine y modulinkr_ro, aplica la migración mediante el runner y muestra los permisos de borrado sobre cuarentena, muestras y valores. No solicita ni imprime contraseñas y no ejecuta borrado de datos. El visor necesita después su paquete correspondiente y una sesión autenticada para habilitar las acciones. La comprobación del permiso sobre PostgreSQL operativo permanece pendiente.
+
+El instalador asegura también el permiso limitado al finalizar el runner, por lo que una ejecución posterior puede restablecerlo si el rol se volvió a crear. La comprobación final muestra el estado real de las tres tablas; no revoca permisos anteriores ajenos a esta modificación.

@@ -2,25 +2,29 @@
 """ModuLinkr, módulo de datos del visor: histórico desde el PostgreSQL
 de la VM (pi-web/README.md §3, fase 3).
 
-Conecta con el rol de SOLO LECTURA (modulinkr_ro) provisionado por el
+Conecta con el rol del visor (modulinkr_ro) provisionado por el
 instalador del servidor, con sslmode=require: canal cifrado, identidad
 del servidor no verificada (la protección de acceso es la contraseña; la
 mejora a verify-full queda anotada en el instalador). Conexión por
 petición con timeout corto: sin Internet, el módulo degrada a 503 con
-mensaje claro y el resto del visor sigue operando.
+mensaje claro y el resto del visor sigue operando. El rol admite lectura y
+DELETE únicamente en quarantine para el borrado confirmado.
 
 Endpoints:
   GET /api/datos/nodos    catálogo cloud (nodos + canales) para
                           el selector
   GET /api/datos/series   series agregadas por canal para graficar
   GET /api/datos/csv      export CSV en streaming de los datos crudos
+  GET /api/datos/cuarentena  registros pendientes y permiso de borrado
+  POST /api/datos/cuarentena/borrado/preparar  revisión de registros exactos
+  POST /api/datos/cuarentena/borrado/confirmar  borrado de la revisión confirmada
 
 Config por variables de entorno (/etc/modulinkr/web.env):
   MODULINKR_PG_HOST      host de la VM (obligatorio para este módulo)
   MODULINKR_PG_PORT      (default 5432)
   MODULINKR_PG_DB        (default modulinkr)
   MODULINKR_PG_USER      (default modulinkr_ro)
-  MODULINKR_PG_PASSWORD  contraseña del rol de solo lectura
+  MODULINKR_PG_PASSWORD  contraseña del rol del visor
 """
 
 from __future__ import annotations
@@ -30,9 +34,12 @@ import io
 import logging
 import os
 import time
+import hashlib
+import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 LOG = logging.getLogger("modulinkr.datos")
@@ -55,6 +62,191 @@ MAX_POINTS_CAP = 2000
 CSV_MAX_ROWS = 500_000
 
 router = APIRouter(prefix="/api/datos")
+
+QUARANTINE_REASONS = {"unknown_node", "no_channels", "length_mismatch"}
+QUARANTINE_DELETE_MAX = 200_000
+_quarantine_plans = {}
+_quarantine_plan_lock = threading.Lock()
+
+
+def _quarantine_can_delete(cur):
+    cur.execute("SELECT has_table_privilege(current_user, 'public.quarantine', 'DELETE')")
+    return bool(cur.fetchone()[0]) and bool(os.environ.get("MODULINKR_WEB_USER", "").strip())
+
+
+def _quarantine_target(conn):
+    params = conn.get_dsn_parameters()
+    return tuple(params.get(key) for key in ("host", "port", "dbname", "user"))
+
+
+def _quarantine_actor(request):
+    if not os.environ.get("MODULINKR_WEB_USER", "").strip():
+        raise HTTPException(403, "El borrado requiere inicio de sesión configurado")
+    if request.headers.get("x-modulinkr-quarantine") != "1":
+        raise HTTPException(403, "Revisa el borrado desde la pantalla de cuarentena")
+    cookie = request.cookies.get("modulinkr_s", "")
+    if not cookie:
+        raise HTTPException(403, "El borrado requiere una sesión válida")
+    return hashlib.sha256(cookie.encode()).hexdigest()
+
+
+def _quarantine_delete_filter(body):
+    scope = body.get("scope")
+    if scope == "selected" and set(body) == {"scope", "ids"}:
+        ids = body["ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 50 or
+                any(not isinstance(qid, str) or not 1 <= len(qid) <= 19 or not qid.isascii() or not qid.isdigit()
+                    or not 0 < int(qid) <= 9223372036854775807 for qid in ids)):
+            raise HTTPException(400, "Selecciona entre 1 y 50 registros de la página")
+        return scope, "q.quarantine_id = ANY(%s)", (sorted({int(qid) for qid in ids}),)
+    if scope == "filtered" and set(body) == {"scope", "origin", "motivo"}:
+        origin, reason = body["origin"], body["motivo"]
+        if (type(origin) is not int or not 0 <= origin <= 254 or
+                not isinstance(reason, str) or (reason and reason not in QUARANTINE_REASONS)
+                or (origin == 0 and not reason)):
+            raise HTTPException(400, "Aplica un filtro por nodo o motivo antes de borrar sus resultados")
+        return scope, "(%s = 0 OR q.origin = %s) AND (%s = '' OR q.reason = %s)", (origin, origin, reason, reason)
+    if scope == "all" and set(body) == {"scope"}:
+        return scope, "TRUE", ()
+    raise HTTPException(400, "Alcance de borrado no válido")
+
+
+@router.post("/cuarentena/borrado/preparar")
+def preparar_borrado_cuarentena(body: dict, request: Request):
+    actor = _quarantine_actor(request)
+    scope, where, params = _quarantine_delete_filter(body)
+    conn = _conn()
+    try:
+        target = _quarantine_target(conn)
+        conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
+        with conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            if not _quarantine_can_delete(cur):
+                raise HTTPException(403, "El servidor no tiene habilitado el borrado de cuarentena")
+            # Se conservan identificadores exactos: ninguna llegada posterior entra en el borrado.
+            cur.execute("SELECT q.quarantine_id, q.origin FROM public.quarantine q WHERE "
+                        + where + " ORDER BY q.quarantine_id LIMIT %s", (*params, QUARANTINE_DELETE_MAX + 1))
+            rows = cur.fetchall()
+            if len(rows) > QUARANTINE_DELETE_MAX:
+                raise HTTPException(409, "El alcance supera 200000 registros; reduce el borrado mediante filtros")
+            if not rows:
+                raise HTTPException(409, "Ya no hay registros pendientes en este alcance; actualiza la consulta")
+        token, now = secrets.token_urlsafe(32), time.monotonic()
+        nodes = sorted({origin for _, origin in rows})
+        with _quarantine_plan_lock:
+            for key in list(_quarantine_plans):
+                if _quarantine_plans[key]["expires"] <= now:
+                    del _quarantine_plans[key]
+            if len(_quarantine_plans) >= 8:
+                del _quarantine_plans[next(iter(_quarantine_plans))]
+            _quarantine_plans[token] = {"actor": actor, "scope": scope,
+                "ids": [qid for qid, _ in rows], "expires": now + 300, "target": target}
+        return {"token": token, "scope": scope, "count": len(rows), "nodes": nodes, "expires_in": 300}
+    except HTTPException:
+        raise
+    except Exception:
+        LOG.exception("No se pudo preparar el borrado de cuarentena")
+        raise HTTPException(503, "No se pudo revisar el borrado; actualiza la consulta") from None
+    finally:
+        conn.close()
+
+
+@router.post("/cuarentena/borrado/confirmar")
+def confirmar_borrado_cuarentena(body: dict, request: Request):
+    actor = _quarantine_actor(request)
+    if set(body) != {"token"} or not isinstance(body["token"], str) or len(body["token"]) > 128:
+        raise HTTPException(400, "Confirmación de borrado no válida")
+    with _quarantine_plan_lock:
+        plan = _quarantine_plans.get(body["token"])
+        if not plan or plan["actor"] != actor or plan["expires"] <= time.monotonic():
+            raise HTTPException(409, "La revisión ha caducado o ya se utilizó; vuelve a revisar el borrado")
+        del _quarantine_plans[body["token"]]
+    conn = _conn()
+    try:
+        if _quarantine_target(conn) != plan["target"]:
+            raise HTTPException(409, "La conexión de la base ha cambiado; vuelve a revisar el borrado")
+        conn.set_session(readonly=False)
+        with conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            cur.execute("SET LOCAL lock_timeout = '2s'")
+            cur.execute("DELETE FROM public.quarantine WHERE quarantine_id = ANY(%s) RETURNING quarantine_id",
+                        (plan["ids"],))
+            deleted = len(cur.fetchall())
+        LOG.info("event=quarantine.deleted scope=%s reviewed=%d deleted=%d", plan["scope"], len(plan["ids"]), deleted)
+        return {"deleted": deleted, "reviewed": len(plan["ids"]), "skipped": len(plan["ids"]) - deleted}
+    except HTTPException:
+        raise
+    except Exception:
+        LOG.exception("No se pudo confirmar el borrado de cuarentena")
+        raise HTTPException(503, "No se pudo confirmar el borrado; consulta el estado antes de intentarlo de nuevo") from None
+    finally:
+        conn.close()
+
+
+def _quarantine_summary(cur):
+    """Cuenta registros retenidos, también de orígenes todavía sin alta."""
+    cur.execute(
+        """SELECT q.origin, n.name, q.reason, count(*)
+           FROM quarantine q LEFT JOIN nodes n ON n.node_id = q.origin
+           GROUP BY q.origin, n.name, q.reason ORDER BY q.origin, q.reason""")
+    nodes, reasons = {}, {}
+    for origin, name, reason, count in cur.fetchall():
+        node = nodes.setdefault(origin, {"origin": origin, "name": name, "count": 0})
+        node["count"] += count
+        reasons[reason] = reasons.get(reason, 0) + count
+    return {"total": sum(reasons.values()), "node_count": len(nodes),
+            "nodes": list(nodes.values()), "reasons": reasons}
+
+
+def _read_quarantine(origin=0, motivo="", limit=50, offset=0, summary_only=False):
+    if motivo and motivo not in QUARANTINE_REASONS:
+        raise HTTPException(400, "Motivo de cuarentena no válido")
+    conn = _conn()
+    try:
+        # Una misma instantánea evita mezclar recuentos con una materialización concurrente.
+        conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
+        with conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            result = _quarantine_summary(cur)
+            result["can_delete"] = _quarantine_can_delete(cur)
+            if not summary_only:
+                where = "(%s = 0 OR q.origin = %s) AND (%s = '' OR q.reason = %s)"
+                filters = (origin, origin, motivo, motivo)
+                cur.execute("SELECT count(*) FROM quarantine q WHERE " + where, filters)
+                count = cur.fetchone()[0]
+                offset = min(offset, ((count - 1) // limit) * limit) if count else 0
+                cur.execute(
+                    """SELECT q.quarantine_id, q.origin, n.name, q.ts, q.seq,
+                              q.source, q.v, q.reason, q.received_at
+                       FROM quarantine q LEFT JOIN nodes n ON n.node_id = q.origin
+                       WHERE """ + where + " ORDER BY q.ts DESC, q.quarantine_id DESC LIMIT %s OFFSET %s",
+                    (*filters, limit, offset))
+                result.update(filtered_count=count, offset=offset, limit=limit, items=[
+                    {"id": str(qid), "origin": nid, "name": name,
+                     "ts": _catalog_date(ts), "seq": seq, "source": source,
+                     "values": values, "reason": reason,
+                     "received_at": _catalog_date(received)}
+                    for qid, nid, name, ts, seq, source, values, reason, received in cur.fetchall()])
+            result["checked_at"] = datetime.now(timezone.utc).isoformat()
+            return result
+    except HTTPException:
+        raise
+    except Exception:
+        LOG.exception("No se pudo consultar la cuarentena")
+        raise HTTPException(503, "No se pudo consultar la cuarentena") from None
+    finally:
+        conn.close()
+
+
+@router.get("/cuarentena/resumen")
+def cuarentena_resumen():
+    return _read_quarantine(summary_only=True)
+
+
+@router.get("/cuarentena")
+def cuarentena(origin: int = Query(0, ge=0, le=254), motivo: str = "",
+               limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0, le=10_000_000)):
+    return _read_quarantine(origin, motivo, limit, offset)
 
 
 def _conn():
