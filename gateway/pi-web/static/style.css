@@ -1110,6 +1110,7 @@ a.ajuste-item:hover { background: var(--accent-suave); }
 .quar-pagination span { flex: 1; text-align: center; }
 .quar-filters { margin-top: 0; }
 #quar-empty { margin: 16px 0 0; }
+#quar-selection-count { margin: 0; }
 .quar-delete-tools { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 8px; }
 .quar-delete-tools > summary { cursor: pointer; padding: 12px 0; min-height: 44px; font-weight: 600; }
 .quar-delete-tools .cfg-fila button { height: auto; min-height: 44px; padding-block: 10px; }
