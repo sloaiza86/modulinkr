@@ -121,6 +121,11 @@ public:
     Status readDiscreteInputs(uint8_t slave_id, uint16_t address,
                               uint8_t count, uint8_t* out);
 
+    Status writeCoils(uint8_t slave_id, uint16_t address, uint8_t count,
+                      const uint8_t* values, bool multiple);
+    Status writeRegisters(uint8_t slave_id, uint16_t address, uint8_t count,
+                          const uint16_t* values, bool multiple);
+
     // Devuelve el último código de excepción Modbus si el último estado
     // fue Status::EXCEPTION. 0 si no aplica.
     uint8_t lastException() const { return last_exception_; }
@@ -180,6 +185,8 @@ private:
     bool         txn_valid_ = false;
     bool         capture_   = false;
     Trace        trace_     = Trace::NONE;
+
+    Status writeRequest(const uint8_t* request, size_t length);
 
     Status readRegisters(uint8_t function_code, uint8_t slave_id,
                          uint16_t address, uint8_t count, uint16_t* out);

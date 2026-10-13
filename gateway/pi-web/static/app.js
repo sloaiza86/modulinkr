@@ -467,7 +467,7 @@ function navegar() {
     refrescarMapa();
   }
   if (v === "red") programarMasonryTarjetas();
-  if (v === "datos" && catalogo === null) cargarCatalogo();
+  if (v === "datos") cargarCatalogo();
   if (v === "configuracion") cfgRuta();
   vistaNavegada = v;
 }
@@ -749,13 +749,44 @@ function programarMasonryTarjetas() {
 }
 window.addEventListener("resize", programarMasonryTarjetas);
 
+function operacionesNodo(cat) {
+  return window.ModulinkrOperations.visible(cat?.writes ?? []);
+}
+
+function tarjetaOperacion(origin, action, ultimo, cat, extra = false) {
+  const indices = action.read_channels ?? [];
+  const channels = indices.map(i => ultimo?.channels?.[i]);
+  const valid = channels.length && channels.every(c => c && c.value != null && !c.st_code);
+  const bits = ["write_single_coil", "write_multiple_coils"].includes(action.function);
+  const raw = valid ? channels.map(c => bits ? c.value === 1 : c.value) : null;
+  const value = raw === null ? null : bits && action.function === "write_multiple_coils" ? raw : raw[0];
+  const read = indices.length === 1 ? cat?.reads?.[indices[0]] : null;
+  const name = !extra && read && window.ModulinkrOperations.kind(action) === "number" ? read.name : action.name;
+  const label = window.ModulinkrOperations.kind(action) === "action" ? "Ejecutar acción" : window.ModulinkrOperations.display(action, value);
+  return `<button class="sensor operacion-tarjeta" type="button" data-operation-origin="${origin}" data-operation-device="${action.device}" data-operation-id="${htmlSeguro(action.id)}" aria-label="Abrir operación ${htmlSeguro(name)}">
+    ${iconoMdi(window.ModulinkrOperations.kind(action) === "action" ? "play" : "tune")}
+    <span class="s-nombre">${htmlSeguro(name)}</span><span class="s-valor">${htmlSeguro(label)}</span>
+    <small class="operacion-origen">${window.ModulinkrOperations.kind(action) === "action" ? "" : indices.length ? "Último valor leído" : "Sin lectura asociada"}</small>
+  </button>`;
+}
+
+function abrirOperacion(origin, device, id) {
+  cerrarDetalle();
+  const dialog = document.getElementById("operacion-dialogo");
+  dialog.querySelector("modulinkr-operation-editor").open(origin, device, id);
+  if (!dialog.open) dialog.showModal();
+}
+
 function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
   const canales = ult ? ult.channels : [];
   const supernodo = esSupernodo(n);
   const iconoNodo = supernodo
     ? '<modulinkr-icon name="modulinkr:radio-handheld-dual"></modulinkr-icon>'
     : iconoMdi("radio-handheld");
+  const operaciones = operacionesNodo(catalogoNodo);
+  const editables = new Set(operaciones.flatMap(a => a.read_channels ?? []));
   const filas = canales.map((c, i) => {
+    if (editables.has(i)) return "";
     const definicion = catalogoNodo?.reads?.find((r) => r.id === c.read_id)
       ?? catalogoNodo?.reads?.[i];
     const nombre = definicion?.name || c.read_id;
@@ -787,7 +818,9 @@ function tarjetaNodo(n, ult, onlineS, catalogoNodo) {
         .map(chipConexion).join("")}</div>
     </div>
     <div class="tn-sensores">
-      ${filas || '<div class="tn-vacio">Aún no hay medidas.</div>'}
+      ${filas ? `<div class="tn-seccion">Medidas</div>${filas}` : ""}
+      ${operaciones.length ? `<div class="tn-seccion">Operaciones</div>${operaciones.map(a => tarjetaOperacion(n.origin, a, ult, catalogoNodo)).join("")}` : ""}
+      ${!filas && !operaciones.length ? '<div class="tn-vacio">Aún no hay medidas.</div>' : ""}
     </div>
   </modulinkr-node-card>`;
 }
@@ -929,8 +962,7 @@ async function refrescarRed() {
   })();
   try { await redPeticion; } finally { redPeticion = null; }
   if (catalogo !== null && actualizarTiposCatalogo()) {
-    selectorMedidas.catalog = catalogo;
-    selectorMedidas.value = { selection: [...seleccion], mode: modo };
+    aplicarFiltroCatalogo();
   }
 }
 
@@ -1125,13 +1157,13 @@ async function cargarModalGrafica() {
   let error = "No hay lecturas en el periodo seleccionado.";
 
   // Se localiza el channel_id por nodo y medida en el catálogo de la
-  // pestaña Datos (se carga aquí si aún no se abrió).
+  // pestaña Datos, actualizado para localizar la serie vigente.
   try {
-    if (catalogo === null) await cargarCatalogo();
+    if (!await cargarCatalogo()) throw new Error("Catálogo no disponible");
     if (token !== modalToken || modalSel === null) return;
     pintarModalCabecera();
     const cn = catalogo?.find((x) => x.node_id === modalSel.origin);
-    const canal = cn?.channels.find((x) => x.read_id === c.read_id);
+    const canal = cn?.channels.find((x) => x.read_id === c.read_id && !x.previous);
     if (canal) {
       const { start: desde, end: hasta } = periodosHistorico.fromPreset(modalPeriodoPreset);
       modalCanalId = canal.channel_id;
@@ -1143,6 +1175,7 @@ async function cargarModalGrafica() {
         desde: desde.toISOString(),
         hasta: hasta.toISOString(),
         max_puntos: "1000",
+        unificar: "true",
       });
       const r = await fetchApi("/api/datos/series?" + q);
       if (r.ok) {
@@ -1264,6 +1297,7 @@ function medidaDetalle(origin, canal, indice) {
 
 function pintarDetalle(origin) {
   const cuerpo = document.getElementById("detalle-cuerpo");
+  const controlAnterior = cuerpo.querySelector("modulinkr-node-control");
   const diagnosticoAbierto = cuerpo.querySelector(".detalle-diagnostico")?.open ?? false;
   const desplazamiento = cuerpo.scrollTop;
   const titulo = document.getElementById("detalle-titulo");
@@ -1301,26 +1335,33 @@ function pintarDetalle(origin) {
   actualizarContenido(estados, chipsNodo(n, u, cacheEstado?.online_s ?? 60)
     .map(chipConexion).join(""));
 
-  const sensores = (u?.channels ?? [])
-    .map((canal, indice) => medidaDetalle(origin, canal, indice)).join("");
+  const cat = cacheCatalogosRed?.find(c => Number(c.origin) === origin);
+  const operationList = operacionesNodo(cat);
+  const editable = new Set(operationList.flatMap(a => a.read_channels ?? []));
+  const sensores = (u?.channels ?? []).map((canal, indice) => editable.has(indice) ? "" : medidaDetalle(origin, canal, indice)).join("");
   const estado = chipEstado(n, u, cacheEstado?.online_s ?? 60);
-
+  const tab = cuerpo.dataset.tab || "device";
+  const advanced = window.ModulinkrOperations.visible(cat?.writes ?? [], true);
   actualizarContenido(cuerpo, `
-    <div class="det-grupo"><h3>Información</h3>
-      ${filaDet("Estado", `<span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span>`)}
-      ${filaDet("Última actividad", n.last_activity_at ? "Hace " + edadEnVivo(n.last_activity_at) : "Sin información")}
-      ${filaDet(n.delivery_online ? "Vía de entrega" : "Última vía de entrega", htmlSeguro(viaEntregaDetalle(n)))}
-      ${filaDet("Versión", htmlSeguro(fwVersionTexto(n.fw_version)))}
+    <div class="detalle-tabs" role="tablist" aria-label="Ficha del nodo">
+      ${[["device","Dispositivo"],["activity","Actividad"],["diagnostic","Diagnóstico"]].map(([id,name]) => `<button type="button" role="tab" id="detalle-tab-${id}" aria-selected="${tab === id}" aria-controls="detalle-pane-${id}" data-detail-tab="${id}">${name}</button>`).join("")}
     </div>
-    ${sensores ? `<div class="det-grupo"><h3>Últimos valores</h3>
-      <div class="detalle-medidas">${sensores}</div></div>` : ""}
-    <div class="det-grupo"><h3>Radio LoRa</h3>
-      ${filaDet("RSSI", fmtNum(n.rssi, 0) + " dBm")}
-      ${filaDet("SNR", fmtNum(n.snr) + " dB")}
-      ${filaDet("Saltos", n.hop_count ?? "")}
-      ${filaDet("Duty cycle, última hora", chipDuty(n.duty_1h))}
+    <div role="tabpanel" id="detalle-pane-device" aria-labelledby="detalle-tab-device" data-detail-pane="device" ${tab !== "device" ? "hidden" : ""}>
+      <p class="detalle-estado"><span class="chip ${estado.cls}">${htmlSeguro(estado.txt)}</span><span>${n.last_activity_at ? "Última actividad hace " + edadEnVivo(n.last_activity_at) : "Sin actividad conocida"}</span></p>
+      ${sensores ? `<div class="det-grupo"><h3>Medidas</h3><div class="detalle-medidas">${sensores}</div></div>` : ""}
+      ${operationList.length ? `<div class="det-grupo"><h3>Operaciones</h3><div class="detalle-medidas">${operationList.map(a => tarjetaOperacion(origin,a,u,cat)).join("")}</div></div>` : ""}
+      ${advanced.length ? `<details class="operaciones-pruebas"><summary>Pruebas Modbus</summary><div class="detalle-medidas">${advanced.map(a => tarjetaOperacion(origin,a,u,cat,true)).join("")}</div></details>` : ""}
     </div>
-    ${bloqueSalud(n.health, n)}`);
+    <div role="tabpanel" id="detalle-pane-activity" aria-labelledby="detalle-tab-activity" data-detail-pane="activity" ${tab !== "activity" ? "hidden" : ""}><div data-control-slot></div></div>
+    <div role="tabpanel" id="detalle-pane-diagnostic" aria-labelledby="detalle-tab-diagnostic" data-detail-pane="diagnostic" ${tab !== "diagnostic" ? "hidden" : ""}>
+      <div class="det-grupo"><h3>Información</h3>${filaDet("Versión",htmlSeguro(fwVersionTexto(n.fw_version)))}${filaDet(n.delivery_online ? "Vía de entrega" : "Última vía de entrega",htmlSeguro(viaEntregaDetalle(n)))}</div>
+      <div class="det-grupo"><h3>Radio LoRa</h3>${filaDet("RSSI",fmtNum(n.rssi,0)+" dBm")}${filaDet("SNR",fmtNum(n.snr)+" dB")}${filaDet("Saltos",n.hop_count ?? "")}${filaDet("Duty cycle, última hora",chipDuty(n.duty_1h))}</div>
+      ${bloqueSalud(n.health,n)}
+    </div>`);
+  const control = controlAnterior && Number(controlAnterior.dataset.origin) === origin
+    ? controlAnterior : document.createElement("modulinkr-node-control");
+  control.dataset.origin = String(origin); control.dataset.mode = "activity";
+  cuerpo.querySelector("[data-control-slot]").replaceWith(control);
   const diagnostico = cuerpo.querySelector(".detalle-diagnostico");
   if (diagnostico) diagnostico.open = diagnosticoAbierto;
   cuerpo.scrollTop = desplazamiento;
@@ -1369,7 +1410,8 @@ function bloqueSalud(h, n) {
 async function verNodoEnDatos(origin) {
   if (catalogo === null) await cargarCatalogo();
   const nodo = catalogo?.find((item) => Number(item.node_id) === Number(origin));
-  const canales = nodo?.channels?.map((canal) => canal.channel_id) ?? [];
+  const canales = nodo?.channels?.filter((canal) => mostrarAnteriores.checked || !canal.previous)
+    .map((canal) => canal.channel_id) ?? [];
   seleccion = new Set(canales);
   modo = "nodo";
   selectorMedidas.value = { selection: canales, mode: modo };
@@ -1382,9 +1424,11 @@ async function verNodoEnDatos(origin) {
 
 function abrirDetalle(origin) {
   detalleOrigen = origin;
+  document.getElementById("detalle-cuerpo").dataset.tab = "device";
   pintarDetalle(origin);
   document.getElementById("detalle-cuerpo").scrollTop = 0;
   document.getElementById("detalle").show();
+  document.querySelector("#detalle modulinkr-node-control")?.refresh();
 }
 function cerrarDetalle() {
   detalleOrigen = null;
@@ -1393,10 +1437,25 @@ function cerrarDetalle() {
 document.getElementById("detalle").addEventListener(
   "modulinkr-close-request", cerrarDetalle);
 document.getElementById("detalle-cuerpo").addEventListener("click", (evento) => {
+  const tab = evento.target.closest("[data-detail-tab]");
+  if (tab) {
+    document.getElementById("detalle-cuerpo").dataset.tab = tab.dataset.detailTab;
+    pintarDetalle(detalleOrigen); document.querySelector("#detalle modulinkr-node-control")?.refresh();
+    document.getElementById(`detalle-tab-${tab.dataset.detailTab}`)?.focus(); return;
+  }
   const medida = evento.target.closest(".detalle-medida");
   if (!medida) return;
   cerrarDetalle();
   abrirModal(Number(medida.dataset.origin), Number(medida.dataset.canal));
+});
+document.getElementById("detalle-cuerpo").addEventListener("keydown", evento => {
+  const tab = evento.target.closest("[data-detail-tab]");
+  if (!tab || !["ArrowLeft","ArrowRight","Home","End"].includes(evento.key)) return;
+  evento.preventDefault();
+  const tabs = [...document.querySelectorAll("[data-detail-tab]")];
+  const index = evento.key === "Home" ? 0 : evento.key === "End" ? tabs.length-1
+    : (tabs.indexOf(tab)+(evento.key === "ArrowRight" ? 1 : -1)+tabs.length)%tabs.length;
+  tabs[index].click();
 });
 document.getElementById("detalle-acciones").addEventListener("click", (evento) => {
   const accion = evento.target.closest("[data-detalle-accion]");
@@ -2113,6 +2172,7 @@ const colorPorCanal = new Map();
 const seriesOcultas = new Set();
 const selectorPeriodo = document.getElementById("selector-periodo");
 const selectorMedidas = document.getElementById("selector-medidas");
+const mostrarAnteriores = document.getElementById("mostrar-anteriores");
 const botonMedidas = document.getElementById("btn-medidas");
 const estadoVacioDatos = document.getElementById("datos-vacio");
 const leyendaGrafico = document.getElementById("grafico-leyenda");
@@ -2157,7 +2217,16 @@ window.addEventListener("resize", () => {
 function etiquetaCanal(cid) {
   const m = metaCanal.get(cid);
   if (!m) return String(cid);
-  return `${m.node_name ?? m.node_id}/${nombreMedida(m)}`;
+  return `${m.node_name ?? m.node_id}/${nombreMedida(m)}${m.previous ? ` · ${periodoCanal(m)}` : ""}`;
+}
+function periodoCanal(c) {
+  const fecha = (valor) => new Date(valor).toLocaleString("es-ES", opcHora({
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }));
+  const desde = c.active_from && new Date(c.active_from).getTime() > 0
+    ? fecha(c.active_from) : "Inicio del registro";
+  return c.previous ? `Anterior · ${desde} a ${fecha(c.active_to)}` : `Actual · ${desde}`;
 }
 function nombreMedida(c) {
   if (c.name) return c.name;
@@ -2183,7 +2252,7 @@ function elementosLeyenda(series) {
     return {
       id: serie.channel_id,
       nodo: meta.node_name ?? `Nodo ${meta.node_id ?? ""}`.trim(),
-      medida,
+      medida: meta.previous ? `${medida} · ${periodoCanal(meta)}` : medida,
       unidad: unidad(serie.unit ?? meta.unit),
       color: colorDeCanal(clave),
       visible: !seriesOcultas.has(clave),
@@ -2195,20 +2264,26 @@ function actualizarLeyendaGrafico(series) {
   if (leyendaGrafico) leyendaGrafico.items = elementosLeyenda(series);
 }
 
+let solicitudCatalogo = 0;
 async function cargarCatalogo() {
+  const solicitud = ++solicitudCatalogo;
   let r;
   try {
-    r = await fetchApi("/api/datos/nodos");
+    r = await fetchApi("/api/datos/nodos?incluir_anteriores=true&unificar=true");
   } catch (e) {
+    if (solicitud !== solicitudCatalogo) return false;
     selectorMedidas.error = "No se pueden cargar las medidas porque el gateway no responde.";
-    return;
+    return false;
   }
+  if (solicitud !== solicitudCatalogo) return false;
   if (!r.ok) {
     const msg = (await r.json()).detail ?? r.status;
     selectorMedidas.error = `No se pudo cargar el histórico. ${msg}`;
-    return;
+    return false;
   }
-  catalogo = await r.json();
+  const datos = await r.json();
+  if (solicitud !== solicitudCatalogo) return false;
+  catalogo = datos;
   actualizarTiposCatalogo();
   metaCanal.clear();
   for (const n of catalogo) {
@@ -2216,6 +2291,7 @@ async function cargarCatalogo() {
       metaCanal.set(c.channel_id, {
         node_id: n.node_id, node_name: n.name,
         read_id: c.read_id, name: c.name, unit: c.unit,
+        previous: c.previous, active_from: c.active_from, active_to: c.active_to,
       });
     }
   }
@@ -2224,10 +2300,31 @@ async function cargarCatalogo() {
     .forEach((clave, indice) => {
       colorPorCanal.set(clave, COLORES_GRAFICO[indice % COLORES_GRAFICO.length]);
     });
-  selectorMedidas.catalog = catalogo;
+  aplicarFiltroCatalogo();
+  renderVistas();
+  programarGrafico();
+  return true;
+}
+
+function aplicarFiltroCatalogo() {
+  const visibles = (catalogo ?? []).map((nodo) => ({ ...nodo,
+    channels: nodo.channels.filter((canal) => mostrarAnteriores.checked || !canal.previous),
+  })).filter((nodo) => nodo.channels.length);
+  const ids = new Set(visibles.flatMap((nodo) => nodo.channels.map((canal) => String(canal.channel_id))));
+  seleccion = new Set(normalizarCanales([...seleccion]).filter((id) => ids.has(String(id))));
+  selectorMedidas.catalog = visibles;
   selectorMedidas.value = { selection: [...seleccion], mode: modo };
   actualizarBotonMedidas();
-  renderVistas();
+}
+
+function normalizarCanales(ids) {
+  const aliases = new Map();
+  for (const nodo of catalogo ?? []) {
+    for (const canal of nodo.channels) {
+      for (const id of canal.channel_ids ?? [canal.channel_id]) aliases.set(String(id), canal.channel_id);
+    }
+  }
+  return [...new Set(ids.map((id) => aliases.get(String(id)) ?? id))];
 }
 
 function actualizarTiposCatalogo() {
@@ -2304,6 +2401,7 @@ function vistaGuardar() {
     }
     vistas[nombre] = {
       channels: [...seleccion], modo,
+      anteriores: mostrarAnteriores.checked,
       periodo: selectorPeriodo.value,
     };
     localStorage.setItem("modulinkr_vistas", JSON.stringify(vistas));
@@ -2323,11 +2421,12 @@ function vistaGuardar() {
 function vistaAplicar(nombre) {
   const v = vistasLeer()[nombre];
   if (!v) return;
-  seleccion = new Set(v.channels);
+  seleccion = new Set(normalizarCanales(v.channels));
+  mostrarAnteriores.checked = Boolean(v.anteriores)
+    || [...seleccion].some((id) => metaCanal.get(id)?.previous);
   modo = v.modo ?? "nodo";
   if (v.periodo) selectorPeriodo.value = v.periodo;
-  selectorMedidas.value = { selection: [...seleccion], mode: modo };
-  actualizarBotonMedidas();
+  aplicarFiltroCatalogo();
   graficar();
 }
 function vistaBorrar() {
@@ -2568,7 +2667,7 @@ async function graficar() {
   const anchoGrafico = document.querySelector(".grafico-contenido")?.clientWidth || 800;
   const maxPuntos = Math.max(240, Math.min(1200, Math.round(anchoGrafico * 0.75)));
   const q = new URLSearchParams({
-    channels: [...seleccion].join(","), via: "all", ...rg, max_puntos: String(maxPuntos),
+    channels: [...seleccion].join(","), via: "all", unificar: "true", ...rg, max_puntos: String(maxPuntos),
   });
   try {
     const r = await fetchApi("/api/datos/series?" + q);
@@ -2614,7 +2713,7 @@ function exportarCsv() {
     aviso.textContent = "Selecciona al menos una medida y un periodo.";
     return;
   }
-  const q = new URLSearchParams({ channels: [...seleccion].join(","), via: "all", ...rg });
+  const q = new URLSearchParams({ channels: [...seleccion].join(","), via: "all", unificar: "true", ...rg });
   // Descarga por navegación: el navegador gestiona el attachment.
   window.location.href = "/api/datos/csv?" + q;
 }
@@ -2640,6 +2739,11 @@ leyendaGrafico?.addEventListener("modulinkr-chart-series-toggle", (evento) => {
   }
 });
 botonMedidas.addEventListener("click", () => selectorMedidas.open());
+mostrarAnteriores.addEventListener("change", () => {
+  aplicarFiltroCatalogo();
+  document.getElementById("vistas-guardadas").value = "";
+  programarGrafico();
+});
 document.getElementById("btn-exportar-csv").addEventListener("click", exportarCsv);
 document.getElementById("btn-guardar-vista").addEventListener("click", vistaGuardar);
 document.getElementById("btn-borrar-vista").addEventListener("click", vistaBorrar);
@@ -6415,7 +6519,7 @@ function fRows(container, funcFromBlock = "") {
       function: g("function") || funcFromBlock,
       id: g("id"), name: g("name"), address: g("address"), count,
       type: g("type"), byte_order: g("byte_order"), scale: g("scale"),
-      offset: g("offset"), unit: g("unit"), pending_fields: pendingFields,
+      offset: g("offset"), unit: g("unit"), pending_fields: pendingFields, ui: row._operationUi,
     };
   });
 }
@@ -6487,6 +6591,7 @@ function buildRW(r) {
     const of = fNum(r.offset, 0); if (r.offset !== "" && of !== 0) o.offset = of;
   }
   if (r.unit) o.unit = r.unit;
+  if (r.ui) o.ui = structuredClone(r.ui);
   return o;
 }
 
@@ -6673,6 +6778,7 @@ function fValidate(f) {
 // ----- Llenado del formulario desde un config.json (leer del nodo) -----
 
 function fillRow(row, r) {
+  row._operationUi = r.ui ? structuredClone(r.ui) : null;
   const s = (f, v) => { const el = row.querySelector(`[data-f="${f}"]`); if (el != null && v != null) el.value = v; };
   s("function", r.function); s("id", r.id); s("name", r.name); s("address", r.address);
   s("count", r.count != null ? r.count : 1); s("type", r.type); s("byte_order", r.byte_order);
@@ -7843,3 +7949,30 @@ function actualizarReloj() {
 }
 actualizarReloj();
 setInterval(actualizarReloj, 30000);
+
+
+document.addEventListener("modulinkr-control-load", async event => {
+  const { origin, complete } = event.detail;
+  try {
+    const response = await fetchApi(`/api/comandos/nodos/${origin}`);
+    const data = await response.json();
+    complete(response.ok ? data : null, response.ok ? null : data.detail || data.error || "No se pudo cargar el control del nodo.");
+  } catch (error) { complete(null, "No se pudo conectar con el control del nodo."); }
+});
+document.addEventListener("modulinkr-operation-open", event => {
+  abrirOperacion(event.detail.origin, event.detail.device, event.detail.action);
+});
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-operation-id]");
+  if (button) abrirOperacion(Number(button.dataset.operationOrigin), Number(button.dataset.operationDevice), button.dataset.operationId);
+});
+document.addEventListener("modulinkr-control-write", async event => {
+  const { origin, action, value, complete } = event.detail;
+  try {
+    const response = await fetchApi(`/api/comandos/nodos/${origin}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Modulinkr-Command": "1" },
+      body: JSON.stringify({ device: action.device, action: action.id, value }) });
+    const result = await response.json();
+    complete(response.ok ? null : result.detail || result.error || "No se pudo registrar la operación.", response.ok ? result : null);
+  } catch (failure) { complete("No se pudo confirmar el registro de la operación. Consulta su actividad antes de repetirla."); }
+});

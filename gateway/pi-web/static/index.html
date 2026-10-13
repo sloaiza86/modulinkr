@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=ota-automatico-20261007">
+  <link rel="stylesheet" href="/static/style.css?v=historico-continuo-20261013">
 </head>
 <body>
 
@@ -113,6 +113,10 @@
           </header>
           <input class="medidas-buscar" type="search"
                  placeholder="Buscar por nodo o medida" aria-label="Buscar medidas">
+          <label class="medidas-anteriores">
+            <input id="mostrar-anteriores" type="checkbox">
+            <span>Mostrar dispositivos y medidas anteriores</span>
+          </label>
           <div class="modo">
             <button class="modo-btn active" type="button" data-modo="nodo">Por nodo</button>
             <button class="modo-btn" type="button" data-modo="medida">Por medida</button>
@@ -1108,7 +1112,7 @@
   </modulinkr-view-router>
 </modulinkr-app>
 
-<!-- Panel lateral de detalle de nodo -->
+<!-- Ficha de dispositivo con actividad y diagnóstico separados. -->
 <div id="detalle-fondo" hidden></div>
 <modulinkr-node-detail id="detalle" backdrop="detalle-fondo" tabindex="-1" hidden>
   <div class="detalle-cierre">
@@ -1128,6 +1132,8 @@
   <div id="detalle-cuerpo"></div>
   <div id="detalle-acciones" class="detalle-acciones"></div>
 </modulinkr-node-detail>
+
+<dialog id="operacion-dialogo" aria-labelledby="operacion-titulo"><modulinkr-operation-editor></modulinkr-operation-editor></dialog>
 
 <!-- Modal de minigráfica de una medida (última hora, buffer local) -->
 <div id="modal-fondo" hidden></div>
@@ -1347,8 +1353,8 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=ota-automatico-20261007"></script>
+<script src="/static/components.js?v=historico-continuo-20261013"></script>
 <script src="/static/network-state.js?v=ota-convivencia-20261002"></script>
-<script src="/static/app.js?v=ota-automatico-20261007"></script>
+<script src="/static/app.js?v=historico-continuo-20261013"></script>
 </body>
 </html>

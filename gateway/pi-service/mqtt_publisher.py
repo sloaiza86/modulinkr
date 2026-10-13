@@ -121,6 +121,7 @@ class MqttPublisher:
         # puede tocar el SQLite del buffer (un solo hilo). Encola y el bucle
         # principal escribe con drain_nbiot. Acotada para no crecer sin fin.
         self._nbiot_q: collections.deque = collections.deque(maxlen=2000)
+        self._command_q = collections.deque(maxlen=128)
 
     # ----- Conexión -----
 
@@ -188,6 +189,7 @@ class MqttPublisher:
             # NB-IoT/failover). Se resuscribe en cada reconexión.
             try:
                 client.subscribe(SUBSCRIBE_TOPIC, qos=1)
+                client.subscribe("modulinkr/v1/+/cmd/response", qos=1)
             except Exception as e:                    # noqa: BLE001
                 LOG.warning("event=mqtt.subscribe_failed error=%s", e)
         else:
@@ -210,6 +212,10 @@ class MqttPublisher:
             if not 1 <= publisher <= 254 or msg.retain:
                 return  # Una publicación retenida no confirma actividad actual.
             payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
+            if msg.topic == f"modulinkr/v1/{publisher}/cmd/response":
+                if payload.get('schema_version')=='3.0' and type(payload.get('origin')) is int:
+                    self._command_q.append((publisher,payload))
+                return
             samples = []
             for s in payload.get("samples") or []:
                 origin, ts, v = s.get("origin"), s.get("ts"), s.get("v")
@@ -403,8 +409,7 @@ class MqttPublisher:
             for rd in catalog.get("reads", [])
         ]
         writes = [
-            {"id": wr.get("id"), "name": wr.get("name"),
-             "unit": wr.get("unit") or None}
+            dict(wr, unit=wr.get("unit") or None)
             for wr in catalog.get("writes", [])
         ]
         return json.dumps({
@@ -415,3 +420,12 @@ class MqttPublisher:
             "reads":          reads,
             "writes":         writes,
         }, separators=(",", ":"))
+
+    def publish_command(self, publisher, payload):
+        return self._publish(f"modulinkr/v1/{publisher}/cmd",payload,qos=1,retain=False)
+
+    def drain_commands(self, service):
+        import node_commands
+        while self._command_q:
+            publisher,result=self._command_q.popleft()
+            node_commands.receive(service,result['origin'],result,'nbiot',publisher)

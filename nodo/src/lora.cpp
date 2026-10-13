@@ -720,9 +720,10 @@ LoraP2P::Status LoraP2P::sendNodeRegister(uint8_t hop_dst, uint8_t frag_idx,
                                           const uint8_t* frag,
                                           uint8_t frag_len) {
     if (!initialized_) return Status::NOT_INITIALIZED;
+    const size_t max_payload = sec_enabled_ ? protocol::kMaxPayloadSecure : protocol::kMaxPayload;
     if (frag == nullptr || frag_len == 0 || frag_total == 0 ||
         frag_idx >= frag_total ||
-        static_cast<size_t>(frag_len) + 2 > protocol::kMaxPayload) {
+        static_cast<size_t>(frag_len) + 2 > max_payload) {
         return Status::INVALID_ARGS;
     }
 

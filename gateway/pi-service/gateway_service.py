@@ -65,6 +65,7 @@ systemd lo relanza.
 from __future__ import annotations
 
 import node_maintenance
+import node_commands
 import collections
 import hashlib
 import json
@@ -2441,6 +2442,11 @@ class GatewayService:
         # registra en el log y se publica a MQTT, porque a diferencia del
         # debug Modbus interesa fuera del banco: es el histórico de fallos y
         # recuperaciones de radio de cada nodo.
+        if ft == protocol.FRAME_MODBUS_WRITE_RESULT:
+            if parsed['dest_id']==protocol.ADDR_GATEWAY and self.buf is not None:
+                node_commands.receive(self,parsed['origin_id'],parsed['write_result'],'lora')
+            return
+
         if ft == protocol.FRAME_NODE_MAINTENANCE_RESULT:
             if parsed['dest_id'] == protocol.ADDR_GATEWAY and self.buf is not None:
                 node_maintenance.receive(self, parsed)
@@ -3264,6 +3270,8 @@ class GatewayService:
                         # El camino NB-IoT importa sobre todo aquí (sin radio):
                         # es cuando los nodos entregan por failover.
                         self.mqtt.drain_nbiot()
+                        self.mqtt.drain_commands(self)
+                        node_commands.tick(self)
                         if now - last_drain >= self.drain_s:
                             last_drain = now
                             self.mqtt.drain()
@@ -3283,6 +3291,8 @@ class GatewayService:
                             self.handle_rx_line(raw.decode(errors="ignore"))
                     now = time.monotonic()
                     self.mqtt.drain_nbiot()
+                    self.mqtt.drain_commands(self)
+                    node_commands.tick(self)
                     # El beacon espera a que el aire quede libre. No se toca
                     # `last_beacon`, así que se reintenta en la vuelta
                     # siguiente y sale con unos milisegundos de retraso en vez

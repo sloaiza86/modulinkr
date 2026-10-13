@@ -1,6 +1,6 @@
 # ModuLinkr, visor web del gateway
 
-El visor web local está implementado como servicio FastAPI independiente. Incluye estado y topología de red, consulta y exportación de datos, configuración del gateway, comisionamiento por USB del gateway o Web Serial, configuración remota, actualización de firmware por LoRa, diagnóstico y migración de parámetros de red. El módulo general de comandos Modbus continúa como stub porque el plano de comandos descrito en `commands-format.md` no está implementado de extremo a extremo.
+El visor web local está implementado como servicio FastAPI independiente. Incluye estado y topología de red, consulta y exportación de datos, configuración del gateway, comisionamiento por USB del gateway o Web Serial, configuración remota, actualización de firmware por LoRa, diagnóstico y migración de parámetros de red. El control Modbus incorpora las cuatro escrituras acordadas mediante LoRa y respaldo automático NB-IoT. El firmware 0.0.81 supera la compilación ESP32. El despliegue de Operaciones y su validación de banco permanecen pendientes.
 
 La primera base funcional se completó el 2026-07-16. La fase 3.1 añadió el selector escalable, las vistas guardadas y los ejes automáticos por unidad. La vista de red muestra además el ciclo de trabajo de la última hora por transmisor, calculado por deltas de los reportes `tx_ms` de la tabla `node_airtime` (`frame-format.md` §6).
 
@@ -20,14 +20,14 @@ Interfaz web servida desde el Raspberry Pi del gateway y organizada en cuatro fu
 
 1. **Datos**: gráficos de las medidas guardadas en la base cloud y export CSV, con selección de nodos, medidas y rango temporal.
 2. **Estado de la red**: qué nodos están conectados, cuáles se vieron alguna vez y cuándo fue la última vez, y por qué ruta entregan (LoRa o NB-IoT).
-3. **Comandos de escritura**: pospuesto. Queda como módulo stub hasta que el firmware de comandos madure (recepción en supernodo incompleta; downlink LoRa a nodos sin NB-IoT sin implementar, `frame-format.md` §11).
+3. **Control Modbus**: acciones declaradas en `writes[]`, con entrega LoRa principal y respaldo NB-IoT automático. La implementación local requiere todavía compilación ESP32, despliegue y prueba de banco.
 4. **Topología**: mapa del árbol mesh (gateway raíz, arista hijo a padre), al estilo del mapa de red de Zigbee2MQTT.
 
 ## 2. Decisiones de arquitectura (2026-07-16)
 
 - **Corre en el Pi** (`modulinkr-web`, servicio systemd separado del gateway). El Pi es el dueño de la verdad viva de la red; las funciones 2 y 4 operan 100 % en local y sobreviven sin Internet. La función 1 consulta la base remota y degrada con aviso si no hay conexión.
 - **Stack**: FastAPI + uvicorn (Python, coherente con el resto del proyecto), frontend estático servido por el propio backend, sin build ni Node: ECharts para gráficos, vis-network para el mapa. Presupuesto de memoria ~40-60 MB (los gráficos los renderiza el navegador del cliente; el Pi solo sirve JSON y estáticos).
-- **Modularidad**: un router de API por función (`/api/datos`, `/api/red`, `/api/topologia`; futuro `/api/comandos`), cada uno con su vista. Añadir una función es añadir un módulo, sin tocar los demás.
+- **Modularidad**: un router de API por función (`/api/datos`, `/api/red`, `/api/topologia`, `/api/comandos`), cada uno con su vista. Añadir una función es añadir un módulo, sin tocar los demás.
 - **Acceso al histórico**: PostgreSQL de la VM expuesto en 5432 con TLS y un rol **solo lectura** dedicado (`modulinkr_ro`, únicamente `SELECT` sobre la base de telemetría; `pg_hba` restringido a ese rol y base). Lo provisiona el instalador del servidor.
 - **Autenticación**: página de login propia con cookie de sesión firmada (HMAC SHA-256 con `MODULINKR_WEB_SECRET`; usuario y contraseña preguntados en la instalación, la clave de firma autogenerada). Sustituye al basic auth de la primera iteración: misma protección, sin el diálogo del navegador y con logout. Desde el 2026-07-25 el visor sirve HTTPS con certificado autofirmado (§8); la cookie se marca `Secure` cuando hay TLS.
 
@@ -54,7 +54,7 @@ El catálogo se regenera con `tools/build_mdi_catalog.py` a partir del paquete o
 | Datos (gráficos, CSV) | PostgreSQL de la VM (`nodes`, `channels`, `samples`, `sample_values`) | Selector de nodos y medidas desde el catálogo zero-touch. Consultas de `db-schema.md` §5. Rangos largos con agregación en servidor (`date_trunc`, promedio por bucket) para no arrastrar la serie cruda hasta el navegador. CSV en streaming con la misma consulta. |
 | Estado de red | `node_status`, `nbiot_last` y `gateway_status` del SQLite local | La suscripción MQTT del servicio registra las publicaciones celulares, incluso sin radio USB. Se distingue la actividad LoRa, la publicación del supernodo y la captura de cada muestra. |
 | Topología | Estado de entrega compartido con las tarjetas | Se combina el padre LoRa observado con `nbiot_last.via_publisher`. La relación de entrega mediante un supernodo no confirma los saltos físicos intermedios. |
-| Comandos (futuro) | Publicación MQTT a `modulinkr/v1/{node}/cmd` (`commands-format.md`) | Módulo stub, pendiente del soporte completo en firmware. |
+| Control Modbus | Catálogo del nodo y tabla `modbus_commands` | Escrituras LoRa con respaldo automático MQTT al supernodo. |
 
 ## 4. Integración con el pi-service
 
@@ -281,3 +281,83 @@ Mantenimiento se divide en Gateway y Nodos. La selección de nodo permite reinic
 Las operaciones se excluyen entre sí y bloquean otras modificaciones desde la API mientras están activas. También se comprueban las transferencias de firmware, las lecturas y escrituras de configuración, las migraciones de red y las operaciones USB que conoce el visor. No se coordinan operaciones externas realizadas por consola o Web Serial independiente. La migración de SQLite se realiza al arrancar el servicio del gateway; si todavía no está instalada, la GUI mantiene deshabilitadas las acciones de nodo.
 
 Las pruebas `test_node_maintenance_api.py` y `test_node_maintenance_dom.html` cubren disponibilidad, confirmaciones, exclusión, pérdida de conexión y textos. La validación local no ejecuta reinicios reales.
+
+
+## Control Modbus
+
+El detalle del nodo incorpora Control, con las acciones del catálogo agrupadas por dispositivo. Las bobinas se presentan como Activar/Desactivar y los registros como valores numéricos con unidad. Antes de registrar la operación se confirma nodo, dispositivo, acción y valor. Los valores introducidos se conservan durante las actualizaciones de estado.
+
+La API autenticada `/api/comandos/nodos/{origin}` consulta el catálogo y las últimas veinte operaciones mediante GET, y registra una escritura mediante POST con `device`, `action` y `value`. La GUI no permite seleccionar transporte. El servicio del gateway utiliza LoRa y recurre automáticamente a NB-IoT. La confirmación del dispositivo y los resultados inciertos se muestran por separado. Una operación activa bloquea nuevas escrituras al mismo destino.
+
+Un catálogo antiguo permite ver sus acciones históricas, pero no acredita capacidad para ejecutarlas. La GUI exige el anuncio actualizado del firmware y un servicio del gateway disponible. La prueba de interfaz utiliza una API simulada; no acredita actuación física.
+
+
+## Despliegue del control de 2026-10-12
+
+Primero se actualiza el servicio del gateway y el visor. El paquete no contiene firmware ni credenciales. Después se compila y carga 0.0.79 en el nodo, supernodo y relays del recorrido. Un gateway anterior no interpreta la extensión del catálogo nuevo; ese orden evita perder el registro de los equipos actualizados. Se aplica cuando no haya una operación de firmware, configuración o mantenimiento en curso.
+
+En el Mac:
+
+```bash
+scp "/private/tmp/modulinkr-control-20261012.tar.gz" modulinkr@Gateway.local:~/modulinkr-control-20261012.tar.gz
+```
+
+En la sesión Termius del gateway:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-control-20261012.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install-control-modbus-20261012.sh"
+sudo journalctl -u modulinkr-gateway.service -u modulinkr-web.service --since "5 minutes ago" --no-pager
+SH
+```
+
+El instalador obtiene las rutas operativas desde systemd, comprueba la sintaxis Python, conserva una copia previa de los archivos y reinicia ambos servicios. Si la instalación falla, restaura los archivos anteriores y vuelve a iniciar los servicios. La creación de la tabla de operaciones se realiza al arrancar el servicio; no se elimina el buffer existente.
+
+En VS Code se abre `/Users/santiago/Documents/Documentos Academicos/Master/TFM/firmware/nodo` y se ejecuta `Cmd+Shift+P`, `PlatformIO: Build`. Tras una compilación satisfactoria, `PlatformIO: Upload` permite actualizar cada equipo por USB, de uno en uno. La distribución de binarios para OTA requiere el empaquetado posterior a esa compilación; el paquete del gateway no contiene una imagen nueva.
+
+La GUI se recarga para solicitar los recursos `control-modbus-20261012`. El banco debe comprobar una escritura con LoRa disponible, la misma clase de operación con la radio del gateway no disponible y entrega por NB-IoT, y la recuperación de LoRa para una operación nueva. Se comprueba por separado la respuesta Modbus y el efecto físico esperado. Los permisos MQTT del gateway y del supernodo deben permitir los topics de órdenes y respuestas.
+
+## Operaciones, 2026-10-13
+
+El resumen de red separa Medidas y Operaciones. Una medida abre su histórico. Una operación abre un editor centrado con el valor leído, su antigüedad y el valor solicitado. La ficha del nodo separa Dispositivo, Actividad y Diagnóstico; RSSI, SNR, versión y vía de entrega quedan en Diagnóstico. Se retiran los avisos permanentes sobre la prioridad de LoRa y las confirmaciones adicionales para cambios ordinarios.
+
+Los registros admiten campos numéricos y selectores declarados mediante `writes[].ui`; las bobinas utilizan interruptores individuales o un grupo aplicado en una sola orden. Las acciones declaran un valor fijo y se ejecutan mediante un botón. Los datos técnicos permanecen plegados. El formulario de comisionamiento conserva `ui` al importar, editar otros campos y exportar, sin modificar los parámetros de transporte.
+
+La respuesta Modbus confirmada no sustituye el valor leído ni acredita por sí sola su efecto. La API compara una lectura válida, capturada después de la confirmación, con el valor solicitado. Se considera la captura más reciente entre LoRa y NB-IoT, sin rejuvenecer una muestra retrasada por su recepción. Una lectura fallida, una relación ausente o un catálogo sustituido impiden marcar la operación como verificada. Si una operación posterior del mismo dispositivo precede a la lectura, no se atribuye esa lectura a la anterior. Una verificación observada se persiste en SQLite, conservando su valor y fecha aunque el dispositivo cambie después. La comprobación establece el resultado observado; no garantiza que una lectura instantánea se haya conservado entre sondeos.
+
+La comparación respeta la precisión float32 en tipos flotantes y no concede una tolerancia relativa a enteros grandes. La telemetría existente transporta valores float32; por ello, un contador uint32 que no pueda expresarse exactamente por esa vía puede escribirse correctamente y permanecer sin una lectura coincidente. El editor distingue esa situación de una escritura rechazada y no repite la orden automáticamente.
+
+Primero se despliega el paquete del gateway, que contiene los ocho archivos funcionales modificados y el instalador. No contiene perfiles de nodo, firmware ni credenciales. El instalador deriva las rutas desde systemd, conserva los archivos anteriores, reinicia los servicios y restaura los archivos si falla. La migración de las columnas de verificación ocurre al arrancar el servicio del gateway. Después se carga el firmware 0.0.81 y, para los límites y selectores declarados, se importa la plantilla correspondiente. La asociación automática de correcciones también funciona con la configuración anterior al cargar ese firmware. Se recarga la GUI para solicitar los recursos `operaciones-20261013`.
+
+En el Mac:
+
+```bash
+scp "/private/tmp/modulinkr-operaciones-20261013.tar.gz" modulinkr@Gateway.local:~/modulinkr-operaciones-20261013.tar.gz
+```
+
+En la sesión Termius del gateway:
+
+```bash
+bash -euo pipefail <<'SH'
+ml_stage="$(mktemp -d)"
+tar -xzvf "$HOME/modulinkr-operaciones-20261013.tar.gz" -C "$ml_stage"
+bash "$ml_stage/install-operations-20261013.sh"
+sudo journalctl -u modulinkr-gateway.service -u modulinkr-web.service --since "5 minutes ago" --no-pager
+SH
+```
+
+El firmware se compila y carga desde PlatformIO en VS Code. Este despliegue conserva la elección automática de transporte. Se valida en banco la apertura del editor desde una corrección, la escritura, la lectura posterior y el historial; las operaciones con el acelerómetro y el respaldo NB-IoT requieren comprobación física independiente.
+
+### Continuidad y medidas anteriores del histórico
+
+Visualización de datos consulta los nombres y fechas de los canales directamente en PostgreSQL mediante `/api/datos/nodos?incluir_anteriores=true&unificar=true`. La API reúne los canales con el mismo nodo, identificador de lectura, nombre y unidad en una medida del selector. El identificador representativo corresponde al canal vigente, o a la versión más reciente cuando la medida ya no tiene canal vigente. `channel_ids` conserva los identificadores originales asociados. La incorporación de lecturas a una configuración puede crear nuevas versiones de todos sus canales; esa separación se mantiene en el almacenamiento, pero no duplica las medidas compatibles en el visor.
+
+La consulta de gráfica, el histórico del resumen y el CSV solicitan `unificar=true`. Cada consulta resuelve en la base todos los canales compatibles con la medida seleccionada, aunque se reciba el identificador de una versión antigua. El promedio de cada intervalo se calcula sobre sus muestras, conservando recuentos y valores por vía; no se promedian los promedios de las versiones. Se conserva la representación de huecos del gráfico y la separación de LoRa y NB-IoT. La API mantiene la consulta por canal individual cuando no se solicita unificación.
+
+«Mostrar dispositivos y medidas anteriores» incorpora las medidas que ya no tienen una versión vigente. Las versiones anteriores de una medida actual forman parte automáticamente de su histórico. Las vistas guardadas que contienen identificadores anteriores se resuelven al identificador representativo, sin duplicar la selección. La opción se conserva en las vistas guardadas y al desactivarla se retiran de la selección las medidas que dejan de estar visibles. El catálogo se actualiza al entrar en Datos y al abrir el histórico del resumen.
+
+La descarga CSV conserva sus seis columnas iniciales y añade `channel_id`, `measure`, `active_from` y `active_to`. Los valores se exportan sin agregar y cada fila conserva su canal original, aunque la consulta abarque varias versiones. El nombre del nodo procede de `nodes.name`, que conserva únicamente el último nombre registrado. El esquema no almacena una identidad física de dispositivo Modbus; la continuidad se establece por los metadatos de la lectura. Un cambio de nodo, identificador, nombre o unidad mantiene otra medida. No se altera la ingesta, el versionado del catálogo, las muestras existentes ni el esquema de la base.
+
+`install_history.sh` actualiza únicamente `dataapi.py`, `static/app.js`, `static/components.js`, `static/index.html` y `static/style.css`. Obtiene la ruta instalada desde la unidad `modulinkr-web.service`, conserva una copia previa y recupera los archivos si el reinicio no queda activo. Requiere un paquete con esos archivos bajo `gateway/pi-web/`; no cambia credenciales ni reinicia el servicio de radio.

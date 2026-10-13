@@ -10,12 +10,6 @@ namespace {
 
 constexpr uint32_t kReadChunkDelayMs = 5;
 
-void drain(Stream& s) {
-    while (s.available()) {
-        (void)s.read();
-    }
-}
-
 String trim(const String& s) {
     String r = s;
     r.trim();
@@ -55,7 +49,7 @@ bool Nbiot::begin(HardwareSerial& uart,
     uart_->begin(baudrate, SERIAL_8N1, rx_pin, tx_pin);
 
     delay(800);
-    drain(*uart_);
+    pollMessages();
 
     sendAT("ATE0", "OK", 1000);
     sendAT("AT+CMEE=2", "OK", 1000);
@@ -72,7 +66,7 @@ bool Nbiot::begin(HardwareSerial& uart,
 
 bool Nbiot::isSimReady() {
     if (uart_ == nullptr) return false;
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CPIN?");
     const String r = readResponse(2000, "OK");
     last_response_ = r;
@@ -81,7 +75,7 @@ bool Nbiot::isSimReady() {
 
 String Nbiot::readIMSI() {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CIMI");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
@@ -90,7 +84,7 @@ String Nbiot::readIMSI() {
 
 String Nbiot::readIMEI() {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CGSN");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
@@ -99,7 +93,7 @@ String Nbiot::readIMEI() {
 
 String Nbiot::readCOPS() {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+COPS?");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
@@ -116,7 +110,7 @@ String Nbiot::readCOPS() {
 
 String Nbiot::readCBAND() {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CBAND?");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
@@ -127,7 +121,7 @@ String Nbiot::readCBAND() {
 
 String Nbiot::readCMNB() {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CMNB?");
     const String r = readResponse(3000, "OK");
     last_response_ = r;
@@ -138,7 +132,7 @@ String Nbiot::readCMNB() {
 
 String Nbiot::scanOPS(uint32_t timeout_ms) {
     if (uart_ == nullptr) return String();
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+COPS=?");
     const String r = readResponse(timeout_ms, "OK");
     last_response_ = r;
@@ -147,21 +141,39 @@ String Nbiot::scanOPS(uint32_t timeout_ms) {
     return t;
 }
 
-namespace {
-bool waitForChar(Stream& s, char target, uint32_t timeout_ms, String& response) {
-    response = "";
-    const uint32_t start = millis();
-    while ((millis() - start) < timeout_ms) {
-        if (s.available()) {
-            const int c = s.read();
-            if (c >= 0) response += static_cast<char>(c);
-            if (c == target) return true;
+int Nbiot::readByte() {
+    const int c=uart_->read();
+    if(c>=0 && receive_.feed(static_cast<char>(c),millis())) return -1;
+    return c;
+}
+void Nbiot::pollMessages() {
+    if(!uart_) return;
+    while(uart_->available()) readByte();
+}
+bool Nbiot::waitPrompt(char target,uint32_t timeout,String& response) {
+    response=String();
+    const uint32_t start=millis();
+    while(millis()-start<timeout) {
+        if(uart_->available()) {
+            const int c=readByte();
+            if(c>=0) response+=static_cast<char>(c);
+            if(c==target) return true;
         }
         delay(5);
     }
     return false;
 }
-}  // namespace
+bool Nbiot::mqttSubscribe(const char* topic) {
+    if(!uart_ || !topic || !*topic || strlen(topic)>79) return false;
+    char cmd[48]; snprintf(cmd,sizeof(cmd),"AT+CMQTTSUB=0,%u,1",unsigned(strlen(topic)));
+    pollMessages(); uart_->println(cmd);
+    if(!waitPrompt('>',5000,last_response_)) return false;
+    uart_->write(reinterpret_cast<const uint8_t*>(topic),strlen(topic));
+    const String response=readResponse(30000,"+CMQTTSUB:"); last_response_=response;
+    int client=-1,result=-1;
+    const int at=response.indexOf("+CMQTTSUB:");
+    return at>=0 && sscanf(response.c_str()+at,"+CMQTTSUB: %d,%d",&client,&result)==2 && client==0 && result==0;
+}
 
 void Nbiot::mqttReset() {
     if (uart_ == nullptr) return;
@@ -201,7 +213,7 @@ bool Nbiot::mqttBegin(const char* client_id, bool tls, uint8_t ssl_ctx) {
 
     // Arranca el servicio MQTT. Activa el PDP context internamente.
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=AT+CMQTTSTART");
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CMQTTSTART");
 
     // Espera URC +CMQTTSTART: 0. Si ya estaba arrancado responde ERROR,
@@ -268,7 +280,7 @@ bool Nbiot::mqttConnect(const char* broker,
             diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
         }
     }
-    drain(*uart_);
+    pollMessages();
     uart_->println(cmd);
 
     // Espera URC +CMQTTCONNECT: 0,0 (cliente 0, sin error).
@@ -287,7 +299,7 @@ bool Nbiot::mqttIsConnected() {
 
 Nbiot::MqttState Nbiot::mqttConnectionState() {
     if (uart_ == nullptr) return MqttState::UNKNOWN;
-    drain(*uart_);
+    pollMessages();
     // SIM7028 MQTT(S) §3.2.9: la consulta devuelve disc_state, 0 conectado
     // y 1 desconectado. No ejecuta la orden de desconexión ni publica datos.
     uart_->println("AT+CMQTTDISC?");
@@ -343,9 +355,9 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     snprintf(cmd, sizeof(cmd),
              "AT+CMQTTTOPIC=0,%u", static_cast<unsigned>(topic_len));
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
-    drain(*uart_);
+    pollMessages();
     uart_->println(cmd);
-    if (!waitForChar(*uart_, '>', 5000, last_response_)) {
+    if (!waitPrompt('>', 5000, last_response_)) {
         return failed("topic_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(topic), topic_len);
@@ -362,9 +374,9 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     snprintf(cmd, sizeof(cmd),
              "AT+CMQTTPAYLOAD=0,%u", static_cast<unsigned>(payload_len));
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
-    drain(*uart_);
+    pollMessages();
     uart_->println(cmd);
-    if (!waitForChar(*uart_, '>', 5000, last_response_)) {
+    if (!waitPrompt('>', 5000, last_response_)) {
         return failed("payload_prompt");
     }
     uart_->write(reinterpret_cast<const uint8_t*>(payload), payload_len);
@@ -379,7 +391,7 @@ bool Nbiot::mqttPublish(const char* topic, const char* payload, uint8_t qos) {
     // Paso 3: disparar la publicación.
     snprintf(cmd, sizeof(cmd), "AT+CMQTTPUB=0,%u,60", qos);
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
-    drain(*uart_);
+    pollMessages();
     uart_->println(cmd);
 
     // Espera URC +CMQTTPUB: 0,0.
@@ -427,7 +439,7 @@ bool Nbiot::configureAPN(const char* apn, const char* user, const char* pass) {
 
 int8_t Nbiot::getCSQ() {
     if (uart_ == nullptr) return INT8_MIN;
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CSQ");
     const String r = readResponse(2000, "OK");
     last_response_ = r;
@@ -446,7 +458,7 @@ int8_t Nbiot::getCSQ() {
 
 Nbiot::CeregStatus Nbiot::getCEREG() {
     if (uart_ == nullptr) return CeregStatus::UNKNOWN;
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CEREG?");
     const String r = readResponse(2000, "OK");
     last_response_ = r;
@@ -480,7 +492,7 @@ Nbiot::CeregStatus Nbiot::getCEREG() {
 
 uint32_t Nbiot::readClock() {
     if (uart_ == nullptr) return 0;
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CCLK?");
     const String r = readResponse(2000, "OK");
     last_response_ = r;
@@ -548,7 +560,7 @@ uint32_t Nbiot::ntpSync(const char* server) {
     // Ejecuta la sincronización: emite la URC +CNTP: <r>[,<time>] (r=1 OK).
     // Puede tardar segundos en contactar el servidor NTP.
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=AT+CNTP");
-    drain(*uart_);
+    pollMessages();
     uart_->println("AT+CNTP");
     String r = readResponse(20000, "+CNTP:");
     last_response_ = r;
@@ -576,7 +588,7 @@ const char* Nbiot::ceregToString(CeregStatus s) {
 
 bool Nbiot::sendAT(const char* cmd, const char* expected, uint32_t timeout_ms) {
     if (uart_ == nullptr) return false;
-    drain(*uart_);
+    pollMessages();
 
     if (verbose_) {
         diag::log("DEBUG", "node.at", "at.command", "data=%s\n", cmd);
@@ -591,7 +603,7 @@ bool Nbiot::sendAT(const char* cmd, const char* expected, uint32_t timeout_ms) {
 
     while ((millis() - start) < timeout_ms) {
         while (uart_->available()) {
-            const int c = uart_->read();
+            const int c = readByte();
             if (c >= 0) buffer += static_cast<char>(c);
             if (expected != nullptr && buffer.indexOf(expected) >= 0) {
                 result = true;
@@ -603,7 +615,7 @@ bool Nbiot::sendAT(const char* cmd, const char* expected, uint32_t timeout_ms) {
                 const uint32_t err_start = millis();
                 while ((millis() - err_start) < 800) {
                     if (uart_->available()) {
-                        const int c2 = uart_->read();
+                        const int c2 = readByte();
                         if (c2 >= 0) buffer += static_cast<char>(c2);
                         if (buffer.endsWith("\r\n") || buffer.endsWith("\n\r")) {
                             break;
@@ -646,7 +658,7 @@ String Nbiot::readResponse(uint32_t timeout_ms, const char* terminator) {
         const uint32_t extra_start = millis();
         while ((millis() - extra_start) < 600) {
             while (uart_->available()) {
-                const int c = uart_->read();
+                const int c = readByte();
                 if (c >= 0) buffer += static_cast<char>(c);
                 if (buffer.endsWith("\r\n") || buffer.endsWith("\n\r")) {
                     return;
@@ -658,7 +670,7 @@ String Nbiot::readResponse(uint32_t timeout_ms, const char* terminator) {
 
     while ((millis() - start) < timeout_ms) {
         while (uart_->available()) {
-            const int c = uart_->read();
+            const int c = readByte();
             if (c >= 0) buffer += static_cast<char>(c);
             if (terminator != nullptr && buffer.indexOf(terminator) >= 0) {
                 // Seguir leyendo hasta el CR/LF de cierre para no truncar

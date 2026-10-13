@@ -24,7 +24,8 @@ void log(const char*,const char*,const char* event,const char* format,...) {
 }
 }
 void drain(Stream&) {}
-bool waitForChar(Stream&,char,uint32_t,String& response) {
+void Nbiot::pollMessages() {}
+bool Nbiot::waitPrompt(char,uint32_t,String& response) {
     response="+CME ERROR: original prompt failure";
     ++prompts; return !((mode==1 && prompts==1)||(mode==3 && prompts==2));
 }

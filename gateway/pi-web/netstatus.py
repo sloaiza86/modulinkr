@@ -855,5 +855,6 @@ def catalogs() -> list[dict]:
         out.append({"origin": r[0], "name": r[1], "fw_version": r[2],
                     "reads": cat.get("reads", []),
                     "writes": cat.get("writes", []),
-                    "schemas": cat.get("schemas", "")})
+                    "schemas": cat.get("schemas", ""),
+                    "write_capable": cat.get("write_capable", False)})
     return out

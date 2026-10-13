@@ -47,6 +47,7 @@ cualquier utilidad de diagnóstico.
 from __future__ import annotations
 
 import struct
+import modbus_command
 from typing import Optional
 
 
@@ -80,7 +81,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x3A          # v3.9 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x3B          # v3.11 (major en nibble alto, minor en bajo)
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -148,6 +149,8 @@ FRAME_FW_BCAST_MAP   = 0x22
 # Sondeo de disponibilidad (v4.1, §22).
 FRAME_NODE_PING      = 0x23
 FRAME_NODE_PONG      = 0x24
+FRAME_MODBUS_WRITE = 0x2C
+FRAME_MODBUS_WRITE_RESULT = 0x2D
 FRAME_NODE_MAINTENANCE = 0x28
 FRAME_NODE_MAINTENANCE_RESULT = 0x29
 
@@ -173,6 +176,8 @@ FRAME_SN_REQUEST    = 0x11
 FRAME_SN_OFFER      = 0x12
 
 FRAME_TYPE_NAMES = {
+    FRAME_MODBUS_WRITE: "MODBUS_WRITE",
+    FRAME_MODBUS_WRITE_RESULT: "MODBUS_WRITE_RESULT",
     FRAME_NODE_MAINTENANCE: 'NODE_MAINTENANCE',
     FRAME_NODE_MAINTENANCE_RESULT: 'NODE_MAINTENANCE_RESULT',
     FRAME_TELEMETRY_ROUTE: 'TELEMETRY_ROUTE',
@@ -671,6 +676,18 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         out['hl_mb_debug_name'] = MB_DEBUG_NAMES.get(
             payload[24], f'unknown(0x{payload[24]:02X})')
 
+    elif frame_type == FRAME_MODBUS_WRITE_RESULT:
+        try:
+            n = payload[0] if payload else 0
+            path = list(payload[1:1+n])
+            if n>16 or len(path)!=n or not modbus_command.valid_path(path,out['origin_id'],out['dest_id']) or len(path)<2 or path[-2]!=out['hop_src']:
+                raise ValueError('Recorrido del resultado inválido.')
+            out['write_result'] = modbus_command.decode_result(payload[1+n:])
+            out['write_path'] = path
+        except ValueError as exc:
+            out['error'] = str(exc)
+            return out
+
     elif frame_type == FRAME_NODE_MAINTENANCE_RESULT:
         if payload_length != 32:
             out['error'] = 'NODE_MAINTENANCE_RESULT: longitud incorrecta'
@@ -704,7 +721,7 @@ def _read_lstr(data: bytes, off: int) -> tuple[str, int]:
     off += 1
     if off + n > len(data):
         raise ValueError('catalogo truncado (string incompleto)')
-    return data[off:off + n].decode('ascii', errors='replace'), off + n
+    return data[off:off + n].decode('utf-8', errors='replace'), off + n
 
 
 def parse_catalog(data: bytes) -> dict:
@@ -747,25 +764,8 @@ def parse_catalog(data: bytes) -> dict:
         reads, off = read_entries(off)
         writes, off = read_entries(off)
 
-        # Campo opcional del final. Lo que sobre y no sea un string bien
-        # formado sigue siendo un error: la tolerancia es a que falte, no a
-        # que haya basura.
-        schemas = ''
-        if off < len(data):
-            schemas, off = _read_lstr(data, off)
-        nclass = 'C'
-        if off < len(data):
-            b = data[off]
-            off += 1
-            if b in (0x41, 0x43):          # 'A' o 'C'
-                nclass = chr(b)
-            else:
-                raise ValueError(f'clase de nodo invalida: 0x{b:02X}')
-        if off != len(data):
-            raise ValueError(f'{len(data) - off} bytes sobrantes tras el catalogo')
-        return {'fw_version': fw, 'node_name': name,
-                'reads': reads, 'writes': writes, 'schemas': schemas,
-                'class': nclass}
+        tail = modbus_command.catalog_tail(data, off, writes, reads)
+        return dict(fw_version=fw,node_name=name,reads=reads,writes=writes,**tail)
     except ValueError as e:
         return {'error': str(e)}
 
@@ -1257,3 +1257,17 @@ def build_fw_report_ack(dest_id: int, hop_dst: int, report_id: int, xfer_id: int
     struct.pack_into('<II', frame, OFF_PAYLOAD, report_id, xfer_id)
     return _finalize(frame, key, sec_ts)
 
+
+
+def build_modbus_write(dest_id, path, body, gw_seq, network_id, ttl, key=None, sec_ts=0):
+    if not modbus_command.valid_path(path,ADDR_GATEWAY,dest_id) or len(path)<2 or not 24<=len(body)<=39:
+        raise ValueError('Orden o recorrido de escritura inválido.')
+    payload=bytes((len(path),))+bytes(path)+body
+    frame=bytearray(HEADER_BYTES+len(payload))
+    frame[OFF_SCHEMA]=SCHEMA_VERSION; frame[OFF_NETWORK_ID]=network_id
+    frame[OFF_HOP_SRC]=ADDR_GATEWAY; frame[OFF_HOP_DST]=path[1]
+    frame[OFF_ORIGIN_ID]=ADDR_GATEWAY; frame[OFF_DEST_ID]=dest_id
+    struct.pack_into('<H',frame,OFF_SEQ,gw_seq & 0xffff)
+    frame[OFF_FRAME_TYPE]=FRAME_MODBUS_WRITE; frame[OFF_TTL]=ttl
+    frame[OFF_PAYLOAD_LEN]=len(payload); frame[OFF_PAYLOAD:]=payload
+    return _finalize(frame,key,sec_ts)

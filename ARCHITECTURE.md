@@ -6,7 +6,7 @@ Este documento describe los componentes y flujos implementados. La historia de l
 
 ModuLinkr adquiere medidas de dispositivos Modbus RTU y mantiene su entrega cuando se degrada la red local o el gateway deja de estar disponible. LoRa forma la red de campo y NB-IoT proporciona la salida celular de contingencia.
 
-El alcance implementado se concentra en adquisición, transporte, observabilidad, configuración y mantenimiento remoto. El canal general de control Modbus permanece pendiente.
+El alcance implementado se concentra en adquisición, transporte, observabilidad, configuración y mantenimiento remoto. Las escrituras Modbus remotas se implementan para 0x05, 0x0F, 0x06 y 0x10, con compilación ESP32, despliegue y validación de banco pendientes.
 
 ## 2. Componentes
 
@@ -56,7 +56,7 @@ Los secretos se solicitan durante la instalación y permanecen fuera del reposit
 
 ## 7. Versionado y compatibilidad
 
-La implementación usa `0x39` en la trama LoRa, configuraciones de nodo `3.3` y mensajes MQTT `3.2`. Algunas extensiones posteriores aparecen descritas como v4.0 y v4.1, aunque el byte de trama permanece en `0x39`.
+La implementación de control utiliza `0x3B` en la trama LoRa, configuraciones de nodo `3.3`, telemetría MQTT `3.3` y órdenes MQTT `3.0`. El catálogo añade una extensión identificada para describir las escrituras. Se actualiza el gateway antes de instalar el firmware que emite ese catálogo.
 
 También existen cambios de layout entre versiones menores del major 3, mientras que los receptores aceptan cualquier minor con ese major. La política definitiva está pendiente: puede separarse el versionado por formato o alinearse con una única secuencia, pero no se adopta ninguna de las dos opciones en este documento.
 
@@ -69,3 +69,10 @@ Siguen pendientes pruebas deliberadas de la ventana de silencio, reversión del 
 ## 9. Fuentes técnicas
 
 La trama LoRa se define en [`shared/protocol/frame-format.md`](shared/protocol/frame-format.md), la configuración en [`shared/protocol/node-config.md`](shared/protocol/node-config.md), los mensajes MQTT en [`shared/protocol/batch-format.md`](shared/protocol/batch-format.md) y la persistencia en [`shared/protocol/db-schema.md`](shared/protocol/db-schema.md). La implementación prevalece cuando se detecta una discrepancia sin resolver.
+
+
+## 10. Control Modbus remoto
+
+El control del visor registra operaciones en SQLite. El servicio del gateway utiliza la ruta LoRa disponible y pasa automáticamente al supernodo de respaldo si esa vía no es utilizable o agota tres intentos. El servicio del módem recibe las órdenes MQTT y las entrega al bucle del nodo, que coordina las escrituras con las lecturas del bus y las ventanas de radio. Los nodos sin módem requieren un recorrido LoRa hasta el supernodo.
+
+La ejecución utiliza exclusivamente `writes[]` y comprueba la firma de la acción configurada. La operación se persiste antes de transmitir al dispositivo Modbus. La GUI separa envío, aceptación, confirmación Modbus, rechazo e incertidumbre. El catálogo declara la capacidad de control; los relays del recorrido también necesitan firmware compatible. La definición completa está en [`commands-format.md`](shared/protocol/commands-format.md) §12.

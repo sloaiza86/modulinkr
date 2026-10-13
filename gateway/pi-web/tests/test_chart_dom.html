@@ -40,6 +40,7 @@ body { display: block; padding: 12px; }
       let modalSel={origin:1,canal:0};
       ${section('const periodosHistorico =', 'let modalSel =')} const cacheUltimos={nodes:[{origin:1,channels:[{read_id:'temperature',unit:'°C'}]}]};
       const pintarModalCabecera=()=>{},actualizarRangoModal=()=>{};
+      const cargarCatalogo=async()=>true;
       const htmlSeguro=x=>String(x);
       let lastQuery=''; const fetchApi=async url=>{ lastQuery=url;
         if(responseMode==='error')throw Error('offline');
@@ -109,6 +110,7 @@ body { display: block; padding: 12px; }
     await api.load('data');const modalChart=await api.modal();
     assert(modalChart.getOption().series.length===2,'El modal carga las dos vías desde la respuesta');
     assert(!document.querySelector('#modal-vias').hidden,'Leyenda de vías visible en el modal');
+    assert(new URL(api.query(),location.origin).searchParams.get('unificar')==='true','El resumen solicita el histórico continuo de la medida');
     const period=document.querySelector('#modal-periodo');
     assert(period.value==='now-24h','El modal empieza en Últimas 24 horas');
     const presets=customElements.get('modulinkr-period-selector').presets;

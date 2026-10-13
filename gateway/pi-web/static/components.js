@@ -482,12 +482,13 @@
         return this._catalogo.map((nodo) => ({
           clave: `n${nodo.node_id}`,
           titulo: nodo.name ?? `Nodo ${nodo.node_id}`,
-          detalle: `Nodo ${nodo.node_id}`,
+          detalle: `Nodo ${nodo.node_id}${nodo.previous ? " · Anterior" : ""}`,
           canales: (nodo.channels ?? []).map((canal) => ({
             clave: String(canal.channel_id),
             texto: this._nombreMedida(canal),
             detalle: canal.unit ?? "",
             icono: this._iconoMedida(canal),
+            version: canal.previous ? (window.periodoCanal?.(canal) ?? "Anterior") : "",
           })),
         }));
       }
@@ -495,7 +496,7 @@
       const grupos = new Map();
       for (const nodo of this._catalogo) {
         for (const canal of nodo.channels ?? []) {
-          const claveMedida = `${canal.read_id ?? canal.name}|${canal.unit ?? ""}`;
+          const claveMedida = `${canal.read_id ?? ""}|${canal.name ?? ""}|${canal.unit ?? ""}`;
           if (!grupos.has(claveMedida)) {
             grupos.set(claveMedida, {
               clave: `m${claveMedida}`,
@@ -510,6 +511,7 @@
             detalle: `Nodo ${nodo.node_id}`,
             icono: nodo.node_type === "super_node"
               ? "modulinkr:radio-handheld-dual" : "radio-handheld",
+            version: canal.previous ? (window.periodoCanal?.(canal) ?? "Anterior") : "",
           });
         }
       }
@@ -578,6 +580,12 @@
         secundario.className = "medida-opcion-detalle";
         secundario.textContent = canal.detalle;
         contenido.append(nombre, secundario);
+        if (canal.version) {
+          const version = document.createElement("span");
+          version.className = "medida-opcion-version";
+          version.textContent = canal.version;
+          contenido.appendChild(version);
+        }
         opcion.appendChild(contenido);
         arbol.appendChild(opcion);
       }
@@ -606,7 +614,7 @@
         const canales = grupo.canales.filter((canal) => {
           if (this._soloSeleccionadas && !this._seleccion.has(canal.clave)) return false;
           if (!consulta || coincideGrupo) return true;
-          return `${canal.texto} ${canal.detalle}`.toLocaleLowerCase("es").includes(consulta);
+          return `${canal.texto} ${canal.detalle} ${canal.version ?? ""}`.toLocaleLowerCase("es").includes(consulta);
         });
         if (!canales.length) continue;
         const abrir = Boolean(consulta) || this._soloSeleccionadas
@@ -2621,11 +2629,25 @@
       this._requestClose = () => this.emit("modulinkr-close-request");
       this._close?.addEventListener("click", this._requestClose);
       this._backdrop?.addEventListener("click", this._requestClose);
+      this._focusTrap = event => {
+        if (event.key !== "Tab" || this.hidden) return;
+        const controls = [...this.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex="0"]')]
+          .filter(el => !el.disabled && el.getClientRects().length);
+        const first = controls[0], last = controls.at(-1);
+        if (!first) return;
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === this)) {
+          event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first.focus();
+        }
+      };
+      this.addEventListener("keydown", this._focusTrap);
     }
 
     disconnectedCallback() {
       this._close?.removeEventListener("click", this._requestClose);
       this._backdrop?.removeEventListener("click", this._requestClose);
+      this.removeEventListener("keydown", this._focusTrap);
     }
 
     show() {
@@ -2725,6 +2747,243 @@
     }
   }
 
+  const operations = {
+    unit: u => ({ C: "°C", c: "°C" })[u] ?? (u ?? ""),
+    kind: a => a.ui?.kind || (["write_single_coil", "write_multiple_coils"].includes(a.function) ? "switch" : "number"),
+    visible(actions, advanced = false) {
+      const used = new Set();
+      return actions.filter(a => {
+        const key = a.read_channels?.length ? `${a.device}:${a.read_channels.join(",")}` : null;
+        const extra = a.ui?.advanced === true || (a.ui?.advanced !== false && key && used.has(key));
+        if (!extra && key) used.add(key);
+        return Boolean(extra) === advanced;
+      });
+    },
+    display(a, v) {
+      if (v == null) return "Sin lectura disponible";
+      if (Array.isArray(v)) return `${v.filter(Boolean).length} de ${v.length} activadas`;
+      if (typeof v === "boolean") return v ? "Encendida" : "Apagada";
+      if (this.kind(a) === "select") return a.ui.options.find(o => o.value === v)?.label || `Valor ${v}`;
+      return `${Number(v).toLocaleString("es-ES", { maximumFractionDigits: 6 })}${a.unit ? " " + this.unit(a.unit) : ""}`;
+    },
+    valid(a, v) {
+      if (this.kind(a) === "switch") return a.count === 1 ? typeof v === "boolean" || (Array.isArray(v) && v.length === 1 && typeof v[0] === "boolean") : Array.isArray(v) && v.length === a.count && v.every(x => typeof x === "boolean");
+      if (typeof v !== "number" || !Number.isFinite(v)) return false;
+      const ui = a.ui || {};
+      if ((ui.min != null && v < ui.min) || (ui.max != null && v > ui.max)) return false;
+      if (ui.kind === "select" && !ui.options.some(o => o.value === v)) return false;
+      if (ui.kind === "action" && v !== ui.value) return false;
+      if (ui.step != null && Math.abs((v - (ui.min || 0)) / ui.step - Math.round((v - (ui.min || 0)) / ui.step)) > 1e-5) return false;
+      const raw = (v - (a.offset || 0)) / (a.scale ?? 1);
+      if (!Number.isFinite(raw)) return false;
+      if (a.type === "float32") return Number.isFinite(Math.fround(raw));
+      const limits = { uint16: [0, 65535], int16: [-32768, 32767], uint32: [0, 4294967295], int32: [-2147483648, 2147483647] }[a.type];
+      return Boolean(limits && Math.round(raw) >= limits[0] && Math.round(raw) <= limits[1] && Math.abs(raw - Math.round(raw)) <= 1e-5);
+    },
+    status(o) {
+      if (o.state === "confirmed" && o.verification === "unavailable" && o.action_info?.ui?.kind === "action") return "Ejecución confirmada";
+      if (o.verification === "verified") return "Aplicado · Lectura verificada";
+      if (o.state === "confirmed") return o.verification === "different" ? "Escritura confirmada · La lectura posterior muestra otro valor"
+        : o.verification === "superseded" ? "Escritura confirmada · Sin lectura antes de otra operación"
+        : o.verification === "catalog_changed" ? "Escritura confirmada · La configuración ha cambiado"
+        : o.verification === "unavailable" ? "Escritura confirmada · Sin lectura asociada" : "Escritura confirmada · Esperando lectura";
+      return { queued: "Pendiente de envío", sent: "Enviada · Esperando al nodo", accepted: "Aceptada por el nodo · Esperando resultado Modbus", rejected: "Rechazada", error: "Error Modbus", uncertain: "Resultado desconocido", unconfirmed: "Sin confirmación" }[o.state] || o.state;
+    },
+  };
+  window.ModulinkrOperations = operations;
+
+  class ModuLinkrNodeControl extends ModuLinkrElement {
+    connectedCallback() {
+      if (!this._initialized) {
+        this._initialized = true;
+        this.innerHTML = '<p class="leyenda control-aviso" role="status" aria-live="polite">Cargando operaciones…</p><div class="control-acciones"></div><div class="control-historial"></div>';
+      }
+      this.refresh();
+      window.clearInterval(this._timer);
+      this._timer = window.setInterval(() => this.refresh(), 3000);
+    }
+    disconnectedCallback() { window.clearInterval(this._timer); }
+    refresh() {
+      if (this._loading || this.closest("modulinkr-node-detail")?.hidden || this.closest("[data-detail-pane]")?.hidden) return;
+      this._loading = true;
+      this.emit("modulinkr-control-load", { origin: Number(this.dataset.origin), complete: (data, error) => {
+        this._loading = false;
+        if (error) this.querySelector(".control-aviso").textContent = error;
+        else this.update(data);
+      } });
+    }
+    update(data) {
+      this._data = data;
+      const notice = this.querySelector(".control-aviso"); notice.textContent = data.unavailable || ""; notice.hidden = !notice.textContent;
+      const area = this.querySelector(".control-acciones"); area.replaceChildren();
+      if (this.dataset.mode !== "activity") {
+        const title = document.createElement("h3"); title.textContent = "Operaciones"; area.append(title);
+        for (const advanced of [false, true]) {
+          const actions = operations.visible(data.actions, advanced);
+          if (!actions.length) continue;
+          const group = document.createElement(advanced ? "details" : "div");
+          if (advanced) { const summary = document.createElement("summary"); summary.textContent = "Pruebas Modbus"; group.append(summary); }
+          for (const action of actions) {
+            const row = document.createElement("button"); row.type = "button"; row.className = "operacion-tarjeta";
+            const name = document.createElement("span"); name.textContent = action.name;
+            const value = document.createElement("span"); value.className = "operacion-valor"; value.textContent = operations.kind(action) === "action" ? "Ejecutar acción" : operations.display(action, action.observed?.value);
+            row.append(name, value); row.addEventListener("click", () => this.emit("modulinkr-operation-open", { origin: Number(this.dataset.origin), device: action.device, action: action.id })); group.append(row);
+          }
+          area.append(group);
+        }
+        if (!data.actions.length) { const empty = document.createElement("p"); empty.textContent = "No hay operaciones declaradas."; area.append(empty); }
+      }
+      const history = this.querySelector(".control-historial"); history.replaceChildren();
+      if (!data.operations.length) { history.textContent = "Sin operaciones registradas."; return; }
+      for (const operation of data.operations) {
+        const row = document.createElement("article"); row.className = "control-operacion";
+        const action = operation.action_info || {};
+        const heading = document.createElement("strong"); heading.textContent = `${action.name || operation.action} · ${operations.status(operation)}`;
+        const detail = document.createElement("p"); detail.textContent = `Solicitado: ${operations.display(action, operation.value)}. ${operation.detail || ""}`;
+        const when = document.createElement("time"); when.dateTime = new Date(operation.created * 1000).toISOString(); when.textContent = new Date(operation.created * 1000).toLocaleString("es-ES");
+        const route = document.createElement("span"); route.textContent = operation.transport ? ` · ${operation.transport === "lora" ? "LoRa" : "NB-IoT"}` : "";
+        row.append(heading, detail, when, route); history.append(row);
+      }
+    }
+  }
+
+  class ModuLinkrOperationEditor extends ModuLinkrElement {
+    connectedCallback() {
+      if (this._initialized) return;
+      this._initialized = true;
+      this.innerHTML = '<div class="operacion-cabecera"><div><h2 id="operacion-titulo">Operación</h2><p class="leyenda operacion-dispositivo"></p></div><button type="button" class="icono-btn operacion-cerrar" aria-label="Cerrar operación"><modulinkr-icon name="mdi:close"></modulinkr-icon></button></div><div class="operacion-leido"><span>Leído en el dispositivo</span><strong class="operacion-lectura">Sin lectura disponible</strong><small class="operacion-edad"></small></div><form class="operacion-form"><div class="operacion-campos"></div><p class="operacion-estado" role="status" aria-live="polite"></p><div class="operacion-botones"><button type="button" class="btn operacion-cancelar">Cancelar</button><button type="submit" class="btn operacion-aplicar">Aplicar</button></div></form><details class="operacion-actividad"><summary>Actividad</summary><div class="operacion-historial"></div></details><details class="operacion-tecnica"><summary>Datos técnicos</summary><div></div></details>';
+      this.querySelectorAll(".operacion-cerrar,.operacion-cancelar").forEach(b => b.addEventListener("click", () => this.closest("dialog").close()));
+      this.querySelector("form").addEventListener("submit", e => this.submit(e));
+      this._timer = window.setInterval(() => { if (this.closest("dialog")?.open) this.refresh(); }, 3000);
+    }
+    disconnectedCallback() { window.clearInterval(this._timer); }
+    open(origin, device, id) {
+      this._origin = origin; this._device = device; this._id = id; this._key = null; this._data = null; this._action = null; this._error = null; this._loadError = null; this._confirmed = false;
+      this.querySelector(".operacion-campos").replaceChildren(); this.querySelector(".operacion-aplicar").disabled = true;
+      this.querySelector(".operacion-estado").textContent = "Cargando operación…";
+      this.querySelector(".operacion-lectura").textContent = "Sin lectura disponible";
+      this.querySelector(".operacion-edad").textContent = ""; this.querySelector(".operacion-historial").replaceChildren();
+      this.querySelector(".operacion-dispositivo").textContent = ""; this.querySelector(".operacion-tecnica div").replaceChildren();
+      this.querySelector("h2").textContent = "Operación";
+      this.querySelectorAll("details").forEach(d => { d.open = false; });
+      this.refresh();
+    }
+    refresh() {
+      const token = `${this._origin}:${this._device}:${this._id}`;
+      if (this._loading === token) return;
+      this._loading = token;
+      this.emit("modulinkr-control-load", { origin: this._origin, complete: (data, error) => {
+        if (this._loading === token) this._loading = null;
+        if (token !== `${this._origin}:${this._device}:${this._id}`) return;
+        this._loadError = error || null;
+        if (data) this.update(data);
+        else { this.querySelector(".operacion-estado").textContent = error; this.querySelector(".operacion-aplicar").disabled = true; }
+      } });
+    }
+    update(data) {
+      this._data = data;
+      const action = data.actions.find(a => a.device === this._device && a.id === this._id);
+      if (!action) { this._error = "Esta operación ya no está declarada. Reabre la ficha del nodo."; this.render(); return; }
+      this._action = action;
+      const definition = { ...action }; delete definition.observed;
+      const key = JSON.stringify(definition);
+      if (this._key !== key) { this._key = key; this._confirmed = false; this.build(action); }
+      this.render();
+    }
+    build(a) {
+      this.querySelector("h2").textContent = a.display_name || a.name;
+      this.querySelector(".operacion-dispositivo").textContent = a.device_name || "Dispositivo";
+      const area = this.querySelector(".operacion-campos"); area.replaceChildren(); this._inputs = [];
+      const kind = operations.kind(a), ui = a.ui || {}, observed = a.observed?.value;
+      const add = (labelText, input) => {
+        const label = document.createElement("label"); label.className = kind === "switch" ? "operacion-switch" : "operacion-campo";
+        const text = document.createElement("span"); text.textContent = labelText;
+        if (kind === "switch") { const read = document.createElement("small"); read.dataset.coil = String(this._inputs.length); text.append(read); }
+        label.append(text, input); area.append(label); this._inputs.push(input);
+        input.addEventListener("input", () => { this._confirmed = false; this._error = null; this.render(); });
+      };
+      if (kind === "switch") {
+        const count = a.count;
+        for (let i = 0; i < count; i++) {
+          const input = document.createElement("input"); input.type = "checkbox"; input.setAttribute("role", "switch");
+          input.checked = Array.isArray(observed) ? observed[i] === true : observed === true;
+          if (observed == null) { input.dataset.unset = "1"; input.indeterminate = true; }
+          input.addEventListener("input", () => { delete input.dataset.unset; });
+          add(ui.labels?.[i] || (count > 1 ? `Bobina ${i + 1}` : "Estado solicitado"), input);
+        }
+      } else if (kind === "select") {
+        const input = document.createElement("select"); input.required = true;
+        const empty = document.createElement("option"); empty.value = ""; empty.textContent = "Seleccionar"; input.append(empty);
+        for (const o of ui.options) { const option = document.createElement("option"); option.value = String(o.value); option.textContent = o.label; input.append(option); }
+        input.value = observed == null ? "" : String(observed); add("Nuevo valor", input);
+      } else if (kind === "number") {
+        const input = document.createElement("input"); input.type = "number"; input.required = true;
+        const limits = { uint16: [0,65535], int16: [-32768,32767], uint32: [0,4294967295], int32: [-2147483648,2147483647] }[a.type];
+        const scale = Number((a.scale ?? 1).toPrecision(7)), offset = Number((a.offset || 0).toPrecision(7));
+        const low = limits ? Math.min(limits[0]*scale+offset, limits[1]*scale+offset) : null;
+        const high = limits ? Math.max(limits[0]*scale+offset, limits[1]*scale+offset) : null;
+        if (ui.min != null || low != null) input.min = String(ui.min ?? low);
+        if (ui.max != null || high != null) input.max = String(ui.max ?? high);
+        input.step = String(ui.step ?? (a.type === "float32" ? "any" : Math.abs(scale)));
+        input.value = observed == null ? "" : String(observed); add(`Nuevo valor${a.unit ? " ("+operations.unit(a.unit)+")" : ""}`, input);
+        const range = document.createElement("small"); range.className = "leyenda";
+        range.textContent = [input.min !== "" && input.max !== "" ? `De ${Number(input.min).toLocaleString("es-ES")} a ${Number(input.max).toLocaleString("es-ES")}${a.unit ? " "+operations.unit(a.unit) : ""}` : "", input.step !== "any" ? `Paso de ${Number(input.step).toLocaleString("es-ES",{maximumFractionDigits:8})}` : ""].filter(Boolean).join(" · "); area.append(range);
+      }
+      this.querySelector(".operacion-leido").hidden = kind === "action" && !a.read_channels?.length;
+      const technical = this.querySelector(".operacion-tecnica div"); technical.replaceChildren();
+      for (const [key, value] of [["Función", a.function], ["Dirección", a.address], ["Tipo", a.type || "Bobinas"], ["Cantidad", a.count], ["Orden de bytes", a.byte_order], ["Valor de la acción", kind === "action" ? ui.value : null]]) {
+        if (value == null || value === "") continue;
+        const row = document.createElement("p"); row.textContent = `${key}: ${value}`; technical.append(row);
+      }
+    }
+    value() {
+      const a = this._action, kind = operations.kind(a);
+      if (kind === "action") return a.ui.value;
+      if (kind === "switch") { if (this._inputs.some(i => i.dataset.unset)) return null; const bits = this._inputs.map(i => i.checked); return a.function === "write_multiple_coils" ? bits : bits[0]; }
+      const input = this._inputs[0]; return input.value === "" ? null : Number(input.value);
+    }
+    render() {
+      const a = this._action, data = this._data;
+      if (!a || !data) return;
+      const active = data.operations.some(o => ["queued","sent","accepted"].includes(o.state));
+      const blocked = Boolean(this._busy || active || data.unavailable || this._error || this._loadError);
+      const value = this.value(), same = JSON.stringify(value) === JSON.stringify(a.observed?.value);
+      const button = this.querySelector(".operacion-aplicar");
+      button.disabled = blocked || !operations.valid(a, value) || (operations.kind(a) !== "action" && same);
+      button.textContent = this._busy ? "Enviando…" : this._confirmed ? "Confirmar acción" : operations.kind(a) === "action" ? "Ejecutar" : "Aplicar";
+      this._inputs.forEach(i => { i.disabled = Boolean(this._busy || active || data.unavailable); });
+      this.querySelector(".operacion-lectura").textContent = operations.display(a, a.observed?.value);
+      const captured = a.observed?.captured;
+      const seconds = captured ? Math.max(0, Math.floor(Date.now()/1000-captured)) : null;
+      const age = seconds < 60 ? `${seconds} s` : seconds < 3600 ? `${Math.floor(seconds/60)} min` : `${Math.floor(seconds/3600)} h`;
+      this.querySelector(".operacion-edad").textContent = captured ? `Última lectura hace ${age}` : a.read_channels?.length ? "Aún no hay una lectura válida" : "Sin lectura asociada";
+      this.querySelectorAll("[data-coil]").forEach(el => { const v = a.observed?.value, i = Number(el.dataset.coil); el.textContent = "Leído: " + (v == null ? "sin lectura" : (Array.isArray(v) ? v[i] : v) ? "encendido" : "apagado"); });
+      const history = data.operations.filter(o => o.device === a.device && o.action === a.id);
+      const pending = data.operations.find(o => ["queued","sent","accepted"].includes(o.state));
+      const status = this.querySelector(".operacion-estado");
+      status.dataset.state = this._error || this._loadError || ["rejected","error"].includes(history[0]?.state) ? "error"
+        : history[0]?.verification === "verified" ? "verified" : "pending";
+      status.textContent = this._error || this._loadError || data.unavailable || (this._confirmed ? "Confirma la ejecución de esta acción." : this._busy ? "Registrando operación…" : pending ? (pending.action === a.id && pending.device === a.device ? operations.status(pending) : "Hay otra operación pendiente en este nodo.") : history[0] ? operations.status(history[0]) : "");
+      const activity = this.querySelector(".operacion-historial"); activity.replaceChildren();
+      if (!history.length) activity.textContent = "Sin operaciones registradas.";
+      for (const o of history) { const row = document.createElement("p"); row.textContent = `${new Date(o.created*1000).toLocaleString("es-ES")} · Solicitado: ${operations.display(a,o.value)} · ${operations.status(o)}`; activity.append(row); }
+    }
+    submit(event) {
+      event.preventDefault();
+      const a = this._action;
+      if (!a || this.querySelector(".operacion-aplicar").disabled || !this.querySelector("form").reportValidity()) return;
+      if ((a.ui?.confirm === true || (operations.kind(a) === "action" && a.ui?.confirm !== false)) && !this._confirmed) { this._confirmed = true; this.render(); return; }
+      this._confirmed = false; this._busy = true; const token = `${this._origin}:${this._device}:${this._id}`; this.render();
+      this.emit("modulinkr-control-write", { origin: this._origin, action: a, value: this.value(), complete: (error, result) => {
+        this._busy = false;
+        if (token !== `${this._origin}:${this._device}:${this._id}`) return;
+        this._error = error;
+        if (result) { this._data.operations.unshift({ ...result, device:a.device, action:a.id, value:this.value(), created:Date.now()/1000 }); }
+        this.render(); this.refresh();
+      } });
+    }
+  }
+
   const componentes = {
     "modulinkr-icon": ModuLinkrIcon,
     "modulinkr-app": ModuLinkrApp,
@@ -2738,6 +2997,8 @@
     "modulinkr-chart-legend": ModuLinkrChartLegend,
     "modulinkr-period-selector": ModuLinkrPeriodSelector,
     "modulinkr-modbus-ai-assistant": ModuLinkrModbusAiAssistant,
+    "modulinkr-node-control": ModuLinkrNodeControl,
+    "modulinkr-operation-editor": ModuLinkrOperationEditor,
     "modulinkr-node-detail": ModuLinkrNodeDetail,
     "modulinkr-history-dialog": ModuLinkrHistoryDialog,
     "modulinkr-confirm-dialog": ModuLinkrConfirmDialog,

@@ -22,6 +22,9 @@ bool NbiotService::begin(const Config& cfg) {
     queue_ = xQueueCreate(kQueueDepth, sizeof(PubItem));
     if (queue_ == nullptr) return false;
 
+    commands_ = xQueueCreate(4, 768);
+    if(commands_ == nullptr) return false;
+    modem_.setMessageCallback(messageReceived,this);
     state_ = State::UART_INIT;
 
     // Núcleo 0: el loop de Arduino (mesh LoRa) vive en el núcleo 1.
@@ -158,6 +161,10 @@ bool NbiotService::step() {
                 logNbiotError("mqtt_connect", modem_.lastResponse().c_str());
                 return false;
             }
+            if(cfg_.topic_commands && *cfg_.topic_commands && !modem_.mqttSubscribe(cfg_.topic_commands)) {
+                logNbiotError("mqtt_subscribe",modem_.lastResponse().c_str());
+                return false;
+            }
             diag::log("INFO", "node.nbiot", "nbiot.mqtt_ready", "host=%s port=%u transport=%s\n", cfg_.broker, cfg_.port, cfg_.tls ? "tls" : "tcp");
             last_csq_ms_ = millis();
             last_mqtt_check_ms_ = millis();
@@ -167,6 +174,7 @@ bool NbiotService::step() {
         }
 
         case State::READY: {
+            modem_.pollMessages();
             // Se consulta incluso sin muestras pendientes, en la tarea del módem.
             if (uint32_t(millis() - last_mqtt_check_ms_) >= kMqttCheckMs) {
                 mqtt_state_ = modem_.mqttConnectionState();
@@ -185,7 +193,7 @@ bool NbiotService::step() {
             // Publicaciones pendientes.
             PubItem item{nullptr, 0};
             if (xQueueReceive(queue_, &item, pdMS_TO_TICKS(500)) == pdTRUE) {
-                bool ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
+                bool ok = modem_.mqttPublish(item.topic[0] ? item.topic : cfg_.topic_batch, item.json, 1);
                 String publish_response = modem_.lastResponse();
                 if (!ok) {
                     mqtt_state_ = modem_.mqttConnectionState();
@@ -200,7 +208,12 @@ bool NbiotService::step() {
                         last_mqtt_check_ms_ = millis();
                         mqtt_state_ = Nbiot::MqttState::CONNECTED;
                         state_ = State::READY;
-                        ok = modem_.mqttPublish(cfg_.topic_batch, item.json, 1);
+                        if(cfg_.topic_commands && *cfg_.topic_commands && !modem_.mqttSubscribe(cfg_.topic_commands)) {
+                            state_=State::MQTT_START;
+                            free(item.json);
+                            return true;
+                        }
+                        ok = modem_.mqttPublish(item.topic[0] ? item.topic : cfg_.topic_batch, item.json, 1);
                         publish_response = modem_.lastResponse();
                     } else {
                         logNbiotError("mqtt_reconnect", modem_.lastResponse().c_str());
@@ -211,7 +224,7 @@ bool NbiotService::step() {
                     published_ok_ = published_ok_ + 1;
                     // Confirmación: el loop (núcleo 1) libera del outbox las
                     // muestras de los batches con id <= este (v2.3).
-                    last_published_batch_id_ = item.batch_id;
+                    if(item.batch_id) last_published_batch_id_ = item.batch_id;
                     diag::log("INFO", "node.nbiot", "nbiot.batch_published", "id=%lu bytes=%u published=%lu\n", static_cast<unsigned long>(item.batch_id), static_cast<unsigned>(strlen(item.json)), static_cast<unsigned long>(published_ok_));
                 } else {
                     // No se confirma: el batch sigue en el outbox y el loop
@@ -281,6 +294,27 @@ bool NbiotService::publish(const char* json, uint32_t batch_id) {
         free(copy);
         return false;
     }
+    return true;
+}
+
+void NbiotService::messageReceived(const char* topic,const char* json,void* context) {
+    auto& service=*static_cast<NbiotService*>(context);
+    if(!service.cfg_.topic_commands || strcmp(topic,service.cfg_.topic_commands)!=0 || !service.commands_) return;
+    char message[768]={};
+    if(strlen(json)>=sizeof(message)) return;
+    strcpy(message,json);
+    if(xQueueSend(service.commands_,message,0)!=pdTRUE)
+        diag::log("WARNING","node.command","command.queue_full","capacity=4");
+}
+bool NbiotService::receiveCommand(char* out,size_t capacity) {
+    if(!commands_ || capacity<768) return false;
+    return xQueueReceive(commands_,out,0)==pdTRUE;
+}
+bool NbiotService::publishMessage(const char* topic,const char* json) {
+    if(!queue_ || !topic || !*topic || strlen(topic)>=80 || !json) return false;
+    char* copy=strdup(json); if(!copy) return false;
+    PubItem item{copy,0}; strcpy(item.topic,topic);
+    if(xQueueSend(queue_,&item,0)!=pdTRUE) { free(copy); return false; }
     return true;
 }
 

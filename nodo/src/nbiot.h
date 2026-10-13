@@ -7,6 +7,7 @@
 // se inicializa).
 
 #pragma once
+#include "mqtt_receive.h"
 
 #include <Arduino.h>
 
@@ -94,6 +95,11 @@ public:
 
     // Cierra la sesión y libera el cliente.
     bool mqttDisconnect();
+    bool mqttSubscribe(const char* topic);
+    void setMessageCallback(MqttReceive::Callback callback, void* context) {
+        receive_.callback=callback; receive_.context=context;
+    }
+    void pollMessages();
 
     // Configura APN + autenticación. Hace CFUN=0 → CGDCONT → CGAUTH → CFUN=1.
     // Si CGAUTH es rechazado con un tipo concreto, prueba con otro tipo
@@ -139,6 +145,9 @@ public:
     Stream* stream() { return uart_; }
 
 private:
+    MqttReceive receive_;
+    int readByte();
+    bool waitPrompt(char target, uint32_t timeout, String& response);
     // Configura el contexto SSL `ctx` para TLS 1.2 sin verificar el
     // certificado del servidor (authmode=0). POR VALIDAR EN BANCO.
     bool sslConfigure(uint8_t ctx);

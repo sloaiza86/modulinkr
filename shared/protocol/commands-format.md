@@ -2,7 +2,7 @@
 
 Documento normativo del **formato JSON** de los comandos que el backend (o el operador) envía al supernodo para disparar acciones: escrituras Modbus, recargas de configuración, lecturas bajo demanda, batches de prueba, reinicios, etc.
 
-> **Estado actual:** diseño no implementado de extremo a extremo. No debe interpretarse como una capacidad disponible del firmware ni del visor. La configuración remota y la actualización de firmware por LoRa usan flujos específicos definidos en `frame-format.md`, no este esquema general de comandos.
+> **Estado actual, 2026-10-12:** las escrituras remotas se implementan en el schema 3.0 descrito en §12, con LoRa principal y NB-IoT de respaldo. Los apartados 1-11 conservan el diseño histórico 2.0 y no acreditan funciones adicionales disponibles. Pendientes compilación ESP32, despliegue y prueba física.
 
 Este formato es complemento de:
 
@@ -314,3 +314,21 @@ response: ok (coil 100 written: true)
 - [`node-config.md`](node-config.md): define los `writes[]` y `reads[]` referenciables por `id`.
 - [`batch-format.md`](batch-format.md): describe los batches disparados por `flush_batch` y `test_batch`.
 - [`frame-format.md`](frame-format.md): describe la trama LoRa cuyos ACKs alimentan la cola que `flush_batch` vacía.
+
+## 12. Control implementado desde 2026-10-12 (schema de órdenes 3.0)
+
+El diseño 2.0 de los apartados anteriores queda como antecedente. La implementación 3.0 se limita a escrituras Modbus declaradas. No habilita los demás tipos de comando históricos. Se admiten 0x05, 0x0F, 0x06 y 0x10; se excluyen 0x16 y 0x17.
+
+El visor registra la orden mediante `POST /api/comandos/nodos/{origin}`, con dispositivo, identificador de acción y valor. El servicio del gateway la entrega por LoRa y recoge el resultado. Tras tres intentos sin resultado, o cuando no existe una ruta LoRa compatible, utiliza automáticamente el supernodo de la ruta celular observada. No existe selector de transporte en la GUI. Una operación que ya ha pasado a NB-IoT conserva esa vía hasta terminar; las operaciones nuevas vuelven a preferir LoRa cuando se recupera.
+
+La orden caduca a los 300 s. Los envíos se separan al menos 10 s y conservan identificador, vencimiento, firma de acción y contenido. El gateway espera 30 s adicionales para recibir una respuesta antes de declarar ausencia de confirmación. La operación y su historial viven en `modbus_commands`, dentro del buffer operativo SQLite. El visor admite una sola operación activa por destino. Las transferencias de configuración, las migraciones, las ventanas de silencio y la difusión de firmware tienen prioridad sobre el envío de escrituras.
+
+El mensaje MQTT utiliza el topic `modulinkr/v1/{supernodo}/cmd`, QoS 1 y sin retención. Contiene `schema_version: "3.0"`, el recorrido `path` desde el supernodo hasta el destino y `body`, la petición binaria codificada en hexadecimal. La petición se define en [`frame-format.md`](frame-format.md) §26. El supernodo recibe el mensaje dentro de la tarea del módem y lo entrega al bucle principal mediante una cola. Para un nodo sin módem, reenvía la misma petición por el recorrido LoRa inverso observado en la custodia.
+
+El resultado vuelve por el recorrido inverso. Si termina en el gateway se procesa por LoRa; si termina en el supernodo, se publica en `modulinkr/v1/{supernodo}/cmd/response`, QoS 1 y sin retención. El JSON contiene `schema_version`, `origin`, `id`, `fingerprint`, `status`, `modbus_status` y `exception`. El gateway comprueba destino, identidad de operación, huella de petición y publicador celular antes de actualizar el historial. El PUBACK solo confirma entrega al broker.
+
+Los registros reciben un valor numérico escalar, incluso cuando ocupa dos registros. La conversión inversa aplica `(value - offset) / scale`; se rechazan valores no finitos, fuera de rango o que requieran truncar un entero. Las bobinas reciben un booleano o un array de la cantidad declarada, con un máximo de 125. La función 0x0F se mantiene aunque la cantidad sea uno. La firma anunciada por acción impide ejecutar una orden preparada para otra dirección, tipo, cantidad o conversión.
+
+Los errores de comunicación Modbus posteriores al envío se muestran como resultado incierto porque el dispositivo pudo aplicar la escritura y perderse su respuesta. Una excepción Modbus válida se muestra como rechazo. El nodo persiste la operación antes de tocar el bus y conserva el último resultado. Un duplicado no repite la transacción. Si el nodo reinicia con una operación persistida en curso, devuelve incertidumbre. Una petición anterior al último identificador guardado tampoco se ejecuta y se declara incierta porque no se conserva su resultado individual. La confirmación Modbus acredita la respuesta del dispositivo, no la actuación física de un relé o mecanismo.
+
+La recepción del SIM7028 utiliza las longitudes anunciadas en CMQTTRXSTART, CMQTTRXTOPIC y CMQTTRXPAYLOAD, incluidos los bloques fragmentados. El contenido recibido queda separado de los terminadores de las respuestas AT y no se pierde al consultar el estado del módem o publicar telemetría. La secuencia de suscripción se comprueba contra la nota MQTT(S) V1.03 del SIM7028. Permanecen pendientes la compilación ESP32 y la validación del módem, del bus y de ambos recorridos en el banco real.

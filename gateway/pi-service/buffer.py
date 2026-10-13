@@ -50,6 +50,21 @@ class GatewayBuffer:
         self.max_entries = max_entries
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS modbus_commands (
+            id INTEGER PRIMARY KEY, origin INTEGER NOT NULL, device INTEGER NOT NULL,
+            action TEXT NOT NULL, value_json TEXT NOT NULL, body BLOB NOT NULL,
+            action_json TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'queued', created REAL NOT NULL, expires INTEGER NOT NULL,
+            sent_at REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+            transport TEXT NOT NULL DEFAULT '', publisher INTEGER, path_json TEXT NOT NULL DEFAULT '[]',
+            detail TEXT NOT NULL DEFAULT '', modbus_status INTEGER, exception INTEGER,
+            updated REAL NOT NULL DEFAULT 0)""")
+        if 'action_json' not in {r[1] for r in self.conn.execute('PRAGMA table_info(modbus_commands)')}:
+            self.conn.execute("ALTER TABLE modbus_commands ADD COLUMN action_json TEXT NOT NULL DEFAULT '{}' ")
+        command_columns = {r[1] for r in self.conn.execute('PRAGMA table_info(modbus_commands)')}
+        for column, kind in (('verified_ts', 'REAL'), ('verified_value_json', 'TEXT')):
+            if column not in command_columns:
+                self.conn.execute(f'ALTER TABLE modbus_commands ADD COLUMN {column} {kind}')
         self.conn.execute("""CREATE TABLE IF NOT EXISTS node_maintenance (
             id INTEGER PRIMARY KEY, origin INTEGER NOT NULL, action INTEGER NOT NULL,
             state TEXT NOT NULL DEFAULT 'queued', created REAL NOT NULL,

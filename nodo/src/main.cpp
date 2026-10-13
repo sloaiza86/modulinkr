@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.78"
+#define MODULINKR_FIRMWARE_VERSION "0.0.81"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -81,6 +81,7 @@
 #include "configstore.h"
 #include "commission.h"
 #include "sampler.h"
+#include "write_commands.h"
 #include "nodeclock.h"
 #include "health.h"
 #include "cfgota.h"
@@ -216,8 +217,9 @@ uint16_t nextSeq() {
 
 constexpr uint32_t kRegBackoffMinMs = 5000;
 constexpr uint32_t kRegBackoffMaxMs = 60000;
-constexpr size_t   kCatalogMax      = 700;   // peor caso del config (8r+4w)
-constexpr size_t   kRegFragMax      = protocol::kMaxPayload - 2;
+constexpr size_t   kCatalogMax      = 2048;  // lecturas y descriptores de hasta 16 escrituras
+// Se reserva el sobre de seguridad también sin cifrado para mantener un tamaño común.
+constexpr size_t   kRegFragMax      = protocol::kMaxPayloadSecure - 2;
 
 // ----- Supervisión de la radio (fase 2 del watchdog) -----
 //
@@ -306,6 +308,13 @@ uint32_t g_reg_backoff_ms  = kRegBackoffMinMs;
 // habilitado, el muestreo NO se detiene aunque más tarde caiga el padre
 // (las muestras se retienen en la outbox y salen por NB-IoT o custodia).
 bool     g_sampling_started = false;
+char g_command_topic[80]={};
+struct PendingWrite {
+    bool active=false;
+    uint8_t body[writecmd::kMaxBody]={}, length=0, path[16]={}, path_count=0;
+} g_write;
+void writeTick();
+
 
 // Serializa el catálogo binario del NODE_REGISTER (spec §13.2):
 // fw_version, node.name, reads (id/name/unit en el orden global de
@@ -365,6 +374,73 @@ size_t buildCatalog(uint8_t* buf, size_t cap) {
     // puede hablarle.
     if (p + 1 > cap) return 0;
     buf[p++] = static_cast<uint8_t>(g_cfg.node_class);
+    if(p+3>cap) return 0;
+    buf[p++]=0x57; buf[p++]=1; buf[p++]=total_writes;
+    for(uint8_t d=0;d<g_cfg.n_devices;++d) for(uint8_t w=0;w<g_cfg.devices[d].n_writes;++w) {
+        const auto& device=g_cfg.devices[d]; const auto& action=device.writes[w];
+        if(p+16>cap) return 0;
+        buf[p++]=d; buf[p++]=action.function; buf[p++]=static_cast<uint8_t>(action.type); buf[p++]=action.count;
+        const uint32_t signature=writecmd::signature(device,action);
+        memcpy(buf+p,&signature,4); memcpy(buf+p+4,&action.scale,4); memcpy(buf+p+8,&action.offset,4); p+=12;
+        if(!putStr(device.name,16)) return 0;
+    }
+    if (p + 3 > cap) return 0;
+    buf[p++] = 0x55; buf[p++] = 1; buf[p++] = total_writes;
+    uint8_t base = 0;
+    for (uint8_t d = 0; d < g_cfg.n_devices; ++d) {
+        const auto& dev = g_cfg.devices[d];
+        for (uint8_t w = 0; w < dev.n_writes; ++w) {
+            const auto& wr = dev.writes[w];
+            JsonDocument ui;
+            if (wr.ui[0] && deserializeJson(ui, wr.ui)) return 0;
+            uint8_t slots[cfg::kMaxReadsTotal], n = 0;
+            const bool bits = wr.function == 0x05 || wr.function == 0x0F;
+            JsonArrayConst ids = ui["read_ids"];
+            if (!ids.isNull()) {
+                for (JsonVariantConst id : ids) for (uint8_t r = 0; r < dev.n_reads; ++r)
+                    if (!strcmp(id.as<const char*>(), dev.reads[r].id)) {
+                        if (n >= cfg::kMaxReadsTotal) return 0;
+                        slots[n++] = base + r;
+                    }
+            } else if (strcmp(ui["kind"] | "number", "action")) {
+                for (uint8_t i = 0; i < (bits ? wr.count : 1); ++i) {
+                    uint8_t match = 255, matches = 0;
+                    for (uint8_t r = 0; r < dev.n_reads; ++r) {
+                        const auto& rd = dev.reads[r];
+                        const bool same = rd.address == wr.address + i &&
+                            (bits ? rd.function == 0x01 && rd.count == 1 && rd.scale == 1 && rd.offset == 0
+                                  : rd.function == 0x03 && rd.count == wr.count && rd.type == wr.type &&
+                                    rd.order == wr.order && rd.scale == wr.scale && rd.offset == wr.offset);
+                        if (same) { match = base + r; ++matches; }
+                    }
+                    if (matches != 1 || n >= cfg::kMaxReadsTotal) { n = 0; break; }
+                    slots[n++] = match;
+                }
+            }
+            const size_t bytes = strlen(wr.ui);
+            if (p + 10 + n + bytes > cap) return 0;
+            buf[p++] = uint8_t(wr.address); buf[p++] = uint8_t(wr.address >> 8);
+            buf[p++] = static_cast<uint8_t>(wr.order); buf[p++] = n;
+            memcpy(buf + p, slots, n); p += n;
+            uint32_t read_signature = 2166136261u;
+            for (uint8_t i = 0; i < n; ++i) {
+                const auto& rd = dev.reads[slots[i] - base];
+                read_signature = writecmd::hash(rd.id, strlen(rd.id), read_signature);
+                read_signature = writecmd::hash(&rd.function, 1, read_signature);
+                read_signature = writecmd::hash(&rd.address, 2, read_signature);
+                read_signature = writecmd::hash(&rd.count, 1, read_signature);
+                read_signature = writecmd::hash(&rd.type, 1, read_signature);
+                read_signature = writecmd::hash(&rd.order, 1, read_signature);
+                read_signature = writecmd::hash(&rd.scale, 4, read_signature);
+                read_signature = writecmd::hash(&rd.offset, 4, read_signature);
+            }
+            read_signature = n ? (read_signature ? read_signature : 1) : 0;
+            memcpy(buf + p, &read_signature, 4); p += 4;
+            buf[p++] = uint8_t(bytes); buf[p++] = uint8_t(bytes >> 8);
+            memcpy(buf + p, wr.ui, bytes); p += bytes;
+        }
+        base += dev.n_reads;
+    }
     return p;
 }
 
@@ -880,7 +956,7 @@ void handleWelcome(const LoraP2P::RxFrame& f) {
 }
 
 // Emisión del registro (v2.1, spec §13.1-13.2). Llamado a 1 Hz: envía un
-// fragmento del catálogo por pasada (los catálogos reales caben en uno);
+// fragmento del catálogo por pasada, con espacio para el sobre de seguridad;
 // completada la ronda, espera el WELCOME con backoff exponencial y, si no
 // llega, la repite desde el fragmento 0.
 void registrationTick(uint32_t now) {
@@ -1460,6 +1536,89 @@ void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
     diag::log("DEBUG", "node.firmware_broadcast", "firmware_broadcast.map_sent", "missing=%u total=%u\n", static_cast<unsigned>(fwbcast::missing()), static_cast<unsigned>(fwbcast::totalFrags()));
 }
 
+void publishWriteResult(uint8_t origin,const writecmd::Result& result) {
+    JsonDocument doc; doc["schema_version"]="3.0"; doc["origin"]=origin;
+    doc["id"]=result.id; doc["fingerprint"]=result.fingerprint; doc["status"]=result.state;
+    doc["modbus_status"]=result.bus; doc["exception"]=result.exception;
+    char json[256],topic[80]; serializeJson(doc,json,sizeof(json));
+    snprintf(topic,sizeof(topic),"modulinkr/v1/%u/cmd/response",g_cfg.node_id);
+    if(!nbsvc.publishMessage(topic,json))
+        diag::log("WARNING","node.command","command.response_not_queued","id=%lu origin=%u",static_cast<unsigned long>(result.id),origin);
+}
+void replyWrite(const uint8_t* path,uint8_t n,const writecmd::Result& result) {
+    if(n==1 && g_cfg.super_node) { publishWriteResult(g_cfg.node_id,result); return; }
+    uint8_t payload[1+16+writecmd::kResultBytes]; payload[0]=n;
+    for(uint8_t i=0;i<n;++i) payload[1+i]=path[n-1-i];
+    writecmd::encodeResult(payload+1+n,result);
+    nextSeq(); lora.sendRoute(path[n-2],path[0],g_lora_seq,protocol::kFrameModbusWriteResult,payload,1+n+writecmd::kResultBytes);
+}
+void queueWrite(const uint8_t* body,uint8_t len,const uint8_t* path,uint8_t n) {
+    writecmd::Request request; if(!writecmd::decode(body,len,request)) return;
+    writecmd::Result result; result.id=request.id; result.fingerprint=writecmd::hash(body,len);
+    if(g_write.active && (g_write.length!=len || memcmp(g_write.body,body,len)!=0)) {
+        result.state=writecmd::BUSY; replyWrite(path,n,result); return;
+    }
+    g_write.active=true; g_write.length=len; memcpy(g_write.body,body,len);
+    g_write.path_count=n; memcpy(g_write.path,path,n);
+    result.state=writecmd::ACCEPTED; replyWrite(path,n,result);
+}
+void handleWriteFrame(const LoraP2P::RxFrame& f) {
+    if(f.hop_dst!=g_cfg.node_id || f.payload_length<2) return;
+    const uint8_t n=f.payload[0]; const uint8_t* path=f.payload+1;
+    if(n>16 || f.payload_length<=1+n || !writecmd::pathValid(path,n) ||
+       path[0]!=f.origin_id || path[n-1]!=f.dest_id) return;
+    int pos=-1; for(uint8_t i=0;i<n;++i) if(path[i]==g_cfg.node_id) pos=i;
+    if(pos<=0 || path[pos-1]!=f.hop_src) return;
+    if(pos<n-1) {
+        if(g_cfg.relay_enabled && f.ttl) lora.forwardFrame(f,path[pos+1]);
+        return;
+    }
+    const uint8_t* body=path+n; const uint8_t len=f.payload_length-1-n;
+    if(f.frame_type==protocol::kFrameModbusWrite) queueWrite(body,len,path,n);
+    else if(g_cfg.super_node && f.origin_id!=protocol::kAddrGateway) {
+        writecmd::Result result;
+        if(writecmd::decodeResult(body,len,result)) publishWriteResult(f.origin_id,result);
+    }
+}
+void incomingCellularWrites() {
+    if(!g_cfg.super_node) return;
+    char json[768];
+    if(!nbsvc.receiveCommand(json,sizeof(json))) return;
+    JsonDocument doc; if(deserializeJson(doc,json)) return;
+    if(strcmp(doc["schema_version"]|"","3.0")!=0) return;
+    const char* hex=doc["body"]|""; const size_t size=strlen(hex);
+    if(size%2 || size<48 || size>2*writecmd::kMaxBody) return;
+    uint8_t body[writecmd::kMaxBody];
+    auto digit=[](char c)->int { if(c>='0'&&c<='9') return c-'0'; if(c>='a'&&c<='f') return c-'a'+10; return -1; };
+    for(size_t i=0;i<size/2;++i) { int a=digit(hex[2*i]),b=digit(hex[2*i+1]); if(a<0||b<0) return; body[i]=uint8_t(a*16+b); }
+    writecmd::Request request; if(!writecmd::decode(body,size/2,request)) return;
+    JsonArrayConst route=doc["path"].as<JsonArrayConst>();
+    uint8_t path[16],n=route.size(); if(!n||route.size()>16) return;
+    for(uint8_t i=0;i<n;++i) { if(!route[i].is<unsigned>()||route[i].as<unsigned>()>254) return; path[i]=route[i].as<uint8_t>(); }
+    if(!writecmd::pathValid(path,n)||path[0]!=g_cfg.node_id) return;
+    if(n==1) queueWrite(body,size/2,path,n);
+    else if(g_lora_ready && nodeclock::synced() && nodeclock::epochNow()<=request.expires) {
+        uint8_t payload[1+16+writecmd::kMaxBody]; payload[0]=n;
+        memcpy(payload+1,path,n); memcpy(payload+1+n,body,size/2);
+        nextSeq(); lora.sendRoute(path[1],path[n-1],g_lora_seq,protocol::kFrameModbusWrite,payload,1+n+size/2);
+    }
+}
+void writeTick() {
+    incomingCellularWrites();
+    if(!g_write.active) return;
+    writecmd::Request request; writecmd::decode(g_write.body,g_write.length,request);
+    const bool expired=!nodeclock::synced()||nodeclock::epochNow()>request.expires;
+    if(!expired && g_lora_ready && (!lora.modbusWindow(millis())||pending.count())) return;
+    const bool busy=g_maintenance_restart_ms||bajandoFirmware()||cfgota::active()||
+        g_trial_active||g_fw_trial_active||g_cfgread_req||configstore::pendingAt();
+    const auto result=writecmd::execute(g_write.body,g_write.length,g_cfg,modbus,
+        nodeclock::synced() ? nodeclock::epochNow() : 0,busy);
+    if(result.state==writecmd::CONFIRMED) delay(g_cfg.devices[request.device].inter_read_ms);
+    replyWrite(g_write.path,g_write.path_count,result); g_write.active=false;
+    diag::log("INFO","node.command","command.result","id=%lu state=%u modbus_status=%u exception=%u",
+        static_cast<unsigned long>(result.id),result.state,result.bus,result.exception);
+}
+
 void sendMaintenanceResult(uint32_t id, uint8_t action, uint8_t state) {
     uint8_t payload[32] = {};
     std::memcpy(payload, &id, 4);
@@ -1838,6 +1997,10 @@ void processLoraRx() {
                 break;
             case protocol::kFrameFwBcastPoll:
                 handleFwBcastPoll(f);
+                break;
+            case protocol::kFrameModbusWrite:
+            case protocol::kFrameModbusWriteResult:
+                handleWriteFrame(f);
                 break;
             case protocol::kFrameNodeMaintenance:
                 handleNodeMaintenance(f);
@@ -2740,6 +2903,7 @@ void setup() {
     delay(400);  // margen para que el ISR de SoftwareSerial se estabilice
 
     // ----- Sampler dirigido por el config -----
+    writecmd::begin();
     sampler.begin(&modbus, &g_cfg);
     diag::log("INFO", "node.init", "init.modbus", "reads=%u transactions_per_cycle=%u\n", g_cfg.total_reads, sampler.groupCount());
 
@@ -2773,6 +2937,8 @@ void setup() {
         nbcfg.mqtt_pass   = g_cfg.mqtt_pass;
         nbcfg.client_id   = g_client_id;
         nbcfg.topic_batch = g_cfg.topic_batch;
+        snprintf(g_command_topic,sizeof(g_command_topic),"modulinkr/v1/%u/cmd",g_cfg.node_id);
+        nbcfg.topic_commands = g_command_topic;
         g_led_nb_started = nbsvc.begin(nbcfg);
         if (g_led_nb_started) {
             diag::log("INFO", "node.init", "init.nb_iot_service_started", "core=0 blocking=false");
@@ -2824,6 +2990,7 @@ void loop() {
     }
 
     independentTick(millis());
+    writeTick();
 
     static uint32_t last_lora_ms = 0;
     static bool     first_loop   = true;

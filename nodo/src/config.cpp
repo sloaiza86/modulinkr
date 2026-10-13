@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <cstring>
 #include <cstdio>
+#include <math.h>
 
 namespace cfg {
 
@@ -60,8 +61,6 @@ uint8_t writeFunctionCode(const char* s) {
     if (strcmp(s, "write_single_register") == 0) return 0x06;
     if (strcmp(s, "write_multiple_coils") == 0) return 0x0F;
     if (strcmp(s, "write_multiple_registers") == 0) return 0x10;
-    if (strcmp(s, "mask_write_register") == 0) return 0x16;
-    if (strcmp(s, "read_write_multiple_registers") == 0) return 0x17;
     return 0;
 }
 
@@ -114,7 +113,12 @@ bool parseEntry(JsonObjectConst j, bool is_read,
         return failf(err, err_len, "address out of range in '%s'", id);
     }
     address = static_cast<uint16_t>(addr);
-    count = static_cast<uint8_t>(j["count"] | 1);
+    if(!is_read && !j["count"].isNull() && !j["count"].is<int>())
+        return failf(err,err_len,"write count must be an integer in '%s'",id);
+    const int requested_count=j["count"] | 1;
+    if(!is_read && (requested_count<1 || requested_count>125))
+        return failf(err,err_len,"write count out of range in '%s'",id);
+    count = static_cast<uint8_t>(requested_count);
 
     const bool is_register_fn =
         function == 0x03 || function == 0x04 || function == 0x06 || function == 0x10;
@@ -532,6 +536,11 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
                                 err, err_len)) {
                     return false;
                 }
+                if (!w.count || w.count > 125 || uint32_t(w.address)+w.count>65536 ||
+                    ((w.function==0x05 || w.function==0x06) && w.count!=1) ||
+                    !isfinite(w.scale) || w.scale==0 || !isfinite(w.offset)) {
+                    return failf(err, err_len, "invalid write count, address or conversion in '%s'", w.id);
+                }
                 for (uint8_t k = 0; k < d.n_writes; ++k) {
                     if (strcmp(d.writes[k].id, w.id) == 0) {
                         return failf(err, err_len, "duplicate id '%s' (rule 8)", w.id);
@@ -542,6 +551,82 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
                     if (strcmp(d.reads[k].id, w.id) == 0) {
                         return failf(err, err_len, "duplicate id '%s' (rule 8)", w.id);
                     }
+                }
+                if (!jw["ui"].isNull()) {
+                    JsonObjectConst ui = jw["ui"];
+                    if (ui.isNull() || measureJson(ui) > 320)
+                        return failf(err, err_len, "invalid ui in '%s' (maximum 320 bytes)", w.id);
+                    const char* kind = ui["kind"] | "number";
+                    if (!ui["kind"].isNull() && !ui["kind"].is<const char*>())
+                        return failf(err, err_len, "ui kind must be a string in '%s'", w.id);
+                    const bool bits = w.function == 0x05 || w.function == 0x0F;
+                    if (strcmp(kind, "number") && strcmp(kind, "select") && strcmp(kind, "action") && strcmp(kind, "switch"))
+                        return failf(err, err_len, "invalid ui kind in '%s'", w.id);
+                    if (bits && !ui["kind"].isNull() && strcmp(kind, "switch"))
+                        return failf(err, err_len, "coil ui must be switch in '%s'", w.id);
+                    if (!bits && !strcmp(kind, "switch"))
+                        return failf(err, err_len, "switch ui requires coils in '%s'", w.id);
+                    for (const char* key : {"min", "max", "step", "value"}) {
+                        if (!ui[key].isNull() && (!ui[key].is<double>() || !isfinite(ui[key].as<double>())))
+                            return failf(err, err_len, "non-numeric ui field in '%s'", w.id);
+                    }
+                    if ((!ui["step"].isNull() && ui["step"].as<double>() <= 0) ||
+                        (!ui["min"].isNull() && !ui["max"].isNull() && ui["min"].as<double>() > ui["max"].as<double>()))
+                        return failf(err, err_len, "invalid ui range in '%s'", w.id);
+                    for (const char* key : {"advanced", "confirm"})
+                        if (!ui[key].isNull() && !ui[key].is<bool>())
+                            return failf(err, err_len, "ui flag must be boolean in '%s'", w.id);
+                    if (!strcmp(kind, "action") && !ui["value"].is<double>())
+                        return failf(err, err_len, "action ui requires fixed value in '%s'", w.id);
+                    auto representable = [&](double value) {
+                        const double raw = (value - double(w.offset)) / double(w.scale);
+                        if (!isfinite(raw)) return false;
+                        if (w.type == ValType::F32) return isfinite(static_cast<float>(raw));
+                        const double low = w.type == ValType::I16 ? -32768.0 : w.type == ValType::I32 ? -2147483648.0 : 0.0;
+                        const double high = w.type == ValType::U16 ? 65535.0 : w.type == ValType::I16 ? 32767.0 : w.type == ValType::U32 ? 4294967295.0 : 2147483647.0;
+                        return round(raw) >= low && round(raw) <= high && fabs(raw - round(raw)) <= 1e-5;
+                    };
+                    if (!strcmp(kind, "action") && !representable(ui["value"].as<double>()))
+                        return failf(err, err_len, "ui action value cannot be represented in '%s'", w.id);
+                    if (!strcmp(kind, "select")) {
+                        JsonArrayConst options = ui["options"];
+                        if (options.isNull() || options.size() < 1 || options.size() > 8)
+                            return failf(err, err_len, "select ui requires 1-8 options in '%s'", w.id);
+                        for (JsonObjectConst option : options) {
+                            const char* label = option["label"] | "";
+                            if (!option["value"].is<double>() || !isfinite(option["value"].as<double>()) || !strlen(label) || strlen(label) > 32)
+                                return failf(err, err_len, "invalid ui option in '%s'", w.id);
+                            if (!representable(option["value"].as<double>()))
+                                return failf(err, err_len, "ui option cannot be represented in '%s'", w.id);
+                            uint8_t equal = 0;
+                            for (JsonObjectConst other : options) equal += other["value"].as<double>() == option["value"].as<double>();
+                            if (equal != 1) return failf(err, err_len, "duplicate ui option in '%s'", w.id);
+                        }
+                    }
+                    if (!ui["labels"].isNull()) {
+                        JsonArrayConst labels = ui["labels"];
+                        if (!bits || labels.isNull() || labels.size() != w.count)
+                            return failf(err, err_len, "ui labels must match coils in '%s'", w.id);
+                        for (JsonVariantConst label : labels)
+                            if (!label.is<const char*>() || !strlen(label.as<const char*>()) || strlen(label.as<const char*>()) > 32)
+                                return failf(err, err_len, "invalid coil label in '%s'", w.id);
+                    }
+                    if (!ui["read_ids"].isNull()) {
+                        JsonArrayConst ids = ui["read_ids"];
+                        if (ids.isNull() || ids.size() > kMaxReadsTotal || ids.size() != (bits ? w.count : 1))
+                            return failf(err, err_len, "ui read_ids count invalid in '%s'", w.id);
+                        for (JsonVariantConst id : ids) {
+                            bool found = false;
+                            if (id.is<const char*>()) for (uint8_t r = 0; r < d.n_reads; ++r)
+                                found |= !strcmp(id.as<const char*>(), d.reads[r].id);
+                            if (!found) return failf(err, err_len, "ui read_id missing in '%s'", w.id);
+                            uint8_t equal = 0;
+                            for (JsonVariantConst other : ids)
+                                if (other.is<const char*>()) equal += !strcmp(other.as<const char*>(), id.as<const char*>());
+                            if (equal != 1) return failf(err, err_len, "duplicate ui read_id in '%s'", w.id);
+                        }
+                    }
+                    serializeJson(ui, w.ui, sizeof(w.ui));
                 }
                 d.n_writes++;
             }
@@ -560,6 +645,18 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
         // que solo releva, pero se avisa desde el boot, no aquí.
     }
 
+    size_t catalog_bytes = 1 + 32 + 1 + strlen(c.node_name) + 2 + 1 + strlen(kSchemasSoportados) + 1 + 6;
+    for (uint8_t d = 0; d < c.n_devices; ++d) {
+        const auto& dev = c.devices[d];
+        for (uint8_t r = 0; r < dev.n_reads; ++r)
+            catalog_bytes += 3 + strlen(dev.reads[r].id) + strlen(dev.reads[r].name) + strlen(dev.reads[r].unit);
+        for (uint8_t w = 0; w < dev.n_writes; ++w) {
+            const auto& wr = dev.writes[w];
+            catalog_bytes += 3 + strlen(wr.id) + strlen(wr.name) + strlen(wr.unit)
+                + 17 + strlen(dev.name) + 10 + c.total_reads + strlen(wr.ui);
+        }
+    }
+    if (catalog_bytes > 2048) return fail(err, err_len, "operation catalog exceeds 2048 bytes");
     return true;
 }
 

@@ -84,6 +84,66 @@ ModbusRTU::Status ModbusRTU::readDiscreteInputs(uint8_t slave_id, uint16_t addre
     return readBits(kFuncReadDiscreteInputs, slave_id, address, count, out);
 }
 
+ModbusRTU::Status ModbusRTU::writeCoils(uint8_t sid, uint16_t address,
+        uint8_t count, const uint8_t* values, bool multiple) {
+    if(!values || !count || count>125 || (!multiple && count!=1) ||
+       uint32_t(address)+count>65536 || !sid || sid>247) return Status::INVALID_RESPONSE;
+    uint8_t req[256]={sid,uint8_t(multiple ? 0x0F : 0x05),uint8_t(address>>8),uint8_t(address)};
+    size_t n=6;
+    for(uint8_t i=0;i<count;++i) if(values[i]>1) return Status::INVALID_RESPONSE;
+    if(multiple) {
+        req[5]=count; req[6]=(count+7)/8; n=7+req[6];
+        for(uint8_t i=0;i<count;++i) req[7+i/8]|=values[i]<<(i%8);
+    } else req[4]=values[0] ? 0xFF : 0;
+    const uint16_t crc=crc16(req,n); req[n]=crc; req[n+1]=crc>>8;
+    return writeRequest(req,n+2);
+}
+
+ModbusRTU::Status ModbusRTU::writeRegisters(uint8_t sid, uint16_t address,
+        uint8_t count, const uint16_t* values, bool multiple) {
+    if(!values || !count || count>123 || (!multiple && count!=1) ||
+       uint32_t(address)+count>65536 || !sid || sid>247) return Status::INVALID_RESPONSE;
+    uint8_t req[256]={sid,uint8_t(multiple ? 0x10 : 0x06),uint8_t(address>>8),uint8_t(address)};
+    size_t n=6;
+    if(multiple) {
+        req[5]=count; req[6]=2*count; n=7+2*count;
+        for(uint8_t i=0;i<count;++i) { req[7+2*i]=values[i]>>8; req[8+2*i]=values[i]; }
+    } else { req[4]=values[0]>>8; req[5]=values[0]; }
+    const uint16_t crc=crc16(req,n); req[n]=crc; req[n+1]=crc>>8;
+    return writeRequest(req,n+2);
+}
+
+ModbusRTU::Status ModbusRTU::writeRequest(const uint8_t* req,size_t length) {
+    last_exception_=0;
+    if(!uart_) return Status::NOT_INITIALIZED;
+    while(uart_->available()) uart_->read();
+    uart_->write(req,length); uart_->flush();
+    uint8_t purged[4]={}; size_t purged_n=0;
+    purgeTurnaround(purged,sizeof(purged),purged_n);
+    uint8_t resp[8]={}; size_t got=readWithTimeout(resp,2);
+    // El mismo transceptor puede anteponer bytes espurios a lecturas y escrituras.
+    uint8_t skipped=0;
+    while(got==2 && (resp[0]!=req[0] || (resp[1]!=req[1] && resp[1]!=(req[1]|0x80))) && skipped<4) {
+        resp[0]=resp[1]; got=1+readWithTimeout(resp+1,1); ++skipped; ++resync_total_;
+    }
+    Status result=Status::OK;
+    if(got<2) result=Status::TIMEOUT;
+    else if(resp[0]!=req[0] || (resp[1]!=req[1]&&resp[1]!=(req[1]|0x80))) result=Status::INVALID_RESPONSE;
+    else {
+        const size_t expected=(resp[1]&0x80) ? 5 : 8;
+        got+=readWithTimeout(resp+2,expected-2);
+        if(got!=expected) result=Status::SHORT_RESPONSE;
+        else if(crc16(resp,expected-2)!=(uint16_t(resp[expected-2])|uint16_t(resp[expected-1])<<8)) result=Status::CRC_ERROR;
+        else if(resp[1]&0x80) { last_exception_=resp[2]; result=Status::EXCEPTION; }
+        else if(memcmp(resp,req,6)!=0) result=Status::INVALID_RESPONSE;
+    }
+    if(result!=Status::OK || capture_) record(result,req,length,resp,got,purged,purged_n);
+    if(trace_==Trace::ALL || (trace_==Trace::ERRORS && result!=Status::OK))
+        diag::log(result==Status::OK ? "DEBUG" : "ERROR","node.modbus","modbus.write_result",
+                  "slave=%u function=0x%02X status=%s exception=%u",req[0],req[1],statusToString(result),last_exception_);
+    return result;
+}
+
 void ModbusRTU::record(Status st, const uint8_t* req, size_t req_len,
                        const uint8_t* rx, size_t rx_len,
                        const uint8_t* purged, size_t purged_n) {

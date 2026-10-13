@@ -10,7 +10,7 @@ petición con timeout corto: sin Internet, el módulo degrada a 503 con
 mensaje claro y el resto del visor sigue operando.
 
 Endpoints:
-  GET /api/datos/nodos    catálogo cloud (nodos + canales vigentes) para
+  GET /api/datos/nodos    catálogo cloud (nodos + canales) para
                           el selector
   GET /api/datos/series   series agregadas por canal para graficar
   GET /api/datos/csv      export CSV en streaming de los datos crudos
@@ -147,29 +147,104 @@ def last_good_cloud(node_id: int) -> dict:
     return out
 
 
+def _catalog_date(value):
+    return value.isoformat() if value is not None else None
+
+
+def _unify_channels(channels):
+    groups = {}
+    for channel in channels:
+        key = (channel.get("node_id"), channel["read_id"], channel["name"], channel["unit"])
+        groups.setdefault(key, []).append(channel)
+    result = []
+    for members in groups.values():
+        representative = max(members, key=lambda c: (
+            not c["previous"], datetime.fromisoformat(c["active_from"]), c["channel_id"]))
+        channel = dict(representative)
+        channel["channel_ids"] = [c["channel_id"] for c in members]
+        channel["active_from"] = min((c["active_from"] for c in members),
+                                     key=lambda value: datetime.fromisoformat(value))
+        if channel["previous"]:
+            channel["active_to"] = max((c["active_to"] for c in members),
+                                       key=lambda value: datetime.fromisoformat(value))
+        result.append(channel)
+    return result
+
+
+def _resolve_channels(cur, ids, unify):
+    cur.execute(
+        """SELECT c.channel_id, c.node_id, c.read_id, c.name, c.unit,
+                  c.active_from, c.active_to FROM channels c
+           WHERE c.channel_id = ANY(%s)
+           ORDER BY c.active_from DESC, c.channel_id DESC""", (ids,))
+    selected = cur.fetchall()
+    found = {row[0] for row in selected}
+    for cid in ids:
+        if cid not in found:
+            raise HTTPException(404, f"canal {cid} no existe")
+    rows = selected
+    if unify:
+        cur.execute(
+            """SELECT DISTINCT c.channel_id, c.node_id, c.read_id, c.name, c.unit,
+                      c.active_from, c.active_to
+               FROM channels c JOIN channels selected
+                 ON c.node_id = selected.node_id AND c.read_id = selected.read_id
+                AND c.name = selected.name AND c.unit IS NOT DISTINCT FROM selected.unit
+               WHERE selected.channel_id = ANY(%s)
+               ORDER BY c.active_from DESC, c.channel_id DESC""", (ids,))
+        rows = cur.fetchall()
+    channels = [{"channel_id": cid, "node_id": nid, "read_id": rid,
+                 "name": name, "unit": unit, "active_from": _catalog_date(start),
+                 "active_to": _catalog_date(end), "previous": end is not None,
+                 "channel_ids": [cid]}
+                for cid, nid, rid, name, unit, start, end in rows]
+    channels = _unify_channels(channels) if unify else channels
+    aliases = {cid: channel for channel in channels for cid in channel["channel_ids"]}
+    result = []
+    seen = set()
+    for cid in ids:
+        channel = aliases[cid]
+        if channel["channel_id"] not in seen:
+            result.append(channel)
+            seen.add(channel["channel_id"])
+    return result
+
+
 @router.get("/nodos")
-def nodos():
-    """Nodos y canales vigentes del catálogo cloud, para el selector."""
+def nodos(incluir_anteriores: bool = False, unificar: bool = False):
+    """Catálogo almacenado, con fechas para distinguir series anteriores."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT n.node_id, n.name,
-                      c.channel_id, c.read_id, c.name, c.unit
+                      c.channel_id, c.read_id, c.name, c.unit,
+                      c.active_from, c.active_to
                FROM nodes n
                JOIN channels c ON c.node_id = n.node_id
-                              AND c.active_to IS NULL
-               ORDER BY n.node_id, c.position""")
+               WHERE (%s OR c.active_to IS NULL)
+               ORDER BY n.node_id, c.position, c.active_from DESC, c.channel_id DESC""",
+            (incluir_anteriores or unificar,))
         out: dict[int, dict] = {}
-        for nid, nname, cid, rid, rname, unit in cur.fetchall():
+        for nid, nname, cid, rid, rname, unit, start, end in cur.fetchall():
             node = out.setdefault(nid, {"node_id": nid, "name": nname,
                                         "channels": []})
             node["channels"].append({"channel_id": cid, "read_id": rid,
-                                     "name": rname, "unit": unit})
-        return list(out.values())
+                                     "name": rname, "unit": unit,
+                                     "active_from": _catalog_date(start),
+                                     "active_to": _catalog_date(end),
+                                     "previous": end is not None})
+        for node in out.values():
+            if unificar:
+                node["channels"] = _unify_channels(node["channels"])
+                if not incluir_anteriores:
+                    node["channels"] = [c for c in node["channels"] if not c["previous"]]
+            node["previous"] = all(c["previous"] for c in node["channels"])
+        return [n for n in out.values() if n["channels"]]
 
 
 @router.get("/series")
 def series(channels: str = Query(...), desde: str = Query(...),
-           hasta: str = Query(...), max_puntos: int = Query(800), via: str = "all"):
+           hasta: str = Query(...), max_puntos: int = Query(800), via: str = "all",
+           unificar: bool = False):
     """Series temporales por canal. Si el rango tiene más muestras que
     max_puntos, se agrega por buckets (promedio) en el servidor."""
     if via not in ("all", "lora", "nbiot"):
@@ -181,13 +256,8 @@ def series(channels: str = Query(...), desde: str = Query(...),
 
     result = []
     with _conn() as conn, conn.cursor() as cur:
-        for cid in ids:
-            cur.execute(
-                """SELECT c.read_id, c.unit, c.node_id FROM channels c
-                   WHERE c.channel_id = %s""", (cid,))
-            meta = cur.fetchone()
-            if meta is None:
-                raise HTTPException(404, f"canal {cid} no existe")
+        for meta in _resolve_channels(cur, ids, unificar):
+            cid = meta["channel_id"]
             cur.execute(
                 """SELECT floor(extract(epoch FROM s.ts) / %s) * %s AS t,
                           avg(v.value),
@@ -197,10 +267,10 @@ def series(channels: str = Query(...), desde: str = Query(...),
                           avg(v.value) FILTER (WHERE s.source = 'nbiot')
                    FROM sample_values v
                    JOIN samples s ON s.sample_id = v.sample_id
-                   WHERE v.channel_id = %s AND s.ts >= %s AND s.ts < %s
+                   WHERE v.channel_id = ANY(%s) AND s.ts >= %s AND s.ts < %s
                      AND (%s = 'all' OR s.source = %s)
                    GROUP BY 1 ORDER BY 1""",
-                (bucket_s, bucket_s, cid, t0, t1, via, via))
+                (bucket_s, bucket_s, meta["channel_ids"], t0, t1, via, via))
             rows = cur.fetchall()
             pts = [[int(t), round(val, 6) if val is not None else None, lo, nb]
                    for t, val, lo, nb, _, _ in rows]
@@ -210,8 +280,9 @@ def series(channels: str = Query(...), desde: str = Query(...),
                 "nbiot": [[int(t), round(nv, 6) if nv is not None else None, 0, nb]
                           for t, _, _, nb, _, nv in rows],
             }
-            result.append({"channel_id": cid, "node_id": meta[2],
-                           "read_id": meta[0], "unit": meta[1],
+            result.append({"channel_id": cid, "node_id": meta["node_id"],
+                           "read_id": meta["read_id"], "unit": meta["unit"],
+                           "channel_ids": meta["channel_ids"],
                            "bucket_s": bucket_s, "points": pts, "source_points": source_points})
     return {"desde": t0.isoformat(), "hasta": t1.isoformat(),
             "series": result}
@@ -219,7 +290,7 @@ def series(channels: str = Query(...), desde: str = Query(...),
 
 @router.get("/csv")
 def export_csv(channels: str = Query(...), desde: str = Query(...),
-               hasta: str = Query(...), via: str = "all"):
+               hasta: str = Query(...), via: str = "all", unificar: bool = False):
     """Datos crudos (sin agregar) de los canales en el rango, como CSV en
     streaming: ts ISO, nodo, medida, unidad, valor."""
     if via not in ("all", "lora", "nbiot"):
@@ -227,13 +298,22 @@ def export_csv(channels: str = Query(...), desde: str = Query(...),
     ids = _parse_channels(channels)
     t0, t1 = _parse_range(desde, hasta)
 
+    catalog_conn = _conn()
+    try:
+        with catalog_conn.cursor() as cur:
+            groups = _resolve_channels(cur, ids, unificar)
+            resolved = list(dict.fromkeys(cid for group in groups for cid in group["channel_ids"]))
+    finally:
+        catalog_conn.close()
+
     def generate():
         conn = _conn()
         try:
             with conn.cursor(name="csv_export") as cur:  # cursor de servidor
                 cur.itersize = 5000
                 cur.execute(
-                    """SELECT s.ts, s.origin, c.read_id, c.unit, v.value, s.source
+                    """SELECT s.ts, s.origin, c.read_id, c.unit, v.value, s.source,
+                              c.channel_id, c.name, c.active_from, c.active_to
                        FROM sample_values v
                        JOIN samples s  ON s.sample_id  = v.sample_id
                        JOIN channels c ON c.channel_id = v.channel_id
@@ -241,18 +321,20 @@ def export_csv(channels: str = Query(...), desde: str = Query(...),
                          AND s.ts >= %s AND s.ts < %s
                          AND (%s = 'all' OR s.source = %s)
                        ORDER BY s.ts, s.origin, c.position""",
-                    (ids, t0, t1, via, via))
+                    (resolved, t0, t1, via, via))
                 buf = io.StringIO()
                 w = csv.writer(buf)
-                w.writerow(["ts", "node", "read_id", "unit", "value", "via"])
+                w.writerow(["ts", "node", "read_id", "unit", "value", "via",
+                            "channel_id", "measure", "active_from", "active_to"])
                 n = 0
-                for ts, origin, rid, unit, value, source in cur:
+                for ts, origin, rid, unit, value, source, cid, name, start, end in cur:
                     w.writerow([ts.isoformat(), origin, rid, unit or "",
-                                repr(float(value)) if value is not None else "", source])
+                                repr(float(value)) if value is not None else "", source,
+                                cid, name, _catalog_date(start), _catalog_date(end)])
                     n += 1
                     if n >= CSV_MAX_ROWS:
                         w.writerow(["# truncado en", CSV_MAX_ROWS,
-                                    "filas", "", "", ""])
+                                    "filas", "", "", "", "", "", "", ""])
                         break
                     if buf.tell() > 64_000:
                         yield buf.getvalue()

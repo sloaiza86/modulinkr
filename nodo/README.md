@@ -4,7 +4,7 @@ El directorio contiene el firmware común de los dispositivos de campo ModuLinkr
 
 ## Estado actual
 
-La versión declarada en `src/main.cpp` es `0.0.78`, con correcciones de cadencia de muestreo y espera de ACK. El firmware usa la trama LoRa `0x3A` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
+La versión declarada en `src/main.cpp` es `0.0.80`, con control remoto Modbus y fragmentación del registro compatible con el sobre de seguridad. El firmware usa la trama LoRa `0x3B` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
 
 El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
@@ -21,6 +21,8 @@ El Atom Lite usa SoftwareSerial para Modbus y reserva las UART hardware para LoR
 
 El dispositivo obtiene hora antes de muestrear, se registra en la red y anuncia su catálogo. La telemetría incluye timestamp, valores y estado de cada transacción Modbus. Las muestras no confirmadas permanecen en la outbox y pueden entregarse mediante custodia NB-IoT.
 
+Desde 0.0.80, cada fragmento del catálogo contiene como máximo 219 bytes. Los dos bytes de índice y total completan el payload de 221 bytes admitido con AES-CCM. Se utiliza el mismo tamaño sin cifrado para mantener una fragmentación común. Un catálogo de 429 bytes se envía en fragmentos de 219 y 210 bytes; el gateway reensambla por índice y responde WELCOME al completar el catálogo. La prueba local recorre constructor, envío, cifrado AES-CCM mediante un puente de prueba en Python, decodificador y manejador de registro del gateway. La UART queda simulada; permanece pendiente la validación física.
+
 Desde 0.0.78, el primer muestreo se realiza en cuanto se permite y el siguiente espera un intervalo completo desde el final de la captura anterior. El tiempo bloqueado no genera una ráfaga de capturas atrasadas. Los valores y timestamps de muestras ya tomadas se conservan al retransmitir.
 
 Una trama aceptada por el driver puede estar todavía en cola. La espera del ACK empieza al recibir `TXP2P DONE`, que confirma la transmisión local del módulo. En ese momento se reserva también la guarda de recepción de 500 ms cuando el ACK está habilitado. Se aplica a telemetría propia nueva, reintentos, drenaje de outbox y custodia; las tramas ajenas retransmitidas como relay no activan el temporizador de muestras propias. La guarda no acorta una retención OTA existente.
@@ -29,11 +31,11 @@ El evento `lora.tx_complete` identifica secuencia, destino, resultado local y pl
 
 El firmware también implementa relay LoRa, diagnóstico Modbus, salud y recuperación de la radio, configuración por USB y LoRa, lectura remota de configuración, actualización de firmware y reversión de configuraciones o imágenes que no vuelven a registrarse.
 
-No está implementada la ejecución del catálogo `writes[]` ni el canal general de comandos MQTT. El register de un nodo normal a través de un supernodo también sigue pendiente.
+Se implementa la ejecución remota de `writes[]` para 0x05, 0x0F, 0x06 y 0x10, con LoRa principal y NB-IoT de respaldo. La recepción MQTT corresponde a escrituras, sin habilitar los demás comandos del diseño histórico. El register de un nodo normal a través de un supernodo sigue pendiente. Se supera PlatformIO Build para ESP32 desde VS Code en 0.0.80. La carga del firmware corregido y el banco físico del control permanecen pendientes.
 
 ## Configuración
 
-El archivo operativo es `/config.json` en LittleFS. Las configuraciones de `configs/` describen el banco y no contienen secretos. El formato completo se define en [`../shared/protocol/node-config.md`](../shared/protocol/node-config.md).
+El archivo operativo es `/config.json` en LittleFS. Las configuraciones de `configs/` describen el banco y las pruebas de escritura, documentadas en [`configs/README.md`](configs/README.md). El formato completo se define en [`../shared/protocol/node-config.md`](../shared/protocol/node-config.md).
 
 Una configuración puede cargarse desde el visor por Web Serial o mediante el canal LoRa. Antes de aplicarla se valida completa. Tras el reinicio queda a prueba hasta que el nodo vuelve a registrarse; si no lo consigue dentro de la ventana configurada, se restaura la anterior.
 
@@ -92,3 +94,12 @@ El firmware 0.0.68 admite reinicio y puesta a cero de contadores mediante LoRa d
 La puesta a cero afecta a arranques, consultas a la radio sin respuesta, reconfiguraciones de radio, reinicios de radio y reinicios automáticos del nodo. Conserva el último fallo y el motivo del último arranque. Se guarda la fecha de puesta a cero junto con los contadores. La operación persistida permite contestar a reintentos sin volver a ejecutarla, también después del arranque. La confirmación de reinicio requiere una respuesta del firmware posterior al arranque.
 
 Se requiere actualizar el servicio del gateway, el nodo y los relays del recorrido. Los nodos conectados exclusivamente por NB-IoT no admiten estas acciones. `tests/test_node_maintenance.py` ejecuta el manejador con reloj, radio y persistencia simulados en C++ nativo. No sustituye la compilación ESP32 ni las pruebas con radio real. El formato y los estados se describen en §24 de [`frame-format.md`](../shared/protocol/frame-format.md).
+
+
+## Escrituras remotas
+
+Las acciones declaradas en `writes[]` se reciben por LoRa o por el servicio NB-IoT del supernodo. El bucle principal ejecuta la transacción Modbus en una ventana sin transmisiones propias ni ACK pendientes, separado de la tarea del módem. Se guarda el identificador y la huella antes de tocar el bus, y después el resultado. El archivo operativo `/write-command.bin` contiene el último resultado; no contiene credenciales.
+
+El catálogo de registro anuncia la capacidad y la definición de cada acción. Los relays del recorrido también necesitan 0.0.79 o una implementación compatible. La pérdida de una respuesta Modbus no autoriza repetir la escritura: se devuelve incertidumbre y un duplicado solo recupera el resultado persistido. La especificación está en [`commands-format.md`](../shared/protocol/commands-format.md) §12 y [`frame-format.md`](../shared/protocol/frame-format.md) §26.
+
+Desde 0.0.81, el catálogo relaciona cada operación con sus lecturas y admite presentación numérica, interruptores, selectores y acciones mediante `writes[].ui`. La relación automática exige posiciones y conversiones compatibles; los identificadores de lectura permiten una relación explícita. La extensión de catálogo requiere actualizar primero el gateway. El límite de fragmentación seguro permanece en 219 bytes y el protocolo de órdenes conserva las cuatro funciones anteriores.

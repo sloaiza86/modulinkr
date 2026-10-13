@@ -33,6 +33,10 @@ Ejemplo: el nodo 1 anuncia `temp` y `hum`. La BD crea el canal 41 (nodo 1, posic
 
 El canal es el eslabón entre las dos mitades del sistema: los `reads[]` del config del nodo (lado firmware) y las filas de `sample_values` (lado datos). `v[i]` de una muestra se guarda contra el canal con `position = i` vigente en el `ts` de captura.
 
+El consumidor actual versiona el conjunto completo ante cualquier diferencia en la lista anunciada de lecturas, incluidos cambios de nombre, unidad, orden o incorporación de medidas. Por ello, añadir una lectura crea también canales nuevos para las que permanecen iguales. El cierre de un canal no acredita por sí solo un cambio de instrumento físico: conserva la definición y la posición que se usaron para interpretar las muestras durante ese periodo. Los registros originales permanecen separados para preservar esa correspondencia y permitir reconstruir cada versión del catálogo.
+
+El visor presenta una medida continua cuando coinciden nodo, identificador de lectura, nombre y unidad. Con `unificar=true`, la consulta reúne las muestras de los canales compatibles y calcula sus agregaciones sobre el conjunto de valores; el almacenamiento y las fechas de cada canal se conservan. La medida vigente incluye automáticamente sus versiones anteriores. «Mostrar dispositivos y medidas anteriores» incorpora medidas compatibles sin versión vigente, en lugar de repetir las versiones de una medida actual. Esta asociación utiliza los metadatos almacenados y no demuestra una identidad física del dispositivo, que no forma parte del esquema. Un cambio de identificador, nombre o unidad conserva una medida separada.
+
 La deduplicación vive en `samples` y no en `sample_values` porque la identidad de `batch-format.md` §8.1 es por muestra completa (`(origin, ts, seq)`), no por valor: un batch reenviado choca contra un único índice y se descarta entero.
 
 ## 2. DDL

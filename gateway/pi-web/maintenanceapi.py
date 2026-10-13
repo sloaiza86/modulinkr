@@ -38,7 +38,7 @@ def pending():
     return (run('status').get('operation') or {}).get('state') == 'pending'
 
 
-def check_operations():
+def check_operations(include_commands=True):
     if configapi._serial_lock.locked():
         raise HTTPException(409, 'Espera a que termine la operación USB en curso.')
     checks = {
@@ -49,6 +49,8 @@ def check_operations():
         'node_maintenance': "state IN ('queued','sent','accepted') AND created > strftime('%s','now') - 180",
         'config_push': "state IN ('pending','sending')",
     }
+    if include_commands:
+        checks['modbus_commands'] = "state IN ('queued','sent','accepted') AND expires+30>strftime('%s','now')"
     try:
         with netstatus._conn() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}

@@ -8,7 +8,8 @@ SRC=Path(__file__).resolve().parents[1]/'src'
 class SerialErrorTest(unittest.TestCase):
     def test_capture_and_output(self):
         driver=(SRC/'nbiot.cpp').read_text()
-        wait=driver[driver.index('bool waitForChar('):driver.index('}  // namespace',driver.index('bool waitForChar('))]
+        wait=driver[driver.index('bool Nbiot::waitPrompt('):driver.index('bool Nbiot::mqttSubscribe(')]
+        wait=wait.replace('bool Nbiot::waitPrompt(char target,', 'bool waitForChar(Stream& s,char target,').replace('uart_->available()', 's.available()').replace('readByte()', 's.read()')
         source=r'''
 #include <string>
 #include <cstdint>

@@ -120,9 +120,7 @@ struct ReadDef {
 };
 
 struct WriteDef {
-    // Catálogo declarativo (§5.4): se valida y se retiene, pero nada lo
-    // invoca todavía (los comandos MQTT que lo disparan no existen aún).
-    // Desde v2.1 el id/name/unit sí se anuncian al gateway en el registro.
+    // La acción declarada delimita las escrituras remotas permitidas.
     char      id[9]     = {0};
     char      name[33]  = {0};
     char      unit[9]   = {0};
@@ -133,6 +131,7 @@ struct WriteDef {
     ByteOrder order     = ByteOrder::NONE;
     float     scale     = 1.0f;
     float     offset    = 0.0f;
+    char      ui[321]   = {0};
 };
 
 struct DeviceDef {

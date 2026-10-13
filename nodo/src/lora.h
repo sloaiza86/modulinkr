@@ -141,6 +141,9 @@ public:
 
     // Tramas esperando turno en la cola de transmisión.
     uint8_t txQueued() const { return static_cast<uint8_t>(txq_count_); }
+    bool modbusWindow(uint32_t now) const {
+        return !tx_in_flight_ && !txq_count_ && uint32_t(now-last_rx_ms_)>=250;
+    }
 
     // Retiene la cola durante `ms` a partir de ahora: nada sale al aire en
     // esa ventana, ni siquiera con el módulo libre.

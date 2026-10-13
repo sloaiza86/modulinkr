@@ -16,8 +16,8 @@ Módulo de comisionamiento (fase 2 del plan, configapi.py):
   /api/config      detección y carga del config.json de un nodo por USB
 Módulo de la radio LoRa (radioapi.py, acciones privilegiadas vía sudoers):
   /api/radio       puerto del Heltec y actualización de su firmware
-Stub documentado:
-  /api/comandos    escrituras a nodos (pospuesto, firmware pendiente)
+Control Modbus:
+  /api/comandos    acciones declaradas y seguimiento de escrituras
 
 Autenticación: página /login propia con cookie de sesión firmada (HMAC
 SHA-256 con clave secreta), en lugar del diálogo Basic Auth del
@@ -299,20 +299,11 @@ import wifiapi  # noqa: E402
 import debugapi  # noqa: E402
 import maintenanceapi  # noqa: E402
 
-# ----- Stub de fase futura -----
+import commandapi  # noqa: E402
 
-cmds = APIRouter(prefix="/api/comandos", dependencies=[Depends(require_auth)])
-
-
-@cmds.get("/{_rest:path}")
-def comandos_stub(_rest: str):
-    return JSONResponse(status_code=501, content={
-        "error": "módulo de comandos pospuesto (firmware de comandos "
-                 "pendiente, commands-format.md)"})
-
-
-for r in (red, topo, cats, cmds):
+for r in (red, topo, cats):
     app.include_router(r)
+app.include_router(commandapi.router, dependencies=[Depends(require_auth)])
 # Los routers de datos y comisionamiento viven en sus módulos; la auth se
 # aplica al incluirlos (las dependencias de router se fijan en el include,
 # no a posteriori).

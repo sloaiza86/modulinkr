@@ -52,6 +52,7 @@ public:
         const char*     mqtt_user;    // usuario MQTT ("" = sin auth)
         const char*     mqtt_pass;    // clave MQTT
         const char*     client_id;
+        const char*     topic_commands = nullptr;
         const char*     topic_batch;  // topic donde se publican los batches
     };
 
@@ -139,6 +140,9 @@ public:
 
     // batch_id del último batch publicado con éxito por MQTT (0 = ninguno).
     // El loop lo usa para liberar del outbox solo lo confirmado.
+    bool receiveCommand(char* out, size_t capacity);
+    bool publishMessage(const char* topic, const char* json);
+
     uint32_t lastPublishedBatchId() const { return last_published_batch_id_; }
 
     uint32_t publishedOk() const { return published_ok_; }
@@ -158,8 +162,10 @@ private:
     struct PubItem {
         char*    json;
         uint32_t batch_id;
+        char topic[80]={};
     };
 
+    static void messageReceived(const char* topic, const char* json, void* context);
     static void taskEntry(void* arg);
     static bool isRegistered(Nbiot::CeregStatus status) {
         return status == Nbiot::CeregStatus::REGISTERED_HOME
@@ -174,6 +180,8 @@ private:
 
     TaskHandle_t  task_   = nullptr;
     QueueHandle_t queue_  = nullptr;  // elementos: PubItem (json strdup + batch_id)
+
+    QueueHandle_t commands_ = nullptr;
 
     volatile State    state_        = State::IDLE;
     volatile Nbiot::MqttState mqtt_state_ = Nbiot::MqttState::UNKNOWN;

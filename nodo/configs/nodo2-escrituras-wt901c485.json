@@ -1,0 +1,199 @@
+{
+  "schema_version": "3.3",
+  "node": {
+    "id": 2,
+    "type": "super_node",
+    "name": "Supernodo Acelerometro",
+    "description": "Atom Lite + DTU EU868 + NB-IoT 2 Unit (SIM7028) + WT901C485"
+  },
+  "transport": {
+    "lora": {
+      "region": "EU868",
+      "frequency_hz": 869525000,
+      "sf": 7,
+      "bw_khz": 125,
+      "tx_power_dbm": 10,
+      "network_id": 1,
+      "send_interval_ms": 10000,
+      "ack_enabled": true,
+      "ack_timeout_ms": 3000,
+      "max_retries": 2,
+      "security": {
+        "enabled": true
+      }
+    },
+    "mesh": {
+      "relay_enabled": true,
+      "max_ttl": 6,
+      "beacon_timeout_ms": 90000,
+      "parent_min_rssi": -100,
+      "parent_hysteresis_db": 6,
+      "parent_missed_frames": 3,
+      "sn_offer_wait_ms": 1000
+    },
+    "nbiot": {
+      "apn": "nb.wlapn.com",
+      "mqtt_broker": "modulinkr.loaiza.co",
+      "mqtt_port": 8883,
+      "tls": true,
+      "topic_telemetry": "modulinkr/v1/{node_id}/telemetry",
+      "topic_commands": "modulinkr/v1/{node_id}/cmd",
+      "debug": true,
+      "relay_enabled": true,
+      "relay_queue_max": 128
+    }
+  },
+  "modbus": {
+    "baudrate": 9600,
+    "parity": "N",
+    "stopbits": 1,
+    "devices": [
+      {
+        "name": "imu",
+        "addressing": {
+          "default_slave_id": 80,
+          "desired_slave_id": 80
+        },
+        "description": "WitMotion WT901C485, aceleracion XYZ",
+        "reads": [
+          {
+            "id": "ax",
+            "name": "accel_x",
+            "function": "read_holding_registers",
+            "address": 52,
+            "type": "int16",
+            "scale": 0.000488,
+            "unit": "g"
+          },
+          {
+            "id": "ay",
+            "name": "accel_y",
+            "function": "read_holding_registers",
+            "address": 53,
+            "type": "int16",
+            "scale": 0.000488,
+            "unit": "g"
+          },
+          {
+            "id": "az",
+            "name": "accel_z",
+            "function": "read_holding_registers",
+            "address": 54,
+            "type": "int16",
+            "scale": 0.000488,
+            "unit": "g"
+          },
+          {
+            "id": "bandcfg",
+            "name": "Filtro (codigo)",
+            "function": "read_holding_registers",
+            "address": 31,
+            "type": "uint16",
+            "scale": 1
+          },
+          {
+            "id": "orcfg",
+            "name": "Orientacion (0 H / 1 V)",
+            "function": "read_holding_registers",
+            "address": 35,
+            "type": "uint16",
+            "scale": 1
+          }
+        ],
+        "writes": [
+          {
+            "id": "unlock",
+            "name": "Desbloquear registros",
+            "function": "write_single_register",
+            "address": 105,
+            "count": 1,
+            "type": "uint16",
+            "scale": 1,
+            "ui": {
+              "kind": "action",
+              "value": 46472,
+              "confirm": false
+            }
+          },
+          {
+            "id": "band",
+            "name": "Filtro",
+            "function": "write_single_register",
+            "address": 31,
+            "count": 1,
+            "type": "uint16",
+            "scale": 1,
+            "ui": {
+              "kind": "select",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "256 Hz"
+                },
+                {
+                  "value": 1,
+                  "label": "188 Hz"
+                },
+                {
+                  "value": 2,
+                  "label": "98 Hz"
+                },
+                {
+                  "value": 3,
+                  "label": "42 Hz"
+                },
+                {
+                  "value": 4,
+                  "label": "20 Hz"
+                },
+                {
+                  "value": 5,
+                  "label": "10 Hz"
+                },
+                {
+                  "value": 6,
+                  "label": "5 Hz"
+                }
+              ]
+            }
+          },
+          {
+            "id": "orient",
+            "name": "Orientación",
+            "function": "write_single_register",
+            "address": 35,
+            "count": 1,
+            "type": "uint16",
+            "scale": 1,
+            "ui": {
+              "kind": "select",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "Horizontal"
+                },
+                {
+                  "value": 1,
+                  "label": "Vertical"
+                }
+              ]
+            }
+          },
+          {
+            "id": "save",
+            "name": "Guardar configuración",
+            "function": "write_single_register",
+            "address": 0,
+            "count": 1,
+            "type": "uint16",
+            "scale": 1,
+            "ui": {
+              "kind": "action",
+              "value": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

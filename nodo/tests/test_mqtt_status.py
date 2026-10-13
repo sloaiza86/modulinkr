@@ -88,6 +88,8 @@ using S = NbiotService::State;
 using R = Nbiot::CeregStatus;
 
 void drain(Stream&) {}
+void Nbiot::pollMessages() {}
+bool Nbiot::mqttSubscribe(const char*) { return true; }
 String Nbiot::readResponse(uint32_t, const char*) {
     if (last_command == "AT+CEREG?") {
         ++registration_queries; return registration_response;

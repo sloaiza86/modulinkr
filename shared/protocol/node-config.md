@@ -367,7 +367,7 @@ La conversión de `raw` a unidad real se hace **en el nodo** (decisión de edge 
 
 Cada entrada describe una **acción de escritura disponible**, invocable únicamente desde fuera (mediante comando externo; ver `commands-format.md`). El JSON solo declara qué acciones existen y cómo materializarlas, no contiene el valor a escribir ni el momento de hacerlo.
 
-**Estado (pendiente):** el firmware valida y retiene este catálogo y lo anuncia al gateway en el registro (`frame-format.md` §13), pero todavía **no ejecuta escrituras**: no hay funciones de escritura en el driver Modbus ni recepción de comandos. Hoy `writes[]` es solo declarativo. La lectura (`reads[]`) sí es operativa.
+El firmware ejecuta las acciones declaradas mediante el control remoto de [`commands-format.md`](commands-format.md) §12. El catálogo anuncia dispositivo, función, tipo, cantidad, firma, escala y desplazamiento para construir los controles del visor. Las funciones de esta implementación son 0x05, 0x0F, 0x06 y 0x10. La validación física de la ejecución permanece pendiente.
 
 **Ejemplo (escritura de coil binario):**
 
@@ -422,8 +422,6 @@ Cada entrada describe una **acción de escritura disponible**, invocable únicam
 | 0x06 | `"write_single_register"` | `writes[]` |
 | 0x0F | `"write_multiple_coils"` | `writes[]` |
 | 0x10 | `"write_multiple_registers"` | `writes[]` |
-| 0x16 | `"mask_write_register"` | `writes[]` (avanzado) |
-| 0x17 | `"read_write_multiple_registers"` | `writes[]` (atómico, avanzado) |
 
 ### 5.6 Tabla de tipos para `type`
 
@@ -640,3 +638,26 @@ El firmware (y la futura herramienta CLI) deben rechazar un `config.json` que vi
 - [`frame-format.md`](frame-format.md): cómo se serializa la telemetría a trama LoRa.
 - [`batch-format.md`](batch-format.md): cómo se serializa la telemetría a batch NB-IoT (modo respaldo).
 - [`commands-format.md`](commands-format.md): estructura de los comandos entrantes que pueden disparar `writes[]` y operaciones administrativas.
+
+### Presentación de operaciones del visor, firmware 0.0.81
+
+Cada escritura puede incorporar un objeto opcional `ui`. El título general del visor es Operaciones porque una escritura puede modificar un parámetro, activar una salida o ejecutar una acción. La función Modbus permanece en los datos técnicos y no determina por sí sola la interacción.
+
+El objeto admite `kind` con `number`, `switch`, `select` o `action`. Las bobinas utilizan `switch`; los registros utilizan `number` por defecto. `select` declara entre una y ocho opciones `{ "value": 0, "label": "Automático" }`. `action` declara un `value` fijo, ejecutado mediante un botón. Se confirma una acción puntual antes de enviarla, salvo `confirm: false`; `confirm: true` también permite exigir confirmación a otra operación. La GUI envía el valor numérico asociado al selector, conservando el formato del comando existente.
+
+`min`, `max` y `step` delimitan el valor solicitado en unidades de ingeniería. Sin esos campos se conserva la representabilidad del tipo, la escala y el desplazamiento. `labels` identifica las bobinas de una escritura agrupada y requiere un nombre por bobina. `advanced: true` sitúa una operación en Pruebas Modbus. El objeto se conserva al importar y exportar el formulario; su edición se realiza en la configuración JSON. Se limita a 320 bytes de JSON compacto por escritura y se comprueba que el catálogo estimado no supere 2048 bytes.
+
+La asociación automática exige una lectura del mismo dispositivo, dirección, cantidad, tipo, orden de bytes, escala y desplazamiento. Una escritura de registros se asocia únicamente con una lectura de holding registers. Una bobina se asocia con una lectura de coils de un bit sin conversión. En un grupo se exige una lectura individual por cada bobina y se conserva su orden. Dos lecturas compatibles con la misma posición hacen ambigua la asociación y se omite. Sin asociación no se inventa un valor actual.
+
+`read_ids` permite declarar la asociación explícita mediante identificadores del mismo dispositivo. Se exige un identificador para un valor escalar o tantos como bobinas para un grupo, sin duplicados. Esta declaración acredita la relación semántica elegida en la configuración; debe corresponder al efecto observable de la escritura. Una acción puntual solo se verifica por lectura cuando declara esa relación.
+
+```json
+"ui": {
+  "read_ids": ["ctemp"],
+  "min": -10,
+  "max": 10,
+  "step": 0.1
+}
+```
+
+El visor agrupa en una entidad las escrituras que comparten lectura, salvo que se declaren ambas como principales con `advanced: false`. Se conserva la primera como operación habitual y las alternativas quedan en Pruebas Modbus. Una escritura 0x10 de 32 bits representa un único valor escalar repartido en dos registros; no habilita un array arbitrario de registros.

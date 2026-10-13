@@ -1,0 +1,148 @@
+{
+  "schema_version": "3.3",
+  "node": {
+    "id": 1,
+    "type": "node",
+    "name": "Nodo Sensor Ambiental",
+    "description": "Atom Lite + DTU EU868 + XY-MD02"
+  },
+  "transport": {
+    "lora": {
+      "region": "EU868",
+      "frequency_hz": 869525000,
+      "sf": 7,
+      "bw_khz": 125,
+      "tx_power_dbm": 10,
+      "network_id": 1,
+      "send_interval_ms": 10000,
+      "ack_enabled": true,
+      "ack_timeout_ms": 3000,
+      "max_retries": 2,
+      "security": {
+        "enabled": true,
+        "key": "5A4EFF35533E51AF54C00C46C530FABE"
+      }
+    },
+    "mesh": {
+      "relay_enabled": true,
+      "max_ttl": 6,
+      "beacon_timeout_ms": 90000,
+      "parent_min_rssi": -100,
+      "parent_hysteresis_db": 6,
+      "parent_missed_frames": 3,
+      "sn_offer_wait_ms": 1000
+    }
+  },
+  "modbus": {
+    "baudrate": 9600,
+    "parity": "N",
+    "stopbits": 1,
+    "debug": "all_each",
+    "devices": [
+      {
+        "name": "Sensor Ambiental",
+        "addressing": {
+          "default_slave_id": 1,
+          "desired_slave_id": 1
+        },
+        "description": "XY-MD02",
+        "reads": [
+          {
+            "id": "temp",
+            "name": "temperature",
+            "function": "read_input_registers",
+            "address": 1,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "C"
+          },
+          {
+            "id": "hum",
+            "name": "humidity",
+            "function": "read_input_registers",
+            "address": 2,
+            "type": "uint16",
+            "scale": 0.1,
+            "unit": "%RH"
+          },
+          {
+            "id": "ctemp",
+            "name": "Correccion temperatura",
+            "function": "read_holding_registers",
+            "address": 259,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "C"
+          },
+          {
+            "id": "chum",
+            "name": "Correccion humedad",
+            "function": "read_holding_registers",
+            "address": 260,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "%RH"
+          }
+        ],
+        "writes": [
+          {
+            "id": "tc06",
+            "name": "Corrección de temperatura",
+            "function": "write_single_register",
+            "address": 259,
+            "count": 1,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "C",
+            "ui": {
+              "min": -10,
+              "max": 10,
+              "step": 0.1
+            }
+          },
+          {
+            "id": "hc06",
+            "name": "Corrección de humedad",
+            "function": "write_single_register",
+            "address": 260,
+            "count": 1,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "%RH",
+            "ui": {
+              "min": -10,
+              "max": 10,
+              "step": 0.1
+            }
+          },
+          {
+            "id": "tc10",
+            "name": "Correccion temperatura (10)",
+            "function": "write_multiple_registers",
+            "address": 259,
+            "count": 1,
+            "type": "int16",
+            "scale": 0.1,
+            "unit": "C",
+            "ui": {
+              "advanced": true
+            }
+          },
+          {
+            "id": "th10",
+            "name": "Correcciones T/H (par bruto)",
+            "function": "write_multiple_registers",
+            "address": 259,
+            "count": 2,
+            "type": "uint32",
+            "scale": 1,
+            "byte_order": "ABCD",
+            "ui": {
+              "advanced": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

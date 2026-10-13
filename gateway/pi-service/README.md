@@ -167,3 +167,12 @@ sudo systemctl start modulinkr-gateway
 La publicación MQTT se encola sin esperar al PUBACK en el bucle de radio. Paho gestiona la red en su hilo y el servicio recoge las confirmaciones sin bloquear. Solo entonces se marcan las muestras correspondientes como publicadas en SQLite; las medidas recibidas mientras un lote está en vuelo quedan para otro lote. Un catálogo actualizado durante una publicación conserva su estado pendiente hasta confirmar el contenido nuevo.
 
 El umbral `MODULINKR_MQTT_PUB_TIMEOUT` produce un aviso cuando falta el PUBACK, sin liberar la custodia ni crear copias del lote en cada vuelta. Paho conserva el mensaje QoS 1 durante una desconexión y lo reenvía al reconectar. Un reinicio del servicio recupera las muestras pendientes desde SQLite. El diagnóstico de salud conserva en memoria el último informe pendiente por nodo además del mensaje en vuelo; esa cola no sustituye al registro local de salud.
+
+
+## Entrega de escrituras Modbus
+
+`node_commands.py` gestiona las operaciones de `modbus_commands`. `modbus_command.py` comparte la validación y el formato entre protocolo y API del visor. El bucle del servicio procesa órdenes incluso con la radio USB desconectada, cuando existe una ruta celular observada y MQTT está conectado. Las escrituras se pausan durante operaciones incompatibles de configuración, migración, silencio y firmware.
+
+LoRa conserva la prioridad. El agotamiento de tres intentos o la ausencia de una ruta compatible permite pasar a NB-IoT, con el mismo identificador y contenido. La suscripción a `modulinkr/v1/+/cmd/response` recoge resultados publicados por el supernodo. Los mensajes a `modulinkr/v1/{supernodo}/cmd` utilizan QoS 1 y no se retienen. El usuario MQTT del gateway necesita publicar en esos topics y suscribirse a sus respuestas; el del supernodo necesita los permisos inversos. Los permisos reales del broker y la recepción del módem deben comprobarse en banco.
+
+La aceptación por el broker no confirma la ejecución. El resultado se correlaciona con el nodo, la operación, su huella y el supernodo utilizado. Una confirmación tardía puede resolver una operación que quedó sin confirmación. El servicio no vuelve a ejecutar automáticamente una operación que el dispositivo dejó como incierta.
