@@ -32,6 +32,7 @@ struct FS {
         if (*mode=='w') disk[name].clear();
         return File(name,disk.count(name));
     }
+    bool exists(const char* name){return disk.count(name);}
     bool rename(const char* a,const char* b) { disk[b]=disk[a]; disk.erase(a); return true; }
 };
 inline FS LittleFS;
@@ -61,16 +62,18 @@ int main() {
     assert(!routing::decode(packet,n,3,2,1,t));
     float v[]={21.5}; uint8_t st[]={0};
     Outbox first; first.begin(100);
-    assert(first.push(3,7,v,st,1,110,1000,true,plan,3,1001));
+    deviceid::Stamp stamp=deviceid::own();memset(stamp.uid,3,6);stamp.boot=1;
+    deviceid::currentStamp()=stamp;
+    assert(first.push(3,7,v,st,1,110,1000,true,plan,3,1001,&stamp));
     Outbox restored; restored.begin(200);
     auto* e=restored.oldest();
     assert(e && e->ts==1000 && e->path_at==1001 && e->path_len==3);
     assert(!memcmp(e->path,plan,3) && e->values[0]==21.5 && !e->in_flight);
     auto old=disk["/outbox.bin"];
-    old[3]='1'; old.resize(old.size()-8); disk["/outbox.bin"]=old;
+    old[3]='1'; old.resize(old.size()-26); disk["/outbox.bin"]=old;
     Outbox legacy; legacy.begin(300);
-    assert(legacy.count()==1 && legacy.oldest()->path_len==0);
-    assert(legacy.oldest()->ts==1000 && disk["/outbox.bin"][3]=='2');
+    assert(legacy.count()==0);
+    assert(disk["/outbox-legacy-1.bin"]==old && disk["/outbox.bin"][3]=='3');
     PendingQueue pending; uint8_t dest=0;
     pending.push(7,v,st,1,0,1,0,1000,6000);
     pending.txResult(7,1,0,true);

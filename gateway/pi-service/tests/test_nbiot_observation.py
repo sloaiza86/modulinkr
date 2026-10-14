@@ -12,6 +12,7 @@ from unittest.mock import patch, Mock
 SERVICE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE))
 from buffer import GatewayBuffer
+import identity
 paho = types.ModuleType("paho")
 paho.mqtt = types.ModuleType("paho.mqtt")
 paho.mqtt.client = types.ModuleType("paho.mqtt.client")
@@ -26,6 +27,10 @@ class ObservationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.buf = GatewayBuffer(str(Path(self.tmp.name) / "buffer.db"))
         self.addCleanup(self.buf.close)
+        for origin in (1,2,3,255): identity.observe(self.buf.conn,origin,f'{origin:012x}',1)
+        self.buf.catalog_upsert(2,dict(device_uid='000000000002',catalog_tag='0011223344556677',reads=[dict(id='temp',name='Temperatura',unit='C')]))
+        self.buf.conn.execute('UPDATE node_catalog SET published=1');self.buf.conn.execute('UPDATE identity_catalogs SET published=1')
+        self.buf.conn.commit()
         with patch.dict(os.environ, {}, clear=True):
             self.pub = publisher.MqttPublisher(self.buf)
 
@@ -39,7 +44,7 @@ class ObservationTests(unittest.TestCase):
         self.pub.client.publish.return_value = self.info
 
     def sample(self, seq):
-        self.buf.accept({"origin_id":2,"ts":1000+seq,"seq":seq,"reads":[21.0],
+        self.buf.accept({"origin_id":2,"device_uid":"000000000002","boot_id":1,"catalog_tag":"0011223344556677","ts":1000+seq,"seq":seq,"reads":[21.0],
                          "payload":b"", "frame_type":1, "schema_version":3, "hop_src":2, "ttl":6}, -50, 12)
 
     def test_puback_stall_keeps_exact_batch_and_never_blocks_radio_loop(self):
@@ -86,9 +91,9 @@ class ObservationTests(unittest.TestCase):
 
     def test_old_catalog_puback_does_not_confirm_a_new_registration(self):
         self.connect_fake()
-        self.buf.catalog_upsert(2,{"fw_version":"0.0.73","node_name":"Supernodo"})
+        self.buf.catalog_upsert(2,{"device_uid":"000000000002","catalog_tag":"0011223344556677","fw_version":"0.0.73","node_name":"Supernodo"})
         self.pub.drain()
-        self.buf.catalog_upsert(2,{"fw_version":"0.0.74","node_name":"Supernodo"})
+        self.buf.catalog_upsert(2,{"device_uid":"000000000002","catalog_tag":"0011223344556677","fw_version":"0.0.74","node_name":"Supernodo"})
         self.info.is_published.return_value = True
         self.pub.poll_publications()
         self.assertEqual(len(self.buf.fetch_pending_catalogs()),1)
@@ -97,8 +102,8 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(len(self.buf.fetch_pending_catalogs()),0)
 
     def message(self, retain=False, origin=2, source=1, samples=True):
-        return types.SimpleNamespace(topic=f"modulinkr/v1/{source}/telemetry", retain=retain,
-            payload=json.dumps({"samples":[{"origin":origin,"ts":990,"v":[21]}] if samples else []}).encode())
+        return types.SimpleNamespace(topic=f"{self.pub.topic_prefix}/{source}/telemetry", retain=retain,
+            payload=json.dumps({"schema_version":"4.0","deployment_id":self.pub.deployment,"publisher_uid":"000000000001","publisher_boot":1,"samples":[{"origin":origin,"device_uid":f"{origin:012x}","boot_id":1,"catalog_tag":"0011223344556677","ts":990,"v":[21]}] if samples else []}).encode())
 
     def test_queue_delay_does_not_rejuvenate_observation(self):
         with patch.object(publisher.time, "time", return_value=1000):

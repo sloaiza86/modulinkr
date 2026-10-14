@@ -80,9 +80,15 @@ test("la capacidad del nodo se comunica antes de enviar", () => {
   assert.match(errors(f).join(), /dispositivo 1: admite como máximo 4 escrituras/);
 });
 
+test("direcciones Modbus repetidas bloquean el envío", () => {
+  const f=form();
+  f.modbus.devices.push({...f.modbus.devices[0],reads:[{...f.modbus.devices[0].reads[0],id:'otra'}]});
+  assert.match(errors(f).join(), /dirección Modbus ya se utiliza/);
+});
+
 test("cuatro dispositivos y ocho medidas válidas siguen permitidos", () => {
   const f = form(), original = f.modbus.devices[0];
-  f.modbus.devices = Array.from({ length: 4 }, (_, i) => ({ ...original,
+  f.modbus.devices = Array.from({ length: 4 }, (_, i) => ({ ...original, desired_slave_id:i+1, default_slave_id:i+1,
     reads: [0, 1].map(j => ({ ...original.reads[0], id: `r${i}${j}` })),
   }));
   assert.deepEqual(errors(f), []);
@@ -181,4 +187,26 @@ test("un nuevo intento limpia el error anterior y crea su indicador", () => {
   vm.runInContext('cfgDialogo("Guardar en el nodo", SPIN + "Guardando...")', context);
   assert.ok(get("cfg-dialogo-texto").spin);
   assert.equal(get("cfg-dialogo").classes["dialogo-peligro"], false);
+});
+
+
+test("solo se permite configurar después de verificar el contrato actual", async () => {
+  let close, dialog;
+  const context=vm.createContext({SCHEMA_GENERADO:'3.3',
+    cfgDialogo:(title,body,options)=>{dialog={title,body,options};},
+    document:{getElementById:()=>({addEventListener:(event,callback)=>{close=callback;}})}});
+  vm.runInContext(section('function schemaPuerta(', 'function cfgSchemaVersion(')
+    +section('function schemaCompat(', 'function schemaAviso('),context);
+  assert.equal(await context.schemaPuerta('3.3','3.3'),true);
+  assert.equal(context.schemaCompat('3.3'),null);
+  for(const [version,declared] of [['3.3',''],['3.2','3.3'],['','3.3']]) {
+    const pending=context.schemaPuerta(version,declared);
+    assert.deepEqual(Object.keys(dialog.options),['cerrar']);
+    assert.ok(dialog.body.includes('configuración'));
+    close();assert.equal(await pending,false);
+  }
+  assert.equal(context.schemaCompat('').bloquea,true);
+  assert.equal(context.schemaCompat('3.2').bloquea,true);
+  const html=fs.readFileSync(path.join(__dirname,'../static/index.html'),'utf8');
+  assert.doesNotMatch(html,/datos-legado|Histórico anterior a la identidad física|id="f-ttel"|id="f-tcmd"/);
 });

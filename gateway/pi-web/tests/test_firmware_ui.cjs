@@ -108,3 +108,10 @@ test('comprobar no invoca el endpoint de instalación',async()=>{
   assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/config/lora/firmware/comprobar');
   assert.equal(calls[0].body.id,4);
 });
+
+test('el fallo de preparación de radio explica por qué no se reinició',()=>{
+  const {e}=render(row({history:[{bcast_id:4,version:'0.0.84',source:'node',kind:'report',phase:3,cause:18,ts:1}]}));
+  assert.match(e.table.innerHTML,/Instalación cancelada/);
+  assert.match(e.table.innerHTML,/radio no confirmó/);
+  assert.match(e.table.innerHTML,/conserva la imagen recibida/);
+});

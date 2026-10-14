@@ -83,6 +83,7 @@ import serial
 import protocol
 from buffer import GatewayBuffer
 from mqtt_publisher import MqttPublisher
+from identity import WireIdentity, operations_blocked as identity_blocked, incident as identity_incident
 
 
 LOG = logging.getLogger("modulinkr.gateway")
@@ -150,8 +151,8 @@ REG_REASSEMBLY_TIMEOUT_S = 15.0
 
 # ----- Envío de configuración por LoRa (frame-format.md §17) -----
 # Tamaño de fragmento con margen para el sobre de seguridad: el payload útil
-# con seguridad activa son 221 B y la cabecera del CONFIG_PUSH ocupa 8.
-CFG_FRAG_BYTES = 213
+# con seguridad activa son 184 B y la cabecera del CONFIG_PUSH ocupa 8.
+CFG_FRAG_BYTES = 176
 # Espera antes de dar por perdidos los fragmentos sin confirmar y reenviarlos.
 #
 # Se dimensiona sobre el ritmo real de envío: con ráfaga, una ronda entera de
@@ -247,7 +248,7 @@ BCAST_OFFER_EVERY_S = 5.0
 
 # La separación reserva recepción para una subida con inicio asíncrono y su
 # ACK, con al menos tanto tiempo de escucha como de emisión de firmware.
-BCAST_GAP_UPLINK_BYTES = protocol.SEC_OVERHEAD + 40   # telemetría típica
+BCAST_GAP_UPLINK_BYTES = protocol.IDENTITY_OVERHEAD + 40   # telemetría típica
 BCAST_GAP_MARGIN_SYM   = 8                            # CAD + decisión
 
 # Separación solicitada para banco, en segundos. Se respeta siempre el
@@ -554,6 +555,35 @@ class GatewayService:
 
     # ----- Emisión hacia el Heltec -----
 
+    def _identity_operations_blocked(self):
+        if not getattr(self,'identity',None): return
+        connection=self.buf.conn
+        for request,version in connection.execute("SELECT id,version FROM fw_bcast WHERE state NOT IN ('done','failed','cancelled')").fetchall():
+            match=re.match(r'^(\d+)\.(\d+)\.(\d+)(?:[-+]|$)',version or '')
+            if not match or tuple(map(int,match.groups()))<(0,0,82):
+                connection.execute("UPDATE fw_bcast SET state='failed',detail=? WHERE id=?",
+                                   ('La imagen no admite la identidad física del protocolo 4.0.',request))
+                connection.execute("UPDATE fw_bcast_install SET state='failed',detail=? WHERE bcast_id=? AND state IN ('pending','installing')",
+                                   ('La imagen no admite la identidad física del protocolo 4.0.',request))
+                if self.bcast and self.bcast.get('op',{}).get('id')==request: self.bcast=None
+        definitions=(('modbus_commands','origin',"state IN ('queued','sent','accepted')",'unconfirmed','detail'),
+            ('node_maintenance','origin',"state IN ('queued','sent','accepted')",'failed','detail'),
+            ('config_push','origin',"state IN ('pending','sending','committing')",'failed','detail'),
+            ('config_read','origin',"state IN ('pending','asking','reading','receiving')",'failed','detail'),
+            ('fw_bcast','target',"state NOT IN ('ready','done','failed','cancelled')",'failed','detail'),
+            ('fw_bcast_install','origin',"state IN ('pending','installing')",'failed','detail'))
+        for table,column,active,terminal,detail in definitions:
+            for request,origin in connection.execute(f'SELECT id,{column} FROM {table} WHERE {active}').fetchall():
+                reason=identity_blocked(connection,origin if origin else 255)
+                if reason:
+                    connection.execute(f'UPDATE {table} SET state=?,{detail}=? WHERE id=?',(terminal,reason,request))
+        connection.commit()
+        if self.cfg_tx and identity_blocked(connection,self.cfg_tx['origin']): self.cfg_tx=None
+        if self.cfg_rx and identity_blocked(connection,self.cfg_rx['origin']): self.cfg_rx=None
+        if self.bcast:
+            origin=self.bcast.get('op',{}).get('target') or 255
+            if identity_blocked(connection,origin): self.bcast=None
+
     def _tx(self, frame: bytes) -> None:
         """Ordena al Heltec transmitir una trama ya construida.
 
@@ -567,6 +597,14 @@ class GatewayService:
         durante una difusión, una muestra tardó tres minutos y seis ciclos de
         reintentos en entregarse porque su ACK nunca llegaba.
         """
+        if getattr(self,'identity',None):
+            self._identity_operations_blocked()
+            try:
+                frame=protocol.identity_frame(frame,self.identity,self.sec_key,getattr(self,'_ack_identity',None))
+            except ValueError as exc:
+                LOG.warning('event=identity.tx_blocked reason=%s',exc)
+                return False
+
         espera = self.aire_libre - time.monotonic()
         if espera > 0:
             time.sleep(min(espera, 1.0))
@@ -688,9 +726,9 @@ class GatewayService:
         # la trama más el hueco que el nodo necesita para confirmarla. No lleva
         # el factor diez del ciclo de trabajo porque ese límite es horario y lo
         # vigila `self.duty`, que es quien frena cuando el presupuesto se agota.
-        toa = protocol.toa_ms(protocol.OVERHEAD + 8 + CFG_FRAG_BYTES,
+        toa = protocol.toa_ms(protocol.IDENTITY_OVERHEAD + 8 + CFG_FRAG_BYTES,
                               self.sf, self.bw_khz)
-        toa_ack = protocol.toa_ms(protocol.OVERHEAD + 9, self.sf, self.bw_khz)
+        toa_ack = protocol.toa_ms(protocol.IDENTITY_OVERHEAD + 9, self.sf, self.bw_khz)
         guarda = max(CFG_BURST_GUARD_MIN_S, 2 * toa_ack / 1000.0)
         # Cuántos caben de verdad en la ventana de escucha del nodo, y con qué
         # separación. Con un factor de dispersión alto no cabe ni uno entero, y
@@ -1365,7 +1403,7 @@ class GatewayService:
     def _bcast_gap_s(self, toa_frag_ms: int) -> float:
         """Separación entre inicios de fragmentos, incluida la ventana RX."""
         subida_ms = protocol.toa_ms(BCAST_GAP_UPLINK_BYTES, self.sf, self.bw_khz)
-        ack_ms = protocol.toa_ms(protocol.SEC_OVERHEAD + 3, self.sf, self.bw_khz)
+        ack_ms = protocol.toa_ms(protocol.IDENTITY_OVERHEAD + 3, self.sf, self.bw_khz)
         tsym_ms = float(1 << self.sf) / self.bw_khz
         escucha_ms = max(toa_frag_ms, 2 * subida_ms + ack_ms +
                          TX_GUARDA_RX_S * 1000 + BCAST_GAP_MARGIN_SYM * tsym_ms)
@@ -1396,7 +1434,7 @@ class GatewayService:
         blk, pi = p // op["block_r"], p % op["block_r"]
         # Las mezclas de un bloque se calculan una vez y se guardan mientras
         # ese bloque se emite: recalcularlas por fragmento serían 128 XOR de
-        # 212 bytes por trama, y el Pi Zero no va sobrado.
+        # 160 bytes por trama, y el Pi Zero no va sobrado.
         if b.get("par_blk") != blk:
             b["par_blk"] = blk
             b["par"] = protocol.bcast_parity(self.bcast_img, blk, op["xfer"],
@@ -1406,6 +1444,7 @@ class GatewayService:
     def bcast_tick(self, now: float) -> None:
         if self.buf is None:
             return
+        self._identity_operations_blocked()
         if self.bcast is None:
             # La entrega anterior conserva el turno hasta solicitar su instalación.
             if self.buf.conn.execute(
@@ -1837,7 +1876,7 @@ class GatewayService:
             row = self.buf.conn.execute(
                 "SELECT total_len FROM fw_bcast WHERE id=?", (bid,)).fetchone()
             check = checks[key] = {'xfer': xfer, 'start': now, 'parts': {},
-                                   'count': (row[0] + 211) // 212, 'result': None, 'attempts': 1}
+                                   'count': (row[0] + 159) // 160, 'result': None, 'attempts': 1}
             self._tx(protocol.build_fw_bcast_poll(
                 origin, self._config_hop(origin), xfer, self._next_gw_seq(),
                 self.net_id, self.max_ttl, self.sec_key, self._gw_sec_ts()))
@@ -1900,8 +1939,8 @@ class GatewayService:
             if origin != parsed['origin_id'] or xfer != check['xfer']:
                 continue
             nbytes = (check['count'] + 7) // 8
-            if (parts != (nbytes + 211) // 212
-                    or len(p[6:]) != min(212, nbytes - part * 212)):
+            if (parts != (nbytes + 159) // 160
+                    or len(p[6:]) != min(160, nbytes - part * 160)):
                 continue
             if check.get('expected_parts', parts) != parts:
                 continue
@@ -1924,6 +1963,7 @@ class GatewayService:
         """
         if self.buf is None:
             return
+        self._identity_operations_blocked()
         if now - self._bcast_inst_chk < 2.0:
             return
         self._bcast_inst_chk = now
@@ -2031,7 +2071,9 @@ class GatewayService:
                  fila["version"], fila["origin"], fila["xfer"])
 
     def bcast_difusion_result(self, parsed: dict) -> bool:
-        """Veredicto de una instalación de imagen difundida."""
+        """Rechazo inmediato de instalación; el arranque usa FW_REPORT."""
+        if parsed.get('fw_status') in (protocol.FW_INSTALLING,protocol.FW_CONFIRMED):
+            return False
         if self.buf is None:
             return False
         try:
@@ -2040,14 +2082,10 @@ class GatewayService:
             return False
         if fila is None:
             return False
-        if parsed.get("fw_status") == protocol.FW_INSTALLING:
-            return True     # aviso previo al reinicio, no veredicto
-        ok = (parsed.get("fw_status") == protocol.FW_CONFIRMED
-              and parsed.get("fw_detail") == fila["version"])
+        if parsed.get('fw_xfer') != fila['xfer']:
+            return False
         detalle = parsed.get("fw_detail") or ""
-        self.buf.bcast_install_state(
-            fila["id"], "done" if ok else "failed",
-            f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
+        self.buf.bcast_install_state(fila["id"], "failed", f"Instalación rechazada: {detalle}")
         LOG.info("event=firmware_broadcast.verdict origin=%d detail=%s",
                  parsed["origin_id"], detalle or "no_detail")
         return True
@@ -2093,6 +2131,7 @@ class GatewayService:
             if terminal:
                 state = 'done' if parsed['fw_cause'] == 0 else 'failed'
                 detail = ('Instalación confirmada' if state == 'done' else
+                          'Instalación cancelada: la radio no confirmó que estaba preparada para reiniciar. Se conserva la imagen recibida.' if parsed['fw_cause'] == 18 else
                           f"Fallo comunicado por el nodo: fase {parsed['fw_phase']}, código {parsed['fw_cause']}")
                 self.buf.conn.execute("""UPDATE fw_bcast SET state=?,detail=?,updated_ts=?
                     WHERE target=? AND xfer=? AND sha256=? AND state='installing'""",
@@ -2109,42 +2148,25 @@ class GatewayService:
                  parsed['fw_missing'],parsed['fw_total'])
 
     def bcast_on_result(self, parsed: dict) -> bool:
-        """Veredicto tras instalar una imagen entregada por este transporte.
-
-        El identificador de transferencia se acepta a cero. El nodo lo pierde
-        al instalar, porque instalar borra su archivo de progreso, y el
-        veredicto de "imagen confirmada" lo emite después de reiniciar, cuando
-        ya no sabe de qué transferencia venía. Exigirlo dejaba la fila en
-        `installing` para siempre: el visor no soltaba la subida terminada, no
-        dejaba lanzar otra, y el nodo aparecía "actualizando" indefinidamente
-        estando ya actualizado. Medido el 1-ago-2026 tras instalar la 0.0.50.
-        """
+        """Rechazo inmediato vinculado a su transferencia. FW_REPORT confirma."""
+        if parsed.get('fw_status') in (protocol.FW_INSTALLING,protocol.FW_CONFIRMED):
+            return False
         if self.buf is None:
             return False
         try:
             fila = self.buf.conn.execute(
                 """SELECT id, target, version FROM fw_bcast
                     WHERE state = 'installing' AND target = ?
-                      AND (xfer = ? OR ? = 0 OR ? IS NULL)
+                      AND xfer = ?
                  ORDER BY id DESC LIMIT 1""",
-                (parsed["origin_id"], parsed.get("fw_xfer"),
-                 parsed.get("fw_xfer"), parsed.get("fw_xfer"))).fetchone()
+                (parsed["origin_id"], parsed.get("fw_xfer"))).fetchone()
         except sqlite3.Error:
             return False
         if fila is None:
             return False
         bid = fila[0]
         detalle = parsed.get("fw_detail") or ""
-        if parsed.get("fw_status") == protocol.FW_INSTALLING:
-            # Aviso previo al reinicio, no veredicto: la operación sigue viva
-            # esperando lo que diga el nodo cuando vuelva a arrancar.
-            LOG.info("event=firmware_broadcast.node_restarting id=%d origin=%d",
-                     bid, parsed["origin_id"])
-            return True
-        ok = (parsed.get("fw_status") == protocol.FW_CONFIRMED
-              and parsed.get("fw_detail") == fila[2])
-        self.buf.bcast_state(bid, "done" if ok else "failed",
-                             f"{'confirmada' if ok else 'no confirmada'}: {detalle}")
+        self.buf.bcast_state(bid, "failed", f"Instalación rechazada: {detalle}")
         LOG.info("event=firmware_broadcast.verdict id=%d origin=%d detail=%s",
                  bid, parsed["origin_id"], detalle or "no_detail")
         return True
@@ -2200,9 +2222,9 @@ class GatewayService:
         part, parts, bits = p[4], p[5], bytes(p[6:])
         origen = parsed["origin_id"]
         nbytes = (self.bcast["n_orig"] + 7) // 8
-        expected_parts = (nbytes + 211) // 212
+        expected_parts = (nbytes + 159) // 160
         if (parts != expected_parts or part >= parts
-                or len(bits) != min(212, nbytes - part * 212)
+                or len(bits) != min(160, nbytes - part * 160)
                 or origen not in self.bcast.get("preguntados", [])):
             return
 
@@ -2306,12 +2328,15 @@ class GatewayService:
         self.cfg_tx = None
 
     def send_ack(self, origin_id: int, hop_dst: int, ack_seq: int,
-                 status: int) -> None:
+                 status: int, confirmed=None) -> None:
+        self._ack_identity=confirmed
         seq = self._next_gw_seq()
         frame = protocol.build_ack(
             origin_id, hop_dst, ack_seq, status, seq, self.net_id, self.max_ttl,
             self.sec_key, self._gw_sec_ts())
-        self._tx(frame)
+        sent=self._tx(frame)
+        self._ack_identity=None
+        if sent is False: return
         self.n_ack += 1
         LOG.info("event=ack.sent dest=%s ack_seq=%d status=%s via_hop=%s gw_seq=%d",
                  protocol.addr_name(origin_id), ack_seq,
@@ -2368,6 +2393,9 @@ class GatewayService:
         snr  = float(m.group("snr"))
         self.n_rx += 1
 
+        if len(frame)>1 and frame[protocol.OFF_NETWORK_ID]!=self.net_id:
+            return
+
         parsed = protocol.parse_frame(frame, self.sec_key)
 
         if "error" in parsed:
@@ -2382,6 +2410,10 @@ class GatewayService:
                             parsed.get("seq", "?"), self.n_micfail)
             else:
                 LOG.warning("event=frame.dropped reason=%s hex=%s", parsed["error"], m.group("hex"))
+            return
+
+        if getattr(self,'identity',None) and not self.identity.accept(parsed):
+            self.n_drop+=1
             return
 
         # Estado de red para el visor (pi-web/README.md §4): toda trama
@@ -2406,6 +2438,10 @@ class GatewayService:
             return
 
         ft = parsed["frame_type"]
+        if ft==protocol.FRAME_ALARM and parsed.get('payload',b'')[:1]==b'\x01':
+            identity_incident(self.buf.conn,'clock_rollback',parsed['origin_id'],'El reloj retrocedió; se reservó una sesión nueva para conservar la identidad de las muestras.')
+            self.buf.conn.commit()
+            return
 
         # Registro de nodos (v2.1, frame-format.md §13): no pasa por el
         # buffer de datos ni por la contabilidad de ACK; se responde WELCOME.
@@ -2580,6 +2616,8 @@ class GatewayService:
             if not parsed.get("path") and parsed["hop_src"] == parsed["origin_id"]:
                 parsed["path"] = [parsed["origin_id"],255]
             is_new = self.buf.accept(parsed, rssi, snr)
+            if is_new is None:
+                return
             if not is_new:
                 self.n_dup += 1
                 LOG.info("event=telemetry.duplicate origin=%s ts=%d seq=%d duplicates=%d",
@@ -2628,7 +2666,7 @@ class GatewayService:
         # muestra llegando por otro camino (directo + relay), no un reintento:
         # se calla el ACK redundante. Un reintento real llega tras el timeout
         # del nodo (segundos) y cae fuera de la ventana, así que sí se reconfirma.
-        key = (parsed["origin_id"], parsed["seq"])
+        key = (parsed["origin_id"], parsed.get("device_uid"), parsed.get("boot_id"), parsed.get("ts"), parsed["seq"])
         now = time.monotonic()
         last = self.recent_acks.get(key)
         if last is not None and (now - last) < self.ack_window_s:
@@ -2640,7 +2678,7 @@ class GatewayService:
         self.recent_acks[key] = now
 
         self.send_ack(parsed["origin_id"], parsed["hop_src"],
-                      parsed["seq"], protocol.ACK_OK)
+                      parsed["seq"], protocol.ACK_OK, parsed)
 
     def _update_node_status(self, parsed: dict, rssi: float,
                             snr: float) -> None:
@@ -2719,10 +2757,11 @@ class GatewayService:
             if (now - p["t_start"]) < REG_REASSEMBLY_TIMEOUT_S
         }
 
-        part = self.reg_partial.get(origin)
+        reg_key=(origin,parsed.get("device_uid"),parsed.get("boot_id"),parsed.get("catalog_tag"))
+        part = self.reg_partial.get(reg_key)
         if part is None or part["total"] != total:
             part = {"total": total, "frags": {}, "t_start": now}
-            self.reg_partial[origin] = part
+            self.reg_partial[reg_key] = part
         part["frags"][idx] = bytes(parsed["catalog_frag"])
 
         if len(part["frags"]) < total:
@@ -2730,7 +2769,7 @@ class GatewayService:
                      idx + 1, total, protocol.addr_name(origin))
             return
 
-        del self.reg_partial[origin]
+        del self.reg_partial[reg_key]
         blob = b"".join(part["frags"][i] for i in range(total))
         catalog = protocol.parse_catalog(blob)
 
@@ -2741,6 +2780,13 @@ class GatewayService:
             self.send_welcome(origin, hop_src, protocol.ACK_DECODE_ERROR)
             return
 
+        if parsed.get('identity_verified'):
+            import hashlib
+            if hashlib.sha256(blob).hexdigest()[:16]!=parsed['catalog_tag'] or catalog.get('catalog_node')!=origin:
+                identity_incident(self.buf.conn,'catalog_mismatch',origin,'La huella del catálogo no coincide con el registro recibido.')
+                self.buf.conn.commit()
+                return
+            catalog.update(device_uid=parsed['device_uid'],catalog_tag=parsed['catalog_tag'],boot_id=parsed['boot_id'])
         self.buf.catalog_upsert(origin, catalog)
         self.n_reg += 1
         reads_fmt = ", ".join(
@@ -3222,6 +3268,7 @@ class GatewayService:
 
     def run(self) -> int:
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
+        self.identity = WireIdentity(self.buf.conn)
 
         # Modo de depuración Modbus por nodo, para etiquetar cada línea de
         # modbus-debug sin consultar la base de datos por trama. Se siembra

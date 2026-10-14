@@ -21,6 +21,7 @@
 
 #include <Arduino.h>
 #include "route_trace.h"
+#include "device_identity.h"
 
 class Outbox {
 public:
@@ -28,6 +29,7 @@ public:
     static constexpr size_t  kCapacity  = 32;
 
     struct Entry {
+        deviceid::Stamp identity;
         bool     in_use     = false;
         bool     in_flight  = false;  // v2.3: incluida en un batch NB-IoT sin confirmar
         uint8_t  origin     = 0;   // node.id que capturó la muestra
@@ -53,10 +55,10 @@ public:
     bool push(uint8_t origin, uint16_t seq, const float* values,
               const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
               uint32_t ts, bool ts_fixed, const uint8_t* path = nullptr,
-              uint8_t path_len = 0, uint32_t path_at = 0);
+              uint8_t path_len = 0, uint32_t path_at = 0, const deviceid::Stamp* identity = nullptr);
 
     // Elimina la entrada de un origen+seq (confirmada por otra vía).
-    bool remove(uint8_t origin, uint16_t seq);
+    bool remove(uint8_t origin, uint16_t seq, uint32_t boot = 0, uint32_t ts = 0);
 
     // Entrada más antigua de un origen concreto (0 = cualquiera).
     // nullptr si no hay.

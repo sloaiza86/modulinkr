@@ -10,12 +10,17 @@ function setup() {
   const elements={};
   const document={getElementById(id) {return elements[id] ||= {hidden:false, disabled:false, value:id==='fw-fuente'?'local':'',textContent:'',className:'',setAttribute(){},addEventListener(){},querySelector(){return this;}};}};
   const events=[], dialogs=[];
+  const binary=new Uint8Array(0x10001);binary.fill(255);
+  const table=new DataView(binary.buffer);
+  table.setUint16(0x8000,0x50AA,true);binary[0x8002]=1;binary[0x8003]=2;
+  table.setUint32(0x8004,0x9000,true);table.setUint32(0x8008,0x5000,true);
+
   const ports=[{name:'A',identity:{name:'Ambiental',node_id:1,version:'0.0.59'}},{name:'B',identity:{name:'Acelerómetro',node_id:2,version:'0.0.59'}}];
   const c=vm.createContext({document,console,Uint8Array,TextEncoder,TextDecoder,setTimeout:r=>{r();return 1;},
     htmlSeguro:String,textoError:e=>e.message, cfgDialogo:(...a)=>dialogs.push(a),navigator:{serial:{requestPort:async()=>ports[0]}},
-    fetchApi:async()=>({ok:true, headers:{get:()=> '0.0.60+abcdef123456'}, arrayBuffer:async()=>new Uint8Array([1,2]).buffer})});
+    fetchApi:async()=>({ok:true, headers:{get:()=> '0.0.60+abcdef123456'}, arrayBuffer:async()=>binary.buffer})});
   c.LocalCfg=class {constructor(port){this.port=port;} async open(){events.push('open '+this.port.name); if(this.port.failOpen)throw new Error("Failed to execute 'open' on 'SerialPort': Failed to open serial port.");} async hello(){if(this.port.failRead)throw new Error('sin respuesta'); return this.port.identity;} async close(){events.push('close '+this.port.name); if(this.port.closing)await this.port.closing.promise;}};
-  c.window={Transport:class {constructor(port){this.port=port;} async disconnect(){events.push('disconnect '+this.port.name);}},ESPLoader:class {constructor({transport}){this.port=transport.port;} async main(){} async writeFlash(){events.push('write '+this.port.name); this.port.identity={...this.port.identity,version:'0.0.60+abcdef123456'}; if(this.port.failAfter)this.port.failRead=true;} async hardReset(){events.push('reset '+this.port.name);}}};
+  c.window={Transport:class {constructor(port){this.port=port;} async disconnect(){events.push('disconnect '+this.port.name);}},ESPLoader:class {constructor({transport}){this.port=transport.port;} async main(){} async writeFlash(options){assert.equal(options.eraseAll,false);assert.equal(options.fileArray.length,2);assert.equal(options.fileArray[0].address,0);assert.equal(options.fileArray[0].data.length,0x9000);assert.equal(options.fileArray[1].address,0xE000);events.push('write '+this.port.name); this.port.identity={...this.port.identity,version:'0.0.60+abcdef123456'}; if(this.port.failAfter)this.port.failRead=true;} async hardReset(){events.push('reset '+this.port.name);}}};
   vm.runInContext(section('function fwNumero(', '// ----- Configurar nodo: formulario'),c);
   vm.runInContext('fwDisponible="0.0.60+abcdef123456"',c);
   return {c,e:elements,document,events,dialogs,ports};
@@ -70,4 +75,14 @@ test('una sesión que no pudo abrir el puerto no cierra el puerto de otra operac
   c.port={open:async()=>{throw new Error('ocupado');},close:async()=>{closes++;}};
   await vm.runInContext('(async()=>{const s=new LocalCfg(port);try{await s.open();}catch(e){}finally{await s.close();}})()',c);
   assert.equal(closes,0);
+});
+
+test('la escritura excluye NVS y rechaza una geometría desconocida',()=>{
+ const {c}=setup();const data=new Uint8Array(0x11000).fill(255),view=new DataView(data.buffer);
+ view.setUint16(0x8000,0x50AA,true);data[0x8002]=1;data[0x8003]=2;
+ view.setUint32(0x8004,0x9000,true);view.setUint32(0x8008,0x5000,true);
+ const parts=c.fwFlashParts(data);
+ assert.equal(parts[0].data.length,0x9000);assert.equal(parts[1].address,0xE000);
+ view.setUint32(0x8004,0xA000,true);
+ assert.throws(()=>c.fwFlashParts(data),/particiones/);
 });

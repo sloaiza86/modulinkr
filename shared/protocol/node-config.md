@@ -16,37 +16,13 @@ Todo `config.json` lleva en la raíz un campo obligatorio `schema_version` con e
 "schema_version": "3.3"
 ```
 
-> **Nota v3.3 (2026-07-25)**: `modbus.debug` (§5) pasa de booleano a un modo de cinco valores (`off`, `errors_last`, `errors_each`, `all_last`, `all_each`): dos ejes, qué transacciones se reportan (solo fallidas o también correctas) y cuántas por ciclo (la última candidata o cada candidata). El booleano sigue aceptándose (`true`=`errors_last`, `false`=`off`), así que los configs 3.2 no se rompen. No cambia la estructura de la trama MODBUS_DEBUG (`frame-format.md` §15); su `status` ahora puede valer `ok` en los modos `all_*`. El firmware acepta configs 3.0 a 3.3.
+El proyecto está en desarrollo antes de su primera publicación. El único formato admitido es 3.3; la numeración anterior registra el desarrollo interno. La configuración, la radio 4.0 y los mensajes MQTT 4.0 tienen contratos independientes.
 
-> **Nota v3.2 (2026-07-20)**: acompaña al bump de la trama (`frame-format.md` §1.2, byte `0x32`: estado Modbus por read en TELEMETRY y trama MODBUS_DEBUG). En el JSON aparece `modbus.debug` (opcional, default `false`, §5): con `true`, el dispositivo transmite por LoRa la última transacción Modbus fallida de cada ciclo (petición y respuesta en crudo, trama MODBUS_DEBUG), observable en el log del Pi del gateway. Al ser opcional, un config 3.0 o 3.1 sigue validando; el firmware acepta las tres versiones.
+El nodo declara `schemas: "3.3"` en `CFG.HELLO` y en el catálogo `NODE_REGISTER`. El visor exige esa declaración antes de transferir un archivo. Un destino sin declaración requiere identificarse de nuevo; no se ofrece continuar sin comprobarlo.
 
-> **Nota v3.1 (2026-07-16)**: acompaña al bump de la trama (`frame-format.md` §1.2, byte `0x31`, HEARTBEAT con `tx_ms` para el duty cycle normativo). La estructura del JSON **no cambia** en 3.1; el firmware acepta configs `"3.0"` y `"3.1"`.
+`modbus.debug` utiliza exclusivamente los modos `off`, `errors_last`, `errors_each`, `all_last` y `all_each`. La ausencia equivale a `off`. Los booleanos se rechazan. `poll_interval_ms` no pertenece al contrato y se rechaza: el periodo de lectura se determina con `lora.send_interval_ms`.
 
-> **Nota v2.1 (2026-07-10)**: el bump acompaña al de la trama LoRa (`frame-format.md` §1.2, byte `0x21`), con la que este string se corresponde uno a uno. La estructura del JSON **no cambia** en 2.1; lo nuevo es comportamiento: registro del nodo en la red (NODE_REGISTER / WELCOME), `ts` de captura en TELEMETRY y `boot_id` en el batch. Los ejemplos de este documento conservan `"2.0"` donde son históricos.
-
-> **Nota v2.2 (2026-07-11)**: añade el sub-bloque **opcional** `transport.lora.security` (§4.5), que activa el cifrado y la autenticación de la interfaz aire (`frame-format.md` §14). Al ser opcional (ausente = desactivado), el bump es de minor: un config 2.1 sigue validando.
-
-> **Nota v3.0 (2026-07-16)**: acompaña al bump de la trama LoRa (`frame-format.md` §1.2, byte `0x30`). En el JSON: `nbiot.topic_telemetry` cambia su default al topic unificado `modulinkr/v1/{node_id}/telemetry` y aparece `nbiot.debug` (opcional, default `true`), que gobierna el sobre de diagnóstico del mensaje de telemetría (`batch-format.md` §5). En comportamiento: sin hora sincronizada no se muestrea (`frame-format.md` §13.4, política que §4.2 ya aplicaba al nodo normal y ahora es global), la obtención de hora es activa (NTP desde el arranque en supernodos, SN_REQUEST con cola vacía en huérfanos) y desaparecen `boot_id` y `clock_synced` del mensaje MQTT.
-
-> **Nota v2.3 (2026-07-11)**: varios cambios. En `nbiot`: `mqtt_user` / `mqtt_pass` (autenticación MQTT) y soporte real de `tls=true` en el firmware (TLS 1.2 sin verificar certificado en el SIM7028; el broker debe usar cert **RSA**, el SIM7028 no negocia ECDSA). En `modbus.devices[]`: `read_mode` (`grouped`/`individual`) e `inter_read_ms` para controlar si las lecturas van agrupadas o una a una, y **se elimina `poll_interval_ms`** (un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`; para leer más lento se sube ese intervalo). Además el firmware ya admite funciones de lectura de bits (`read_coils` 0x01, `read_discrete_inputs` 0x02), no solo registros. La eliminación de `poll_interval_ms` es el único cambio no aditivo; como el firmware lo ignora si aparece, no rompe configs previos en la práctica.
-
-Reglas de compatibilidad:
-
-| Cambio | Bump | Compatibilidad |
-| --- | --- | --- |
-| Añadir un campo opcional | MINOR (2.0 a 2.1) | Hacia atrás: nodos 2.0 ignoran el campo |
-| Añadir un valor a un enum existente | MINOR | Hacia atrás: validar en el firmware |
-| Añadir un campo obligatorio, cambiar un tipo, renombrar o eliminar un campo | MAJOR (1.0 a 2.0) | **Rompe** la compatibilidad |
-
-El salto de 1.0 a 2.0 introduce la red mesh: campos obligatorios nuevos en `lora` (`network_id`, `max_retries`), el bloque obligatorio `transport.mesh` y el campo `nbiot.relay_enabled`. Al ser campos obligatorios, un config 1.0 no valida contra 2.0, de ahí el bump de major. La cabecera de la trama LoRa cambió de forma incompatible en paralelo (ver `frame-format.md` §1.2).
-
-El firmware **rechaza al cargar** cualquier `config.json` con una `schema_version` que no entienda, y desde v3.7 **declara cuáles entiende** para que quien envía pueda comprobarlo antes.
-
-La lista viaja en dos sitios donde el nodo ya se presenta: el `CFG.HELLO` del comisionamiento por USB, en el campo `schemas`, y el final del catálogo del `NODE_REGISTER` (`frame-format.md` §13.2). Va al final del catálogo a propósito, de modo que un gateway anterior siga leyendo el resto tal cual, y es opcional: un nodo con firmware anterior no la manda y quien lo lea obtiene cadena vacía, que significa "no lo declara" y no "no soporta ninguno".
-
-Existe porque sin ella nadie podía responder si un config iba a ser aceptado. El visor generaba una versión fija y el firmware aceptaba un rango escrito en el código, así que funcionaba por coincidencia: al añadir una versión nueva, un config generado por un visor actualizado se enviaba a un nodo viejo, se rechazaba al cargar y la ventana de prueba lo revertía minutos después. El resultado era seguro pero caro, y por radio además gastaba aire para descubrir algo que se sabía de antemano.
-
-El error de rechazo nombra las dos partes, la versión recibida y las que el firmware acepta, porque ese texto viaja en el `CONFIG_RESULT` y es lo que se lee en el visor.
+Los temas MQTT se calculan a partir de la identidad del gateway y del publicador, según [`batch-format.md`](batch-format.md). No se importan ni editan como parámetros de configuración.
 
 ## 2. Estructura general
 
@@ -54,7 +30,7 @@ Tres bloques de primer nivel:
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "3.3",
   "node":      { ... },
   "transport": { ... },
   "modbus":    { ... }
@@ -84,6 +60,7 @@ Identifica al dispositivo dentro del despliegue. Estos datos son los que aparece
 | Campo | Tipo | Obligatorio | Valores válidos | Notas |
 | --- | --- | --- | --- | --- |
 | `id` | integer | sí | `1`-`254` | Entero único en el despliegue. `0` y `255` reservados (broadcast / gateway). En la trama LoRa va como u8. |
+| `deployment_id` | string | no | UID hexadecimal de 12 caracteres en minúsculas, distinto de cero | Se asigna al configurar por USB. Vincula el nodo con el gateway físico; no cambia mediante configuración remota. |
 | `type` | string | sí | `"node"`, `"super_node"` | Discriminador del rol. Determina qué bloques aparecen en `transport`. |
 | `class` | string | no (v4.0) | `"A"`, `"C"` | Cuándo puede el gateway hablarle. Por defecto `"C"`. Ver `frame-format.md` §21: es lo que decide la latencia de bajada y si el nodo puede recibir una difusión. |
 | `name` | string | sí | 1-64 caracteres | Etiqueta humana. No se transmite por aire; uso en logs/UI. |
@@ -176,8 +153,6 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
   "mqtt_broker":          "broker.hivemq.com",
   "mqtt_port":            8883,
   "tls":                  true,
-  "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
-  "topic_commands":       "modulinkr/v1/{node_id}/cmd",
   "debug":                true,
   "relay_enabled":        true,
   "relay_queue_max":      128
@@ -194,9 +169,7 @@ Aparece **solo cuando** `node.type == "super_node"`. **Cuando aparece, todos los
 | `tls` | boolean | `true`, `false` | Si `true`, el módem usa TLS 1.2 con el broker. En el SIM7028 (v2.3) el TLS se establece **sin verificar el certificado del servidor** (`authmode=0`), por lo que no requiere cargar ninguna CA. POR VALIDAR EN BANCO. |
 | `mqtt_user` | string | opcional (v2.3), default `""` | Usuario de autenticación MQTT. Se envía en `AT+CMQTTCONNECT`. Vacío = conexión anónima. |
 | `mqtt_pass` | string | opcional (v2.3), default `""` | Contraseña de autenticación MQTT. Solo se usa si `mqtt_user` no está vacío. |
-| `topic_telemetry` | string | template MQTT | Topic donde publica los mensajes de telemetría (`batch-format.md` §2). `{node_id}` se sustituye por el `node.id` decimal. |
-| `topic_commands` | string | template MQTT | Topic al que se suscribe para recibir comandos (ver `commands-format.md`). |
-| `debug` | boolean | opcional (v3.0), default `true` | Si `true`, cada mensaje de telemetría lleva el sobre `debug` (`batch-format.md` §5: `publisher`, `batch_id`, `trigger`, `fw_version`). El mensaje de `test_batch` lo lleva siempre. |
+| `debug` | boolean | opcional (v3.0), default `true` | Si `true`, cada mensaje de telemetría lleva el sobre `debug` (`batch-format.md` §5: `publisher`, `batch_id`, `trigger`, `fw_version`). |
 | `relay_enabled` | boolean | `true`, `false` | Si `true`, el supernodo responde SN_OFFER a los SN_REQUEST de vecinos sin ruta y acepta sus tramas en custodia (`frame-format.md` §8). Con `false` nunca ofrece su salida celular. |
 | `relay_queue_max` | integer | `≥ 1` | Tope de muestras ajenas en cola de custodia. Alcanzado el tope, el supernodo deja de responder SN_OFFER hasta liberar espacio. |
 
@@ -211,7 +184,7 @@ El mecanismo es por muestra, gobernado por un buzón local de reenvío (la outbo
 1. El supernodo envía cada muestra por LoRa hacia su padre en el árbol de rutas, con su número de secuencia `seq` (uint16, ver `frame-format.md`), y la guarda en la cola de pendientes hasta recibir el ACK del gateway.
 2. Si el ACK llega, la muestra se libera y no toca el celular. Si pasan `lora.ack_timeout_ms` sin ACK, retransmite hasta `lora.max_retries` veces.
 3. Agotados los reintentos (o si no hay padre ni registro), la muestra pasa al buzón de reenvío. En paralelo, el fallo alimenta la invalidación de padre (`mesh.parent_missed_frames`, ver `frame-format.md` §2.2).
-4. El supernodo vacía su buzón por NB-IoT: cuando el módem está listo y hay muestras en el buzón, tras una espera corta de agrupado empaqueta lo acumulado en un batch (ver `batch-format.md`) y lo publica vía MQTT en `nbiot.topic_telemetry`. El envío es uno a la vez (stop-and-wait): el batch se confirma con el PUBACK del módem, y si no se confirma a tiempo se reintenta; el backend descarta duplicados por `(origin, ts, seq)`.
+4. El supernodo vacía su buzón por NB-IoT: cuando el módem está listo y hay muestras en el buzón, tras una espera corta de agrupado empaqueta lo acumulado en un batch (ver `batch-format.md`) y lo publica vía MQTT en el tema derivado del despliegue. El envío es uno a la vez (stop-and-wait): el batch se confirma con el PUBACK del módem, y si no se confirma a tiempo se reintenta; el backend descarta duplicados por `(origin, device_uid, boot_id, ts, seq)`.
 
 A diferencia de un nodo normal, el supernodo no reintenta su propio buzón por LoRa: lo que LoRa dejó caer sale por celular.
 
@@ -262,7 +235,7 @@ Describe el bus RS-485 y los dispositivos industriales conectados a él.
 | `baudrate` | integer | sí | `2400`, `4800`, `9600`, `19200`, `38400`, `57600`, `115200` | Velocidad del bus. Todos los dispositivos del bus deben hablar a la misma velocidad. |
 | `parity` | string | sí | `"N"`, `"E"`, `"O"` | None / Even / Odd. |
 | `stopbits` | integer | sí | `1`, `2` | Stop bits. |
-| `debug` | string o boolean | no (v3.3, default `"off"`) | `"off"`, `"errors_last"`, `"errors_each"`, `"all_last"`, `"all_each"` (y booleano por compatibilidad) | Modo del debug Modbus, que gobierna la trama MODBUS_DEBUG (`frame-format.md` §15) que el Pi del gateway vuelca a su log. Dos ejes: qué transacciones (`errors` solo las fallidas, `all` también las correctas) y cuántas por ciclo (`_last` la última candidata, `_each` cada candidata). `"off"` no emite nada. Los modos `_each` suben el aire (una trama por transacción). Compatibilidad v3.2: `true` equivale a `"errors_last"` y `false` a `"off"`. Pensado para comisionamiento y diagnóstico; en operación normal se deja en `"off"`. Independiente de `nbiot.debug` (§4.3), que gobierna el sobre del mensaje de telemetría. |
+| `debug` | string | no (v3.3, default `"off"`) | `"off"`, `"errors_last"`, `"errors_each"`, `"all_last"`, `"all_each"`  | Modo del debug Modbus, que gobierna la trama MODBUS_DEBUG (`frame-format.md` §15) que el Pi del gateway vuelca a su log. Dos ejes: qué transacciones (`errors` solo las fallidas, `all` también las correctas) y cuántas por ciclo (`_last` la última candidata, `_each` cada candidata). `"off"` no emite nada. Los modos `_each` suben el aire (una trama por transacción). Pensado para comisionamiento y diagnóstico; en operación normal se deja en `"off"`. Independiente de `nbiot.debug` (§4.3), que gobierna el sobre del mensaje de telemetría. |
 | `devices` | array | sí | mínimo 1 entrada | Lista de dispositivos en el bus. |
 
 ### 5.1 Bloque `devices[i]`
@@ -284,7 +257,7 @@ Cada entrada del array describe un dispositivo industrial concreto: cómo direcc
 | `name` | string | sí | Etiqueta corta para logs. 1-16 caracteres recomendado. |
 | `description` | string | no | Texto libre. |
 | `addressing` | object | sí | Direccionamiento del esclavo. Ver §5.2. |
-| ~~`poll_interval_ms`~~ | integer | **eliminado en v2.3** | Antes: periodo de polling por dispositivo. Desde v2.3 hay un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`. Si el campo aparece, el firmware lo ignora. Para leer más lento, subir `send_interval_ms`. |
+| ~~`poll_interval_ms`~~ | integer | **eliminado en v2.3** | Antes: periodo de polling por dispositivo. Desde v2.3 hay un solo timer: cada dispositivo se lee una vez por ciclo de `lora.send_interval_ms`. Si el campo aparece, el firmware lo rechaza. Para leer más lento, subir `send_interval_ms`. |
 | `read_mode` | string | no (v2.3, default `"grouped"`) | `"grouped"`: las lecturas contiguas (misma función, direcciones consecutivas) se leen en UNA transacción Modbus. `"individual"`: cada lectura sale en su propia transacción. |
 | `inter_read_ms` | integer | no (v2.3, default `250`) | Respiro entre transacciones Modbus consecutivas del dispositivo, en ms (`0`-`5000`). En `individual` es el retardo entre cada lectura. |
 | `reads` | array | sí (puede ir vacío) | Lecturas periódicas. Ver §5.3. |
@@ -463,7 +436,7 @@ Notas:
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "3.3",
   "node": {
     "id":          1,
     "type":        "node",
@@ -505,7 +478,6 @@ Notas:
           "default_slave_id": 1,
           "desired_slave_id": 1
         },
-        "poll_interval_ms": 1000,
         "reads": [
           { "id": "temp", "name": "temperature", "function": "read_input_registers",
             "address": 1, "type": "int16",  "scale": 0.1, "unit": "C" },
@@ -524,7 +496,7 @@ Notas:
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "3.3",
   "node": {
     "id":          10,
     "type":        "super_node",
@@ -558,8 +530,6 @@ Notas:
       "mqtt_broker":          "broker.hivemq.com",
       "mqtt_port":            8883,
       "tls":                  true,
-      "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
-      "topic_commands":       "modulinkr/v1/{node_id}/cmd",
       "relay_enabled":        true,
       "relay_queue_max":      128
     }
@@ -578,7 +548,6 @@ Notas:
           "change_function":  "write_single_register",
           "change_address":   256
         },
-        "poll_interval_ms": 1000,
         "reads": [
           { "id": "temp", "name": "temperature", "function": "read_input_registers",
             "address": 1, "type": "int16",  "scale": 0.1, "unit": "C" },
@@ -597,7 +566,6 @@ Notas:
           "default_slave_id": 80,
           "desired_slave_id": 80
         },
-        "poll_interval_ms": 200,
         "reads": [
           { "id": "ax", "name": "accel_x", "function": "read_holding_registers",
             "address": 52, "type": "int16", "scale": 0.000488, "unit": "g" },

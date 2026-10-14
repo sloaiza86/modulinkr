@@ -66,11 +66,34 @@ bool LoraP2P::begin(HardwareSerial& uart,
 
 bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required) {
     if (uart_ == nullptr) return false;
+    // Se espera silencio entre respuestas: cortar a los 512 bytes podía
+    // dejar el final de una recepción mezclado con la respuesta del comando.
     const uint32_t drain_start = millis();
-    for (size_t n = 0; n < 512 && uart_->available() > 0 && millis() - drain_start < 20; ++n) uart_->read();
+    uint32_t quiet_start = drain_start;
+    while (millis() - drain_start < 200 && millis() - quiet_start < 20) {
+        while (uart_->available() > 0 && millis() - drain_start < 200) {
+            uart_->read();
+            quiet_start = millis();
+        }
+        delay(1);
+    }
+    if (millis() - quiet_start < 20) {
+        diag::log("WARNING", "node.radio", "radio.init_failed", "stage=%s reason=uart_not_quiet", stage);
+        return false;
+    }
+    if (strcmp(command, "AT+NWM=?") == 0) work_mode_ = -1;
     diag::log("DEBUG", "node.radio", "radio.init_command", "stage=%s command=%s timeout_ms=%lu",
               stage, command, static_cast<unsigned long>(timeout_ms));
-    uart_->print(command);
+    // La recuperación espacia bytes para activar el cierre de recepción
+    // UART del RUI antiguo; la operación normal conserva la escritura rápida.
+    if (strcmp(stage, "probe_paced") == 0 || strcmp(stage, "wake_paced") == 0) {
+        for (const char* p = command; *p; ++p) {
+            char symbol[2] = {*p, '\0'};
+            uart_->print(symbol);
+            uart_->flush();
+            delay(2);
+        }
+    } else uart_->print(command);
     uart_->print("\r\n");
     char line[192] = {};
     size_t length = 0;
@@ -91,6 +114,9 @@ bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t time
                 if (strncmp(line, "+EVT:", 5) != 0) {
                     diag::log("DEBUG", "node.radio", "radio.init_response", "stage=%s response=%s truncated=%s",
                               stage, line, truncated ? "true" : "false");
+                    if (!truncated && strcmp(command, "AT+NWM=?") == 0 &&
+                        strlen(line) == 8 && strncmp(line, "AT+NWM=", 7) == 0 &&
+                        line[7] >= '0' && line[7] <= '2') work_mode_ = line[7] - '0';
                     if (!truncated && strcmp(line, "OK") == 0) return true;
                     // ATZ puede responder con el banner en vez de OK. La
                     // disponibilidad se comprueba con otro AT tras la espera.
@@ -100,7 +126,8 @@ bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t time
                                   "stage=%s evidence=boot_banner", stage);
                         return true;
                     }
-                    if (strstr(line, "ERROR") != nullptr) {
+                    if (strstr(line, "ERROR") != nullptr || strcmp(line, "AT_COMMAND_NOT_FOUND") == 0 ||
+                        strcmp(line, "COMMAND_LOCKED") == 0) {
                         diag::log(required ? "ERROR" : "WARNING", "node.radio", "radio.init_failed",
                                   "stage=%s command=%s reason=rejected response=%s", stage, command, line);
                         return false;
@@ -122,24 +149,27 @@ bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t time
 
 bool LoraP2P::applyRadioConfig() {
     if (uart_ == nullptr) return false;
-    // El control de arranque usa respuestas completas y plazos acotados.
-    // No crea un mutex nuevo por cada reintento de inicialización.
+    // El buffer predeterminado de 256 bytes no contiene una recepción de
+    // hasta 242 bytes codificada en hexadecimal y su cabecera de evento.
+    uart_->flush();
+    uart_->end();
+    if (uart_->setRxBufferSize(4096) != 4096) return false;
     uart_->begin(115200, SERIAL_8N1, rx_pin_, tx_pin_);
+    line_len_ = 0;
+    line_discard_ = false;
     cad_ok_ = false;
-    // El ESP32 puede reiniciarse mientras el módulo sigue alimentado y en RX.
-    // Un sondeo fallido no debe impedir detener RX e intentar ATZ.
-    probe_ok_ = radioCommand("probe", "AT", 1500, false);
-    if (!probe_ok_) {
-        diag::log("WARNING", "node.radio", "radio.startup_recovery",
-                  "reason=probe_failed action=stop_receive_reset");
+    probe_ok_ = synchronizeModule();
+    if (!probe_ok_ && !softReset()) return false;
+    if (!radioCommand("mode_query", "AT+NWM=?", 1500) || work_mode_ < 0) return false;
+    if (work_mode_ != 0) {
+        if (!radioCommand("p2p_mode", "AT+NWM=0", 1500)) return false;
+        delay(kResetSettleMs);
+        if (!synchronizeModule() || !radioCommand("mode_verify", "AT+NWM=?", 1500) || work_mode_ != 0) return false;
     }
-    radioCommand("stop_receive", "AT+PRECV=0", 1500, false);
-    radioCommand("reset", "ATZ", 1000, false);
-    delay(kResetSettleMs);
-    if (!radioCommand("after_reset", "AT", 1500)) return false;
-    if (!radioCommand("p2p_mode", "AT+NWM=0", 1500)) return false;
-    delay(kResetSettleMs);
-    if (!radioCommand("after_mode", "AT", 1500)) return false;
+    if (!stopReception("stop_receive")) return false;
+    // El host controla la radio por UART también entre transmisiones.
+    // Se evita el sueño automático del coprocesador en esta interfaz.
+    if (!radioCommand("uart_awake", "AT+LPM=0", 1500)) return false;
     char command[96];
     snprintf(command, sizeof(command), "AT+P2P=%lu:%u:%u:%u:%u:%u",
              freq_hz_, sf_, bw_khz_, cr_index_, kPreambleSymbols, tx_dbm_);
@@ -149,11 +179,52 @@ bool LoraP2P::applyRadioConfig() {
     return radioCommand("receive", "AT+PRECV=65533", 1500);
 }
 
+bool LoraP2P::synchronizeModule() {
+    if (uart_ == nullptr) return false;
+    // CRLF termina un comando cortado por Upload o ESP.restart y permite
+    // despertar el módulo antes de enviar el primer comando completo.
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        uart_->print("\r\n");
+        uart_->flush();
+        delay(100);
+        if (radioCommand(attempt ? "probe_retry" : "probe", "AT", 1500, false)) return true;
+    }
+    // Se intenta detener RX incluso si el sondeo no obtuvo respuesta.
+    if (stopReception("sync_stop_receive") && radioCommand("sync_probe", "AT", 1500, false)) return true;
+    diag::log("WARNING", "node.radio", "radio.uart_recovery", "action=paced_probe interbyte_ms=2");
+    if (!radioCommand("probe_paced", "AT", 1500, false)) return false;
+    return radioCommand("wake_paced", "AT+LPM=0", 1500, false);
+}
+
+bool LoraP2P::stopReception(const char* stage) {
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        if (radioCommand(stage, "AT+PRECV=0", 1500, false)) return true;
+        if (attempt < 2) delay(300);
+    }
+    return false;
+}
+
+bool LoraP2P::softReset() {
+    if (uart_ == nullptr) return false;
+    // Evita encadenar ATZ cada 30 s contra un módulo que no confirma el reset.
+    if (reset_attempted_ && millis() - last_reset_ms_ < 300000) {
+        diag::log("WARNING", "node.radio", "radio.reset_deferred", "retry_ms=300000");
+        return false;
+    }
+    reset_attempted_ = true;
+    last_reset_ms_ = millis();
+    diag::log("WARNING", "node.radio", "radio.startup_recovery", "action=ATZ reason=uart_unresponsive_or_recovery");
+    radioCommand("reset", "ATZ", 1500, false);
+    delay(kResetSettleMs);
+    return synchronizeModule();
+}
+
 void LoraP2P::clearFaults() {
     // Base temporal de los dos detectores: sin fijarla, el criterio de
     // silencio compararía contra un último evento en el instante 0 y
     // dispararía en falso durante el primer ciclo.
     const uint32_t now = millis();
+    tx_uncertain_ = false;
 
     last_done_ms_  = now;
     last_psend_ms_ = now;
@@ -182,6 +253,7 @@ void LoraP2P::discardTxQueue() {
     last_tx_len_   = 0;
     hold_until_ms_ = 0;
     line_len_      = 0;
+    line_discard_  = false;
 }
 
 bool LoraP2P::probeModule() {
@@ -193,7 +265,6 @@ bool LoraP2P::reinitRadio() {
     initialized_ = false;
     discardTxQueue();
 
-    // La secuencia registra el sondeo y continúa hasta el reset aunque falle.
     if (!applyRadioConfig()) return false;
 
     clearFaults();
@@ -202,21 +273,26 @@ bool LoraP2P::reinitRadio() {
 }
 
 bool LoraP2P::resetModule() {
-    // La reconfiguración ya incluye ATZ y su comprobación posterior.
+    initialized_ = false;
+    discardTxQueue();
+    if (!softReset()) return false;
     return reinitRadio();
 }
 
 bool LoraP2P::prepareForRestart() {
     initialized_ = false;
+    // Se deja terminar el envío físico antes de emitir órdenes de control.
+    // No se procesa otra petición recibida durante la preparación OTA.
+    if (tx_in_flight_) {
+        const uint32_t elapsed = millis() - in_flight_at_ms_;
+        if (elapsed < in_flight_guard_ms_) delay(in_flight_guard_ms_ - elapsed);
+    }
     discardTxQueue();
     if (uart_ == nullptr) return false;
-    // La radio externa no pierde alimentación con ESP.restart(). Se deja
-    // reiniciada y sin recepción para el arranque de la nueva aplicación.
-    radioCommand("restart_stop_receive", "AT+PRECV=0", 1500, false);
-    radioCommand("restart_reset", "ATZ", 1000, false);
-    delay(kResetSettleMs);
+    if (!stopReception("restart_idle")) return false;
     if (!radioCommand("restart_probe", "AT", 1500, false)) return false;
-    return radioCommand("restart_idle", "AT+PRECV=0", 1500, false);
+    uart_->flush();
+    return true;
 }
 
 void LoraP2P::queryVersion() {
@@ -300,7 +376,8 @@ void LoraP2P::setSecurity(bool enabled, const uint8_t key[protocol::kKeyBytes]) 
         ccm_ready_ = false;
     }
     sec_enabled_ = false;
-    if (!enabled || key == nullptr) return;
+    if (!enabled) return;
+    if (key == nullptr) { initialized_=false; return; }
 
     std::memcpy(sec_key_, key, protocol::kKeyBytes);
     mbedtls_ccm_init(&ccm_);
@@ -310,6 +387,7 @@ void LoraP2P::setSecurity(bool enabled, const uint8_t key[protocol::kKeyBytes]) 
         // en claro y que se note en banco (las tramas no validarán en el
         // gateway) que operar con un contexto roto.
         mbedtls_ccm_free(&ccm_);
+        initialized_=false;
         return;
     }
     ccm_ready_  = true;
@@ -348,28 +426,17 @@ void LoraP2P::buildNonce(uint8_t nonce[protocol::kNonceBytes],
     // spec §14.3: network_id | origin | dest | frame_type | seq (2 LE) |
     // sec_ts (4 LE) | hop_src | pad (2 x 0x00). El hop_src distingue a los
     // transmisores de una misma trama: cada salto re-cifra con su nonce.
-    nonce[0]  = hdr[kOffNetworkId];
-    nonce[1]  = hdr[kOffOriginId];
-    nonce[2]  = hdr[kOffDestId];
-    nonce[3]  = hdr[kOffFrameType];
-    nonce[4]  = hdr[kOffSeqLow];
-    nonce[5]  = hdr[kOffSeqHigh];
-    std::memcpy(&nonce[6], &sec_ts, sizeof(sec_ts));  // ESP32 es LE nativo
-    nonce[10] = hdr[kOffHopSrc];
-    nonce[11] = 0x00;
-    nonce[12] = 0x00;
+    (void)sec_ts;
+    std::memcpy(nonce,hdr+kOffTxUid,6);
+    std::memcpy(nonce+6,hdr+kOffTxBoot,4);
+    std::memcpy(nonce+10,hdr+kOffTxCounter,3);
 }
 
 void LoraP2P::buildAad(uint8_t aad[protocol::kHeaderBytes + protocol::kSecTsBytes],
                        const uint8_t* hdr, uint32_t sec_ts) {
     using namespace protocol;
-    // spec §14.3: cabecera con los campos mutables por salto a cero
-    // (hop_src, hop_dst, ttl) + sec_ts. Autentica los campos inmutables
-    // extremo a extremo a través de cualquier número de saltos.
+    // El major 4 autentica el salto completo; cada relay vuelve a firmarlo.
     std::memcpy(aad, hdr, kHeaderBytes);
-    aad[kOffHopSrc] = 0x00;
-    aad[kOffHopDst] = 0x00;
-    aad[kOffTtl]    = 0x00;
     std::memcpy(&aad[kHeaderBytes], &sec_ts, sizeof(sec_ts));
 }
 
@@ -684,7 +751,7 @@ LoraP2P::Status LoraP2P::forwardFrame(const RxFrame& f, uint8_t new_hop_dst) {
                         static_cast<uint8_t>(f.ttl - 1),
                         f.payload,
                         f.payload_length,
-                        f.sec_ts);
+                        f.sec_ts, &f);
 }
 
 LoraP2P::Status LoraP2P::sendBeaconEcho(uint16_t beacon_seq,
@@ -794,13 +861,14 @@ LoraP2P::Status LoraP2P::sendSnOffer(uint8_t requester, uint16_t seq,
 }
 
 LoraP2P::Status LoraP2P::sendAck(uint8_t dest, uint16_t own_seq,
-                                 uint16_t ack_seq, uint8_t status, uint8_t via) {
+                                 uint16_t ack_seq, uint8_t status, uint8_t via, uint32_t boot, uint32_t ts) {
     if (!initialized_) return Status::NOT_INITIALIZED;
-    const uint8_t payload[3] = {
+    uint8_t payload[11] = {
         static_cast<uint8_t>(ack_seq & 0xFF),
         static_cast<uint8_t>((ack_seq >> 8) & 0xFF),
         status,
     };
+    memcpy(payload+3,&boot,4); memcpy(payload+7,&ts,4);
     // Receptor final directo (custodia): sin relay, ttl=1.
     return buildAndSend(via ? via : dest, node_id_, dest, own_seq,
                         protocol::kFrameAck, via ? routing::kMaxPath : 1,
@@ -829,9 +897,13 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
                                       uint8_t ttl,
                                       const uint8_t* payload,
                                       uint8_t payload_length,
-                                      uint32_t sec_ts) {
+                                      uint32_t sec_ts, const RxFrame* identity) {
     using namespace protocol;
 
+    const bool telemetry = frame_type==kFrameTelemetry || frame_type==kFrameTelemetryRoute;
+    const bool sample_override=sample_override_;
+    if (telemetry) sample_override_=false;
+    if (deviceid::blocked(node_id_) || (dest_id && deviceid::blocked(dest_id))) return Status::INVALID_ARGS;
     if (payload_length > (sec_enabled_ ? kMaxPayloadSecure : kMaxPayload)) {
         return Status::INVALID_ARGS;
     }
@@ -845,7 +917,27 @@ LoraP2P::Status LoraP2P::buildAndSend(uint8_t hop_dst,
         if (sec_ts<=last_route_ts) sec_ts=last_route_ts+1;
         last_route_ts=sec_ts;
     }
-    uint8_t frame[kOverhead + kMaxPayload];
+    uint8_t frame[kOverhead + kMaxPayload] = {};
+    deviceid::Stamp origin = deviceid::own(), destination;
+    if (identity) origin=identity->identity;
+    else if (telemetry && sample_override) origin=sample_identity_;
+    else if (origin_id!=node_id_ && !deviceid::peer(origin_id,origin)) return Status::INVALID_ARGS;
+    uint8_t present=0; for(uint8_t value:origin.uid) present|=value;
+    if (!present || !origin.boot) return Status::INVALID_ARGS;
+    memcpy(frame+kOffOriginUid,origin.uid,6);
+    memcpy(frame+kOffOriginBoot,&origin.boot,4);
+    memcpy(frame+kOffCatalog,origin.catalog,8);
+    if (dest_id) {
+        if (identity) memcpy(frame+kOffDestUid,identity->dest_uid,6);
+        else if (deviceid::peer(dest_id,destination)) memcpy(frame+kOffDestUid,destination.uid,6);
+        else return Status::INVALID_ARGS;
+    }
+    uint32_t tx_boot=0, tx_counter=0;
+    if (!deviceid::nextNonce(frame+kOffTxUid,tx_boot,tx_counter)) return Status::TX_FAILED;
+    memcpy(frame+kOffTxBoot,&tx_boot,4);
+    frame[kOffTxCounter]=uint8_t(tx_counter);
+    frame[kOffTxCounter+1]=uint8_t(tx_counter>>8);
+    frame[kOffTxCounter+2]=uint8_t(tx_counter>>16);
 
     frame[kOffSchema]     = kSchemaVersion;
     frame[kOffNetworkId]  = network_id_;
@@ -926,6 +1018,7 @@ void LoraP2P::writePsend(const uint8_t* frame, size_t len) {
 }
 
 LoraP2P::Status LoraP2P::sendRaw(const uint8_t* frame, size_t len) {
+    if (tx_uncertain_) return Status::TX_FAILED;
     // Con una escritura en vuelo la trama se perdería en silencio, y durante
     // la ventana de guarda del ACK se llevaría por delante la confirmación de
     // la telemetría recién enviada. En los dos casos espera turno (ver la
@@ -991,7 +1084,7 @@ void LoraP2P::clearInFlight() {
 }
 
 void LoraP2P::startNextQueued() {
-    if (tx_in_flight_ || txq_count_ == 0 || queueHeld()) return;
+    if (tx_uncertain_ || tx_in_flight_ || txq_count_ == 0 || queueHeld()) return;
 
     // La copia a last_tx_ ocurre dentro de startTx antes de que la ranura
     // pueda reutilizarse.
@@ -1035,30 +1128,43 @@ void LoraP2P::poll() {
     while (uart_->available() > 0) {
         const char c = static_cast<char>(uart_->read());
         if (c == '\n' || c == '\r') {
-            if (line_len_ > 0) {
+            if (line_len_ > 0 && !line_discard_) {
                 line_[line_len_] = '\0';
                 handleLine(line_);
                 line_len_ = 0;
             }
+            line_len_ = 0;
+            line_discard_ = false;
             continue;
         }
+        if (line_discard_) continue;
         if (line_len_ < kLineMax - 1) {
             line_[line_len_++] = c;
         } else {
-            // Línea imposiblemente larga: descartar y resincronizar.
+            // El final de una línea desbordada no es una respuesta válida.
             line_len_ = 0;
+            line_discard_ = true;
         }
     }
 
     // Escritura en vuelo que agotó su margen sin TXP2P DONE. Va después de
     // vaciar la UART para no contar como perdida una confirmación que ya
-    // estaba en el buffer. Libera la cola, de modo que el silencio del módulo
-    // no bloquee todos los envíos siguientes; psend_no_done_ queda alto a
-    // propósito, que es la señal de radio muda.
+    // estaba en el buffer. Sin DONE no se sabe si el módulo sigue ocupado:
+    // se suspende TX hasta recuperar la radio, sin encadenar otros PSEND.
     if (tx_in_flight_ && busy_at_ms_ == 0 &&
         static_cast<int32_t>(millis() - in_flight_at_ms_) >=
             static_cast<int32_t>(in_flight_guard_ms_)) {
         tx_timeouts_++;
+        tx_uncertain_ = true;
+        if (!mute_flagged_) {
+            mute_flagged_ = true;
+            mute_events_++;
+            anotarMudo("tx_completion_timeout");
+        }
+        diag::log("ERROR", "node.radio", "radio.tx_completion_timeout",
+                  "elapsed_ms=%lu guard_ms=%lu tx_paused=true queued=%u",
+                  static_cast<unsigned long>(millis() - in_flight_at_ms_),
+                  static_cast<unsigned long>(in_flight_guard_ms_), static_cast<unsigned>(txq_count_));
         notifyTelemetryTx(last_tx_, last_tx_len_, false);
         clearInFlight();
     }
@@ -1269,14 +1375,14 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
                               (static_cast<uint16_t>(buf[crc_input_len + 1]) << 8);
     if (crc_calc != crc_recv) { rx_discarded_++; return; }
 
-    if ((buf[kOffSchema] & kSchemaMajorMask) != (kSchemaVersion & kSchemaMajorMask)) {
+    if (buf[kOffSchema] != kSchemaVersion) {
         rx_discarded_++;
         return;
     }
 
     // 6. Tráfico ajeno legítimo de la misma red: no es para este nodo.
     const uint8_t hop_dst = buf[kOffHopDst];
-    if (hop_dst != kAddrBroadcast && hop_dst != node_id_) { return; }
+    
 
     // 7 (v2.2, spec §14.6): verificar MIC y descifrar. También lo hace el
     // relay (necesita el plaintext para re-cifrar el salto siguiente, y de
@@ -1347,6 +1453,15 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
         }
     }
 
+    uint32_t origin_boot=0,tx_boot=0;
+    memcpy(&origin_boot,buf+kOffOriginBoot,4); memcpy(&tx_boot,buf+kOffTxBoot,4);
+    const bool sender_ok=deviceid::observe(buf[kOffHopSrc],buf+kOffTxUid,tx_boot);
+    const bool origin_ok=deviceid::observe(buf[kOffOriginId],buf+kOffOriginUid,origin_boot);
+    if (!sender_ok || !origin_ok || deviceid::blocked(node_id_)) { rx_discarded_++; return; }
+    if (hop_dst!=kAddrBroadcast && hop_dst!=node_id_) return;
+    const auto own=deviceid::own();
+    if (buf[kOffDestId]==node_id_ && memcmp(buf+kOffDestUid,own.uid,6)) { rx_discarded_++; return; }
+
     if (ring_count_ >= kRxRing) {
         // Ring lleno: descarta la más antigua (el llamante va lento).
         ring_head_ = (ring_head_ + 1) % kRxRing;
@@ -1355,6 +1470,11 @@ void LoraP2P::handleRawFrame(const uint8_t* buf, size_t len,
     }
 
     RxFrame& f = ring_[(ring_head_ + ring_count_) % kRxRing];
+    memcpy(f.identity.uid,buf+kOffOriginUid,6);
+    memcpy(f.identity.catalog,buf+kOffCatalog,8); f.identity.boot=origin_boot;
+    memcpy(f.dest_uid,buf+kOffDestUid,6); memcpy(f.tx_uid,buf+kOffTxUid,6);
+    f.tx_boot=tx_boot;
+    f.tx_counter=uint32_t(buf[kOffTxCounter]) | (uint32_t(buf[kOffTxCounter+1])<<8) | (uint32_t(buf[kOffTxCounter+2])<<16);
     f.network_id     = buf[kOffNetworkId];
     f.hop_src        = buf[kOffHopSrc];
     f.hop_dst        = hop_dst;

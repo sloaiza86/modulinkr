@@ -36,8 +36,6 @@
       "mqtt_broker": "modulinkr.loaiza.co",
       "mqtt_port": 8883,
       "tls": true,
-      "topic_telemetry": "modulinkr/v1/{node_id}/telemetry",
-      "topic_commands": "modulinkr/v1/{node_id}/cmd",
       "debug": true,
       "relay_enabled": true,
       "relay_queue_max": 128

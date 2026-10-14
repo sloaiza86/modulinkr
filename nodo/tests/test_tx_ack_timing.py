@@ -136,6 +136,14 @@ int main(int argc,char** argv){
   submit(1);advance(699);assert(!pending.firstExpired(clock_ms,3000));
   advance(700);assert(lora.txTimeouts()==1);
   assert(pending.firstExpired(clock_ms,3000)->tx_failed);
+  assert(lora.tx_uncertain_ && lora.radioFaulted());
+  auto f=frame(99);assert(lora.sendRaw(f.data(),f.size())==LoraP2P::Status::TX_FAILED);
+  auto writes=uart.writes.size();advance(2000);assert(uart.writes.size()==writes);
+  uart.feed("+EVT:TXP2P DONE");lora.poll();assert(lora.tx_uncertain_);
+ }else if(name=="truncated_done"){
+  submit(1);uart.feed((std::string(650,'x')+"TXP2P DONE").c_str());lora.poll();
+  assert(lora.txDone()==0 && lora.tx_in_flight_);
+  done(100);assert(lora.txDone()==1);
  }else if(name=="module_error"){
   submit(1);uart.feed("AT_ERROR");lora.poll();
   assert(pending.firstExpired(clock_ms,3000)->tx_failed && !lora.queueHeld());
@@ -204,6 +212,7 @@ class TxAckTimingTests(unittest.TestCase):
             "void LoraP2P::clearInFlight()", "void LoraP2P::startNextQueued()",
             "void LoraP2P::holdQueue(uint32_t ms)", "bool LoraP2P::queueHeld() const",
             "void LoraP2P::poll()", "void LoraP2P::discardTxQueue()",
+            "void LoraP2P::anotarMudo(const char* criterio)",
             "const char* LoraP2P::statusToString(Status s)",
         )
         bodies = "\n".join(function(driver, s) for s in signatures)
@@ -231,7 +240,7 @@ class TxAckTimingTests(unittest.TestCase):
         subprocess.run([str(self.binary), name], check=True, timeout=10)
 
 
-for case in ("queued_wait", "guard_each_done", "cad_busy", "missing_done", "module_error",
+for case in ("queued_wait", "guard_each_done", "cad_busy", "missing_done", "truncated_done", "module_error",
              "discard_reset", "queue_rejected_retry", "custody_retry", "late_ack",
              "foreign_telemetry", "rollover", "longer_hold", "sampling_stall",
              "custody_queue_rejected", "failed_attempts_retained"):

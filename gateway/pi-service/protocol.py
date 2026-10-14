@@ -1,47 +1,10 @@
 #!/usr/bin/env python3
-"""ModuLinkr, librería del protocolo LoRa v2.2 para el gateway (lado Pi).
+"""Protocolo LoRa 4.0 del gateway, con identidad física por salto.
 
-Fuente normativa: firmware/shared/protocol/frame-format.md (schema v3.0,
-cabecera de 11 bytes + payload + CRC16). Este módulo materializa en Python:
-
-  - Las constantes del protocolo.
-  - El CRC16 Modbus RTU (mismo algoritmo que el driver Modbus del nodo).
-  - El parseo de una trama recibida (parse_frame) y del catálogo binario
-    del registro de nodos (parse_catalog), ver §13 de la spec.
-  - La construcción de las tramas descendentes que genera el Pi
-    (build_ack, build_beacon, build_welcome), ver §12 y §13 de la spec.
-  - La seguridad de la interfaz aire v2.2 (spec §14): AES-CCM con clave
-    de red, sobre de sec_ts (4 B) + MIC (4 B) por trama. Requiere el
-    paquete `cryptography` (pip install cryptography en el venv del Pi);
-    solo se importa si se usa una clave, así el servicio sin seguridad
-    no depende de él.
-
-Cambios v2.1 (10-jul-2026): TELEMETRY lleva ts de captura (uint32 epoch al
-inicio del payload), BEACON lleva epoch del gateway, y aparecen las tramas
-NODE_REGISTER (0x04) y WELCOME (0x05) del proceso de registro.
-
-Cambios v2.2 (11-jul-2026): seguridad de la interfaz aire (spec §14). Con
-clave, parse_frame espera y valida el sobre (verifica MIC, descifra) y los
-build_* cifran y firman. Sin clave, todo queda como en v2.1 salvo el byte
-de versión (0x22).
-
-Cambios v3.0 (16-jul-2026): ts de captura siempre válido (sin hora no se
-muestrea, spec §13.4). parse_frame valida el major del schema (regla 5 de
-§10) y una TELEMETRY con ts=0 se marca con 'ts_zero' para que el servicio
-responda ACK DECODE_ERROR (regla 11).
-
-Cambios v3.1 (16-jul-2026): HEARTBEAT pasa a diagnóstico periódico sin
-ACK con tx_ms (4 B LE), el aire acumulado del transmisor para el duty
-cycle normativo (EN 300 220-1). toa_ms() calcula el Time-on-Air de las
-tramas que el propio gateway ordena transmitir.
-
-Cambios v3.2 (20-jul-2026): TELEMETRY lleva un byte de estado Modbus por
-read tras los valores (spec §3.1: nibble bajo estado, nibble alto código
-de excepción; lecturas fallidas viajan como NaN) y aparece MODBUS_DEBUG
-(0x06, spec §15): la transacción Modbus fallida en crudo.
-
-No toca hardware ni serial: solo bytes. Lo usan gateway_service.py y
-cualquier utilidad de diagnóstico.
+parse_frame acepta únicamente el contrato de radio vigente. Los builders
+utilizan una representación intermedia de payload de once bytes de cabecera;
+identity_frame incorpora la identidad y el cifrado final antes de transmitir.
+_decode_payload_frame es un decodificador interno de esa representación.
 """
 
 from __future__ import annotations
@@ -81,7 +44,7 @@ def crc16_modbus(data: bytes) -> int:
 
 # ----- Constantes del protocolo (frame-format.md) -----
 
-SCHEMA_VERSION = 0x3B          # v3.11 (major en nibble alto, minor en bajo)
+SCHEMA_VERSION = 0x3B          # representación interna, nunca emitida directamente
 SCHEMA_MAJOR_MASK = 0xF0
 
 HEADER_BYTES = 11
@@ -283,6 +246,7 @@ FW_RESULT_NAMES = {
     3: 'fallo marcando el arranque',
     4: 'revertida',
     5: 'instalando',
+    6: 'radio no preparada; imagen conservada',
 }
 
 ACK_SCHEMA_MISMATCH = 0x02
@@ -369,7 +333,7 @@ def _finalize_secure(frame: bytearray, key: bytes, sec_ts: int) -> bytes:
 
 # ----- Parseo de trama entrante -----
 
-def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
+def _decode_payload_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
     """Decodifica y valida una trama según frame-format.md §10 y §14.6.
     Devuelve un dict con los campos; incluye 'error' si algo no valida.
     Siempre incluye 'crc_ok' cuando la trama tiene longitud coherente.
@@ -509,10 +473,10 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
 
     elif frame_type == FRAME_HEARTBEAT:
         # v3.1: 4 B con tx_ms (aire acumulado del transmisor, duty cycle
-        # normativo). 0 B = legado v3.0, sin contador. El supernodo añade
+        # normativo). El supernodo añade
         # 2 B con su estado NB-IoT/MQTT (frame-format.md §6): nb_flags y csq.
-        if payload_length not in (0, 4, 6):
-            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 0, 4 o 6'
+        if payload_length not in (4, 6):
+            out['error'] = f'HEARTBEAT payload_length={payload_length}, esperado 4 o 6'
             return out
         if payload_length >= 4:
             out['tx_ms'] = struct.unpack_from('<I', payload, 0)[0]
@@ -554,9 +518,9 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
     elif frame_type == FRAME_MODBUS_DEBUG:
         # v3.2 (spec §15.1): dev_index + status + req_len + resp_len +
         # req + resp. Regla 8 de §10: los tamaños deben cuadrar.
-        if payload_length < 4:
+        if payload_length < 13:
             out['error'] = (f'MODBUS_DEBUG payload_length={payload_length}, '
-                            f'esperado >= 4')
+                            f'esperado >= 13')
             return out
         dev_index = payload[0]
         status_b  = payload[1]
@@ -632,7 +596,7 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
             out['error'] = 'FW_REPORT requiere 46 bytes'
             return out
         report_id, xfer, phase, cause, missing, total = struct.unpack_from('<IIBBHH', payload)
-        if not report_id or phase not in (1, 2, 3, 4) or cause > 17 or missing > total:
+        if not report_id or phase not in (1, 2, 3, 4) or cause > 18 or missing > total:
             out['error'] = 'FW_REPORT contiene valores inválidos'
             return out
         out.update(fw_report_id=report_id, fw_xfer=xfer, fw_phase=phase,
@@ -655,11 +619,11 @@ def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
         # v3.3 (spec §16.1): 24 B fijos con el motivo del último fallo de
         # radio, la causa del arranque, los arranques acumulados, las
         # recuperaciones por nivel y los contadores de radio.
-        if payload_length not in (25, 29):
+        if payload_length != 29:
             out['error'] = (f'NODE_HEALTH payload_length={payload_length}, '
-                            f'esperado 25 o 29')
+                            f'esperado 29')
             return out
-        out['hl_counters_since'] = struct.unpack_from('<I', payload, 25)[0] if payload_length >= 29 else 0
+        out['hl_counters_since'] = struct.unpack_from('<I', payload, 25)[0]
         out['hl_fault']        = payload[0]
         out['hl_fault_name']   = HEALTH_FAULT_NAMES.get(
             payload[0], f'unknown(0x{payload[0]:02X})')
@@ -729,17 +693,11 @@ def parse_catalog(data: bytes) -> dict:
 
     Formato (§13.2, strings con prefijo de longitud de 1 B):
       fw_version, node_name, n_reads, [id, name, unit]*, n_writes,
-      [id, name, unit]*, schemas (v3.7, opcional), class (v4.0, opcional)
+      [id, name, unit]*, schemas, class, escrituras, operaciones, ID y medidas.
 
-    `schemas` son las versiones del schema del config.json que el firmware del
-    nodo sabe cargar, separadas por comas. Va al final y es opcional: un nodo
-    con firmware anterior a v3.7 no lo manda, y entonces se devuelve cadena
-    vacía, que el visor interpreta como "no lo declara" y no como "ninguna".
-
-    `class` es un byte, 'A' o 'C' (§21): dice cuándo puede el gateway hablarle.
-    Igual de opcional y por el mismo motivo, y con el mismo criterio para el
-    valor ausente: 'C', que es lo que era todo nodo antes de que el campo
-    existiera y sigue siendo lo que son los nodos alimentados de red.
+    El contrato actual exige la declaración del config 3.3, la clase de
+    escucha, el ID del nodo y los descriptores de medidas. Un descriptor
+    incompleto no permite comprobar la huella ni configurar el equipo.
 
     Devuelve dict con 'fw_version', 'node_name', 'reads', 'writes', 'schemas'
     y 'class'; o dict con 'error' si el descriptor está malformado."""
@@ -765,6 +723,8 @@ def parse_catalog(data: bytes) -> dict:
         writes, off = read_entries(off)
 
         tail = modbus_command.catalog_tail(data, off, writes, reads)
+        if not tail['schemas'] or '3.3' not in tail['schemas'].split(',') or tail['catalog_node'] is None or any('slave_id' not in reading for reading in reads):
+            raise ValueError('El catálogo no declara el contrato y la identidad vigentes.')
         return dict(fw_version=fw,node_name=name,reads=reads,writes=writes,**tail)
     except ValueError as e:
         return {'error': str(e)}
@@ -775,8 +735,9 @@ def parse_catalog(data: bytes) -> dict:
 def _finalize(frame: bytearray, key: Optional[bytes] = None,
               sec_ts: int = 0) -> bytes:
     """Cierra una trama serializada en claro (cabecera + payload). Sin
-    clave: añade el CRC16 y devuelve (v2.1/v2.2 en claro). Con clave:
-    inserta el sobre v2.2, cifra, firma y añade el CRC (spec §14.2)."""
+    clave: añade el CRC16. Con clave: cifra la representación interna.
+    El servicio convierte esta representación al contrato de radio 4.0
+    antes de transmitir; no constituye otro formato admitido en el aire."""
     if key:
         return _finalize_secure(frame, key, sec_ts)
     crc = crc16_modbus(frame)
@@ -875,12 +836,9 @@ def build_quiet(start_epoch: int, duration_s: int, gw_seq: int,
                 sec_ts: int = 0) -> bytes:
     """Anuncia una ventana de silencio a toda la red (frame-format.md §19).
 
-    Es una trama propia y no un campo del beacon a propósito. El beacon tiene
-    un payload de tamaño fijo que los nodos validan, así que ensancharlo dejaría
-    a un nodo con firmware anterior descartando todos los beacons: perdería la
-    hora y el padre, y en 90 s se quedaría huérfano. Con un tipo nuevo, ese nodo
-    simplemente lo ignora, sigue transmitiendo y lo único que pasa es que
-    estorba un poco. Preferible un nodo que molesta a un nodo que se pierde.
+    La ventana es una operación independiente del anuncio periódico de red.
+    Un tipo propio permite comprobar y repetir su duración sin cambiar la
+    información de sincronización del beacon.
 
     La ventana se da como instante absoluto y no como "dentro de N segundos"
     porque los nodos comparten reloj (el beacon lleva la hora y desde v3.0 un
@@ -908,12 +866,12 @@ def build_quiet(start_epoch: int, duration_s: int, gw_seq: int,
 
 # ----- Difusión de firmware (frame-format.md §20) -----
 
-# Tamaño del fragmento de difusión. 212 y no 213 porque tiene que ser múltiplo
-# de cuatro: así el fragmento i cae en el desplazamiento 212·i, que está
+# Tamaño del fragmento de difusión. 160 bytes, múltiplo
+# de cuatro: así el fragmento i cae en el desplazamiento 160·i, que está
 # alineado, y el nodo puede escribirlo directamente aunque lleguen desordenados
 # (§20.1). El byte que se pierde es un 0,5 % del aire, y a cambio desaparece el
 # búfer de 4 kB que hoy hace falta para alinear.
-BCAST_FRAG_BYTES = 212
+BCAST_FRAG_BYTES = 160
 
 # Bloque de la corrección sistemática (§20.2): K originales y R mezclas.
 BCAST_K = 128
@@ -1157,15 +1115,8 @@ def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
     """
     if len(sha256) != 32:
         raise ValueError("sha256 debe ser de 32 bytes")
-    # `apply_at` a cero significa "ahora", que es el comportamiento de
-    # siempre: entonces la trama sale con los 38 bytes de v3.5 y un nodo
-    # anterior la entiende igual. Con hora, se añaden 4 bytes al final y el
-    # nodo guarda el config sin aplicarlo hasta ese instante (spec §17.7).
-    #
-    # Un campo y no un indicador aparte: dos datos podrían contradecirse
-    # ("inmediato" con una hora futura) y alguien tendría que decidir cuál
-    # gana, decisión que se olvida y se implementa distinta en cada lado.
-    largo = 38 if apply_at == 0 else 42
+    # La hora forma parte del contrato; cero significa aplicación inmediata.
+    largo = 42
     frame = bytearray(HEADER_BYTES + largo)
     frame[OFF_SCHEMA]      = SCHEMA_VERSION
     frame[OFF_NETWORK_ID]  = network_id
@@ -1180,8 +1131,7 @@ def build_config_commit(dest_id: int, hop_dst: int, xfer_id: int,
     struct.pack_into('<I', frame, OFF_PAYLOAD, xfer_id & 0xFFFFFFFF)
     struct.pack_into('<H', frame, OFF_PAYLOAD + 4, total_len & 0xFFFF)
     frame[OFF_PAYLOAD + 6:OFF_PAYLOAD + 38] = sha256
-    if apply_at:
-        struct.pack_into('<I', frame, OFF_PAYLOAD + 38, apply_at & 0xFFFFFFFF)
+    struct.pack_into('<I', frame, OFF_PAYLOAD + 38, apply_at & 0xFFFFFFFF)
     return _finalize(frame, key, sec_ts)
 
 
@@ -1271,3 +1221,84 @@ def build_modbus_write(dest_id, path, body, gw_seq, network_id, ttl, key=None, s
     frame[OFF_FRAME_TYPE]=FRAME_MODBUS_WRITE; frame[OFF_TTL]=ttl
     frame[OFF_PAYLOAD_LEN]=len(payload); frame[OFF_PAYLOAD:]=payload
     return _finalize(frame,key,sec_ts)
+
+
+IDENTITY_SCHEMA_VERSION = 0x40
+IDENTITY_HEADER_BYTES = 48
+IDENTITY_MAX_PAYLOAD = 184
+IDENTITY_OVERHEAD = 58
+
+
+def identity_plain(frame, key=None):
+    header_size = IDENTITY_HEADER_BYTES if frame[0] == IDENTITY_SCHEMA_VERSION else HEADER_BYTES
+    if len(frame) < header_size + 2 or crc16_modbus(frame[:-2]) != struct.unpack('<H',frame[-2:])[0]:
+        raise ValueError('CRC o longitud inválidos')
+    size = frame[OFF_PAYLOAD_LEN]
+    if len(frame) != header_size + size + 2 + (8 if key else 0):
+        raise ValueError('Longitud de trama inválida')
+    if not key:
+        return bytes(frame[header_size:-2]),0
+    sec_ts = struct.unpack_from('<I',frame,header_size)[0]
+    if header_size==IDENTITY_HEADER_BYTES:
+        nonce = bytes(frame[35:48])
+        aad = bytes(frame[:48])+frame[48:52]
+    else:
+        nonce=build_nonce(frame,sec_ts); aad=build_aad(frame,sec_ts)
+    return _aesccm(key).decrypt(nonce,bytes(frame[header_size+4:-2]),aad),sec_ts
+
+
+def identity_frame(frame, context, key=None, confirmed=None):
+    plain,sec_ts=identity_plain(frame,key)
+    if blocked_reason := __import__('identity').blocked(context.conn,255):
+        raise ValueError(blocked_reason)
+    dest=frame[OFF_DEST_ID]
+    if dest not in (0,255) and frame[OFF_FRAME_TYPE] in (0x13,0x15,0x17,0x1C,0x1F,0x20,0x21,0x23,0x28,0x2C):
+        if reason := __import__('identity').operations_blocked(context.conn,dest):
+            raise ValueError(reason)
+    destination=context.destination(dest)
+    if frame[OFF_FRAME_TYPE]==FRAME_ACK and confirmed:
+        plain=plain[:3]+struct.pack('<II',confirmed['boot_id'],confirmed.get('ts',0))
+    if len(plain)>IDENTITY_MAX_PAYLOAD:
+        raise ValueError('Payload demasiado grande para identidad física')
+    out=bytearray(frame[:11]); out[0]=IDENTITY_SCHEMA_VERSION; out[10]=len(plain)
+    boot,counter=context.nonce()
+    out+=bytes.fromhex(context.uid)+bytes.fromhex(destination)+bytes(8)+struct.pack('<I',context.boot)
+    out+=bytes.fromhex(context.uid)+struct.pack('<I',boot)+counter.to_bytes(3,'little')
+    if key:
+        sec=struct.pack('<I',sec_ts)
+        out+=sec+_aesccm(key).encrypt(bytes(out[35:48]),plain,bytes(out)+sec)
+    else:
+        out+=plain
+    out+=struct.pack('<H',crc16_modbus(out))
+    return bytes(out)
+
+
+def parse_frame(frame: bytes, key: Optional[bytes] = None) -> dict:
+    if not frame or frame[0]!=IDENTITY_SCHEMA_VERSION:
+        return {'error':'La trama no corresponde al protocolo de radio 4.0.'}
+    try:
+        plain,sec_ts=identity_plain(frame,key)
+        if len(plain)>(IDENTITY_MAX_PAYLOAD if key else 192):
+            raise ValueError('Payload de identidad demasiado grande')
+        metadata=dict(identity_verified=True,device_uid=frame[11:17].hex(),dest_uid=frame[17:23].hex(),
+                      catalog_tag=frame[23:31].hex(),boot_id=struct.unpack_from('<I',frame,31)[0],
+                      tx_uid=frame[35:41].hex(),tx_boot=struct.unpack_from('<I',frame,41)[0],
+                      tx_counter=int.from_bytes(frame[45:48],'little'))
+        from identity import valid_uid
+        if (not valid_uid(metadata['device_uid']) or not valid_uid(metadata['tx_uid']) or
+            not metadata['boot_id'] or not metadata['tx_boot'] or not metadata['tx_counter'] or
+            (frame[5] and not valid_uid(metadata['dest_uid'])) or
+            (not frame[5] and metadata['dest_uid']!='000000000000')):
+            raise ValueError('Identidad física incompleta')
+        body=plain
+        if frame[8]==FRAME_ACK:
+            if len(plain)!=11: raise ValueError('ACK sin identidad de muestra')
+            metadata.update(ack_boot=struct.unpack_from('<I',plain,3)[0],ack_ts=struct.unpack_from('<I',plain,7)[0])
+            body=plain[:3]
+        normalized=bytearray(frame[:11]); normalized[0]=SCHEMA_VERSION; normalized[10]=len(body)
+        normalized+=body; normalized+=struct.pack('<H',crc16_modbus(normalized))
+        parsed=_decode_payload_frame(bytes(normalized))
+        parsed.update(metadata,schema_version=IDENTITY_SCHEMA_VERSION,schema_str='4.0',sec_ts=sec_ts)
+        return parsed
+    except Exception as exc:
+        return dict(error=str(exc),identity_verified=False,mic_fail=bool(key))

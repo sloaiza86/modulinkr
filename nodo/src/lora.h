@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <mbedtls/ccm.h>
 #include "protocol.h"
+#include "device_identity.h"
 
 class LoraP2P {
 public:
@@ -31,6 +32,11 @@ public:
     // con security ON, además MIC verificado, payload DESCIFRADO y frescura
     // de tramas de control comprobada, frame-format.md §14.6).
     struct RxFrame {
+        deviceid::Stamp identity;
+        uint8_t dest_uid[6] = {};
+        uint8_t tx_uid[6] = {};
+        uint32_t tx_boot = 0;
+        uint32_t tx_counter = 0;
         uint8_t  network_id;
         uint8_t  hop_src;
         uint8_t  hop_dst;
@@ -71,6 +77,7 @@ public:
                uint8_t ttl);
 
     bool isReady() const { return initialized_; }
+    void setSampleIdentity(const deviceid::Stamp& stamp) { sample_identity_=stamp; sample_override_=true; }
 
     using TelemetryTxCallback = void (*)(uint16_t seq, uint8_t dest, uint32_t at_ms, bool sent);
     // Solo telemetría propia: DONE inicia el plazo de ACK y su guarda.
@@ -207,14 +214,14 @@ public:
     // dar tiempo a nada (observado en banco el 29-jul-2026).
     bool probeModule();
 
-    // Nivel 1: repite begin(), incluido ATZ, y reaplica los parámetros guardados.
+    // Nivel 1: recupera la UART y reaplica los parámetros guardados.
     bool reinitRadio();
 
-    // Nivel 2: repite el reset y la configuración sin duplicar ATZ en un intento.
+    // Nivel 2: solicita un reset comprobado y reaplica la configuración.
     bool resetModule();
 
-    // Reinicia la radio y detiene RX antes del reinicio OTA del ESP32.
-    // Devuelve false si no se confirma el estado, sin impedir el reinicio OTA.
+    // Detiene RX y confirma la respuesta AT antes del reinicio OTA del ESP32.
+    // Un resultado false impide seleccionar la nueva partición de arranque.
     bool prepareForRestart();
 
     // Da por buena la radio y reabre las ventanas de los dos detectores.
@@ -393,7 +400,7 @@ public:
 
     // La custodia devuelve el ACK por el vecino del último salto recibido.
     Status sendAck(uint8_t dest, uint16_t own_seq,
-                   uint16_t ack_seq, uint8_t status, uint8_t via = 0);
+                   uint16_t ack_seq, uint8_t status, uint8_t via = 0, uint32_t boot = 0, uint32_t ts = 0);
 
     // Lee la UART sin bloquear y acumula tramas entrantes válidas.
     // Llamar en cada vuelta del loop().
@@ -420,6 +427,8 @@ private:
     HardwareSerial* uart_ = nullptr;
     bool initialized_ = false;
 
+    deviceid::Stamp sample_identity_;
+    bool sample_override_ = false;
     uint8_t network_id_ = 0;
     uint8_t node_id_    = 0;
     uint8_t ttl_        = 1;
@@ -492,6 +501,12 @@ private:
     // Aplica la configuración de radio al módulo. La usan begin() y L2.
     bool applyRadioConfig();
     bool radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required = true);
+    bool synchronizeModule();
+    bool stopReception(const char* stage);
+    bool softReset();
+    int8_t work_mode_ = -1;
+    bool reset_attempted_ = false;
+    uint32_t last_reset_ms_ = 0;
 
     // Vacía la cola de transmisión contabilizando lo que se pierde.
     void discardTxQueue();
@@ -514,6 +529,7 @@ private:
     size_t   txq_head_           = 0;
     size_t   txq_count_          = 0;
     bool     tx_in_flight_       = false;
+    bool     tx_uncertain_       = false;
     uint32_t in_flight_at_ms_    = 0;  // millis() de la escritura en vuelo
     uint32_t in_flight_guard_ms_ = 0;  // margen antes de darla por perdida
     uint32_t tx_dropped_         = 0;  // encoladas descartadas (cola llena)
@@ -553,6 +569,7 @@ private:
     // Línea en construcción de la UART (eventos asíncronos del RAK3172).
     static constexpr size_t kLineMax = 600;
     char   line_[kLineMax];
+    bool   line_discard_ = false;
     size_t line_len_ = 0;
 
     // Ring buffer de tramas recibidas pendientes de leer por el llamante.
@@ -621,7 +638,7 @@ private:
                         uint8_t ttl,
                         const uint8_t* payload,
                         uint8_t payload_length,
-                        uint32_t sec_ts);
+                        uint32_t sec_ts, const RxFrame* identity = nullptr);
 
     // Emite AT+PSEND=<hex> sin bloquear (no espera el OK del módulo).
     // sendRaw guarda la trama para el reintento rápido de CAD; writePsend

@@ -33,6 +33,8 @@ import csv
 import io
 import logging
 import os
+import netstatus
+import re
 import time
 import hashlib
 import secrets
@@ -63,20 +65,20 @@ CSV_MAX_ROWS = 500_000
 
 router = APIRouter(prefix="/api/datos")
 
-QUARANTINE_REASONS = {"unknown_node", "no_channels", "length_mismatch"}
+QUARANTINE_REASONS = {"unknown_node", "no_channels", "length_mismatch", "identity_conflict"}
 QUARANTINE_DELETE_MAX = 200_000
 _quarantine_plans = {}
 _quarantine_plan_lock = threading.Lock()
 
 
 def _quarantine_can_delete(cur):
-    cur.execute("SELECT has_table_privilege(current_user, 'public.quarantine', 'DELETE')")
+    cur.execute("SELECT has_table_privilege(current_user, 'quarantine', 'DELETE')")
     return bool(cur.fetchone()[0]) and bool(os.environ.get("MODULINKR_WEB_USER", "").strip())
 
 
 def _quarantine_target(conn):
     params = conn.get_dsn_parameters()
-    return tuple(params.get(key) for key in ("host", "port", "dbname", "user"))
+    return tuple(params.get(key) for key in ("host", "port", "dbname", "user", "options"))
 
 
 def _quarantine_actor(request):
@@ -124,7 +126,7 @@ def preparar_borrado_cuarentena(body: dict, request: Request):
             if not _quarantine_can_delete(cur):
                 raise HTTPException(403, "El servidor no tiene habilitado el borrado de cuarentena")
             # Se conservan identificadores exactos: ninguna llegada posterior entra en el borrado.
-            cur.execute("SELECT q.quarantine_id, q.origin FROM public.quarantine q WHERE "
+            cur.execute("SELECT q.quarantine_id, q.origin FROM quarantine q WHERE "
                         + where + " ORDER BY q.quarantine_id LIMIT %s", (*params, QUARANTINE_DELETE_MAX + 1))
             rows = cur.fetchall()
             if len(rows) > QUARANTINE_DELETE_MAX:
@@ -169,7 +171,7 @@ def confirmar_borrado_cuarentena(body: dict, request: Request):
         with conn, conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '5s'")
             cur.execute("SET LOCAL lock_timeout = '2s'")
-            cur.execute("DELETE FROM public.quarantine WHERE quarantine_id = ANY(%s) RETURNING quarantine_id",
+            cur.execute("DELETE FROM quarantine WHERE quarantine_id = ANY(%s) RETURNING quarantine_id",
                         (plan["ids"],))
             deleted = len(cur.fetchall())
         LOG.info("event=quarantine.deleted scope=%s reviewed=%d deleted=%d", plan["scope"], len(plan["ids"]), deleted)
@@ -255,7 +257,13 @@ def _conn():
     if not PG_HOST:
         raise HTTPException(503, "MODULINKR_PG_HOST sin configurar")
     try:
+        with netstatus._conn() as local:
+            row=local.execute('SELECT uid FROM identity_bindings WHERE origin=255').fetchone()
+        if not row or not re.fullmatch(r'[0-9a-f]{12}',row[0]) or row[0]=='000000000000':
+            raise ValueError('No se pudo identificar el gateway para consultar sus datos. Comprueba que el servicio de comunicaciones esté activo.')
+        scope='ml_'+row[0]
         return psycopg2.connect(
+            options='-c search_path='+scope,
             host=PG_HOST, port=PG_PORT, dbname=PG_DB,
             user=PG_USER, password=PG_PASS,
             sslmode="require", connect_timeout=5)

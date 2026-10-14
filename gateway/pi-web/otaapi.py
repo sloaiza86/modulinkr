@@ -28,6 +28,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 import netstatus
+import identityapi
 import firmwaremeta
 
 LOG = logging.getLogger("modulinkr.web.ota")
@@ -44,8 +45,8 @@ APP_SHA = SERVICE_DIR / "nodo-app.bin.sha256"
 
 # Tamaño del fragmento de difusión y lo que le añade el protocolo (cabecera de
 # 11 B, CRC de 2 B, y el identificador y el índice que van en el payload).
-FRAG_BYTES    = 212
-FRAG_OVERHEAD = 19
+FRAG_BYTES    = 160
+FRAG_OVERHEAD = 64
 # Ciclo de trabajo de la sub-banda de EN 300 220-1 en la que emite el gateway.
 DUTY_LEGAL = 0.08
 
@@ -55,8 +56,6 @@ PROBE_CONFIG_READ  = 0x02
 PROBE_FIRMWARE     = 0x03
 PROBE_ESPERA_S     = 7.0
 
-
-PROBE_DESDE = (0, 0, 57)      # primera versión del nodo que sabe contestar
 
 CONFIG_ERRORS = {
     "lora_radio_unavailable": "No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.",
@@ -87,44 +86,17 @@ def _config_error(code: str, **extra) -> JSONResponse:
                         content={"code": code, "error": CONFIG_ERRORS[code], **extra})
 
 
-def _sabe_sondear(origin: int) -> bool:
-    """Si el firmware que corre ese nodo entiende el sondeo (§22).
-
-    Un nodo anterior no contesta, y sin este puente su silencio se leería como
-    "no disponible": el canal de configuración de ese nodo quedaría bloqueado
-    por haber añadido una comprobación pensada para protegerlo. Una red no se
-    actualiza entera de golpe, así que la que sí lo hace tiene que saber
-    convivir con la que todavía no.
-    """
-    try:
-        with _conn() as c:
-            fila = c.execute(
-                "SELECT fw_version FROM node_catalog WHERE origin_id = ?",
-                (origin,)).fetchone()
-        if fila is None or not fila[0]:
-            return False
-        nums = re.findall(r"\d+", fila[0].split("-")[0])
-        return tuple(int(x) for x in nums[:3]) >= PROBE_DESDE
-    except Exception:                          # noqa: BLE001
-        return False
-
-
 def _disponible(origin: int, para_que: int) -> tuple:
-    """Si se puede lanzar ahora una operación sobre ese nodo, y por qué no.
-
-    Se le pregunta al nodo cuando su firmware sabe contestar. Cuando no, se
-    cae al criterio antiguo, que es mirar cuándo se le oyó por última vez:
-    peor, porque no distingue "vivo" de "disponible", pero mejor que nada.
-    """
+    """Consulta la disponibilidad actual del nodo antes de encolar."""
     radio_error = _radio_error()
     if radio_error:
         return False, radio_error
-    if _sabe_sondear(origin):
-        return _sondear(origin, para_que)
-    callado = _callado_desde(origin)
-    if callado is None:
-        return True, ""
-    return False, "node_no_response"
+    with _conn() as c:
+        reason=__import__("identity").blocked(c,origin)
+    if reason:
+        CONFIG_ERRORS["identity_conflict"]=reason
+        return False,"identity_conflict"
+    return _sondear(origin, para_que)
 
 
 def _sondear(origin: int, para_que: int) -> tuple:
@@ -182,33 +154,6 @@ def _fmt_ago(segundos: float) -> str:
     if segundos < 5400:
         return f"{segundos / 60:.0f} min"
     return f"{segundos / 3600:.1f} h"
-
-
-def _callado_desde(origin: int) -> float | None:
-    """Segundos que lleva callado un nodo, o None si está dando señales.
-
-    Sirve para no aceptar una operación que no puede salir bien. Un timeout
-    tapa el síntoma: la petición se encola, se ejecuta cuando nadie la mira,
-    falla, y quien la pidió se encuentra el canal ocupado al volver. Es mejor
-    no aceptarla y decir por qué en el momento de pedirla.
-
-    El umbral es el mismo que usa la pantalla para pintar un nodo como caído,
-    para que no puedan contradecirse: si el visor lo da por vivo, aquí también.
-    """
-    try:
-        import netstatus
-        with _conn() as c:
-            fila = c.execute(
-                "SELECT last_seen FROM node_status WHERE origin = ?",
-                (origin,)).fetchone()
-            if fila is None or not fila[0]:
-                return None      # nodo desconocido: que decida el servicio
-            ahora = time.time()
-            callado = ahora - fila[0]
-            return callado if callado > netstatus._umbral_de(c, origin, ahora) \
-                else None
-    except Exception:                          # noqa: BLE001
-        return None              # ante la duda, no se estorba al operador
 
 
 _radio_cache: dict = {"t": 0.0, "sf": 7, "bw": 125}
@@ -315,6 +260,16 @@ def enviar(body: dict = Body(...)):
 
     try:
         with _conn() as c:
+            c.execute('BEGIN IMMEDIATE')
+            identityapi.require(c,origin)
+            bound=c.execute('SELECT uid FROM identity_bindings WHERE origin=?',(origin,)).fetchone()[0]
+            assigned=json.loads(config)
+            if assigned.get('node',{}).get('id')!=origin:
+                return JSONResponse(status_code=409,content={'error':'Para cambiar el identificador utiliza USB; las órdenes remotas conservan la asignación.'})
+            if assigned['node'].get('deployment_id') not in (None,'',identityapi.deployment(c)):
+                return JSONResponse(status_code=409,content={'error':'La configuración pertenece a otro despliegue.'})
+            assigned['node']['deployment_id']=identityapi.deployment(c)
+            config=json.dumps(assigned,ensure_ascii=False,separators=(',',':'))
             # Una transferencia a la vez por nodo: encolar otra mientras hay
             # una en vuelo dejaría dos configs compitiendo por el mismo nodo.
             fila = c.execute(
@@ -409,6 +364,7 @@ def leer_estado(id: int):
 def _firmware_nodes(available):
     nodes = netstatus.network_state().get('nodes', [])
     return [{"node_id": n['origin'], "name": n.get('name'),
+             'identity_blocked':n.get('identity_blocked'),
              "installed_version": n.get('fw_version'), "available_version": available,
              "comparison": firmwaremeta.comparison(n.get('fw_version'), available),
              "online": n.get('online', False),
@@ -441,6 +397,9 @@ def _firmware_install_status(c):
 
 
 def _firmware_guard(origin, available):
+    release = firmwaremeta.release_number(available)
+    if release is None or release < (0, 0, 82):
+        return JSONResponse(status_code=409, content={'error': 'La imagen no admite la identidad física de esta red. Compila y empaqueta el firmware 0.0.82 o posterior.'})
     error = _radio_error()
     if error:
         return _config_error(error)
@@ -883,7 +842,7 @@ def firmware_seleccion(body: dict = Body(...)):
         return _config_error(error)
     if body.get('expected_version') != info['version']:
         return JSONResponse(status_code=409, content={'error': 'El firmware disponible ha cambiado. Recarga la página y comprueba la versión.'})
-    eligible = {n['node_id'] for n in info['nodes'] if n['online'] and n['comparison'] == 'different'}
+    eligible = {n['node_id'] for n in info['nodes'] if n['online'] and n['comparison'] == 'different' and not n.get('identity_blocked')}
     if not set(origins) <= eligible:
         return JSONResponse(status_code=409, content={'error': 'La selección ha cambiado: comprueba la conexión y la versión de los nodos.'})
     try:
@@ -1072,7 +1031,8 @@ def firmware_difusion():
                   12: 'No se pudo confirmar la imagen de arranque', 13: 'Error al leer la memoria flash',
                   14: 'No se pudo calcular el hash', 15: 'Imagen verificada',
                   16: 'Arrancó la imagen anterior; la nueva no quedó activa',
-                  17: 'La imagen nueva no logró registrarse en la red durante la prueba'}
+                  17: 'La imagen nueva no logró registrarse en la red durante la prueba',
+                  18: 'Instalación cancelada: la radio no confirmó que estaba preparada para reiniciar. La imagen recibida se conserva.'}
         phases = {1: 'Recepción', 2: 'Verificación', 3: 'Instalación', 4: 'Arranque'}
         shown = []
         for node in nodes:
@@ -1121,7 +1081,12 @@ def firmware_difusion():
             _ota_project_node(c, node, job, report, active, busy_install)
     radio_available = not bool(_radio_error())
     for node in nodes:
-        node['can_send'] = node['can_send'] and radio_available
+        with _conn() as c:
+            identity_reason=__import__('identity').blocked(c,node['node_id'])
+        node['identity_blocked']=identity_reason
+        node['can_send'] = node['can_send'] and radio_available and not identity_reason
+        node['can_install'] = node['can_install'] and not identity_reason
+        if identity_reason: node['summary']=identity_reason
         node['can_install'] = node['can_install'] and radio_available
         node['can_check'] = node['can_check'] and radio_available
         if not radio_available:

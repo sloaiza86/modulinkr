@@ -245,7 +245,7 @@ bool verify() {
     return std::memcmp(calc, sha_, sizeof(calc)) == 0;
 }
 
-Result install(uint32_t xfer, const uint8_t sha[32]) {
+Result install(uint32_t xfer, const uint8_t sha[32], bool (*prepare_restart)()) {
     auto fail = [&](Result result, Cause cause) {
         record(xfer,sha,Phase::INSTALL,cause);
         return result;
@@ -257,6 +257,8 @@ Result install(uint32_t xfer, const uint8_t sha[32]) {
     // Se reverifica contra la flash aunque ya se hiciera al completar: entre
     // una cosa y la otra pueden haber pasado horas y un reinicio.
     if (!verify()) return fail(Result::SHA_MISMATCH,verify_cause_);
+    if (prepare_restart == nullptr || !prepare_restart())
+        return fail(Result::RADIO_NOT_READY,Cause::RADIO_NOT_READY);
     strncpy(boot_target_,part_->label,sizeof(boot_target_)-1);
     if (!record(xfer,sha,Phase::BOOT,Cause::INSTALLING))
         return fail(Result::SET_FAILED,Cause::STORAGE);

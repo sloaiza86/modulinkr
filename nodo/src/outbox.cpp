@@ -4,19 +4,20 @@
 
 #include <LittleFS.h>
 #include <cstring>
+#include <cstdio>
 
 namespace {
 
 constexpr const char* kPath    = "/outbox.bin";
 constexpr const char* kTmpPath = "/outbox.tmp";
-// MOB2 añade el recorrido. La lectura conserva compatibilidad con MOB1.
-constexpr uint8_t kMagic[4] = {'M', 'O', 'B', '2'};
+// MOB3 conserva equipo, sesión y catálogo. Los formatos anteriores se archivan.
+constexpr uint8_t kMagic[4] = {'M', 'O', 'B', '3'};
 
 }  // namespace
 
 bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
                   const uint8_t* st, uint8_t n_values, uint32_t capture_ms,
-                  uint32_t ts, bool ts_fixed, const uint8_t* path, uint8_t path_len, uint32_t path_at) {
+                  uint32_t ts, bool ts_fixed, const uint8_t* path, uint8_t path_len, uint32_t path_at, const deviceid::Stamp* identity) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     Entry* slot = nullptr;
@@ -42,6 +43,7 @@ bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
     slot->in_use     = true;
     slot->in_flight  = false;  // muestra nueva: aún no va en ningún batch
     slot->origin     = origin;
+    slot->identity = identity ? *identity : origin==deviceid::address() ? deviceid::own() : deviceid::Stamp{};
     slot->seq        = seq;
     slot->capture_ms = capture_ms;
     slot->ts         = ts;
@@ -58,9 +60,9 @@ bool Outbox::push(uint8_t origin, uint16_t seq, const float* values,
     return had_room;
 }
 
-bool Outbox::remove(uint8_t origin, uint16_t seq) {
+bool Outbox::remove(uint8_t origin, uint16_t seq, uint32_t boot, uint32_t ts) {
     for (auto& e : entries_) {
-        if (e.in_use && e.origin == origin && e.seq == seq) {
+        if (e.in_use && e.origin == origin && e.seq == seq && (!boot || e.identity.boot==boot) && (!ts || e.ts==ts)) {
             e.in_use = false;
             count_--;
             save();
@@ -138,6 +140,7 @@ void Outbox::save() {
         f.write(&e.path_len,1);
         f.write(e.path,e.path_len);
         f.write(reinterpret_cast<const uint8_t*>(&e.path_at),4);
+        f.write(e.identity.uid,6); f.write(reinterpret_cast<const uint8_t*>(&e.identity.boot),4); f.write(e.identity.catalog,8);
     }
     f.close();
     LittleFS.rename(kTmpPath, kPath);
@@ -150,13 +153,22 @@ void Outbox::begin(uint32_t now_ms) {
 
     uint8_t cab[5] = {0};
     if (f.read(cab, sizeof(cab)) != sizeof(cab) ||
-        (memcmp(cab, kMagic, 3) != 0 || (cab[3] != '1' && cab[3] != '2'))) {
+        (memcmp(cab, kMagic, 3) != 0 || (cab[3] != '1' && cab[3] != '2' && cab[3] != '3'))) {
         f.close();
         cargando_ = false;
         save();          // formato desconocido: se reescribe vacío
         return;
     }
+    if (cab[3]!='3') {
+        f.close();
+        char archive[48]; snprintf(archive,sizeof(archive),"/outbox-legacy-%lu.bin",static_cast<unsigned long>(deviceid::own().boot));
+        if (LittleFS.exists(archive) || !LittleFS.rename(kPath,archive)) { cargando_=false; return; }
+        cargando_=false;
+        save();
+        return;
+    }
     const uint8_t n = cab[4];
+    bool invalid_identity=false;
     for (uint8_t i = 0; i < n && i < kCapacity; ++i) {
         uint8_t origin = 0, fijado = 0, n_values = 0;
         uint16_t seq = 0;
@@ -178,15 +190,25 @@ void Outbox::begin(uint32_t now_ms) {
         // que sí es la que importa y sí se guarda.
         uint8_t path_len=0, path[routing::kMaxPath]={};
         uint32_t path_at=0;
-        if (cab[3]=='2') {
+        {
             if (f.read(&path_len,1)!=1 || path_len>routing::kMaxPath) break;
             if (f.read(path,path_len)!=path_len) break;
             if (f.read(reinterpret_cast<uint8_t*>(&path_at),4)!=4) break;
         }
+        deviceid::Stamp stamp;
+        if (f.read(stamp.uid,6)!=6 ||
+            f.read(reinterpret_cast<uint8_t*>(&stamp.boot),4)!=4 || f.read(stamp.catalog,8)!=8) break;
+        uint8_t uid_present=0;
+        for (const uint8_t byte : stamp.uid) uid_present |= byte;
+        if (!stamp.boot || !uid_present) { invalid_identity=true; continue; }
         push(origin, seq, valores, st, n_values, now_ms + i, ts, fijado != 0,
-             path,path_len,path_at);
+             path,path_len,path_at,&stamp);
     }
     f.close();
+    if (invalid_identity) {
+        char archive[48]; snprintf(archive,sizeof(archive),"/outbox-legacy-%lu.bin",static_cast<unsigned long>(deviceid::own().boot));
+        if (LittleFS.exists(archive) || !LittleFS.rename(kPath,archive)) { cargando_=false; return; }
+    }
     // Y se vuelve a escribir una sola vez, ya con la memoria montada: deja el
     // archivo exactamente igual que ella aunque la lectura se haya truncado a
     // media entrada.

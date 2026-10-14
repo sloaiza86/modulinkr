@@ -214,10 +214,7 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     // identidad y en el catálogo del registro, para que quien envía un config
     // pueda comprobarlo antes de gastar el aire.
     //
-    // Se aceptan varias porque los cambios de estructura del JSON son
-    // opcionales hacia atrás (node-config.md §1: 3.1 no cambió estructura,
-    // 3.2 añadió modbus.debug booleano, 3.3 lo amplía a un enum aceptando
-    // también el booleano).
+    // El contrato vigente del proyecto es único antes de la publicación.
     const char* schema = doc["schema_version"] | "";
     if (!schemaSoportado(schema)) {
         // El mensaje dice las dos versiones porque viaja en el CONFIG_RESULT
@@ -235,6 +232,13 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     const int nid = node["id"] | 0;
     if (nid < 1 || nid > 254) return fail(err, err_len, "node.id out of range 1-254 (rule 2)");
     c.node_id = static_cast<uint8_t>(nid);
+    const char* deployment = node["deployment_id"] | "";
+    if (*deployment) {
+        if (strlen(deployment)!=12 || !strcmp(deployment,"000000000000")) return fail(err,err_len,"node.deployment_id invalid");
+        for (size_t i=0;i<12;++i) if (!((deployment[i]>='0'&&deployment[i]<='9') ||
+            (deployment[i]>='a'&&deployment[i]<='f'))) return fail(err,err_len,"node.deployment_id invalid");
+    }
+    copyStr(c.deployment_id,sizeof(c.deployment_id),deployment,12);
     const char* ntype = node["type"] | "";
     if (strcmp(ntype, "node") == 0) {
         c.super_node = false;
@@ -245,9 +249,8 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     }
     copyStr(c.node_name, sizeof(c.node_name), node["name"] | "(unnamed)", 32);
 
-    // node.class es opcional y por defecto 'C', que es lo que son todos los
-    // nodos de este despliegue. Ausente no es un error: un config anterior a
-    // v4.0 describe un nodo alimentado igual que uno nuevo.
+    // La clase C es el valor predeterminado para escucha continua.
+    // La clase A se selecciona explícitamente para limitar la bajada.
     const char* nclass = node["class"] | "C";
     if (strcmp(nclass, "C") == 0 || strcmp(nclass, "c") == 0) {
         c.node_class = 'C';
@@ -372,27 +375,6 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
         // Autenticación MQTT (v2.3, opcional; default sin credenciales).
         copyStr(c.mqtt_user, sizeof(c.mqtt_user), nb["mqtt_user"] | "", 32);
         copyStr(c.mqtt_pass, sizeof(c.mqtt_pass), nb["mqtt_pass"] | "", 32);
-        // topic_telemetry con {node_id} sustituido (spec §4.3).
-        const char* tpl = nb["topic_telemetry"] | (const char*)nullptr;
-        if (tpl == nullptr) return fail(err, err_len, "nbiot.topic_telemetry missing");
-        {
-            char idbuf[4];
-            snprintf(idbuf, sizeof(idbuf), "%u", c.node_id);
-            const char* ph = strstr(tpl, "{node_id}");
-            if (ph == nullptr) {
-                if (!copyStr(c.topic_batch, sizeof(c.topic_batch), tpl, sizeof(c.topic_batch) - 1)) {
-                    return fail(err, err_len, "nbiot.topic_telemetry too long");
-                }
-            } else {
-                const size_t pre = static_cast<size_t>(ph - tpl);
-                const int n = snprintf(c.topic_batch, sizeof(c.topic_batch), "%.*s%s%s",
-                                       static_cast<int>(pre), tpl, idbuf,
-                                       ph + strlen("{node_id}"));
-                if (n <= 0 || n >= static_cast<int>(sizeof(c.topic_batch))) {
-                    return fail(err, err_len, "nbiot.topic_telemetry too long");
-                }
-            }
-        }
         if (nb["relay_enabled"].isNull() || nb["relay_queue_max"].isNull()) {
             return fail(err, err_len, "nbiot block incomplete (rule 14)");
         }
@@ -418,14 +400,10 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
     c.parity = par[0];
     c.stopbits = mb["stopbits"] | 0;
     if (c.stopbits != 1 && c.stopbits != 2) return fail(err, err_len, "modbus.stopbits invalid");
-    // modbus.debug (v3.3): enum de 5 valores, con compatibilidad del
-    // booleano v3.2 (true=errors_last, false=off). Ausente = off.
+    // Se acepta el modo de diagnóstico del contrato vigente.
     JsonVariantConst dbg = mb["debug"];
     if (dbg.isNull()) {
         c.modbus_debug = cfg::ModbusDebug::OFF;
-    } else if (dbg.is<bool>()) {
-        c.modbus_debug = dbg.as<bool>() ? cfg::ModbusDebug::ERRORS_LAST
-                                        : cfg::ModbusDebug::OFF;
     } else if (dbg.is<const char*>()) {
         const char* s = dbg.as<const char*>();
         if      (strcmp(s, "off")         == 0) c.modbus_debug = cfg::ModbusDebug::OFF;
@@ -435,7 +413,7 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
         else if (strcmp(s, "all_each")    == 0) c.modbus_debug = cfg::ModbusDebug::ALL_EACH;
         else return fail(err, err_len, "modbus.debug invalid (off/errors_last/errors_each/all_last/all_each)");
     } else {
-        return fail(err, err_len, "modbus.debug invalid (expected boolean or string)");
+        return fail(err, err_len, "modbus.debug invalid (expected string)");
     }
 
     JsonArrayConst devices = mb["devices"];
@@ -472,9 +450,11 @@ bool load(const char* json_text, Config& c, char* err, size_t err_len) {
             }
         }
         d.slave_id = static_cast<uint8_t>(des_id);
+        for (uint8_t i=0;i<c.n_devices;++i) {
+            if (c.devices[i].slave_id==d.slave_id) return fail(err,err_len,"duplicate Modbus slave address on the same bus");
+        }
 
-        // v2.3: poll_interval_ms desaparece (un solo timer, el de envío).
-        // Si aparece en el JSON se ignora sin error (compatibilidad).
+        if (jd.containsKey("poll_interval_ms")) return fail(err,err_len,"modbus poll_interval_ms is not part of the configuration contract");
 
         // read_mode / inter_read_ms (v2.3, ambos opcionales). Ausente =
         // "grouped" con 250 ms, idéntico al comportamiento clásico.

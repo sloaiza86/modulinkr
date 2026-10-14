@@ -18,7 +18,7 @@ from buffer import GatewayBuffer
 
 source = ast.parse((SERVICE / 'gateway_service.py').read_text())
 cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'GatewayService')
-names = {'ota_check_tick','ota_auto_tick','_ota_check_finish','_ota_check_detail','_bcast_gap_s', '_install_image_ready', '_install_image_map', 'bcast_install_tick',
+names = {'_identity_operations_blocked','ota_check_tick','ota_auto_tick','_ota_check_finish','_ota_check_detail','_bcast_gap_s', '_install_image_ready', '_install_image_map', 'bcast_install_tick',
          '_bcast_install_caducada', 'bcast_on_result', 'bcast_difusion_install_tick',
          'bcast_difusion_result', '_bcast_nodos', 'bcast_tick', 'bcast_start',
          'bcast_on_status', '_bcast_cerrar_pasada', 'bcast_on_map', 'firmware_report'}
@@ -44,7 +44,7 @@ class InstallTests(unittest.TestCase):
             setattr(self.gw, name, types.MethodType(namespace[name], self.gw))
         self.buf.conn.execute("""INSERT INTO fw_bcast
             (id,xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,updated_ts,target)
-            VALUES(1,123,'image',?,636,?,128,10,'install_req',?,?,1)""", (VERSION,'00'*32,time.time(),time.time()))
+            VALUES(1,123,'image',?,480,?,128,10,'install_req',?,?,1)""", (VERSION,'00'*32,time.time(),time.time()))
         self.buf.conn.commit()
 
     def auto_ready(self):
@@ -91,7 +91,7 @@ class InstallTests(unittest.TestCase):
         self.gw._bcast_inst_chk = 10
         self.buf.conn.execute("""INSERT INTO fw_bcast
             (id,xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target)
-            VALUES(2,123,'image',?,636,?,128,10,'offering',?,2)""",(VERSION,'00'*32,time.time()))
+            VALUES(2,123,'image',?,480,?,128,10,'offering',?,2)""",(VERSION,'00'*32,time.time()))
         self.buf.conn.commit()
         started=[]
         self.gw.bcast_start=lambda op,now: started.append(op['id'])
@@ -115,15 +115,15 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.buf.conn.execute('SELECT result FROM fw_check').fetchone()[0],'verification_pending')
 
     def test_check_retries_preserve_partial_maps_and_reject_malformed_parts(self):
-        self.buf.conn.execute('UPDATE fw_bcast SET total_len=?',(2649*212,));self.buf.conn.commit()
+        self.buf.conn.execute('UPDATE fw_bcast SET total_len=?',(1989*160,));self.buf.conn.commit()
         self.gw.bcast_install_tick(10)
         def part(index, data, count=2):
             self.gw._install_image_map({'origin_id':1,'payload':(123).to_bytes(4,'little')+bytes([index,count])+data})
         part(0,b'\xff',1)
         self.assertEqual(self.gw._install_image_checks[(1,1)]['parts'],{})
-        part(0,b'\xff'*212)
+        part(0,b'\xff'*160)
         self.gw.bcast_install_tick(41)
-        part(1,b'\xff'*120)
+        part(1,b'\xff'*89)
         self.gw.bcast_install_tick(43)
         self.assertEqual(self.sent[-1][protocol.OFF_FRAME_TYPE],protocol.FRAME_FW_INSTALL)
 
@@ -171,6 +171,18 @@ class InstallTests(unittest.TestCase):
             fw_phase=4,fw_cause=12,fw_missing=0,fw_total=0))
         self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast').fetchone()[0],'failed')
 
+    def test_radio_not_ready_preserves_map_and_closes_attempt_with_reason(self):
+        self.buf.bcast_map_set(1,1,b'\x07',0)
+        self.buf.bcast_state(1,'installing')
+        self.gw.firmware_report(dict(origin_id=1,fw_report_id=12,fw_xfer=123,fw_sha256='00'*32,
+            fw_phase=3,fw_cause=18,fw_missing=0,fw_total=0))
+        state, detail = self.buf.conn.execute('SELECT state,detail FROM fw_bcast').fetchone()
+        self.assertEqual(state,'failed')
+        self.assertIn('radio no confirmó',detail)
+        self.assertIn('conserva la imagen',detail)
+        self.assertEqual(self.buf.conn.execute('SELECT missing FROM fw_bcast_map').fetchone()[0],0)
+        self.assertEqual(self.buf.conn.execute('SELECT cause FROM fw_report').fetchone()[0],18)
+
     def test_queue_waits_until_new_build_is_observed(self):
         self.auto_ready();self.gw.bcast_install_tick(10);self.reply();self.gw.bcast_install_tick(12)
         self.assertTrue(self.buf.ota_blocks_radio())
@@ -204,7 +216,7 @@ class InstallTests(unittest.TestCase):
     def test_gap_reserves_receive_window_at_each_radio_speed(self):
         for sf,bw in [(7,125),(7,250),(9,125),(12,125)]:
             self.gw.sf, self.gw.bw_khz = sf,bw
-            toa = protocol.toa_ms(protocol.SEC_OVERHEAD+6+212,sf,bw)
+            toa = protocol.toa_ms(protocol.SEC_OVERHEAD+6+160,sf,bw)
             gap = self.gw._bcast_gap_s(toa)
             self.assertGreaterEqual(gap, 2*toa/1000)
             self.assertGreaterEqual(gap-toa/1000,
@@ -214,7 +226,7 @@ class InstallTests(unittest.TestCase):
         self.gw._fw_en_ventana = lambda op: True
         self.gw.aire_libre = self.gw.eco_libre_ms = 0
         self.gw.duty = types.SimpleNamespace(limit_ms=10000, fits=lambda *a,**k: True)
-        self.gw._bcast_payload = lambda i: bytes(212)
+        self.gw._bcast_payload = lambda i: bytes(160)
         self.gw.bcast = {"op":{"id":1,"state":"repairing","pass_no":1,"xfer":123},
             "cola":[0,1,2],"repair_total":3,"n_orig":3,"next_ms":0,"toa_ms":364,
             "gap_s":0.8,"dest":1,"hop":1}
@@ -234,7 +246,7 @@ class InstallTests(unittest.TestCase):
         self.gw.bcast_tick(22)
         detail = self.buf.conn.execute('SELECT detail FROM fw_bcast WHERE id=1').fetchone()[0]
         self.assertIn('reenviados 2 de 3', detail)
-        self.gw.bcast['op'].update(state='sending',total_len=636)
+        self.gw.bcast['op'].update(state='sending',total_len=480)
         self.gw.bcast['budget_waiting'] = True
         self.gw.bcast['next_ms'] = 0
         self.gw.bcast_tick(24)
@@ -296,7 +308,7 @@ class InstallTests(unittest.TestCase):
 
     def test_initial_map_resumes_only_missing_without_consuming_pass(self):
         self.gw._bcast_balance = lambda now: None
-        self.gw.bcast = {'op': {'id':1,'pass_no':0,'target':1,'total_len':636},
+        self.gw.bcast = {'op': {'id':1,'pass_no':0,'target':1,'total_len':480},
             'n_orig':3,'consulta_inicial':True,'preguntados':[1]}
         self.buf.bcast_map_set(1,1,b'\x05',1)
         self.gw._bcast_cerrar_pasada(10)
@@ -308,7 +320,7 @@ class InstallTests(unittest.TestCase):
             self.buf.bcast_maps_clear(1)
             self.gw._bcast_balance = lambda now: None
             self.gw._bcast_cola_completa = lambda: [0,1,2,3]
-            self.gw.bcast = {'op': {'id':1,'pass_no':0,'target':1,'total_len':636},
+            self.gw.bcast = {'op': {'id':1,'pass_no':0,'target':1,'total_len':480},
                 'n_orig':3,'consulta_inicial':True,'preguntados':[1],'rondas':2}
             if not absent: self.buf.bcast_map_set(1,1,b'\x00',3)
             self.gw._bcast_cerrar_pasada(10)
@@ -318,7 +330,7 @@ class InstallTests(unittest.TestCase):
     def test_repair_slows_with_high_losses_and_respects_fixed_gap(self):
         for automatic, expected in ((True, 0.6), (False, 0.4)):
             self.gw._bcast_balance=lambda now: None
-            self.gw.bcast={'op':{'id':1,'pass_no':0,'target':1,'total_len':636},
+            self.gw.bcast={'op':{'id':1,'pass_no':0,'target':1,'total_len':480},
                 'n_orig':3,'preguntados':[1],'sent_originals':3,
                 'gap_s':0.4,'base_gap_s':0.4,'pace_auto':automatic}
             self.buf.bcast_map_set(1,1,b'\x01',2)
@@ -328,7 +340,7 @@ class InstallTests(unittest.TestCase):
 
     def test_report_wire_format_and_validation(self):
         for key in (None,bytes(range(16))):
-            payload=struct.pack('<IIBBHH',17,123,1,6,5,2648)+bytes(range(32))
+            payload=struct.pack('<IIBBHH',17,123,3,18,0,0)+bytes(range(32))
             frame=bytearray(protocol.HEADER_BYTES+len(payload))
             frame[protocol.OFF_SCHEMA]=protocol.SCHEMA_VERSION
             frame[protocol.OFF_NETWORK_ID]=1
@@ -337,12 +349,13 @@ class InstallTests(unittest.TestCase):
             frame[protocol.OFF_FRAME_TYPE]=protocol.FRAME_FW_REPORT
             frame[protocol.OFF_PAYLOAD_LEN]=len(payload)
             frame[protocol.OFF_PAYLOAD:]=payload
-            parsed=protocol.parse_frame(protocol._finalize(frame,key,1234),key)
+            parsed=protocol._decode_payload_frame(protocol._finalize(frame,key,1234),key)
             self.assertNotIn('error',parsed)
-            self.assertEqual(parsed['fw_missing'],5)
+            self.assertEqual(parsed['fw_missing'],0)
+            self.assertEqual(parsed['fw_cause'],18)
             self.assertEqual(parsed['fw_sha256'],bytes(range(32)).hex())
-        frame[protocol.OFF_PAYLOAD+8]=99
-        self.assertIn('error',protocol.parse_frame(protocol._finalize(frame,None,0)))
+        frame[protocol.OFF_PAYLOAD+9]=19
+        self.assertIn('error',protocol._decode_payload_frame(protocol._finalize(frame,None,0)))
 
     def test_report_is_persisted_and_acknowledged_even_when_repeated(self):
         report = dict(origin_id=1,fw_report_id=11,fw_xfer=123,fw_sha256='00'*32,
@@ -426,7 +439,7 @@ class InstallTests(unittest.TestCase):
     def test_verdict_must_identify_requested_build(self):
         self.gw.bcast_install_tick(10); self.reply(); self.gw.bcast_install_tick(12)
         self.gw.bcast_on_result({'origin_id':1, 'fw_xfer':0, 'fw_status':protocol.FW_CONFIRMED, 'fw_detail':'0.0.58-difusion-red'})
-        self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast').fetchone()[0], 'failed')
+        self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast').fetchone()[0], 'installing')
 
     def test_broadcast_install_uses_same_fresh_check(self):
         self.buf.conn.execute("UPDATE fw_bcast SET target=NULL,state='ready'")
@@ -434,6 +447,9 @@ class InstallTests(unittest.TestCase):
         self.gw.bcast_difusion_install_tick(10); self.reply(); self.gw.bcast_difusion_install_tick(12)
         self.assertEqual(self.sent[-1][protocol.OFF_FRAME_TYPE], protocol.FRAME_FW_INSTALL)
         self.gw.bcast_difusion_result({'origin_id':1,'fw_status':protocol.FW_CONFIRMED,'fw_detail':VERSION})
+        self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast_install').fetchone()[0], 'installing')
+        self.gw.firmware_report(dict(origin_id=1,fw_report_id=21,fw_xfer=123,fw_sha256='00'*32,
+            fw_phase=4,fw_cause=0,fw_missing=0,fw_total=3))
         self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast_install').fetchone()[0], 'done')
 
     def test_cancel_is_processed_before_old_schedule_window(self):

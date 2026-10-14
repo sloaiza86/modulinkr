@@ -1,5 +1,6 @@
 """Ejecución de las órdenes de mantenimiento de nodos por LoRa."""
 import protocol
+import identity
 
 ACTIVE = ('queued', 'sent', 'accepted')
 
@@ -12,9 +13,12 @@ def tick(service, now):
     if not row or now - row[4] < 10:
         return
     request_id, origin, action, expires, _ = row
-    service._tx(protocol.build_node_maintenance(origin, service._config_hop(origin),
+    if getattr(service,'identity',None) and identity.operations_blocked(c,origin):
+        c.execute("UPDATE node_maintenance SET state='failed',detail='Conflicto de identidad.' WHERE id=?",(request_id,)); c.commit(); return
+    sent=service._tx(protocol.build_node_maintenance(origin, service._config_hop(origin),
         request_id, action, expires, service._next_gw_seq(), service.net_id,
         service.max_ttl, service.sec_key, service._gw_sec_ts()))
+    if sent is False: return
     c.execute("UPDATE node_maintenance SET state=CASE WHEN state='queued' THEN 'sent' ELSE state END, sent_at=?, attempts=attempts+1 WHERE id=?", (now, request_id))
     c.commit()
 

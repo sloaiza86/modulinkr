@@ -29,6 +29,7 @@ import glob
 import json
 import logging
 import firmwaremeta
+import identityapi
 import os
 import subprocess
 import threading
@@ -55,7 +56,6 @@ SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
 FLASH_NODO_SH = SERVICE_DIR / "flash_nodo.sh"
 GET_NET_SH = SERVICE_DIR / "get_net.sh"
 NODO_BIN = SERVICE_DIR / "nodo.bin"
-NODO_VER = SERVICE_DIR / "nodo.bin.version"
 FLASH_TIMEOUT_S = 180   # esptool a 460800 sobre ESP32 clásico: margen amplio
 
 # Firmware que el nodo anuncia en CFG.HELLO (main.cpp kFirmwareName): sirve
@@ -318,6 +318,10 @@ async def subir(request: Request):
     try:
         with _open(port) as ser:
             ident = _hello(ser)
+            config_text=identityapi.prepare(config_text,ident.get('device_uid'))
+            payload=config_text.encode('utf-8')
+            if len(payload)>MAX_CONFIG_LEN: return _err(400,'Configuración demasiado grande.')
+            digest=hashlib.sha256(payload).hexdigest()
             _send(ser, f"CFG.PUT {len(payload)} {digest}")
             resp = _read_response(ser, "CFG:READY")
             if resp != "CFG:READY":
@@ -365,15 +369,9 @@ def firmware_info():
         info = {"size": st.st_size,
                 "mtime": time.strftime("%Y-%m-%d %H:%M",
                                        time.localtime(st.st_mtime))}
-    version = None
-    if NODO_VER.is_file():
-        try:
-            version = NODO_VER.read_text(encoding="utf-8").strip() or None
-        except OSError:
-            version = None
     return {"bin": info, "version": firmwaremeta.image_version(NODO_BIN),
             "release_notes": firmwaremeta.release_notes("node", firmwaremeta.image_version(NODO_BIN)),
-            "legacy_version": version, "fw_name": NODE_FW_NAME,
+            "fw_name": NODE_FW_NAME,
             "flash_ready": FLASH_NODO_SH.is_file()}
 
 
@@ -406,8 +404,8 @@ def red_params():
         except ValueError:
             return None
     # Región y frecuencia: fuente de verdad en gateway.env desde el camino
-    # B (editables por la página de red). Si no están (Pi anterior a la
-    # migración), se conservan los valores de despliegue de web.env.
+    # B (editables por la página de red). web.env conserva los valores de
+    # puesta en marcha cuando gateway.env no declara esos parámetros.
     if env.get("MODULINKR_LORA_REGION"):
         out["region"] = env["MODULINKR_LORA_REGION"]
     _freq = _int("MODULINKR_LORA_FREQ_HZ")
@@ -442,6 +440,9 @@ def nodo_bin():
     conservando el config.json del nodo."""
     if not NODO_BIN.is_file():
         return _err(404, "no hay nodo.bin en el gateway")
+    release=firmwaremeta.release_number(firmwaremeta.image_version(NODO_BIN))
+    if release is None or release<(0,0,82):
+        return _err(409,'La imagen no admite la identidad física. Compila y empaqueta 0.0.82 o posterior.')
     return FileResponse(str(NODO_BIN), media_type="application/octet-stream",
                         filename="nodo.bin", headers={
                             "X-Modulinkr-Firmware-Version": firmwaremeta.image_version(NODO_BIN) or "unknown",
@@ -474,6 +475,8 @@ async def flash(request: Request):
         available = firmwaremeta.image_version(NODO_BIN)
         if not available:
             return _err(409, "No se puede identificar el firmware disponible. Vuelve a empaquetarlo.")
+        if (firmwaremeta.release_number(available) or (0,0,0))<(0,0,82):
+            return _err(409,'La imagen no admite la identidad física. Compila y empaqueta 0.0.82 o posterior.')
         if body.get('expected_version') != available:
             return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
         try:

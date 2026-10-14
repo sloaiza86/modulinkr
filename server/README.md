@@ -66,7 +66,7 @@ server/
 
 ## Estado
 
-La base de datos, el broker y el consumidor están desplegados en la VM de Azure (`modulinkr.loaiza.co`). PostgreSQL mantiene las cinco tablas del esquema más `schema_migrations`; Mosquitto sirve TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. El handshake TLS del SIM7028 y la ingestión del consumidor cloud quedaron validados en el despliegue registrado en la bitácora.
+La base de datos, el broker y el consumidor están desplegados en la VM de Azure (`modulinkr.loaiza.co`). PostgreSQL mantiene las estructuras base, `schema_migrations` y los esquemas físicos por despliegue; Mosquitto sirve TLS en 8883 con el certificado Let's Encrypt y autenticación por usuario y contraseña. El handshake TLS del SIM7028 y la ingestión del consumidor cloud quedaron validados en el despliegue registrado en la bitácora.
 
 
 ## Permiso de borrado de cuarentena, 2026-10-13
@@ -82,3 +82,8 @@ El instalador asegura también el permiso limitado al finalizar el runner, por l
 La migración `005_system_health.sql` y `modulinkr-monitor.service` incorporan la medición del volumen que contiene el directorio de datos de PostgreSQL y el estado del consumidor. El visor consulta esa fila mediante su acceso cifrado existente a PostgreSQL, independiente de MQTT. No se añade otro puerto público ni otra credencial. La medición de la VM y el estado del consumidor caducan a los noventa segundos. Si falla el monitor o la base deja de responder, se conserva la última información disponible con su antigüedad.
 
 `install_supervision.sh` reutiliza `/etc/modulinkr/consumer.env`, aplica únicamente la migración nueva mediante el runner, detecta el volumen a partir del directorio operativo de PostgreSQL e instala las unidades del consumidor y del monitor. El consumidor requiere Paho 2.1 para confirmar mensajes después de procesarlos. El script no modifica las credenciales ni borra muestras. La instalación nueva del componente `consumer` incluye también la supervisión. La comprobación de permisos, capacidad y reentrega en la VM permanece pendiente del despliegue.
+
+
+## Estado previo a la publicación
+
+Se utiliza exclusivamente el consumidor de identidad física 4.0 y el espacio MQTT `modulinkr/v2`. Los módulos de ingesta del formato interno anterior se retiran del código. Las migraciones numeradas y las tablas de prueba se conservan para reproducir y recuperar el banco; no se ofrecen como histórico de clientes. La definición actual se encuentra en [`db-schema.md`](../shared/protocol/db-schema.md).

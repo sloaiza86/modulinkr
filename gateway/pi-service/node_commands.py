@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import protocol
+import identity
 from modbus_command import ACTIVE, DETAILS, STATES, fingerprint, valid_path
 
 LOG = logging.getLogger('modulinkr.commands')
@@ -45,6 +46,7 @@ def route(conn, origin, source, now):
 
 def receive(service, origin, result, transport, publisher=None):
     c=service.buf.conn
+    if getattr(service,'identity',None) and identity.operations_blocked(c,origin): return
     row=c.execute('SELECT origin,body,state,transport,publisher FROM modbus_commands WHERE id=?',(result.get('id'),)).fetchone()
     if not row or type(origin) is not int or type(result.get('status')) is not int or row[0]!=origin or result.get('fingerprint')!=fingerprint(row[1]) or result.get('status') not in STATES:
         return
@@ -76,6 +78,8 @@ def tick(service, now=None):
     c.commit()
     rows=c.execute("SELECT id,origin,body,state,expires,sent_at,attempts,transport FROM modbus_commands WHERE state IN ('queued','sent','accepted') ORDER BY id").fetchall()
     for request_id,origin,body,state,expires,sent_at,attempts,transport in rows:
+        if getattr(service,'identity',None) and identity.operations_blocked(c,origin):
+            c.execute("UPDATE modbus_commands SET state='unconfirmed',detail='Operación bloqueada por conflicto de identidad.',updated=? WHERE id=?",(now,request_id)); c.commit(); continue
         if now>expires or (sent_at and now-sent_at<RETRY_S):
             continue
         if hasattr(service,'_clock_ok') and not service._clock_ok():
@@ -107,7 +111,12 @@ def tick(service, now=None):
             catalogs=[service.buf.catalog_get(n) for n in path]
             if any(not cat or not cat.get('write_capable') for cat in catalogs):
                 continue
-            payload=json.dumps(dict(schema_version='3.0',body=bytes(body).hex(),path=path),separators=(',',':'))
+            destination=c.execute('SELECT uid FROM identity_bindings WHERE origin=?',(publisher,)).fetchone()
+            target=c.execute('SELECT uid FROM identity_bindings WHERE origin=?',(origin,)).fetchone()
+            if getattr(service,'identity',None) and (not destination or not target): continue
+            payload=json.dumps(dict(schema_version='4.0',deployment_id=getattr(service.mqtt,'deployment',None),
+                destination_uid=destination[0] if destination else None,target_uid=target[0] if target else None,
+                body=bytes(body).hex(),path=path),separators=(',',':'))
             if not service.mqtt.publish_command(publisher,payload):
                 continue
             via='nbiot'

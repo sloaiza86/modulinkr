@@ -15,14 +15,9 @@ cloud como única fuente de verdad, `Red V4.md` §"Actualización del
      mark_published).
 
 Política:
-  - Clave primaria (origin_id, ts, seq) desde v2.1: deduplicación e
-    idempotencia automáticas con la identidad nueva del dato
-    (frame-format.md §2.6). El ts de captura desambigua arranques del
-    nodo: un seq reiniciado ya no colisiona con corridas anteriores
-    (desaparece el paliativo de vaciar la BBDD tras reflashear).
-    Desde v3.0 el ts es siempre válido (sin hora no se muestrea,
-    frame-format.md §13.4); una TELEMETRY con ts=0 se rechaza con
-    DECODE_ERROR en gateway_service.py y no llega a este buffer.
+  - La clave física combina origin_id, device_uid, boot_id, ts y seq.
+    La sesión distingue reinicios y el catálogo conserva la interpretación
+    de los valores. No se acepta TELEMETRY con ts=0.
   - Cota máxima de entradas (FIFO): al superarse, se borran las más
     antiguas por t_recv. Es un buffer de tolerancia, no un archivo; si
     Internet lleva mucho caído, los supernodos con NB-IoT ya están
@@ -32,8 +27,8 @@ Política:
     NODE_REGISTER (fw, nombre, reads y writes con id/name/unit). Upsert
     por origin_id; pendiente de publicar al backend cloud.
 
-Migración: si la BBDD contiene la tabla v2.0 (PK sin ts), se renombra a
-buffer_v20_legacy y se crea la nueva. No se borra nada.
+Las tablas internas de desarrollo sin identidad se conservan fuera del
+buffer operativo. No generan una incidencia ni se publican.
 """
 
 from __future__ import annotations
@@ -41,6 +36,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import identity
 import time
 from typing import Optional
 
@@ -80,10 +76,15 @@ class GatewayBuffer:
             captured_ts INTEGER NOT NULL, seq INTEGER NOT NULL, observed_at REAL NOT NULL,
             received_at REAL NOT NULL, path_json TEXT NOT NULL,
             PRIMARY KEY(origin, source))""")
+        identity.init(self.conn)
         self._migrate_v20_if_needed()
+        self._migrate_identity_buffer()
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS buffer (
                 origin_id      INTEGER NOT NULL,
+                device_uid TEXT NOT NULL DEFAULT '',
+                boot_id INTEGER NOT NULL DEFAULT 0,
+                catalog_tag TEXT NOT NULL DEFAULT '',
                 ts             INTEGER NOT NULL,
                 seq            INTEGER NOT NULL,
                 t_recv         REAL    NOT NULL,
@@ -96,9 +97,13 @@ class GatewayBuffer:
                 hop_src        INTEGER,
                 ttl            INTEGER,
                 published      INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (origin_id, ts, seq)
+                PRIMARY KEY (origin_id, device_uid, boot_id, ts, seq)
             )
         """)
+        if self.conn.execute('SELECT 1 FROM identity_bindings WHERE origin=255').fetchone():
+            self.conn.execute('CREATE TABLE IF NOT EXISTS buffer_development_archive AS SELECT * FROM buffer WHERE 0')
+            self.conn.execute("INSERT INTO buffer_development_archive SELECT * FROM buffer WHERE device_uid=''")
+            self.conn.execute("DELETE FROM buffer WHERE device_uid=''")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS node_catalog (
                 origin_id    INTEGER PRIMARY KEY,
@@ -109,6 +114,17 @@ class GatewayBuffer:
                 published    INTEGER NOT NULL DEFAULT 0
             )
         """)
+        if self.conn.execute('SELECT 1 FROM identity_bindings WHERE origin=255').fetchone():
+            internal=[]
+            for origin,blob in self.conn.execute('SELECT origin_id,catalog_json FROM node_catalog'):
+                try: uid=json.loads(blob).get('device_uid')
+                except (ValueError,AttributeError): continue
+                if not identity.valid_uid(uid): internal.append(origin)
+            if internal:
+                self.conn.execute('CREATE TABLE IF NOT EXISTS catalog_development_archive AS SELECT * FROM node_catalog WHERE 0')
+                for origin in internal:
+                    self.conn.execute('INSERT INTO catalog_development_archive SELECT * FROM node_catalog WHERE origin_id=?',(origin,))
+                    self.conn.execute('DELETE FROM node_catalog WHERE origin_id=?',(origin,))
         # Estado de red por nodo (visor web, pi-web/README.md §4): última
         # trama oída por LoRa, incluidas las overheard. parent_id/hop_count
         # los alimentan solo los ecos de BEACON; rssi/snr solo las tramas
@@ -383,6 +399,14 @@ class GatewayBuffer:
         self._migrate_net_migration_rescate()
         self.conn.commit()
 
+    def _migrate_identity_buffer(self):
+        self.conn.execute("UPDATE identity_incidents SET active=0 WHERE kind IN ('legacy_pending','unverified')")
+        columns=list(self.conn.execute('PRAGMA table_info(buffer)'))
+        if columns and 'device_uid' not in {c[1] for c in columns}:
+            self.conn.execute('ALTER TABLE buffer RENAME TO buffer_v3_identity_legacy')
+            self.conn.execute("CREATE TABLE buffer (origin_id INTEGER NOT NULL,device_uid TEXT NOT NULL DEFAULT '',boot_id INTEGER NOT NULL DEFAULT 0,catalog_tag TEXT NOT NULL DEFAULT '',ts INTEGER NOT NULL,seq INTEGER NOT NULL,t_recv REAL NOT NULL,schema_version INTEGER,frame_type INTEGER,payload BLOB,reads_json TEXT,rssi REAL,snr REAL,hop_src INTEGER,ttl INTEGER,published INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(origin_id,device_uid,boot_id,ts,seq))")
+            self.conn.commit()
+
     def _migrate_v20_if_needed(self) -> None:
         """Si existe la tabla buffer v2.0 (sin columna ts), la renombra a
         buffer_v20_legacy. Conserva los datos viejos (no se borra nada)."""
@@ -648,11 +672,11 @@ class GatewayBuffer:
     def bcast_install_esperando(self, origin: int) -> dict | None:
         """La instalación de ese nodo que espera veredicto, si la hay."""
         row = self.conn.execute(
-            """SELECT i.id, i.created_ts, b.version FROM fw_bcast_install i
+            """SELECT i.id, i.created_ts, b.version, b.xfer FROM fw_bcast_install i
                 JOIN fw_bcast b ON b.id=i.bcast_id
                 WHERE i.origin = ? AND i.state = 'installing'
              ORDER BY i.id DESC LIMIT 1""", (int(origin),)).fetchone()
-        return None if row is None else {"id": row[0], "created_ts": row[1], "version": row[2]}
+        return None if row is None else {"id": row[0], "created_ts": row[1], "version": row[2], "xfer":row[3]}
 
     # ----- Sondeo de disponibilidad (spec §22) -----
 
@@ -1077,6 +1101,18 @@ class GatewayBuffer:
         ACK OK: si es duplicado, el nodo reintentó porque perdió el ACK
         anterior (frame-format.md §2.6). La identidad es (origin, ts, seq);
         el ts llega siempre válido (v3.0: ts=0 se rechaza antes)."""
+        if parsed.get('identity_verified'):
+            if identity.blocked(self.conn,parsed['origin_id']):
+                identity.quarantine(self.conn,parsed,'identity_conflict'); return None
+            if not self.conn.execute('SELECT 1 FROM identity_catalogs WHERE uid=? AND tag=?',
+                                     (parsed['device_uid'],parsed['catalog_tag'])).fetchone():
+                identity.incident(self.conn,'catalog_missing',parsed['origin_id'],'La muestra anuncia un catálogo que todavía no se ha recibido.')
+                identity.quarantine(self.conn,parsed,'catalog_missing'); return None
+            previous=self.conn.execute('SELECT payload FROM buffer WHERE origin_id=? AND device_uid=? AND boot_id=? AND ts=? AND seq=?',
+                                       (parsed['origin_id'],parsed['device_uid'],parsed['boot_id'],parsed.get('ts',0),parsed['seq'])).fetchone()
+            if previous and bytes(previous[0] or b'')!=bytes(parsed.get('payload',b'')):
+                identity.incident(self.conn,'sample_conflict',parsed['origin_id'],'La misma identidad de muestra llegó con otro contenido.')
+                identity.quarantine(self.conn,parsed,'sample_conflict'); return None
         reads_json = None
         if 'reads' in parsed:
             # v3.2: una lectura fallida llega como NaN, que no es JSON
@@ -1094,6 +1130,11 @@ class GatewayBuffer:
             else:
                 reads_json = json.dumps(v)
 
+        if parsed.get('identity_verified') and reads_json:
+            data=json.loads(reads_json)
+            if not isinstance(data,dict): data={'v':data}
+            data.update(device_uid=parsed['device_uid'],boot_id=parsed['boot_id'],catalog_tag=parsed['catalog_tag'])
+            reads_json=json.dumps(data)
         path = parsed.get('path')
         if path:
             self.observe_route(parsed['origin_id'],parsed.get('ts',0),parsed['seq'],
@@ -1101,11 +1142,11 @@ class GatewayBuffer:
         try:
             self.conn.execute(
                 """INSERT INTO buffer
-                   (origin_id, ts, seq, t_recv, schema_version, frame_type,
+                   (origin_id, device_uid, boot_id, catalog_tag, ts, seq, t_recv, schema_version, frame_type,
                     payload, reads_json, rssi, snr, hop_src, ttl, published)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (
-                    parsed['origin_id'],
+                    parsed['origin_id'], parsed.get('device_uid',''),parsed.get('boot_id',0),parsed.get('catalog_tag',''),
                     parsed.get('ts', 0),
                     parsed['seq'],
                     time.time(),
@@ -1150,6 +1191,10 @@ class GatewayBuffer:
                 time.time(),
             ),
         )
+        if catalog.get('device_uid') and catalog.get('catalog_tag'):
+            self.conn.execute("INSERT OR IGNORE INTO identity_catalogs(uid,tag,origin,catalog_json) VALUES(?,?,?,?)",
+                              (catalog['device_uid'],catalog['catalog_tag'],origin_id,json.dumps(catalog)))
+            self.conn.execute("UPDATE identity_incidents SET active=0 WHERE origin=? AND kind IN ('unverified','catalog_missing')", (origin_id,))
         self.conn.commit()
 
     def catalog_get(self, origin_id: int) -> Optional[dict]:
@@ -1191,20 +1236,20 @@ class GatewayBuffer:
 
     # ----- Drenado a cloud (telemetría) -----
 
-    def fetch_pending(self, limit: int = 100) -> list[dict]:
+    def fetch_pending(self, limit: int = 100, verified_only: bool = False) -> list[dict]:
         """Devuelve hasta `limit` muestras sin publicar, en orden de llegada
         (t_recv ascendente). Cada muestra trae lo necesario para armar el
         sample del batch-format: origin_id, ts, seq y la lista de valores
         `v` (de reads_json). El drenado las publica y luego marca con
         mark_published; nada se borra aquí."""
         rows = self.conn.execute(
-            """SELECT origin_id, ts, seq, reads_json
-               FROM buffer WHERE published=0
+            """SELECT origin_id, ts, seq, reads_json, device_uid, boot_id, catalog_tag
+               FROM buffer WHERE published=0 AND (?=0 OR device_uid<>'')
                ORDER BY t_recv ASC LIMIT ?""",
-            (limit,),
+            (int(verified_only),limit),
         ).fetchall()
         out = []
-        for origin_id, ts, seq, reads_json in rows:
+        for origin_id, ts, seq, reads_json, device_uid, boot_id, catalog_tag in rows:
             data = json.loads(reads_json) if reads_json else []
             # v3.2: objeto {"v", "st"} cuando hay estados; lista plana si no.
             if isinstance(data, dict):
@@ -1213,6 +1258,7 @@ class GatewayBuffer:
                 v, st = data, None
             entry = {
                 "origin_id": origin_id,
+                "device_uid":device_uid,"boot_id":boot_id,"catalog_tag":catalog_tag,
                 "ts": ts,
                 "seq": seq,
                 "v": v,
@@ -1232,11 +1278,11 @@ class GatewayBuffer:
         servicio (entrega al menos una vez; el consumidor cloud deduplica)."""
         if not keys:
             return
-        self.conn.executemany(
-            """UPDATE buffer SET published=1
-               WHERE origin_id=? AND ts=? AND seq=?""",
-            keys,
-        )
+        for values in keys:
+            if len(values)==5:
+                self.conn.execute('UPDATE buffer SET published=1 WHERE origin_id=? AND ts=? AND seq=? AND device_uid=? AND boot_id=?',values)
+            else:
+                self.conn.execute("UPDATE buffer SET published=1 WHERE origin_id=? AND ts=? AND seq=? AND device_uid='' AND boot_id=0",values)
         self.conn.commit()
 
     # ----- Drenado a cloud (catálogos) -----

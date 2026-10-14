@@ -206,6 +206,22 @@ def catalog_tail(data, off, writes, reads=None):
             off += length
             action.update(address=address, byte_order=('', 'ABCD', 'BADC', 'CDAB', 'DCBA')[order],
                           read_channels=channels, read_signature=read_signature, ui=validate_ui(action, ui))
+    catalog_node=None
+    if off < len(data) and data[off]==0x49:
+        if off+2>len(data) or not 1<=data[off+1]<=254: raise ValueError('Identidad de catálogo inválida.')
+        catalog_node=data[off+1]; off+=2
+    if off < len(data):
+        if data[off:off+3]!=bytes((0x52,1,len(reads or []))):
+            raise ValueError('Extensión de medidas desconocida.')
+        off+=3
+        for reading in reads or []:
+            if off+16>len(data): raise ValueError('Descriptor de medida truncado.')
+            device,slave,fn,address,count,typ,order,scale,offset=struct.unpack_from('<BBBHBBBff',data,off)
+            off+=16
+            if device>3 or not 1<=slave<=247 or fn not in (1,2,3,4) or typ>=len(TYPES) or not count or not math.isfinite(scale) or not math.isfinite(offset):
+                raise ValueError('Descriptor de medida inválido.')
+            reading.update(device=device,slave_id=slave,function=fn,address=address,count=count,
+                           type=TYPES[typ],byte_order=order,scale=scale,offset=offset)
     if off != len(data):
         raise ValueError('Bytes sobrantes tras el catálogo.')
-    return dict(schemas=schemas, **{'class':node_class}, write_capable=capable)
+    return dict(schemas=schemas, **{'class':node_class}, write_capable=capable,catalog_node=catalog_node)

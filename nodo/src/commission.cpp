@@ -12,6 +12,7 @@
 #include <new>
 
 #include "configstore.h"
+#include "device_identity.h"
 
 namespace commission {
 
@@ -30,7 +31,7 @@ size_t g_line_len = 0;
 // Respuesta en UNA escritura, \n incluido: los logs de otras tareas (la
 // del NB-IoT en el núcleo 0) no pueden partir la línea.
 void respond(const char* line) {
-    char buf[400];
+    char buf[448];
     const size_t n = strnlen(line, sizeof(buf) - 2);
     memcpy(buf, line, n);
     buf[n] = '\n';
@@ -71,6 +72,9 @@ bool parseSha256Hex(const char* hex, uint8_t out[32]) {
 void handleHello() {
     JsonDocument doc;
     doc["proto"]      = kProtoVersion;
+    char uid[13]; deviceid::text(deviceid::own().uid,6,uid);
+    doc["device_uid"] = uid;
+    doc["identity_ready"] = deviceid::ready();
     doc["fw"]         = g_id.fw_name;
     doc["version"]    = g_id.fw_version;
     // Qué schemas del config.json sabe cargar este firmware. Lo usa el
@@ -86,13 +90,13 @@ void handleHello() {
         doc["error"] = (g_id.err != nullptr) ? g_id.err : "configuration missing";
     }
 
-    char json[320];
+    char json[400];
     const size_t n = serializeJson(doc, json, sizeof(json));
     if (n == 0 || n >= sizeof(json)) {
         respondErr("identity serialization failed");
         return;
     }
-    char line[336];
+    char line[416];
     snprintf(line, sizeof(line), "CFG:HELLO %s", json);
     respond(line);
 }

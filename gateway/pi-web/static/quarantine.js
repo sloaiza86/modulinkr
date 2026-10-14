@@ -5,6 +5,7 @@
     unknown_node: "Catálogo del nodo pendiente",
     no_channels: "Sin medidas definidas para esa fecha",
     length_mismatch: "Cantidad de valores incompatible con el catálogo",
+    identity_conflict: "Conflicto de identidad pendiente de resolver",
   };
   let revision = 0, controller = null, data = null, selected = null, offset = 0;
   let lastCard = null, active = false, busy = false;

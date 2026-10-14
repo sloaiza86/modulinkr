@@ -1,3 +1,4 @@
+from identity_fixture import CPP as IDENTITY_CPP
 """Ejecuta batchTick con ArduinoJson y la bandeja reales, sin radio ni módem."""
 from pathlib import Path
 import shutil
@@ -13,6 +14,8 @@ HARNESS=r'''
 #include <cassert>
 #include <cmath>
 #include <set>
+#include <algorithm>
+using std::min;
 #include <vector>
 #include "outbox.h"
 #include "nbiot.h"
@@ -30,6 +33,7 @@ constexpr uint32_t kBatchAckTimeoutMs=120000,kBatchCoalesceMs=1000;
 bool g_batch_inflight=false;
 uint32_t g_batch_id=0,g_inflight_batch_id=0,g_inflight_sent_ms=0,g_batches=0;
 struct Service {
+ bool publishMessage(const char*,const char*){return true;}
     uint32_t ack=0;
     bool accept=false;
     std::vector<std::string> messages;
@@ -41,6 +45,7 @@ struct Service {
         messages.emplace_back(text); return true;
     }
 } nbsvc;
+size_t g_reg_catalog_len=0; uint8_t g_reg_catalog[2048]={};
 // BATCH
 int main(int argc,char** argv) {
     const int mode=argc>1 ? atoi(argv[1]) : 0;
@@ -50,6 +55,7 @@ int main(int argc,char** argv) {
     uint8_t st[8]={0,0,0,0,0,1,0,0},path[16];
     for (uint8_t i=0;i<15;++i) path[i]=i+1;
     path[15]=200;
+    deviceid::currentAddress()=relay?1:200;
     for (uint16_t seq=1;seq<=32;++seq)
         outbox.push(relay?1:200,seq,values,st,8,seq,1790095000+seq,true,
                     relay?path:nullptr,relay?16:0,1790095360);
@@ -69,7 +75,7 @@ int main(int argc,char** argv) {
     std::set<unsigned> seqs;
     for (auto& message:nbsvc.messages) {
         JsonDocument doc; assert(!deserializeJson(doc,message));
-        assert(doc["schema_version"]=="3.3");
+        assert(doc["schema_version"]=="4.0");
         if (g_cfg.nbiot_debug) assert(doc["debug"]["trigger"]==(relay?"relay":"failover"));
         for (JsonObject sample:doc["samples"].as<JsonArray>()) {
             unsigned seq=sample["seq"]; assert(seqs.insert(seq).second);
@@ -90,7 +96,7 @@ class BatchSizeTests(unittest.TestCase):
         body=source[source.index('void batchTick('):source.index('// Mapea parity/stopbits')]
         with tempfile.TemporaryDirectory() as td:
             d=Path(td); (d/'Arduino.h').write_text(ARDUINO); (d/'LittleFS.h').write_text(FS)
-            (d/'test.cpp').write_text(HARNESS.replace('// BATCH',body))
+            (d/'test.cpp').write_text(IDENTITY_CPP+HARNESS.replace('// BATCH',body))
             subprocess.run([shutil.which('clang++'),'-std=c++17','-Wall','-Wextra','-I'+td,
                 '-I'+str(SRC),'-I'+str(json_include),str(d/'test.cpp'),str(SRC/'outbox.cpp'),
                 '-o',str(d/'test')],check=True)

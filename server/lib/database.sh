@@ -183,6 +183,7 @@ db_grant_app() {
 GRANT USAGE ON SCHEMA public TO "$u";
 GRANT ALL ON ALL TABLES IN SCHEMA public TO "$u";
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "$u";
+GRANT EXECUTE ON FUNCTION public.ensure_modulinkr_deployment(text) TO "$u";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "$u";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "$u";
 SQL
@@ -241,6 +242,7 @@ GRANT CONNECT ON DATABASE "$d" TO "$u";
 GRANT USAGE ON SCHEMA public TO "$u";
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "$u";
 GRANT DELETE ON TABLE public.quarantine TO "$u";
+INSERT INTO public.deployment_readers(role_name) VALUES('$u') ON CONFLICT DO NOTHING;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "$u";
 SQL
     ok "Lectura de tablas y borrado de quarantine concedidos a '$u'"

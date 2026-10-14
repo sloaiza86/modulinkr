@@ -1,4 +1,4 @@
-// ModuLinkr, reloj del nodo (v2.1; boot_id retirado en v3.0)
+// ModuLinkr, reloj de captura del nodo
 //
 // Fuente normativa: frame-format.md §13.4 (jerarquía de fuentes de hora) y
 // batch-format.md §6. El reloj corre como un offset entre el epoch Unix y
@@ -6,10 +6,8 @@
 // sobre NB-IoT) llama a sync() y el offset se corrige. La deriva del
 // oscilador deja de importar porque los beacons resincronizan cada 30 s.
 //
-// v3.0: sin hora sincronizada no se muestrea (synced() es el gate del
-// sampler en main.cpp), así que toda muestra nace con ts válido. El
-// boot_id desaparece: identificaba muestras sin hora, que ya no existen
-// (el salt criptográfico de §14.4 vive aparte, en lora.cpp).
+// Sin hora sincronizada no se muestrea. La sesión física se gestiona en
+// device_identity y permanece independiente de la sincronización del reloj.
 //
 // Seguridad de concurrencia: campos de 32 bits alineados con acceso
 // volatile, el mismo patrón lockless que NbiotService (escritura desde la

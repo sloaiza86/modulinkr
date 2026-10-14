@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=supervision-20261013">
+  <link rel="stylesheet" href="/static/style.css?v=prepublic-20261014">
 </head>
 <body>
 
@@ -84,6 +84,7 @@
     <modulinkr-view id="view-red" class="view" data-view="red" aria-label="Resumen de red">
       <div id="tarjetas" class="grid-tarjetas"></div>
       <p id="red-aviso" class="aviso"></p>
+      <div id="identidad-incidencias" aria-live="polite" hidden></div>
     </modulinkr-view>
 
     <modulinkr-view id="view-topologia" class="view" data-view="topologia" aria-label="Topología de red" hidden>
@@ -941,6 +942,7 @@
               <option value="unknown_node">Catálogo del nodo pendiente</option>
               <option value="no_channels">Sin medidas definidas para esa fecha</option>
               <option value="length_mismatch">Cantidad de valores incompatible con el catálogo</option>
+              <option value="identity_conflict">Conflicto de identidad pendiente de resolver</option>
             </select></label>
           </div>
           <p id="quar-empty" class="texto-ayuda" hidden></p>
@@ -1140,8 +1142,6 @@
             <div class="cfg-form">
               <label class="cfg-campo"><span>Usuario APN</span><input id="f-apnuser" type="text" placeholder="opcional"></label>
               <label class="cfg-campo"><span>Contraseña APN</span><input id="f-apnpass" type="password" placeholder="Opcional"></label>
-              <label class="cfg-campo"><span>Tema MQTT de telemetría</span><input id="f-ttel" type="text" value="modulinkr/v1/{node_id}/telemetry"></label>
-              <label class="cfg-campo"><span>Tema MQTT de comandos</span><input id="f-tcmd" type="text" value="modulinkr/v1/{node_id}/cmd"></label>
               <label class="cfg-check"><input id="f-mdebug" type="checkbox" checked><span>Incluir diagnóstico en la telemetría</span></label>
               <label class="cfg-check"><input id="f-nbrelay" type="checkbox" checked><span>Ofrecer salida celular a vecinos</span></label>
               <label class="cfg-campo"><span>Capacidad de almacenamiento temporal</span><input id="f-relayqueue" type="number" min="1" value="128"></label>
@@ -1451,9 +1451,9 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=cuarentena-alineacion-20261013"></script>
-<script src="/static/network-state.js?v=ota-convivencia-20261002"></script>
-<script src="/static/quarantine.js?v=cuarentena-alineacion-20261013"></script>
+<script src="/static/components.js?v=prepublic-20261014"></script>
+<script src="/static/network-state.js?v=prepublic-20261014"></script>
+<script src="/static/quarantine.js?v=prepublic-20261014"></script>
 <dialog id="notificaciones-panel" aria-labelledby="notificaciones-titulo">
   <header class="notificaciones-cabecera">
     <h2 id="notificaciones-titulo">Notificaciones</h2>
@@ -1474,7 +1474,8 @@
   <footer class="notificaciones-pie"><span id="notificaciones-resumen" aria-live="polite"></span>
     <button id="notificaciones-leidas" type="button">Marcar todas como leídas</button></footer>
 </dialog>
-<script src="/static/supervision.js?v=supervision-20261013"></script>
-<script src="/static/app.js?v=supervision-20261013"></script>
+<script src="/static/supervision.js?v=prepublic-20261014"></script>
+<script src="/static/identity.js?v=prepublic-20261014"></script>
+<script src="/static/app.js?v=radio-recovery-20261014"></script>
 </body>
 </html>

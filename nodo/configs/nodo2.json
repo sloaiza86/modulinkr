@@ -41,8 +41,6 @@
       "tls":                  true,
       "mqtt_user":            "modulinkr",
       "mqtt_pass":            "practica",
-      "topic_telemetry":      "modulinkr/v1/{node_id}/telemetry",
-      "topic_commands":       "modulinkr/v1/{node_id}/cmd",
       "debug":                true,
       "relay_enabled":        true,
       "relay_queue_max":      128

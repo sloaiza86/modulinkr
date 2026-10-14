@@ -34,12 +34,12 @@ class Request:
 class FlashGuards(unittest.TestCase):
     def test_node_never_writes_equal_unknown_or_unreviewed_firmware(self):
         import firmwaremeta
-        for installed, expected, permitted in [('0.0.58-difusion-red','0.0.59+abcdef123456',True),
-                ('0.0.59','0.0.59+abcdef123456',False), (None,'0.0.59+abcdef123456',False),
+        for installed, expected, permitted in [('0.0.58-difusion-red','0.0.82+abcdef123456',True),
+                ('0.0.82','0.0.82+abcdef123456',False), (None,'0.0.82+abcdef123456',False),
                 ('0.0.58','0.0.60',False)]:
             sudo = Mock(return_value=(True,''))
             ns = dict(_port_allowed=lambda p:True, FLASH_NODO_SH=WEB/'configapi.py', NODO_BIN=WEB/'configapi.py',
-                _serial_lock=threading.Lock(), firmwaremeta=types.SimpleNamespace(image_version=lambda p:'0.0.59+abcdef123456',comparison=firmwaremeta.comparison),
+                _serial_lock=threading.Lock(), firmwaremeta=types.SimpleNamespace(image_version=lambda p:'0.0.82+abcdef123456',comparison=firmwaremeta.comparison,release_number=firmwaremeta.release_number),
                 _open=lambda p:contextlib.nullcontext(None),_hello=lambda s:{'version':installed},_sudo=sudo)
             response=asyncio.run(load_flash('configapi.py',ns)(Request({'port':'/dev/test','expected_version':expected})))
             self.assertEqual(sudo.called, permitted)

@@ -54,11 +54,11 @@ La interfaz aire admite AES-CCM extremo a extremo entre los nodos y el Pi. El He
 
 Los secretos se solicitan durante la instalación y permanecen fuera del repositorio. Las configuraciones versionadas contienen únicamente valores no sensibles de banco.
 
-## 7. Versionado y compatibilidad
+## 7. Contratos actuales
 
-La implementación de control utiliza `0x3B` en la trama LoRa, configuraciones de nodo `3.3`, telemetría MQTT `3.3` y órdenes MQTT `3.0`. El catálogo añade una extensión identificada para describir las escrituras. Se actualiza el gateway antes de instalar el firmware que emite ese catálogo.
+La implementación utiliza radio `0x40`, configuración `3.3` y mensajes MQTT `4.0` en temas `modulinkr/v2` separados por UID del gateway. Se verifica cada contrato de forma exacta. El catálogo declara las medidas, operaciones e identidad física que permiten comprobar los datos y las órdenes.
 
-También existen cambios de layout entre versiones menores del major 3, mientras que los receptores aceptan cualquier minor con ese major. La política definitiva está pendiente: puede separarse el versionado por formato o alinearse con una única secuencia, pero no se adopta ninguna de las dos opciones en este documento.
+El proyecto todavía no ha publicado su primera versión. Las versiones internas anteriores no representan despliegues de clientes ni se admiten mediante caminos alternativos. Se conserva el histórico normal del producto y la recuperación interna del banco.
 
 ## 8. Estado de validación
 

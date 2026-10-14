@@ -3,11 +3,11 @@
 
 El tramo final del camino del dato (fase 3): se suscribe al broker y
 persiste en la base de datos según db-schema.md. Un solo formato de
-entrada para las cuatro rutas de entrega (batch-format.md v3.0):
+entrada para las cuatro rutas de entrega (batch-format.md 4.0):
 
-  modulinkr/v1/+/telemetry   mensajes {schema_version, samples[], debug?}
+  modulinkr/v2/<deployment_id>/+/telemetry   mensajes {schema_version, samples[], debug?}
                              del gateway (publisher 255) y los supernodos
-  modulinkr/v1/+/register    catálogos retenidos (alta zero-touch)
+  modulinkr/v2/<deployment_id>/+/register    catálogos retenidos (alta zero-touch)
 
 Diseño:
   - Sesión MQTT persistente (clean_session=False, client_id fijo): si el
@@ -15,7 +15,7 @@ Diseño:
     entre tanto y lo entrega al volver. Los registers, además, son
     retained: llegan al suscribirse aunque sean anteriores al arranque.
   - Transacción por mensaje; deduplicación por el índice único
-    (origin, ts, seq) de la base (ON CONFLICT DO NOTHING).
+    (origin, device_uid, boot_id, ts, seq) de la base (ON CONFLICT DO NOTHING).
   - Los datos rechazados se contabilizan y confirman. Un fallo de
     infraestructura revierte la transacción y conserva el mensaje sin
     confirmar. La reconexión solicita su reentrega en la sesión persistente.
@@ -35,6 +35,9 @@ Config por variables de entorno (/etc/modulinkr/consumer.env):
 from __future__ import annotations
 
 import json
+import hashlib
+import socket
+from pathlib import Path
 import logging
 import os
 import re
@@ -45,14 +48,13 @@ import time
 import paho.mqtt.client as mqtt
 
 from db import Db
-from ingest import ingest_message
-from catalog import process_register
 from health import process_health
+import identity_ingest
 from consumer_status import ConsumerStatus
 
 LOG = logging.getLogger("modulinkr.consumer")
 
-TOPIC_RE = re.compile(r"^modulinkr/v1/(\d+)/(telemetry|register|health)$")
+TOPIC_RE = re.compile(r"^modulinkr/v2/([0-9a-f]{12})/(\d{1,3})/(telemetry|register|health)(?:/[0-9a-f]{16}(?:/\d{1,2})?)?$")
 
 # Contador de descarte por tipo de topic, para que un payload ilegible no se
 # contabilice siempre como register.
@@ -81,16 +83,21 @@ class Consumer:
         self.status = ConsumerStatus()
         self._retry_at = 0
 
+        try:
+            machine=Path('/etc/machine-id').read_text().strip()
+        except OSError:
+            machine=socket.gethostname()
+        client_id='ml-cons-'+hashlib.sha256((machine+self.host+self.db.name).encode()).hexdigest()[:12]
         # clean_session=False + client_id fijo: el broker guarda la
         # suscripción y los QoS 1 pendientes entre reinicios del servicio.
         try:
             self.client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION1,
-                client_id="modulinkr-consumer", clean_session=False,
+                client_id=client_id, clean_session=False,
                 protocol=mqtt.MQTTv311)
         except (AttributeError, TypeError):
             self.client = mqtt.Client(
-                client_id="modulinkr-consumer", clean_session=False,
+                client_id=client_id, clean_session=False,
                 protocol=mqtt.MQTTv311)
 
         if self.user:
@@ -120,9 +127,7 @@ class Consumer:
         # La suscripción se (re)emite en cada conexión: con sesión
         # persistente es redundante pero inocua, y cubre el primer
         # arranque y los brokers reiniciados sin estado.
-        client.subscribe([("modulinkr/v1/+/telemetry", 1),
-                          ("modulinkr/v1/+/register", 1),
-                          ("modulinkr/v1/+/health", 1)])
+        client.subscribe([("modulinkr/v2/+/+/telemetry",1),("modulinkr/v2/+/+/register/#",1),("modulinkr/v2/+/+/health",1)])
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         self.status.update(mqtt_connected=False)
@@ -135,7 +140,13 @@ class Consumer:
             LOG.warning("event=mqtt.topic_rejected topic=%s", msg.topic)
             client.ack(msg.mid, msg.qos)
             return
-        publisher, kind = int(m.group(1)), m.group(2)
+        deployment=m.group(1)
+        publisher, kind = int(m.group(2)), m.group(3)
+        if not identity_ingest.valid_uid(deployment) or not 1<=publisher<=255 or (kind!='telemetry' and publisher==255):
+            self.stats[_BAD_KEY[kind]]+=1
+            LOG.warning('event=mqtt.topic_identity_rejected topic=%s',msg.topic)
+            client.ack(msg.mid,msg.qos)
+            return
 
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
@@ -147,16 +158,22 @@ class Consumer:
             client.ack(msg.mid, msg.qos)
             return
 
+        if (payload.get('deployment_id') != deployment or payload.get('schema_version') != '4.0'):
+            self.stats[_BAD_KEY[kind]] += 1
+            LOG.warning('event=payload.identity_rejected topic=%s', msg.topic)
+            client.ack(msg.mid, msg.qos)
+            return
+
         before = {key: self.stats[key] for key in ('inserted', 'quarantined', 'dup',
                                                   'reg_ok', 'reg_synced', 'materialized', 'hlt_ok', 'hlt_dup')}
         try:
-            if kind == "telemetry":
-                self.stats["msg_tel"] += 1
-                ingest_message(self.db, publisher, payload, self.stats)
-            elif kind == "health":
-                process_health(self.db, publisher, payload, self.stats)
+            if kind=='register': identity_ingest.register(self.db,publisher,payload,self.stats)
+            elif kind=='telemetry':
+                self.stats['msg_tel']+=1
+                identity_ingest.telemetry(self.db,publisher,payload,self.stats)
             else:
-                process_register(self.db, publisher, payload, self.stats)
+                identity_ingest.scoped(self.db,deployment)
+                process_health(self.db,publisher,payload,self.stats)
             if any(self.stats[key] != value for key, value in before.items()):
                 self.status.update(write_error=False, last_saved=time.time())
             client.ack(msg.mid, msg.qos)

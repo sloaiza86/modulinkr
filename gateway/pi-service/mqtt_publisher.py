@@ -1,69 +1,15 @@
 #!/usr/bin/env python3
-"""ModuLinkr, publicador MQTT del gateway (lado Pi).
+"""Publica catálogos, muestras y salud con identidad física del despliegue.
 
-Drena el buffer local (buffer.py) hacia el broker MQTT cloud. Es el tramo
-que faltaba del camino LoRa a cloud: hasta ahora el servicio recibía la
-trama, la aceptaba en custodia (published=0) y ahí se quedaba. Aquí se
-publica y solo se marca published=1 tras el PUBACK del broker.
-
-Dos flujos, ambos hacia el broker cloud (Mosquitto self-hosted, TLS con
-cert RSA, Red V4.md §Infraestructura cloud):
-
-  1. Telemetría: el mensaje unificado de batch-format.md (v3.0), un
-     publish por vuelta de drenado al topic modulinkr/v1/255/telemetry
-     (255 = publisher gateway), QoS 1, retained=false. Payload:
-       {"schema_version": "3.0",
-        "samples": [{"origin": N, "seq": S, "ts": T, "v": [floats]}, ...],
-        "debug": {...}}   (sobre opcional, MODULINKR_MQTT_DEBUG)
-     Mismo formato que publican los supernodos: el consumidor cloud tiene
-     un solo parser y deduplica por (origin, ts, seq); la misma muestra
-     llegada también por NB-IoT es un duplicado y se descarta
-     (db-schema.md §2).
-
-  2. Catálogo: mensaje register retenido al topic
-     modulinkr/v1/{origin}/register, QoS 1, retained=true, formato de
-     batch-format.md §10.2. El gateway republica en nombre de cada nodo que
-     se registró por LoRa, para que el consumidor tenga un solo punto de
-     ingesta de catálogos. Se publica antes que la telemetría de esa vuelta
-     (la leyenda antes que los datos).
-
-Custodia y entrega al menos una vez: published pasa a 1 SOLO tras el
-PUBACK. Un corte de Internet o un reinicio del servicio deja la muestra
-pendiente y se reintenta; el consumidor deduplica los reenvíos.
-
-Además de publicar, se SUSCRIBE a modulinkr/v1/+/telemetry para observar el
-camino NB-IoT (failover): un publisher distinto de 255 es un supernodo
-publicando por celular. Con eso el visor sabe qué supernodo tiene NB-IoT/MQTT
-activos y qué nodos entregan por failover, con sus datos frescos, aunque el
-LoRa esté caído. on_message solo encola (hilo de paho); el bucle del servicio
-escribe al buffer con drain_nbiot. Requiere que el usuario MQTT del gateway
-tenga permiso de suscripción en el broker.
-
-Config por variables de entorno (el instalador de fase 1 las rellena; la
-clave se pregunta al ejecutar, nunca se escribe en el código):
-  MODULINKR_MQTT_HOST         host del broker cloud (vacío = MQTT off)
-  MODULINKR_MQTT_PORT         (default 8883)
-  MODULINKR_MQTT_USER         usuario MQTT (vacío = sin auth)
-  MODULINKR_MQTT_PASS         clave MQTT
-  MODULINKR_MQTT_TLS          (default 1) 1 = TLS; 0 = en claro (solo banco
-                              o broker en localhost sin cifrar)
-  MODULINKR_MQTT_CAFILE       cert de la CA (RSA) que firma el broker;
-                              vacío = CAs del sistema
-  MODULINKR_MQTT_CERTFILE     cert de cliente (opcional, mTLS)
-  MODULINKR_MQTT_KEYFILE      clave del cert de cliente (opcional, mTLS)
-  MODULINKR_MQTT_TLS_INSECURE (default 0) 1 = no valida el hostname del
-                              cert (solo para banco con cert autofirmado)
-  MODULINKR_MQTT_DRAIN_MAX    (default 50) muestras por vuelta de drenado
-  MODULINKR_MQTT_PUB_TIMEOUT  (default 5.0) umbral de aviso sin PUBACK, segundos
-  MODULINKR_MQTT_DEBUG        (default 1) 1 = el mensaje de telemetría
-                              lleva el sobre debug (batch-format.md §5)
-
-Requiere `pip install paho-mqtt` en el venv del servicio.
+Los topics utilizan modulinkr/v2/<deployment_id>/<publicador>. Se confirma
+el buffer solo después del PUBACK y se observa la entrega celular sin
+republicar las muestras recibidas del broker.
 """
 
 from __future__ import annotations
 
 import collections
+import identity
 import json
 import logging
 import os
@@ -74,21 +20,22 @@ import paho.mqtt.client as mqtt
 
 LOG = logging.getLogger("modulinkr.mqtt")
 
-SCHEMA_VERSION   = "3.3"
+SCHEMA_VERSION   = "4.0"
 SERVICE_VERSION  = "0.1.0"     # versión del servicio del Pi (debug.fw_version)
 GATEWAY_ID       = 255         # publisher del gateway (0xFF, frame-format §1.5)
-TELEMETRY_TOPIC  = f"modulinkr/v1/{GATEWAY_ID}/telemetry"
-REGISTER_TOPIC   = "modulinkr/v1/{origin}/register"
-HEALTH_TOPIC     = "modulinkr/v1/{origin}/health"
 # El gateway se suscribe a la telemetría de TODOS los publishers para ver el
 # camino NB-IoT (failover): un publisher distinto de 255 es un supernodo
 # publicando por celular (db-schema §2, source por el publisher del topic).
-SUBSCRIBE_TOPIC  = "modulinkr/v1/+/telemetry"
 
 
 class MqttPublisher:
     def __init__(self, buf):
+        self._catalog_q=collections.deque()
         self.buf = buf
+        row=buf.conn.execute('SELECT uid FROM identity_bindings WHERE origin=255').fetchone()
+        self.deployment=row[0] if row else identity.host_uid(buf.conn)
+        self.topic_prefix=f'modulinkr/v2/{self.deployment}'
+        self.client_id=f'ml-gateway-{self.deployment}' 
 
         self.host       = os.environ.get("MODULINKR_MQTT_HOST", "")
         self.port       = int(os.environ.get("MODULINKR_MQTT_PORT", "8883"))
@@ -137,10 +84,10 @@ class MqttPublisher:
         try:
             self.client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION1,
-                client_id="modulinkr-gateway", protocol=mqtt.MQTTv311)
+                client_id=self.client_id, protocol=mqtt.MQTTv311)
         except (AttributeError, TypeError):
             self.client = mqtt.Client(
-                client_id="modulinkr-gateway", protocol=mqtt.MQTTv311)
+                client_id=self.client_id, protocol=mqtt.MQTTv311)
 
         if self.user:
             self.client.username_pw_set(self.user, self.password)
@@ -188,8 +135,9 @@ class MqttPublisher:
             # Suscripción a la telemetría de todos los publishers (camino
             # NB-IoT/failover). Se resuscribe en cada reconexión.
             try:
-                client.subscribe(SUBSCRIBE_TOPIC, qos=1)
-                client.subscribe("modulinkr/v1/+/cmd/response", qos=1)
+                client.subscribe(f"{self.topic_prefix}/+/telemetry", qos=1)
+                client.subscribe(f"{self.topic_prefix}/+/cmd/response", qos=1)
+                client.subscribe(f"{self.topic_prefix}/+/register/#",qos=1)
             except Exception as e:                    # noqa: BLE001
                 LOG.warning("event=mqtt.subscribe_failed error=%s", e)
         else:
@@ -208,13 +156,19 @@ class MqttPublisher:
         (drain_nbiot). Corre en el hilo de paho: solo encola, no toca SQLite,
         y nunca propaga (un fallo aquí no debe tumbar el bucle de red)."""
         try:
-            publisher = int(msg.topic.split("/")[2])
-            if not 1 <= publisher <= 254 or msg.retain:
+            parts=msg.topic.split('/')
+            if len(parts)<5 or '/'.join(parts[:3])!=self.topic_prefix: return
+            publisher = int(parts[3])
+            if not 1 <= publisher <= 254 or (msg.retain and parts[4]!='register'):
                 return  # Una publicación retenida no confirma actividad actual.
             payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
-            if msg.topic == f"modulinkr/v1/{publisher}/cmd/response":
-                if payload.get('schema_version')=='3.0' and type(payload.get('origin')) is int:
+            if payload.get("deployment_id")!=self.deployment or payload.get("schema_version")!="4.0": return
+            if msg.topic == f"{self.topic_prefix}/{publisher}/cmd/response":
+                if payload.get('schema_version')=='4.0' and type(payload.get('origin')) is int:
                     self._command_q.append((publisher,payload))
+                return
+            if parts[4]=='register':
+                if payload.get('node_id')==publisher and 'catalog_fragment' in payload: self._catalog_q.append(payload)
                 return
             samples = []
             for s in payload.get("samples") or []:
@@ -223,7 +177,7 @@ class MqttPublisher:
                     continue
                 st = s.get("st")
                 samples.append(
-                    (origin, ts, json.dumps({"v": v, "st": st} if st else v), s.get("seq",0), s.get("path"), s.get("path_at")))
+                    (origin, ts, json.dumps(dict(v=v,st=st,device_uid=s.get("device_uid"),boot_id=s.get("boot_id"),catalog_tag=s.get("catalog_tag"))), s.get("seq",0), s.get("path"), s.get("path_at"),s,payload.get("publisher_uid"),payload.get("publisher_boot")))
             if samples:
                 self._nbiot_q.append((publisher, samples, time.time()))
         except Exception as e:                        # noqa: BLE001
@@ -234,12 +188,40 @@ class MqttPublisher:
         la actividad del supernodo (mqtt_seen) y el último dato de cada origin
         (nbiot_last). Barato: se llama cada vuelta del bucle del servicio."""
         self.poll_publications()
+        while self._catalog_q:
+            catalog_payload=self._catalog_q.popleft()
+            try:
+                origin=catalog_payload['node_id']
+                if not identity.observe(self.buf.conn,origin,catalog_payload.get('device_uid'),catalog_payload.get('boot_id',1)):
+                    self.buf.conn.commit(); continue
+                self.buf.conn.commit()
+                blob=identity.assemble_catalog(self.buf.conn,catalog_payload)
+                if blob is None: continue
+                import protocol
+                cat=protocol.parse_catalog(blob)
+                if 'error' in cat: raise ValueError(cat['error'])
+                cat.update(device_uid=catalog_payload['device_uid'],catalog_tag=catalog_payload['catalog_tag'])
+                self.buf.catalog_upsert(origin,cat)
+            except (KeyError,ValueError) as exc:
+                identity.incident(self.buf.conn,'catalog_conflict',catalog_payload.get('node_id',0),str(exc));self.buf.conn.commit()
         while True:
             try:
                 publisher, samples, received_at = self._nbiot_q.popleft()
             except IndexError:
                 break
-            for origin, ts, reads_json, seq, path, path_at in samples:
+            for values in samples:
+                origin,ts,reads_json,seq,path,path_at=values[:6]
+                if len(values)>6:
+                    sample,publisher_uid,publisher_boot=values[6:]
+                    self.buf.conn.execute('BEGIN IMMEDIATE')
+                    sender_ok=identity.observe(self.buf.conn,publisher,publisher_uid,publisher_boot)
+                    origin_ok=identity.observe(self.buf.conn,origin,sample.get('device_uid'),sample.get('boot_id'))
+                    self.buf.conn.commit()
+                    if not sender_ok or not origin_ok or identity.blocked(self.buf.conn,origin):
+                        identity.quarantine(self.buf.conn,sample,'identity_conflict'); continue
+                if len(values)>6 and not self.buf.conn.execute('SELECT 1 FROM identity_catalogs WHERE uid=? AND tag=?',(sample.get('device_uid'),sample.get('catalog_tag'))).fetchone():
+                    identity.incident(self.buf.conn,'catalog_missing',origin,'El dato celular anuncia un catálogo que todavía no se ha recibido.')
+                    identity.quarantine(self.buf.conn,sample,'catalog_missing'); continue
                 self.buf.nbiot_last_update(origin, ts, reads_json, publisher, received_at)
                 self.buf.observe_route(origin,ts,seq,"nbiot",publisher,path,path_at,received_at)
             self.buf.mqtt_seen(publisher, received_at)
@@ -257,10 +239,19 @@ class MqttPublisher:
         return self._drain_telemetry()
 
     def _drain_catalogs(self) -> int:
+        for uid,tag,origin,raw in self.buf.conn.execute('SELECT uid,tag,origin,catalog_json FROM identity_catalogs WHERE published=0').fetchall():
+            if identity.blocked(self.buf.conn,origin): continue
+            payload=self._register_payload(origin,json.loads(raw))
+            topic=f'{self.topic_prefix}/{origin}/register/{tag}'
+            def saved(uid=uid,tag=tag):
+                self.buf.conn.execute('UPDATE identity_catalogs SET published=1 WHERE uid=? AND tag=?',(uid,tag))
+                self.buf.conn.commit()
+            self._publish(topic,payload,qos=1,retain=True,confirmed=saved)
         for c in self.buf.fetch_pending_catalogs():
             origin = c["origin_id"]
+            if identity.blocked(self.buf.conn,origin): continue
             payload = self._register_payload(origin, c["catalog"])
-            topic = REGISTER_TOPIC.format(origin=origin)
+            topic = f"{self.topic_prefix}/{origin}/register"
             def confirmed(origin=origin, payload=payload):
                 # Un registro nuevo durante el envío necesita su propio PUBACK.
                 current = next((c for c in self.buf.fetch_pending_catalogs()
@@ -278,17 +269,23 @@ class MqttPublisher:
         para hasta drain_max muestras. Solo tras el PUBACK se marcan
         published; sin PUBACK, el mismo lote permanece en vuelo y las
         muestras nuevas esperan al siguiente lote."""
-        if TELEMETRY_TOPIC in self._publishing:
+        if f"{self.topic_prefix}/255/telemetry" in self._publishing:
             return 0
-        rows = self.buf.fetch_pending(self.drain_max)
+        rows = self.buf.fetch_pending(self.drain_max,verified_only=True)
         if not rows:
             return 0
 
+        verified=[r for r in rows if identity.valid_uid(r.get('device_uid')) and r.get('boot_id') and r.get('catalog_tag')]
+        for row in rows:
+            if row not in verified:
+                identity.quarantine(self.buf.conn,row,'invalid_sample_identity')
+        rows=verified
+        if not rows: return 0
         # Orden de batch-format.md §4.1: por origin y seq ascendente
         # (fetch_pending viene por t_recv; con un solo origen coincide).
         rows.sort(key=lambda r: (r["origin_id"], r["seq"]))
 
-        # v3.2: v puede llevar null (lectura fallida) y st acompaña cuando
+        # v puede llevar null (lectura fallida) y st acompaña cuando
         # hay estados distintos de ok (batch-format.md §4).
         samples = []
         for r in rows:
@@ -299,9 +296,11 @@ class MqttPublisher:
             if r.get("path"):
                 s["path"] = r["path"]
                 s["path_at"] = r["path_at"]
+            s.update(device_uid=r.get("device_uid"),boot_id=r.get("boot_id"),catalog_tag=r.get("catalog_tag"))
             samples.append(s)
         msg = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": "4.0",
+            "deployment_id":self.deployment,"publisher_uid":self.deployment,
             "samples":        samples,
         }
         if self.debug_env:
@@ -313,14 +312,14 @@ class MqttPublisher:
             }
 
         payload = json.dumps(msg, separators=(",", ":"))
-        keys = [(r["origin_id"], r["ts"], r["seq"]) for r in rows]
+        keys = [(r["origin_id"], r["ts"], r["seq"],r["device_uid"],r["boot_id"]) for r in rows]
         batch_id = self.batch_id + 1
         def confirmed():
             self.buf.mark_published(keys)
             self.n_pub_tel += len(keys)
             LOG.info("event=mqtt.telemetry_published samples=%d messages=1 batch_id=%d",
                      len(keys), batch_id)
-        if self._publish(TELEMETRY_TOPIC, payload, qos=1, retain=False, confirmed=confirmed):
+        if self._publish(f"{self.topic_prefix}/255/telemetry", payload, qos=1, retain=False, confirmed=confirmed):
             self.batch_id = batch_id
         return 0
 
@@ -366,7 +365,7 @@ class MqttPublisher:
                 if self._health_pending.get(origin) == payload:
                     del self._health_pending[origin]
                 self.n_pub_hlt += 1
-            self._publish(HEALTH_TOPIC.format(origin=origin), payload, qos=1,
+            self._publish(f"{self.topic_prefix}/{origin}/health", payload, qos=1,
                           retain=False, confirmed=confirmed)
 
     def publish_health(self, origin: int, health: dict) -> bool:
@@ -378,7 +377,8 @@ class MqttPublisher:
         no hay concurrencia sobre el cliente.
         """
         payload = json.dumps({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": "4.0",
+            "deployment_id":self.deployment,
             "node_id":        origin,
             "fault":          health.get("hl_fault_name"),
             "reset_reason":   health.get("hl_reset_reason"),
@@ -403,26 +403,21 @@ class MqttPublisher:
     def _register_payload(self, origin: int, catalog: dict) -> str:
         """Mensaje register retenido de batch-format.md §10.2 a partir del
         catálogo decodificado guardado en node_catalog."""
-        reads = [
-            {"id": rd.get("id"), "name": rd.get("name"),
-             "unit": rd.get("unit") or None}
-            for rd in catalog.get("reads", [])
-        ]
-        writes = [
-            dict(wr, unit=wr.get("unit") or None)
-            for wr in catalog.get("writes", [])
-        ]
-        return json.dumps({
-            "schema_version": SCHEMA_VERSION,
-            "node_id":        origin,
-            "name":           catalog.get("node_name"),
-            "fw_version":     catalog.get("fw_version"),
-            "reads":          reads,
-            "writes":         writes,
-        }, separators=(",", ":"))
+        payload=dict(schema_version='4.0',deployment_id=self.deployment,node_id=origin,
+                     device_uid=catalog.get('device_uid'),catalog_tag=catalog.get('catalog_tag'),
+                     name=catalog.get('node_name'),fw_version=catalog.get('fw_version'),
+                     reads=catalog.get('reads',[]),writes=catalog.get('writes',[]))
+        replacement=self.buf.conn.execute('SELECT uid,reason FROM identity_resolutions WHERE origin=? ORDER BY id DESC LIMIT 1',(origin,)).fetchone()
+        if replacement and replacement[0]==catalog.get('device_uid'):
+            payload['identity_resolution']=replacement[1]
+            previous=self.buf.conn.execute('SELECT uid FROM identity_sightings WHERE origin=? AND uid<>? ORDER BY last_seen DESC LIMIT 1',(origin,replacement[0])).fetchone()
+            if previous: payload['replaces_uid']=previous[0]
+        return json.dumps(payload,separators=(',',':'))
 
     def publish_command(self, publisher, payload):
-        return self._publish(f"modulinkr/v1/{publisher}/cmd",payload,qos=1,retain=False)
+        reason=identity.blocked(self.buf.conn,publisher)
+        if reason: return False
+        return self._publish(f"{self.topic_prefix}/{publisher}/cmd",payload,qos=1,retain=False)
 
     def drain_commands(self, service):
         import node_commands

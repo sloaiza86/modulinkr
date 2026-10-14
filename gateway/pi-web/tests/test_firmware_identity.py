@@ -78,15 +78,26 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(firmwaremeta.distribution_version(binary, source, old), VERSION)
 
 
+IDENTITY_VERSION = '0.0.82-difusion-red+010203040506'
+
+
 class FirmwareStateTests(unittest.TestCase):
+    def test_legacy_image_is_rejected_before_radio_operations(self):
+        response=api._firmware_guard(1,VERSION)
+        self.assertEqual(response.status_code,409)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = str(Path(self.tmp.name) / 'state.db')
         self.buf = GatewayBuffer(self.db)
         self.addCleanup(self.buf.close)
+        import identity
+        identity.observe(self.buf.conn,255,"ffffffffffff",1)
+        for origin in (1,2): identity.observe(self.buf.conn,origin,f"{origin:012x}",1)
+        self.buf.conn.commit()
         self.app = Path(self.tmp.name) / 'nodo-app.bin'
-        self.app.write_bytes(app_bytes())
+        self.app.write_bytes(app_bytes().replace(b'0.0.58-difusion-red', b'0.0.82-difusion-red'))
         self.nodes = [{'origin': 1, 'name': 'Sensor', 'fw_version': '0.0.57',
                        'online': True, 'parent_id': 255, 'hop_count': 1}]
         for obj, attr, value in [(api, 'DB_PATH', self.db), (api, 'APP_BIN', self.app)]:
@@ -99,7 +110,7 @@ class FirmwareStateTests(unittest.TestCase):
         now = time.time() - age
         cur = self.buf.conn.execute("""INSERT INTO fw_bcast
             (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,updated_ts,target)
-            VALUES (1,'image',?,212,?,128,10,?,?,?,?)""", (VERSION, '00'*32, state, now, now, target))
+            VALUES (1,'image',?,212,?,128,10,?,?,?,?)""", (IDENTITY_VERSION, '00'*32, state, now, now, target))
         self.buf.conn.commit()
         return cur.lastrowid
 
@@ -107,6 +118,16 @@ class FirmwareStateTests(unittest.TestCase):
         xfer,sha = self.buf.conn.execute('SELECT xfer,sha256 FROM fw_bcast WHERE id=?',(bid,)).fetchone()
         self.buf.conn.execute('INSERT OR REPLACE INTO fw_report VALUES(?,?,?,?,2,15,0,0,?)',(origin,bid,xfer,sha,time.time()))
         self.buf.conn.commit()
+
+    def test_radio_preparation_rejection_explains_preserved_image(self):
+        bid=self.operation(state='failed',target=1)
+        self.buf.bcast_map_set(bid,1,b'\x01',0)
+        self.buf.conn.execute("INSERT INTO fw_report VALUES(1,9,1,?,3,18,0,0,?)",('00'*32,time.time()))
+        self.buf.conn.commit()
+        row=api.firmware_difusion()['nodos'][0]
+        self.assertIn('radio no confirmó',row['report_text'])
+        self.assertIn('se conserva',row['report_text'])
+        self.assertTrue(row['received'])
 
     def test_old_operation_remains_identifiable_without_active_progress(self):
         self.operation(age=34*86400)
@@ -117,7 +138,7 @@ class FirmwareStateTests(unittest.TestCase):
         self.assertTrue(data['can_start'])
 
     def test_current_nodes_do_not_enable_another_send(self):
-        self.nodes[0]['fw_version'] = VERSION
+        self.nodes[0]['fw_version'] = IDENTITY_VERSION
         self.assertFalse(api.firmware_difusion()['can_start'])
 
     def test_received_does_not_mean_installed(self):
@@ -197,9 +218,9 @@ class FirmwareStateTests(unittest.TestCase):
         self.assertFalse(data['nodos'][0]['can_install'])
 
     def test_backend_rejects_installed_image(self):
-        self.buf.conn.execute("INSERT INTO node_catalog(origin_id,fw_version,catalog_json,t_updated) VALUES(1,?,'{}',?)", (VERSION,time.time()))
+        self.buf.conn.execute("INSERT INTO node_catalog(origin_id,fw_version,catalog_json,t_updated) VALUES(1,?,'{}',?)", (IDENTITY_VERSION,time.time()))
         self.buf.conn.commit()
-        response = api._firmware_guard(1, VERSION)
+        response = api._firmware_guard(1, IDENTITY_VERSION)
         self.assertEqual(response.status_code, 409)
 
     def selection_setup(self):
@@ -215,14 +236,14 @@ class FirmwareStateTests(unittest.TestCase):
     def test_running_image_releases_other_node_without_confirming_boot(self):
         self.selection_setup()
         bid = self.operation(state='installing', target=1)
-        self.buf.conn.execute('UPDATE node_catalog SET fw_version=?,t_updated=? WHERE origin_id=1', (VERSION,time.time()+1))
+        self.buf.conn.execute('UPDATE node_catalog SET fw_version=?,t_updated=? WHERE origin_id=1', (IDENTITY_VERSION,time.time()+1))
         self.buf.conn.commit()
-        self.nodes[0]['fw_version'] = VERSION
+        self.nodes[0]['fw_version'] = IDENTITY_VERSION
         data = api.firmware_difusion()
         self.assertTrue(data['nodos'][0]['boot_pending'])
         self.assertEqual(data['nodos'][0]['operation_state'],'installing')
         self.assertTrue(data['nodos'][1]['can_send'])
-        result = api.firmware_seleccion({'expected_version':VERSION,'origins':[2]})
+        result = api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2]})
         self.assertIsInstance(result,dict)
         self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast WHERE id=?',(bid,)).fetchone()[0],'installing')
 
@@ -230,25 +251,25 @@ class FirmwareStateTests(unittest.TestCase):
         self.selection_setup()
         bid = self.operation(state='installing',target=1)
         requested = self.buf.conn.execute('SELECT updated_ts FROM fw_bcast WHERE id=?',(bid,)).fetchone()[0]
-        for version, stamp, state in [(VERSION,requested-1,'installing'),
-                (VERSION[:-1]+'7',requested+1,'installing'),(VERSION,requested+1,'install_req')]:
+        for version, stamp, state in [(IDENTITY_VERSION,requested-1,'installing'),
+                (IDENTITY_VERSION[:-1]+'7',requested+1,'installing'),(IDENTITY_VERSION,requested+1,'install_req')]:
             self.buf.conn.execute('UPDATE node_catalog SET fw_version=?,t_updated=? WHERE origin_id=1',(version,stamp))
             self.buf.conn.execute('UPDATE fw_bcast SET state=? WHERE id=?',(state,bid))
             self.buf.conn.commit()
             self.assertFalse(api.firmware_difusion()['nodos'][1]['can_send'])
-            self.assertEqual(api.firmware_seleccion({'expected_version':VERSION,'origins':[2]}).status_code,409)
+            self.assertEqual(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2]}).status_code,409)
 
     def test_broadcast_install_uses_same_pending_boot_rule(self):
         self.selection_setup()
         bid = self.operation()
         self.buf.conn.execute("INSERT INTO fw_bcast_install(bcast_id,origin,created_ts,updated_ts,state) VALUES (?,1,?,?,'installing')",(bid,time.time(),time.time()))
-        self.buf.conn.execute('UPDATE node_catalog SET fw_version=?,t_updated=? WHERE origin_id=1',(VERSION,time.time()+1))
+        self.buf.conn.execute('UPDATE node_catalog SET fw_version=?,t_updated=? WHERE origin_id=1',(IDENTITY_VERSION,time.time()+1))
         self.buf.conn.commit()
-        self.nodes[0]['fw_version'] = VERSION
+        self.nodes[0]['fw_version'] = IDENTITY_VERSION
         data = api.firmware_difusion()
         self.assertTrue(data['nodos'][0]['boot_pending'])
         self.assertTrue(data['nodos'][1]['can_send'])
-        self.assertIsInstance(api.firmware_seleccion({'expected_version':VERSION,'origins':[2]}),dict)
+        self.assertIsInstance(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2]}),dict)
 
     def test_failed_complete_transfer_requires_explicit_check_before_install(self):
         self.selection_setup()
@@ -282,7 +303,7 @@ class FirmwareStateTests(unittest.TestCase):
 
     def test_selection_only_queues_selected_nodes_in_order(self):
         self.selection_setup()
-        result = api.firmware_seleccion({'expected_version':VERSION,'origins':[2,1]})
+        result = api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2,1]})
         self.assertEqual(result['origins'], [2,1])
         self.assertEqual(self.buf.bcast_active()['target'], 2)
         rows = api.firmware_difusion()['nodos']
@@ -299,24 +320,24 @@ class FirmwareStateTests(unittest.TestCase):
 
     def test_selection_rejects_unknown_equal_offline_and_duplicate(self):
         self.selection_setup()
-        for value, online in [(None,True),(VERSION,True),('0.0.57',False)]:
+        for value, online in [(None,True),(IDENTITY_VERSION,True),('0.0.57',False)]:
             self.nodes[0].update(fw_version=value, online=online)
-            result = api.firmware_seleccion({'expected_version':VERSION,'origins':[1]})
+            result = api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1]})
             self.assertEqual(result.status_code,409)
-        self.assertEqual(api.firmware_seleccion({'expected_version':VERSION,'origins':[2,2]}).status_code,400)
+        self.assertEqual(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2,2]}).status_code,400)
         self.assertEqual(self.buf.conn.execute('SELECT count(*) FROM fw_bcast').fetchone()[0],0)
 
     def test_selection_is_atomic_and_rejects_concurrent_transfer(self):
         self.selection_setup()
-        self.buf.conn.execute("UPDATE node_catalog SET fw_version=? WHERE origin_id=1",(VERSION,)); self.buf.conn.commit()
-        self.assertEqual(api.firmware_seleccion({'expected_version':VERSION,'origins':[2,1]}).status_code,409)
+        self.buf.conn.execute("UPDATE node_catalog SET fw_version=? WHERE origin_id=1",(IDENTITY_VERSION,)); self.buf.conn.commit()
+        self.assertEqual(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2,1]}).status_code,409)
         self.assertEqual(self.buf.conn.execute('SELECT count(*) FROM fw_bcast').fetchone()[0],0)
-        api.firmware_seleccion({'expected_version':VERSION,'origins':[2]})
-        self.assertEqual(api.firmware_seleccion({'expected_version':VERSION,'origins':[3]}).status_code,409)
+        api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[2]})
+        self.assertEqual(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[3]}).status_code,409)
 
     def test_confirmed_target_is_not_offered_for_install_again(self):
         self.selection_setup()
-        result = api.firmware_seleccion({'expected_version':VERSION,'origins':[1]})
+        result = api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1]})
         self.buf.bcast_state(result['ids'][0], 'done')
         row = api.firmware_difusion()['nodos'][0]
         self.assertEqual(row['operation_state'],'done')
@@ -324,7 +345,7 @@ class FirmwareStateTests(unittest.TestCase):
 
     def test_cancel_clears_queue_but_preserves_ready_images(self):
         self.selection_setup()
-        result = api.firmware_seleccion({'expected_version':VERSION,'origins':[1,2,3]})
+        result = api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1,2,3]})
         self.buf.bcast_state(result['ids'][0], 'ready')
         self.assertTrue(api.firmware_difusion_cancelar()['ok'])
         self.assertIsNone(self.buf.bcast_active())
@@ -337,13 +358,13 @@ class FirmwareStateTests(unittest.TestCase):
         old='0.0.56+abcdef123456'
         self.buf.conn.execute('UPDATE fw_bcast SET version=? WHERE id=?',(old,bid)); self.buf.conn.commit()
         node=api.firmware_difusion()['nodos'][0]
-        self.assertEqual(node['available_version'],VERSION)
+        self.assertEqual(node['available_version'],IDENTITY_VERSION)
         self.assertEqual(node['operation']['version'],old)
 
     def test_auto_is_opt_in_persisted_and_can_be_disabled(self):
         self.selection_setup()
-        self.assertEqual(api.firmware_seleccion({'expected_version':VERSION,'origins':[1],'auto_install':'yes'}).status_code,400)
-        result=api.firmware_seleccion({'expected_version':VERSION,'origins':[1,2],'auto_install':True})
+        self.assertEqual(api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1],'auto_install':'yes'}).status_code,400)
+        result=api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1,2],'auto_install':True})
         self.assertEqual(self.buf.conn.execute('SELECT sum(auto_install) FROM fw_bcast').fetchone()[0],2)
         self.assertEqual(api.firmware_auto_desactivar({'id':result['ids'][0],'origin':1}),{'ok':True})
         self.assertEqual(self.buf.conn.execute('SELECT sum(auto_install) FROM fw_bcast').fetchone()[0],1)
@@ -352,7 +373,7 @@ class FirmwareStateTests(unittest.TestCase):
 
     def test_cancel_one_operation_preserves_other_queued_node(self):
         self.selection_setup()
-        result=api.firmware_seleccion({'expected_version':VERSION,'origins':[1,2]})
+        result=api.firmware_seleccion({'expected_version':IDENTITY_VERSION,'origins':[1,2]})
         self.assertEqual(self.buf.conn.execute('SELECT sum(auto_install) FROM fw_bcast').fetchone()[0],0)
         api.firmware_difusion_cancelar({'id':result['ids'][0],'origin':1})
         self.assertEqual(self.buf.conn.execute('SELECT state FROM fw_bcast ORDER BY id').fetchall(),[('cancelled',),('offering',)])
@@ -388,14 +409,14 @@ class RadioIdentityTests(unittest.TestCase):
             with sqlite3.connect(path) as conn:
                 conn.execute('CREATE TABLE radio_identity(id INTEGER,version TEXT,port TEXT,ts REAL)')
             for age, port, connected, expected in [
-                (5, '/dev/ttyUSB0', True, VERSION),
+                (5, '/dev/ttyUSB0', True, IDENTITY_VERSION),
                 (61, '/dev/ttyUSB0', True, None),
                 (5, '/dev/ttyUSB1', True, None),
                 (5, '/dev/ttyUSB0', False, None),
             ]:
                 with sqlite3.connect(path) as conn:
                     conn.execute('DELETE FROM radio_identity')
-                    conn.execute('INSERT INTO radio_identity VALUES(1,?,?,?)', (VERSION,port,time.time()-age))
+                    conn.execute('INSERT INTO radio_identity VALUES(1,?,?,?)', (IDENTITY_VERSION,port,time.time()-age))
                 ns = {'netstatus': types.SimpleNamespace(_conn=lambda: sqlite3.connect(path),
                         gateway_link_state=lambda: {'lora_link': connected}),
                       'configapi': types.SimpleNamespace(GATEWAY_PORT='/dev/ttyUSB0'),

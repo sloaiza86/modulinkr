@@ -4,7 +4,7 @@ El directorio contiene el firmware común de los dispositivos de campo ModuLinkr
 
 ## Estado actual
 
-La versión declarada en `src/main.cpp` es `0.0.80`, con control remoto Modbus y fragmentación del registro compatible con el sobre de seguridad. El firmware usa la trama LoRa `0x3B` y acepta configuraciones con `schema_version` de `3.0` a `3.3`. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`.
+La versión declarada en `src/main.cpp` es `0.0.84`. El firmware exige identidad física, protocolo LoRa 4.0 y configuración 3.3. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`. ModuLinkr permanece antes de su primera publicación; los formatos internos previos no constituyen versiones desplegadas en clientes.
 
 El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
@@ -55,13 +55,13 @@ Después de compilar en VS Code, `make_dist.sh` genera los binarios que consume 
 
 ## Recuperación LoRa tras un reinicio
 
-Desde 0.0.77, el arranque intenta detener la recepción con `AT+PRECV=0` y reiniciar el módulo con `ATZ` aunque el sondeo inicial `AT` no reciba `OK`. El módulo LoRa permanece alimentado cuando se reinicia solo el ESP32. Por eso un fallo del sondeo no debe impedir el intento de recuperación. Si no se consigue inicializar la radio, se repite el procedimiento 30 segundos después de terminar el intento, mientras se mantiene disponible la salida NB-IoT del supernodo.
+El Atom y el módulo LoRa se reinician por separado. El arranque de 0.0.84 sincroniza la UART, detiene RX, comprueba el modo P2P y desactiva el sueño del RAK antes de configurar la radio. No se envía ATZ en un arranque saludable ni se cambia de modo cuando el módulo ya está en P2P. Un sondeo fallido añade una escritura espaciada y limita los intentos de ATZ a uno cada cinco minutos. La falta de inicialización mantiene la radio no disponible y reintenta después de treinta segundos.
 
-El evento `radio.startup_recovery` identifica un sondeo fallido seguido del intento de recuperación. `radio.reset_observed` reconoce el banner de arranque del RAK como respuesta al comando `ATZ`, sin exigir un `OK` en esa misma respuesta. La radio solo queda disponible tras responder al sondeo posterior y aceptar su configuración y recepción. Un banner sin respuesta posterior sigue siendo un fallo. `radio.init_failed` conserva etapa, comando, motivo y respuesta parcial.
+La ausencia de `TXP2P DONE` detiene las transmisiones posteriores hasta recuperar la radio. Se evita atribuir una confirmación tardía al siguiente envío. La recuperación requiere observar tráfico nuevo; una configuración aceptada por AT no acredita por sí sola una transmisión. La recuperación de radio no reinicia automáticamente el Atom ni elimina su hora o la outbox.
 
-Una instalación OTA aceptada prepara también la radio externa antes de reiniciar el ESP32: detiene RX, intenta ATZ, comprueba AT y vuelve a detener RX. `radio.restart_prepared` muestra `result=ready` si se confirman el sondeo final y la parada de recepción, o `result=unconfirmed` si no se confirman. Este último caso no bloquea el arranque de la imagen seleccionada ni anula la comprobación de registro y reversión existentes. La imagen nueva vuelve a ejecutar la secuencia de inicialización completa.
+La instalación OTA verifica la imagen antes de detener RX y confirmar el sondeo final. Si no se confirma la preparación, no se selecciona la partición nueva ni se reinicia: se conserva la imagen recibida y se comunica `RADIO_NOT_READY`, causa 18. El gateway y el visor muestran que la instalación se detuvo porque la radio no quedó preparada y que la imagen continúa disponible.
 
-La preparación previa al reinicio requiere que la aplicación que ejecuta la orden de instalar ya contenga esta corrección. Al actualizar desde 0.0.75 o 0.0.76 solo actúa la recuperación de arranque incluida en la imagen nueva. Para comprobar ambos extremos se requiere una base 0.0.77 y otra imagen de prueba posterior. Las pruebas nativas con UART simulada verifican la secuencia, las respuestas y los límites de espera; no demuestran la recuperación física de un módulo que ignore todos los comandos. El banco actual no dispone de control de alimentación o reset del módulo desde el ESP32.
+El RAK3172-E del banco se actualizó de RUI 4.0.6 a RUI 4.3.0 mediante el USB del Atom. Esta versión incluye la corrección del fabricante para el bloqueo de UART2 con un ESP32 anfitrión. Se validaron la restauración de ModuLinkr y una carga USB posterior, sin desconexión total, con lecturas Modbus y ACK del gateway. La actualización interna del RAK se realiza mediante el entorno temporal `rak-bridge`; después se restaura `atom-lite`. El procedimiento, las pruebas y sus límites figuran en [`../shared/protocol/radio-recovery.md`](../shared/protocol/radio-recovery.md).
 
 ## Documentos relacionados
 
@@ -103,3 +103,8 @@ Las acciones declaradas en `writes[]` se reciben por LoRa o por el servicio NB-I
 El catálogo de registro anuncia la capacidad y la definición de cada acción. Los relays del recorrido también necesitan 0.0.79 o una implementación compatible. La pérdida de una respuesta Modbus no autoriza repetir la escritura: se devuelve incertidumbre y un duplicado solo recupera el resultado persistido. La especificación está en [`commands-format.md`](../shared/protocol/commands-format.md) §12 y [`frame-format.md`](../shared/protocol/frame-format.md) §26.
 
 Desde 0.0.81, el catálogo relaciona cada operación con sus lecturas y admite presentación numérica, interruptores, selectores y acciones mediante `writes[].ui`. La relación automática exige posiciones y conversiones compatibles; los identificadores de lectura permiten una relación explícita. La extensión de catálogo requiere actualizar primero el gateway. El límite de fragmentación seguro permanece en 219 bytes y el protocolo de órdenes conserva las cuatro funciones anteriores.
+
+
+## Identidad física y despliegues
+
+El código del nodo 0.0.83 utiliza la radio 4.0, catálogos por huella y muestras vinculadas a equipo y sesión. El gateway bloquea identificadores repetidos y el consumidor separa los despliegues. El contrato actual, la conservación interna del banco y el procedimiento de despliegue se describen en [`identity-safety.md`](../shared/protocol/identity-safety.md). El banco debe utilizar nodos y relays del contrato de radio 4.0; las versiones internas previas no representan clientes publicados.

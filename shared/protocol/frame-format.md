@@ -1,5 +1,7 @@
 # ModuLinkr, especificación de la trama LoRa
 
+Estado actual 2026-10-14: ModuLinkr no ha publicado todavía su primera versión. Se admite únicamente el byte de radio `0x40`. Las referencias a versiones previas conservan la evolución interna del banco y no definen caminos admitidos ni una base instalada. La radio 4.0 utiliza la cabecera de identidad física definida en §27. Esa sección sustituye para la implementación actual los tamaños de cabecera, nonce, AAD, ACK y fragmentos de las versiones anteriores. El procedimiento de actualización se describe en [`identity-safety.md`](identity-safety.md).
+
 Documento normativo del **formato binario** que viaja por el aire LoRa entre los dispositivos del sistema (nodos, supernodos y gateway). Cubre las dos direcciones:
 
 - **Uplink** (nodo hacia gateway): tramas de telemetría y otras.
@@ -1198,6 +1200,9 @@ Misma forma que el CONFIG_RESULT (§17.4): `xfer_id` (4), `status` (1) y un deta
 | `0x03` | No se pudo marcar la partición de arranque. |
 | `0x04` | Revertida: arrancó, no se registró, y volvió a la anterior. |
 | `0x05` | Instalando: partición marcada, reiniciando. |
+| `0x06` | Instalación cancelada: la radio no confirmó que estaba preparada para reiniciar. Se conserva la imagen recibida. |
+
+La selección de la nueva partición exige reverificar la imagen y confirmar que la radio está sin recepción y responde a AT. Si esa preparación falla, no se cambia la partición de arranque, no se borra el mapa de recepción y no se reinicia el ESP32. Se intenta restablecer la radio y se conserva el rechazo en FW_REPORT para comunicarlo cuando vuelva el enlace.
 
 ### 18.6 Ventana de prueba y reversión
 
@@ -1258,6 +1263,7 @@ El payload de FW_REPORT tiene 46 bytes. Los enteros multibyte se codifican en li
 | 15 | Imagen recibida y verificada |
 | 16 | Arranque con la partición anterior tras preparar la instalación |
 | 17 | La imagen nueva no se registró en la red dentro de su ventana de prueba |
+| 18 | Instalación cancelada porque la radio no confirmó la preparación del reinicio; imagen recibida conservada |
 
 El código 16 no atribuye una causa física: puede observarse tras una reversión automática o un corte antes de activar la imagen. La falta de fragmentos no se interpreta como interferencia. El código 6 conserva el mapa y permite reanudar. Si falla el almacenamiento del propio informe, se conserva en RAM mientras el nodo siga encendido; no se garantiza su recuperación tras un corte.
 
@@ -1638,7 +1644,7 @@ Resumen para trazabilidad del TFM:
 
 **Cambios de v3.0 a v3.1 (2026-07-16)**:
 
-1. HEARTBEAT rediseñado como diagnóstico del duty cycle (§6): payload de 4 bytes con `tx_ms` (aire acumulado del transmisor, medido en el punto que define EN 300 220-1), emisión periódica cada 60 s, y sin régimen de ACK (la pérdida la absorbe la totalización por deltas en el receptor). Regla 8 de §10 actualizada (`payload_length ∈ {0, 4}`).
+1. HEARTBEAT rediseñado como diagnóstico del duty cycle (§6): payload de 4 bytes con `tx_ms` (aire acumulado del transmisor, medido en el punto que define EN 300 220-1), emisión periódica cada 60 s, y sin régimen de ACK (la pérdida la absorbe la totalización por deltas en el receptor). Regla 8 de §10 actualizada (`payload_length ∈ {4, 6}`).
 2. El gateway contabiliza su propio aire (beacons, ACKs, WELCOME) con la misma fórmula de ToA y se reporta a sí mismo.
 3. Nota de honestidad habitual: un receptor v3.0 rechaza el HEARTBEAT de 4 bytes, pero todo el despliegue se flashea a la vez y el resto de tramas es idéntico; se acepta como minor.
 
@@ -1669,7 +1675,7 @@ La difusión conserva hasta 16 solicitudes recientes, identificadas por origen y
 
 En estos tres tipos, el payload y su longitud pueden cambiar por salto. Se recifra la trama con un `sec_ts` de transmisión no reutilizado dentro de la sesión del transmisor, conservando la identidad de la muestra. Esta regla sustituye la inmutabilidad del payload y del `sec_ts` de §2 y §14 únicamente para los tipos de §23. La traza es información aportada por dispositivos que comparten la clave de red, no una prueba criptográfica independiente de cada enlace.
 
-`path_at` conserva el instante de recepción en el supernodo o gateway. Republicar la misma custodia no lo renueva. La bandeja MOB2 conserva la ruta y su fecha e importa MOB1 sin reconstruir saltos desconocidos. Los reintentos de una custodia ya en cola no sustituyen una entrada en vuelo. El límite de 16 identificadores incluye origen y receptor final; el identificador 255 solo se admite como destino final del gateway.
+`path_at` conserva el instante de recepción en el supernodo o gateway. Republicar la misma custodia no lo renueva. La bandeja MOB3 conserva recorrido, fecha, equipo, sesión y huella del catálogo. Los archivos internos de otro formato se archivan fuera de la bandeja operativa. Los reintentos de una custodia ya en cola no sustituyen una entrada en vuelo. El límite de 16 identificadores incluye origen y receptor final; el identificador 255 solo se admite como destino final del gateway.
 
 ## 24. Mantenimiento remoto de nodos
 
@@ -1699,7 +1705,7 @@ NODE_MAINTENANCE_RESULT contiene 32 bytes:
 
 El resultado 0 indica aceptación, 1 confirmación, 2 operación incompatible en curso, 3 fallo de persistencia, 4 orden caducada o sustituida y 5 muestras pendientes de ACK. El gateway exige correspondencia de origen, identificador y acción. Una aceptación tardía no sustituye una confirmación. Al agotarse el plazo sin resultado se conserva el estado sin confirmar; no se interpreta el silencio como éxito o fallo de ejecución.
 
-NODE_HEALTH conserva el prefijo anterior de 25 bytes y añade la fecha UTC de puesta a cero en los bytes 25 a 28. El receptor acepta ambos tamaños. Tras recibir una fecha de puesta a cero, un diagnóstico con fecha anterior no restaura los contadores antiguos. La fecha y los contadores sobreviven al reinicio del nodo; se requiere actualizar el receptor Python antes de instalar este firmware.
+NODE_HEALTH conserva el prefijo anterior de 25 bytes y añade la fecha UTC de puesta a cero en los bytes 25 a 28. El receptor exige los 29 bytes del contrato actual. Tras recibir una fecha de puesta a cero, un diagnóstico con fecha anterior no restaura los contadores antiguos. La fecha y los contadores sobreviven al reinicio del nodo; se requiere actualizar el receptor Python antes de instalar este firmware.
 
 ## 26. Escrituras Modbus remotas (v3.11)
 
@@ -1722,3 +1728,21 @@ El firmware 0.0.81 añade después de la extensión de escrituras 0x57 una exten
 La asociación y el objeto `ui` se definen en [`node-config.md`](node-config.md), apartado Presentación de operaciones del visor. El tamaño total del catálogo permanece limitado a 2048 bytes y cada fragmento conserva el límite seguro de 219 bytes. Los marcadores 0x55 y 0x57 pertenecen al catálogo; no son funciones Modbus ni nuevos tipos de trama. La versión del protocolo sigue siendo 0x3B y las funciones de escritura continúan siendo 0x05, 0x0F, 0x06 y 0x10.
 
 El gateway actualizado admite la ausencia de la extensión, con lectura asociada desconocida. Un gateway anterior rechaza los bytes adicionales, por lo que se actualiza el servicio y el visor antes de cargar 0.0.81 en un nodo. Los relays solo transportan los fragmentos y no necesitan interpretar esta extensión.
+
+
+## 27. Identidad física y aislamiento (2026-10-14)
+
+El major 4 conserva los once campos iniciales y amplía la cabecera a 48 B. Los bytes 11-16 contienen el UID físico del origen, 17-22 el UID del destinatario, 23-30 la huella SHA-256 truncada del catálogo, 31-34 la sesión del origen, 35-40 el UID del transmisor del salto, 41-44 su sesión persistida y 45-47 su contador de transmisión. Los enteros se codifican en little endian. Una dirección broadcast lleva UID destinatario nulo. El destinatario final verifica su UID antes de ejecutar. Los relays conservan identidad, sesión y catálogo del origen.
+
+AES-CCM utiliza un nonce de 13 B formado por UID transmisor (6 B), sesión persistida (4 B) y contador (3 B). La sesión se reserva antes de emitir; un fallo de persistencia impide la transmisión. El contador no se reutiliza al cambiar el reloj ni al reintentar. La cabecera completa y sec_ts forman el AAD. El máximo PHY se conserva en 242 B, con payload cifrado máximo de 184 B. Los fragmentos de firmware y mapas tienen 160 B, y los de configuración 176 B.
+
+El gateway conserva las asignaciones entre dirección y UID. Una segunda identidad para una dirección abre un conflicto persistente y bloquea su catálogo, sus datos y sus operaciones. No se libera una dirección por silencio. El UID del gateway identifica el despliegue y separa los topics MQTT y el histórico. Los nodos conservan el gateway conocido y rechazan otro UID con dirección 255. Una trama de otro formato se rechaza antes de atribuirla a un equipo. No genera una incidencia de migración ni se presenta como un nodo sin identidad.
+
+Las confirmaciones de telemetría incluyen secuencia, resultado, sesión de origen y timestamp de captura. Una confirmación no libera una muestra de otra sesión. Cada muestra conserva UID, sesión y catálogo durante retransmisión, custodia y reinicio. Los catálogos se conservan por huella para interpretar el backlog con su definición original. Un conflicto de contenido con la misma identidad de muestra se conserva como incidencia, sin reemplazar el valor aceptado.
+
+
+### Contrato único previo a la publicación
+
+HEARTBEAT exige cuatro bytes de aire acumulado o seis cuando incluye el estado celular. NODE_HEALTH exige 29 bytes. CONFIG_COMMIT exige 42 bytes, incluido `apply_at`, que vale cero para aplicación inmediata. El catálogo declara formato 3.3, clase A o C, descriptores de escrituras y operaciones, ID de nodo y descriptores semánticos de medidas. La ausencia de esos campos invalida el registro.
+
+FW_REPORT conserva la transferencia, SHA-256, fase y causa durante el reinicio y se repite hasta recibir FW_REPORT_ACK. FW_RESULT se utiliza solo para un rechazo inmediato de instalación, vinculado a la transferencia exacta. No confirma un arranque ni se admite una transferencia cero como sustituto de la esperada. Los avisos repetidos para gateways de versiones internas previas se retiran.

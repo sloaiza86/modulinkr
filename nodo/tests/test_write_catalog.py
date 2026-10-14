@@ -35,7 +35,7 @@ int main(){std::string json;std::getline(std::cin,json);char error[256];
             mesh=dict(relay_enabled=True,max_ttl=4,beacon_timeout_ms=90000,parent_min_rssi=-100,parent_hysteresis_db=6,parent_missed_frames=3,sn_offer_wait_ms=1000)),
             modbus=dict(baudrate=9600,parity='N',stopbits=1,devices=[]))
         for d in range(4):
-            device=dict(name='módulo'+str(d),addressing=dict(default_slave_id=1,desired_slave_id=1),reads=[dict(id='temp',name='Temperatura',function='read_input_registers',address=0,type='int16'),dict(id='hum',name='Humedad',function='read_input_registers',address=1,type='uint16')],writes=[])
+            device=dict(name='módulo'+str(d),addressing=dict(default_slave_id=d+1,desired_slave_id=d+1),reads=[dict(id='temp',name='Temperatura',function='read_input_registers',address=0,type='int16'),dict(id='hum',name='Humedad',function='read_input_registers',address=1,type='uint16')],writes=[])
             for i,fn in enumerate(['write_single_coil','write_multiple_coils','write_single_register','write_multiple_registers']):
                 entry=dict(id='action'+str(i),name='Acción'+str(i),function=fn,address=i*2,count=1)
                 if i>=2:entry['type']='uint16'
@@ -47,6 +47,14 @@ int main(){std::string json;std::getline(std::cin,json);char error[256];
             subprocess.run(['clang++','-std=c++17','-Wno-deprecated-declarations','-DARDUINOJSON_ENABLE_ARDUINO_STRING=0','-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0','-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0','-I',tmp,'-I',str(SRC),'-I',str(library),str(root/'test.cpp'),str(SRC/'config.cpp'),'-o',str(root/'test')],check=True)
             def run():return subprocess.run([str(root/'test')],input=json.dumps(config)+'\n',text=True,capture_output=True)
             result=run();self.assertEqual(result.returncode,0,result.stdout)
+            for version in ('3.0','3.1','3.2'):
+                config['schema_version']=version;self.assertEqual(run().returncode,2)
+            config['schema_version']='3.3'
+            for value in (True,False):
+                config['modbus']['debug']=value;self.assertEqual(run().returncode,2)
+            config['modbus'].pop('debug')
+            config['modbus']['devices'][0]['poll_interval_ms']=1000;self.assertEqual(run().returncode,2)
+            config['modbus']['devices'][0].pop('poll_interval_ms')
             decoded=protocol.parse_catalog(bytes.fromhex(result.stdout));self.assertNotIn('error',decoded)
             self.assertTrue(decoded['write_capable']);self.assertEqual(len(decoded['writes']),16)
             self.assertEqual(decoded['writes'][-1]['device'],3)

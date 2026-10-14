@@ -1,7 +1,7 @@
 // ModuLinkr, carga y validación del config.json del dispositivo
 //
 // Materializa en el firmware la especificación de node-config.md (schema
-// 2.0): el JSON dicta la identidad del nodo, los parámetros de red LoRa y
+// 3.3): el JSON dicta la identidad del nodo, los parámetros de red LoRa y
 // mesh, el bloque NB-IoT (solo supernodos) y el bus Modbus completo
 // (dispositivos, lecturas, escrituras).
 //
@@ -34,19 +34,9 @@
 
 namespace cfg {
 
-// Versiones del schema del config.json que este firmware sabe cargar
-// (node-config.md §1), separadas por comas y de la más antigua a la más
-// nueva. Es la fuente única: la validación de `load` la recorre, y el nodo
-// la anuncia en su identidad por USB y en el catálogo del registro.
-//
-// Existe porque nadie podía responder "¿este firmware entiende este schema?".
-// El visor generaba un schema fijo y el firmware aceptaba un rango escrito a
-// mano en un `if` encadenado, de modo que funcionaba por coincidencia: al
-// añadir una versión nueva, un config generado por un visor actualizado se
-// enviaba a un nodo viejo, se rechazaba al cargar y la ventana de prueba lo
-// revertía minutos después. Seguro, pero caro y desconcertante. Declarándolo,
-// quien envía puede saberlo antes de gastar el aire.
-constexpr const char* kSchemasSoportados = "3.0,3.1,3.2,3.3";
+// Contrato vigente del config.json, anunciado por USB y en el catálogo.
+// La primera publicación no incorpora formatos anteriores del banco.
+constexpr const char* kSchemasSoportados = "3.3";
 
 // true si `schema` está en la lista de arriba. Comparación exacta sobre la
 // cadena separada por comas, sin interpretar números: una versión se soporta
@@ -65,7 +55,7 @@ enum class ValType : uint8_t { U16, I16, U32, I32, F32 };
 // Modo del debug Modbus (node-config.md §5, v3.3). Dos ejes en un valor:
 // qué transacciones son candidatas (ninguna / solo fallidas / todas) y
 // cuántas se emiten por ciclo (la última candidata / cada candidata). El
-// booleano v3.2 se mapea en el parseo: true=ERRORS_LAST, false=OFF.
+// El campo se declara como uno de los modos de diagnóstico.
 enum class ModbusDebug : uint8_t {
     OFF = 0,       // no se emite MODBUS_DEBUG (coste cero)
     ERRORS_LAST,   // la última transacción fallida del ciclo (v3.2 clásico)
@@ -151,6 +141,7 @@ struct DeviceDef {
 struct Config {
     // node
     uint8_t  node_id    = 0;
+    char deployment_id[13] = {};
     bool     super_node = false;
     char     node_name[33] = {0};
 
@@ -210,7 +201,6 @@ struct Config {
     bool     tls          = false;    // TLS 1.2 con el broker (mqtt_port 8883)
     char     mqtt_user[33] = {0};     // usuario MQTT (opcional, default "")
     char     mqtt_pass[33] = {0};     // clave MQTT (opcional, default "")
-    char     topic_batch[64] = {0};   // con {node_id} ya sustituido
     bool     nb_relay_enabled     = true;
     uint16_t relay_queue_max      = 128;
     bool     nbiot_debug          = true;  // sobre debug del mensaje (v3.0)

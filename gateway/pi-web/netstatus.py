@@ -91,13 +91,7 @@ def snapshot() -> dict:
 
 
 def _schemas_de(catalog_json) -> str:
-    """Saca la lista de schemas del catálogo guardado, tolerando su ausencia.
-
-    El campo llegó en v3.7 y el catálogo se guarda como JSON entero, así que
-    un nodo con firmware anterior deja una fila perfectamente válida sin él.
-    Devolver cadena vacía y no None deja al visor distinguir "no lo declara"
-    de "no soporta ninguno", que son cosas distintas.
-    """
+    """Declara el contrato del catálogo; vacío indica registro incompleto."""
     if not catalog_json:
         return ""
     try:
@@ -183,21 +177,14 @@ def _umbral_datos_de(conn, origin: int, ahora: float) -> float:
 
 
 def _clase_de(catalog_json: str) -> str:
-    """Clase del nodo (frame-format.md §21), 'A' o 'C'.
-
-    Aquí sí se devuelve un valor por defecto y no cadena vacía, al revés que
-    con los schemas, y la diferencia es deliberada. Con los schemas, no
-    declararlos y no soportar ninguno son cosas distintas y hay que poder
-    distinguirlas. Con la clase no: un nodo que no la declara es de firmware
-    anterior a v4.0, y todos esos son nodos alimentados que escuchan siempre.
-    Suponer 'C' ahí no es adivinar, es lo que eran.
-    """
+    """Clase declarada: A o C. Un registro incompleto conserva valor vacío."""
     if not catalog_json:
-        return "C"
+        return ""
     try:
-        return json.loads(catalog_json).get("class", "C") or "C"
+        value=json.loads(catalog_json).get("class", "")
+        return value if value in ("A", "C") else ""
     except (ValueError, AttributeError):
-        return "C"
+        return ""
 
 
 def duty_by_origin(window_s: float = 3600.0) -> dict:
@@ -214,8 +201,7 @@ def duty_by_origin(window_s: float = 3600.0) -> dict:
                    WHERE t_recv >= ? ORDER BY origin, t_recv""",
                 (t0,)).fetchall()
     except sqlite3.OperationalError:
-        # buffer.db de un gateway anterior a v3.1, sin la tabla: el resto
-        # de la vista de red funciona igual, solo sin duty.
+        # Sin la tabla de reportes no hay evidencia para calcular el duty.
         return {}
     acc: dict = {}
     prev: dict = {}
@@ -238,8 +224,8 @@ def gateway_link_state() -> dict:
     """Estado de los enlaces del gateway (LoRa y MQTT) desde el latido que
     el servicio escribe en gateway_status. Si el latido no se refresca
     dentro de HEARTBEAT_S, el servicio se da por caído y ambos enlaces por
-    abajo. En un buffer anterior a la tabla (gateway de una versión previa)
-    devuelve None en los campos: el visor cae al veredicto antiguo."""
+    abajo. Sin tabla o sin reporte se conserva el estado desconocido,
+    que no acredita disponibilidad del servicio ni de los enlaces."""
     now = time.time()
     unknown = {"service_online": None, "lora_link": None,
                "mqtt_enabled": None, "mqtt_connected": None,
@@ -291,7 +277,7 @@ def _sesiones_firmware(conn) -> dict:
                 f"ORDER BY id",
                 FW_SESION_VIVA).fetchall()
         except sqlite3.OperationalError:
-            continue        # buffer anterior a esta tabla
+            continue        # Almacenamiento todavía sin inicializar.
         for destino, estado in filas:
             sesiones[0 if destino is None else int(destino)] = estado
     return sesiones
@@ -341,9 +327,7 @@ def network_state() -> dict:
             "origin":     r[0],
             "name":       r[7],
             "fw_version": r[8],
-            # Schemas del config.json que el firmware del nodo sabe cargar
-            # (v3.7). Cadena vacía si el nodo no lo declara, que es el caso de
-            # un firmware anterior: el visor lo distingue de "ninguno".
+            # Un registro incompleto no acredita el formato de configuración.
             "schemas":    _schemas_de(r[9]),
             # Clase (v4.0, §21): 'C' escucha siempre, 'A' solo tras hablar.
             # Decide la latencia de bajada y si la difusión le alcanza.
@@ -435,7 +419,29 @@ def network_state() -> dict:
     except sqlite3.OperationalError:
         pass
     gw_ago = round(now - gw_last, 1) if gw_last is not None else None
-    return {"nodes": nodes, "generated_at": now,
+    import sys
+    from pathlib import Path
+    sys.path.insert(0,str(Path(__file__).resolve().parent.parent/'pi-service'))
+    import identity
+    with _conn() as c:
+        try:
+            bindings={r[0]:r for r in c.execute('SELECT origin,uid,boot,conflict FROM identity_bindings')}
+        except sqlite3.OperationalError:
+            bindings={}
+        for node in nodes:
+            binding=bindings.get(node['origin'])
+            node['device_uid']=binding[1] if binding else None
+            node['identity_verified']=bool(binding and binding[2] and not binding[3])
+            node['identity_blocked']=identity.blocked(c,node['origin'])
+        root=bindings.get(255)
+        identities=dict(bindings=[],sightings=[],incidents=[])
+        try:
+            identities['bindings']=[dict(origin=r[0],device_uid=r[1],boot_id=r[2],conflict=bool(r[3])) for r in bindings.values()]
+            identities['sightings']=[dict(origin=r[0],device_uid=r[1],last_seen=r[2]) for r in c.execute('SELECT origin,uid,last_seen FROM identity_sightings')]
+            identities['incidents']=[dict(kind=r[0],origin=r[1],detail=r[2]) for r in c.execute('SELECT kind,origin,detail FROM identity_incidents WHERE active=1')]
+        except sqlite3.OperationalError:
+            pass
+    return {"identity":identities,"deployment_id":root[1] if root else None,"nodes": nodes, "generated_at": now,
             "gateway_duty_1h": duty.get(GATEWAY_ID),
             "gateway_online": None if gw_ago is None else gw_ago <= ONLINE_S,
             "gateway_ago_s": gw_ago,
@@ -723,6 +729,24 @@ def _channels_simple(vals: list, sts: list, defs: list) -> list:
     return channels
 
 
+def _sample_definition(raw,origin,current):
+    payload=json.loads(raw) if raw else {}
+    if not isinstance(payload,dict) or not payload.get('catalog_tag'):
+        try:
+            with _conn() as c:
+                binding=c.execute('SELECT boot FROM identity_bindings WHERE origin=?',(origin,)).fetchone()
+            if binding and binding[0]: return [],'unverified'
+        except sqlite3.OperationalError:
+            pass
+        return current.get(origin,[]),None
+    with _conn() as c:
+        binding=c.execute('SELECT uid FROM identity_bindings WHERE origin=?',(origin,)).fetchone()
+        if binding and binding[0]!=payload.get('device_uid'): return [],'unverified'
+        row=c.execute('SELECT catalog_json FROM identity_catalogs WHERE uid=? AND tag=?',
+                      (payload.get('device_uid'),payload['catalog_tag'])).fetchone()
+    return (json.loads(row[0]).get('reads',[]) if row else []),payload['catalog_tag']
+
+
 def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
     """Últimos valores por nodo para las tarjetas de /api/red/ultimos.
 
@@ -751,7 +775,8 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
     nodes: dict[int, dict] = {}
     for origin, t, rj, captured_ts in last_rows:
         vals, sts = _reads_row(rj)
-        defs = reads_def.get(origin, [])
+        defs,tag = _sample_definition(rj,origin,reads_def)
+        if tag=='unverified': continue
         channels = []
         pendientes = []  # posiciones falladas: buscarles el último valor bueno
         for i, v in enumerate(vals):
@@ -784,6 +809,8 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
             for tp, rjp in prev:
                 if not pendientes:
                     break
+                previous_tag=json.loads(rjp).get("catalog_tag") if rjp and isinstance(json.loads(rjp),dict) else None
+                if previous_tag!=tag: continue
                 vp = _reads_row(rjp)[0]
                 for i in list(pendientes):
                     if i < len(vp) and vp[i] is not None:
@@ -796,7 +823,7 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
         # cloud. dataapi lo sirve con cache TTL (5 min) para que el sondeo
         # de 5 s no toque la VM cada vez; sin Internet devuelve vacío y el
         # canal queda con el motivo en texto.
-        if pendientes and include_cloud:
+        if pendientes and include_cloud and tag is None:
             try:
                 from dataapi import last_good_cloud
                 cloud = last_good_cloud(origin)
@@ -809,7 +836,7 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
                     channels[i]["value_ago_s"] = round(now - got[0], 1)
                     pendientes.remove(i)
 
-        nodes[origin] = {"origin": origin, "t_last": captured_ts,
+        nodes[origin] = {"origin": origin,"catalog_tag":tag, "t_last": captured_ts,
                          "captured_ts": captured_ts,
                          "ago_s": round(now - captured_ts, 1), "channels": channels}
 
@@ -817,6 +844,8 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
         node = nodes.get(origin)
         if node is None:
             continue
+        _,tag=_sample_definition(rj,origin,reads_def)
+        if tag!=node.get("catalog_tag"): continue
         for i, v in enumerate(_reads_row(rj)[0]):
             if i < len(node["channels"]):
                 node["channels"][i]["serie"].append([round(t, 1), v])
@@ -834,10 +863,13 @@ def last_values(window_s: float = 3600.0, include_cloud: bool = True) -> dict:
         if lora is not None and lora["captured_ts"] >= cap_ts:
             continue
         vals, sts = _reads_row(rj)
+        defs,tag=_sample_definition(rj,origin,reads_def)
+        if tag=='unverified': continue
         nodes[origin] = {"origin": origin, "t_last": cap_ts,
                          "ago_s": round(now - cap_ts, 1), "via_nbiot": True,
                          "via_publisher": publisher, "captured_ts": cap_ts,
-                         "channels": _channels_simple(vals, sts, reads_def.get(origin, []))}
+                         "catalog_tag":tag,
+              "channels": _channels_simple(vals, sts, defs)}
 
     return {"window_s": window_s, "nodes": list(nodes.values())}
 

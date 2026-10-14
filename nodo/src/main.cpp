@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.81"
+#define MODULINKR_FIRMWARE_VERSION "0.0.84"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -78,6 +78,7 @@
 #include "outbox.h"
 #include "nbiot_service.h"
 #include "config.h"
+#include "device_identity.h"
 #include "configstore.h"
 #include "commission.h"
 #include "sampler.h"
@@ -168,7 +169,7 @@ bool g_configured  = false;
 bool g_cfg_missing = false;   // config ausente o inválido (solo para el log)
 char g_cfg_err[96] = {0};
 
-// client_id MQTT derivado del node_id (se rellena en setup).
+// El UID físico evita que dos nodos con el mismo ID se expulsen del broker.
 char g_client_id[24] = {0};
 
 // Instancias globales.
@@ -209,6 +210,7 @@ bool g_lora_ready = false;
 // (origin, ts, seq); las colisiones entre arranques que obligaban a
 // vaciar la BBDD del Pi tras reflashear desaparecen.
 uint16_t nextSeq() {
+    if (g_lora_seq==65535) deviceid::renewSession();
     g_lora_seq++;
     return g_lora_seq;
 }
@@ -237,8 +239,6 @@ constexpr uint32_t kRecoveryVerifyMarginMs = 60000;
 uint32_t g_recovery_verify_ms = 240000;
 
 constexpr uint32_t kExhaustedRetryMs   = 300000;    // reintento con la escalera agotada
-constexpr uint32_t kRebootWindowMs     = 21600000;  // 6 h
-constexpr uint8_t  kRebootMaxPerWindow = 3;
 constexpr uint32_t kHealthRepeatMs     = 60000;
 constexpr uint8_t  kHealthRepeats      = 3;
 
@@ -281,17 +281,11 @@ uint32_t g_trial_start_ms = 0;
 // se reutiliza la constante en vez de duplicar el número.
 bool     g_fw_trial_active = false;
 uint32_t g_fw_trial_start  = 0;
-uint32_t g_fw_result_left  = 0;   // emisiones pendientes de FW_RESULT
-uint32_t g_fw_result_ms    = 0;
-uint32_t g_fw_result_xfer  = 0;
-uint8_t  g_fw_result_code  = 0;
 
 health::Record g_health;
 uint32_t g_maintenance_restart_ms = 0;
-uint8_t  g_recov_level     = 0;   // 0 sana, 1..4 último nivel ejecutado
+uint8_t  g_recov_level     = 0;   // 0 sana, 1..3 último nivel ejecutado
 uint32_t g_recov_step_ms   = 0;   // millis() de esa ejecución
-uint8_t  g_reboots_window  = 0;
-uint32_t g_reboot_win_ms   = 0;
 uint8_t  g_health_tx_left  = 0;   // emisiones pendientes de NODE_HEALTH
 uint32_t g_health_tx_ms    = 0;
 
@@ -308,7 +302,6 @@ uint32_t g_reg_backoff_ms  = kRegBackoffMinMs;
 // habilitado, el muestreo NO se detiene aunque más tarde caiga el padre
 // (las muestras se retienen en la outbox y salen por NB-IoT o custodia).
 bool     g_sampling_started = false;
-char g_command_topic[80]={};
 struct PendingWrite {
     bool active=false;
     uint8_t body[writecmd::kMaxBody]={}, length=0, path[16]={}, path_count=0;
@@ -363,15 +356,9 @@ size_t buildCatalog(uint8_t* buf, size_t cap) {
     }
 
     // Schemas del config.json que este firmware sabe cargar (v3.7). Va al
-    // final y no en la cabecera del catálogo a propósito: así un gateway
-    // anterior, que no lo espera, sigue leyendo el resto tal cual. Son unos
-    // quince bytes en una trama que se emite una vez por arranque.
     if (!putStr(cfg::kSchemasSoportados, 64)) return 0;
 
-    // Clase del nodo (v4.0, §21). Va detrás de los schemas y por el mismo
-    // motivo: un gateway anterior que no la espera sigue leyendo el resto sin
-    // enterarse. Un byte, y le ahorra al gateway tener que suponer cuándo
-    // puede hablarle.
+    // El catálogo declara la clase y el contrato de configuración.
     if (p + 1 > cap) return 0;
     buf[p++] = static_cast<uint8_t>(g_cfg.node_class);
     if(p+3>cap) return 0;
@@ -440,6 +427,16 @@ size_t buildCatalog(uint8_t* buf, size_t cap) {
             memcpy(buf + p, wr.ui, bytes); p += bytes;
         }
         base += dev.n_reads;
+    }
+    if (p+5+16*g_cfg.total_reads>cap) return 0;
+    buf[p++]=0x49; buf[p++]=g_cfg.node_id;
+    buf[p++]=0x52; buf[p++]=1; buf[p++]=g_cfg.total_reads;
+    for(uint8_t d=0;d<g_cfg.n_devices;++d) for(uint8_t r=0;r<g_cfg.devices[d].n_reads;++r) {
+        const auto& dev=g_cfg.devices[d]; const auto& rd=dev.reads[r];
+        buf[p++]=d; buf[p++]=dev.slave_id; buf[p++]=rd.function;
+        memcpy(buf+p,&rd.address,2); p+=2;
+        buf[p++]=rd.count; buf[p++]=static_cast<uint8_t>(rd.type); buf[p++]=static_cast<uint8_t>(rd.order);
+        memcpy(buf+p,&rd.scale,4); memcpy(buf+p+4,&rd.offset,4); p+=8;
     }
     return p;
 }
@@ -540,11 +537,10 @@ void printBanner() {
                       : "listens after transmit: downlink follows sampling cadence");
     if (g_cfg.super_node) {
         diag::log("INFO", "node.init", "init.role", "type=supernode fallback=NB-IoT");
-        diag::log("INFO", "node.init", "init.mqtt_config", "host=%s port=%u transport=%s auth=%s topic_batch=%s",
+        diag::log("INFO", "node.init", "init.mqtt_config", "host=%s port=%u transport=%s auth=%s",
                        g_cfg.broker, g_cfg.port,
                        g_cfg.tls ? "TLS" : "TCP",
-                       g_cfg.mqtt_user[0] ? "enabled" : "none",
-                       g_cfg.topic_batch);
+                       g_cfg.mqtt_user[0] ? "enabled" : "none");
     } else {
         diag::log("INFO", "node.init", "init.role", "type=node fallback=supernode");
     }
@@ -582,7 +578,7 @@ bool fireLora() {
             const uint32_t now = millis();
             if (last_wait_log_ms == 0 || now - last_wait_log_ms > 10000) {
                 last_wait_log_ms = now;
-                diag::log("INFO", "node.sampler", "sampler.paused", "reason=clock_unsynchronized schema=3.0");
+                diag::log("INFO", "node.sampler", "sampler.paused", "reason=clock_unsynchronized");
             }
             return false;
         }
@@ -658,6 +654,15 @@ bool fireLora() {
     // gate de v3.0 el reloj está sincronizado, así que nunca es 0.
     const uint32_t capture_ms = millis();
     const uint32_t ts         = nodeclock::epochNow();
+    static uint32_t last_capture=0;
+    if (last_capture && ts<last_capture) {
+        if (!deviceid::renewSession()) return false;
+        uint8_t alarm[9]={1}; memcpy(alarm+1,&last_capture,4); memcpy(alarm+5,&ts,4);
+        if (g_lora_ready && mesh.hasParent()) { nextSeq(); lora.sendRoute(mesh.parentId(),255,g_lora_seq,protocol::kFrameAlarm,alarm,sizeof(alarm)); }
+        diag::log("WARNING","node.clock","clock.rollback","previous=%lu current=%lu session=%lu",static_cast<unsigned long>(last_capture),static_cast<unsigned long>(ts),static_cast<unsigned long>(deviceid::own().boot));
+    }
+    last_capture=ts;
+
 
     if (!g_lora_ready || !mesh.hasParent()) {
         // Sin radio o ruta al gateway: la muestra va a la outbox con su seq
@@ -748,16 +753,18 @@ void relayDownlink(const LoraP2P::RxFrame& f, const char* etiqueta) {
 
 // ACK entrante: propio (reconciliación) o ajeno (relay hacia abajo).
 void handleAck(const LoraP2P::RxFrame& f) {
-    if (f.payload_length != 3) return;
+    if (f.payload_length != 11) return;
 
     if (f.dest_id == g_cfg.node_id) {
         const uint16_t ack_seq = static_cast<uint16_t>(f.payload[0]) |
                                  (static_cast<uint16_t>(f.payload[1]) << 8);
         const uint8_t status = f.payload[2];
+        uint32_t ack_boot=0,ack_ts=0; memcpy(&ack_boot,f.payload+3,4); memcpy(&ack_ts,f.payload+7,4);
+        if (!ack_boot || !ack_ts) return;
         uint8_t dest = protocol::kAddrGateway;
         if (status!=protocol::kAckOk && status!=protocol::kAckOkViaNbiot) return;
         if ((f.origin_id==protocol::kAddrGateway) != (status==protocol::kAckOk)) return;
-        if (pending.ack(ack_seq, dest, f.origin_id)) {
+        if (pending.ack(ack_seq, dest, f.origin_id, ack_boot, ack_ts)) {
             g_lora_acked++;
             if (status == protocol::kAckOkViaNbiot) {
                 g_led_custody.ok(millis());
@@ -770,7 +777,7 @@ void handleAck(const LoraP2P::RxFrame& f) {
 
             // Si la muestra vivía en la outbox (drenaje o custodia),
             // queda entregada y sale de ahí.
-            if (outbox.remove(g_cfg.node_id, ack_seq)) {
+            if (outbox.remove(g_cfg.node_id, ack_seq, ack_boot, ack_ts)) {
                 g_outbox_inflight = false;
             }
 
@@ -825,7 +832,7 @@ void acceptCustody(const LoraP2P::RxFrame& f, const uint8_t* path=nullptr, uint8
     bool present=false;
     for (size_t i=0; i<Outbox::capacity(); ++i) {
         const auto* entry=outbox.at(i);
-        if (entry && entry->origin==f.origin_id && entry->seq==f.seq) {
+        if (entry && entry->origin==f.origin_id && entry->seq==f.seq && entry->identity.boot==f.identity.boot && !memcmp(entry->identity.uid,f.identity.uid,6)) {
             if (entry->ts!=ts) return;
             present=true;
         }
@@ -833,13 +840,13 @@ void acceptCustody(const LoraP2P::RxFrame& f, const uint8_t* path=nullptr, uint8
     if (!present) {
         if (!outbox.space()) return;
         outbox.push(f.origin_id, f.seq, values, sts, n, millis(), ts,
-                    /*ts_fixed=*/true, path, path_len, nodeclock::epochNow());
+                    /*ts_fixed=*/true, path, path_len, nodeclock::epochNow(), &f.identity);
         g_custody_rx++;
     }
     const bool dup=present;
 
     nextSeq();
-    lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckOkViaNbiot, f.hop_src);
+    lora.sendAck(f.origin_id, g_lora_seq, f.seq, protocol::kAckOkViaNbiot, f.hop_src, f.identity.boot, ts);
     diag::log("INFO", "node.custody", "custody.received", "origin=%u seq=%u%s  outbox=%u rx=%lu\n", f.origin_id, f.seq, dup ? " retry=true" : " retry=false", static_cast<unsigned>(outbox.count()), static_cast<unsigned long>(g_custody_rx));
 }
 
@@ -1059,9 +1066,8 @@ cfgota::Result aplicarConfig(const char* texto, size_t texto_len,
 
 void handleConfigCommit(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-commit"); return; }
-    // 38 = xfer(4) + len(2) + sha256(32), la forma de v3.5.
-    // 42 = lo mismo más la hora de aplicación (v3.9, spec §17.7).
-    if (f.payload_length != 38 && f.payload_length != 42) return;
+    // La hora de aplicación es obligatoria; cero representa aplicar ahora.
+    if (f.payload_length != 42) return;
 
     uint32_t xfer;
     uint16_t total_len;
@@ -1070,9 +1076,7 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     const uint8_t* sha = &f.payload[6];
 
     uint32_t apply_at = 0;
-    if (f.payload_length == 42) {
-        std::memcpy(&apply_at, &f.payload[38], sizeof(apply_at));
-    }
+    std::memcpy(&apply_at, &f.payload[38], sizeof(apply_at));
 
     const char* texto = nullptr;
     size_t      texto_len = 0;
@@ -1088,7 +1092,10 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
             snprintf(detalle, sizeof(detalle), "insufficient memory for validation");
         } else {
             char err[96];
-            const bool ok = cfg::load(texto, *tmp, err, sizeof(err));
+            bool ok = cfg::load(texto, *tmp, err, sizeof(err));
+            if (ok && (tmp->node_id!=g_cfg.node_id || strcmp(tmp->deployment_id,g_cfg.deployment_id))) {
+                ok=false; snprintf(err,sizeof(err),"physical identity changes require USB");
+            }
             delete tmp;
             if (!ok) {
                 r = cfgota::Result::INVALID;
@@ -1211,7 +1218,7 @@ void pendingTick() {
 // config con lo que el gateway sabe daría un JSON válido que el nodo
 // aceptaría, con el que seguiría registrándose, y que por tanto la ventana de
 // prueba CONFIRMARÍA: el nodo quedaría vivo y en línea midiendo nada.
-constexpr uint32_t kCfgReadFragBytes = 213;   // igual que en la escritura
+constexpr uint32_t kCfgReadFragBytes = 176;   // igual que en la escritura
 
 uint32_t g_cfgread_req    = 0;      // petición en curso, 0 = ninguna
 uint32_t g_cfgread_mask   = 0;      // fragmentos que el gateway aún pide
@@ -1523,7 +1530,7 @@ void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
     fwbcast::closeBlock();
 
     const uint8_t partes = fwbcast::mapParts();
-    uint8_t bits[212];
+    uint8_t bits[160];
     for (uint8_t i = 0; i < partes; ++i) {
         const size_t n = fwbcast::mapPart(i, bits, sizeof(bits));
         if (n == 0) break;
@@ -1537,11 +1544,16 @@ void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
 }
 
 void publishWriteResult(uint8_t origin,const writecmd::Result& result) {
-    JsonDocument doc; doc["schema_version"]="3.0"; doc["origin"]=origin;
+    JsonDocument doc; doc["origin"]=origin;
     doc["id"]=result.id; doc["fingerprint"]=result.fingerprint; doc["status"]=result.state;
     doc["modbus_status"]=result.bus; doc["exception"]=result.exception;
+    uint8_t deployment_root[6]; if (!deviceid::gateway(deployment_root)) return;
+    char root_text[13],uid_text[13]; deviceid::text(deployment_root,6,root_text); deviceid::text(deviceid::own().uid,6,uid_text);
+    doc["schema_version"]="4.0"; doc["deployment_id"]=root_text; doc["device_uid"]=uid_text; doc["publisher_boot"]=deviceid::own().boot;
     char json[256],topic[80]; serializeJson(doc,json,sizeof(json));
-    snprintf(topic,sizeof(topic),"modulinkr/v1/%u/cmd/response",g_cfg.node_id);
+    uint8_t root[6]; if (!deviceid::gateway(root) || deviceid::blocked(g_cfg.node_id)) return;
+    char deployment[13]; deviceid::text(root,6,deployment);
+    snprintf(topic,sizeof(topic),"modulinkr/v2/%s/%u/cmd/response",deployment,g_cfg.node_id);
     if(!nbsvc.publishMessage(topic,json))
         diag::log("WARNING","node.command","command.response_not_queued","id=%lu origin=%u",static_cast<unsigned long>(result.id),origin);
 }
@@ -1585,17 +1597,25 @@ void incomingCellularWrites() {
     char json[768];
     if(!nbsvc.receiveCommand(json,sizeof(json))) return;
     JsonDocument doc; if(deserializeJson(doc,json)) return;
-    if(strcmp(doc["schema_version"]|"","3.0")!=0) return;
+    if(strcmp(doc["schema_version"]|"","4.0")!=0) return;
     const char* hex=doc["body"]|""; const size_t size=strlen(hex);
     if(size%2 || size<48 || size>2*writecmd::kMaxBody) return;
     uint8_t body[writecmd::kMaxBody];
     auto digit=[](char c)->int { if(c>='0'&&c<='9') return c-'0'; if(c>='a'&&c<='f') return c-'a'+10; return -1; };
     for(size_t i=0;i<size/2;++i) { int a=digit(hex[2*i]),b=digit(hex[2*i+1]); if(a<0||b<0) return; body[i]=uint8_t(a*16+b); }
     writecmd::Request request; if(!writecmd::decode(body,size/2,request)) return;
+    uint8_t destination[6],root[6]; const auto own=deviceid::own();
+    if (!deviceid::gateway(root) || deviceid::blocked(g_cfg.node_id) ||
+        !deviceid::parse(doc["destination_uid"] | "",6,destination) || memcmp(destination,own.uid,6)) return;
+    char deployment[13]; deviceid::text(root,6,deployment);
+    if (strcmp(doc["deployment_id"] | "",deployment)) return;
     JsonArrayConst route=doc["path"].as<JsonArrayConst>();
     uint8_t path[16],n=route.size(); if(!n||route.size()>16) return;
     for(uint8_t i=0;i<n;++i) { if(!route[i].is<unsigned>()||route[i].as<unsigned>()>254) return; path[i]=route[i].as<uint8_t>(); }
     if(!writecmd::pathValid(path,n)||path[0]!=g_cfg.node_id) return;
+    uint8_t target[6]; deviceid::Stamp expected=own;
+    if (path[n-1]!=g_cfg.node_id && !deviceid::peer(path[n-1],expected)) return;
+    if (!deviceid::parse(doc["target_uid"] | "",6,target) || memcmp(target,expected.uid,6)) return;
     if(n==1) queueWrite(body,size/2,path,n);
     else if(g_lora_ready && nodeclock::synced() && nodeclock::epochNow()<=request.expires) {
         uint8_t payload[1+16+writecmd::kMaxBody]; payload[0]=n;
@@ -1739,13 +1759,25 @@ void handleFwInstall(const LoraP2P::RxFrame& f) {
 
     uint32_t xfer;
     std::memcpy(&xfer, &f.payload[0], sizeof(xfer));
-    const fwota::Result r = fwota::install(xfer, &f.payload[4]);
+    const fwota::Result r = fwota::install(xfer, &f.payload[4], []() {
+        g_lora_ready = false;
+        const bool ready = lora.prepareForRestart();
+        diag::log(ready ? "INFO" : "ERROR", "node.radio", "radio.restart_prepared",
+                  "reason=firmware_install result=%s", ready ? "ready" : "failed");
+        return ready;
+    });
 
     if (r != fwota::Result::INSTALLING) {
+        if (!g_lora_ready) {
+            g_lora_ready = lora.reinitRadio();
+            diag::log(g_lora_ready ? "INFO" : "ERROR", "node.radio", "radio.install_cancelled",
+                      "radio_available=%s image_preserved=true restarting=false", g_lora_ready ? "true" : "false");
+        }
         diag::log("WARNING", "node.firmware", "firmware.install_rejected", "code=%u\n", static_cast<unsigned>(r));
         nextSeq();
         lora.sendFwResult(g_lora_seq, mesh.parentId(), xfer,
-                          static_cast<uint8_t>(r), nullptr);
+                          static_cast<uint8_t>(r), r == fwota::Result::RADIO_NOT_READY
+                              ? "Radio sin respuesta; instalacion cancelada, imagen conservada" : nullptr);
         return;
     }
 
@@ -1761,9 +1793,6 @@ void handleFwInstall(const LoraP2P::RxFrame& f) {
     // anterior, y anunciaba que el sha256 no cuadraba justo después de una
     // instalación correcta (medido el 1-ago-2026 al instalar la 0.0.50).
     fwbcast::reset();
-    const bool radio_idle = lora.prepareForRestart();
-    diag::log(radio_idle ? "INFO" : "WARNING", "node.radio", "radio.restart_prepared",
-              "reason=firmware_install result=%s", radio_idle ? "ready" : "unconfirmed");
     diag::log("INFO", "node.firmware", "firmware.installing", "installing=true restarting=true");
     Serial.flush();
     delay(300);
@@ -1790,12 +1819,6 @@ void fwTrialTick(uint32_t now) {
             g_health.fw_confirms++;
             health::save(g_health);
             diag::log("INFO", "node.firmware", "firmware.image_confirmed", "network_reachable_s=%lu\n", static_cast<unsigned long>((now - g_fw_trial_start) / 1000));
-            // El veredicto se anuncia al gateway con la misma repetición espaciada
-            // de la trama de salud, porque interesa justo cuando el enlace va mal.
-            g_fw_result_xfer = 0;
-            g_fw_result_code = static_cast<uint8_t>(fwota::Result::CONFIRMED);
-            g_fw_result_left = kHealthRepeats;
-            g_fw_result_ms   = now;
             return;
         }
     }
@@ -1818,8 +1841,7 @@ void fwTrialTick(uint32_t now) {
     fwota::rollbackRunning();     // no retorna: reinicia con la anterior
 }
 
-// El informe persistente se repite hasta su acuse. FW_RESULT conserva las
-// repeticiones limitadas para mantener compatibilidad con gateways anteriores.
+// El informe persistente se repite hasta recibir el acuse del gateway.
 void fwResultTick(uint32_t now) {
     static uint32_t report_due = 0;
     const auto& report = fwota::report();
@@ -1835,15 +1857,7 @@ void fwResultTick(uint32_t now) {
                        protocol::kFrameFwReport,p,sizeof(p));
         report_due=now+60000;
     }
-    if (g_fw_result_left == 0) return;
-    if (!g_lora_ready || !g_registered || !mesh.hasParent()) return;
-    if (static_cast<int32_t>(now - g_fw_result_ms) < 0) return;
 
-    nextSeq();
-    lora.sendFwResult(g_lora_seq, mesh.parentId(), g_fw_result_xfer,
-                      g_fw_result_code, firmwareIdentity());
-    g_fw_result_left--;
-    g_fw_result_ms = now + kHealthRepeatMs;
 }
 
 // La traza recibida se valida antes de aprender rutas o aceptar custodia.
@@ -2016,6 +2030,7 @@ void processLoraRx() {
             case protocol::kFrameFwResult:
             case protocol::kFrameFwBcastMap:
             case protocol::kFrameNodeHealth:
+            case protocol::kFrameAlarm:
             case protocol::kFrameNodeMaintenanceResult:
             case protocol::kFrameNodePong:
                 // Subida de otro nodo con este como salto: relay normal.
@@ -2033,9 +2048,9 @@ void retainInOutbox(PendingQueue::Entry& e, const char* motivo) {
     g_lora_lost++;
     // El push reemplaza la posible entrada previa del mismo seq. El ts ya
     // viajó en la trama (fijado): se conserva tal cual, inmutable.
-    outbox.remove(g_cfg.node_id, e.seq);
+    outbox.remove(g_cfg.node_id, e.seq, e.identity.boot, e.ts);
     outbox.push(g_cfg.node_id, e.seq, e.values, e.st, e.n_values,
-                e.capture_ms, e.ts, /*ts_fixed=*/true);
+                e.capture_ms, e.ts, /*ts_fixed=*/true, nullptr, 0, 0, &e.identity);
     g_outbox_inflight = false;
     diag::log("INFO", "node.outbox", "outbox.retained", "seq=%u reason=%s size=%u lost=%lu\n", e.seq, motivo, static_cast<unsigned>(outbox.count()), static_cast<unsigned long>(g_lora_lost));
     pending.drop(e);
@@ -2067,6 +2082,7 @@ void processAckTimeouts() {
     const uint32_t now = millis();
     PendingQueue::Entry* e = pending.firstExpired(now, g_cfg.ack_timeout_ms);
     if (e == nullptr) return;
+    lora.setSampleIdentity(e->identity);
 
     // Entrega en custodia a un supernodo (dest != gateway).
     if (e->dest != protocol::kAddrGateway) {
@@ -2212,11 +2228,12 @@ void snClientTick(uint32_t now) {
                 Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
                 const uint32_t ts = fixOutboxTs(*e);  // primera serialización
+                lora.setSampleIdentity(e->identity);
                 const auto st = lora.sendTelemetryCustody(e->seq, ts, e->values, e->st,
                                           e->n_values, g_sn_target, g_sn_path, g_sn_path_len);
                 if (st != LoraP2P::Status::OK) break;
                 pending.push(e->seq, e->values, e->st, e->n_values, now,
-                             g_sn_target, e->capture_ms, ts, g_cfg.ack_timeout_ms * (g_sn_path_len-1));
+                             g_sn_target, e->capture_ms, ts, g_cfg.ack_timeout_ms * (g_sn_path_len-1), &e->identity);
                 g_outbox_inflight = true;
                 diag::log("INFO", "node.supernode", "supernode.custody_delivery", "seq=%u supernode=%u outbox=%u\n", e->seq, g_sn_target, static_cast<unsigned>(outbox.count()));
             }
@@ -2235,11 +2252,12 @@ void outboxDrainTick(uint32_t now) {
     if (e == nullptr) return;
 
     const uint32_t ts = fixOutboxTs(*e);
+    lora.setSampleIdentity(e->identity);
     const auto st = lora.sendTelemetry(e->seq, ts, e->values, e->st, e->n_values,
                        mesh.parentId());
     if (st != LoraP2P::Status::OK) return;
     pending.push(e->seq, e->values, e->st, e->n_values, now,
-                 protocol::kAddrGateway, e->capture_ms, ts);
+                 protocol::kAddrGateway, e->capture_ms, ts, 0, &e->identity);
     g_outbox_inflight = true;
     diag::log("INFO", "node.outbox", "outbox.draining", "seq=%u parent=%u size=%u\n", e->seq, mesh.parentId(), static_cast<unsigned>(outbox.count()));
 }
@@ -2313,22 +2331,18 @@ void heartbeatTick(uint32_t now) {
     diag::log("DEBUG", "node.duty", "duty.heartbeat", "seq=%u tx_ms=%lu tx_pct_since_boot=%.2f psend=%lu done=%lu busy=%lu err=%lu timeout=%lu drop=%lu micfail=%lu stale=%lu\n", g_lora_seq, static_cast<unsigned long>(tx_ms), now > 0 ? (100.0 * tx_ms / now) : 0.0, static_cast<unsigned long>(lora.txPsend()), static_cast<unsigned long>(lora.txDone()), static_cast<unsigned long>(lora.busyEvents()), static_cast<unsigned long>(lora.txErrors()), static_cast<unsigned long>(lora.txTimeouts()), static_cast<unsigned long>(lora.txDropped()), static_cast<unsigned long>(lora.rxMicFail()), static_cast<unsigned long>(lora.rxStale()));
 }
 
-// Supervisor de la radio (fase 2). El driver aporta el mecanismo (los dos
-// detectores y los tres niveles de recuperación); aquí vive la política: qué
-// nivel toca, cuándo escalar y hasta dónde. El nivel 4, reiniciar el ESP32,
-// no está en el driver a propósito, porque exige escribir antes el registro
-// persistente y porque un driver no debería poder reiniciar el nodo.
-//
-// El ritmo de escalada lo marcan las propias ventanas de los detectores: tras
-// ejecutar un nivel se limpian las faltas, y que vuelvan a dispararse es la
-// prueba de que ese nivel no sirvió. Con el transmisor mudo eso son unos 25 s
-// por escalón, y con el receptor mudo 180 s.
+// La recuperación comprueba UART y radio sin reiniciar el ESP32. Un fallo
+// de inicialización pasa al reintento periódico y conserva la hora y la
+// outbox; un reinicio del host no corta la alimentación del RAK3172.
 void radioHealthTick(uint32_t now) {
+    if (!g_lora_ready) return;
     if (!lora.radioFaulted()) {
         // Una recuperación solo se da por buena cuando la radio aguanta más
         // que la ventana del detector más lento: antes de eso, el silencio de
         // las faltas solo significa que se acaban de limpiar.
         if (g_recov_level > 0 &&
+            (g_health.last_fault == static_cast<uint8_t>(health::Fault::RX_SILENT)
+                ? lora.rxValid() > g_health.rx_valid : lora.txDone() > g_health.tx_done) &&
             static_cast<int32_t>(now - g_recov_step_ms) >=
                 static_cast<int32_t>(g_recovery_verify_ms)) {
             diag::log("INFO", "node.radio", "radio.recovered", "level=%u psend=%lu done=%lu rx=%lu\n", g_recov_level, static_cast<unsigned long>(lora.txPsend()), static_cast<unsigned long>(lora.txDone()), static_cast<unsigned long>(lora.rxValid()));
@@ -2402,7 +2416,7 @@ void radioHealthTick(uint32_t now) {
         g_recov_step_ms = now;
         g_health.reinits++;
         diag::log("ERROR", "node.radio", "radio.recovery_exhausted", "reason=%s action=reinitialize\n", causa);
-        lora.reinitRadio();
+        g_lora_ready = lora.reinitRadio();
         health::save(g_health);
         return;
     }
@@ -2414,6 +2428,7 @@ void radioHealthTick(uint32_t now) {
         case 1: {
             g_health.reinits++;
             const bool ok = lora.reinitRadio();
+            g_lora_ready = ok;
             if (!lora.lastProbeOk()) g_health.probes++;
             diag::log("INFO", "node.radio", "radio.recovery", "level=1 reason=%s at_probe=%s radio=%s\n", causa, lora.lastProbeOk() ? "responsive" : "silent", ok ? "ok" : "failed");
             if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
@@ -2422,29 +2437,16 @@ void radioHealthTick(uint32_t now) {
         case 2: {
             g_health.resets++;
             const bool ok = lora.resetModule();
+            g_lora_ready = ok;
             if (!lora.lastProbeOk()) g_health.probes++;
             diag::log("INFO", "node.radio", "radio.recovery", "level=2 action=ATZ_reconfigure at_probe=%s radio=%s\n", lora.lastProbeOk() ? "responsive" : "silent", ok ? "ok" : "failed");
             if (ok) lora.setSecurity(g_cfg.security_enabled, g_cfg.security_key);
             break;
         }
         case 3: {
-            // Tope por ventana contra el bucle de reinicios: superado, el
-            // nodo pasa a reintentar solo la reconfiguración.
-            if (now - g_reboot_win_ms >= kRebootWindowMs) {
-                g_reboot_win_ms  = now;
-                g_reboots_window = 0;
-            }
-            if (g_reboots_window >= kRebootMaxPerWindow) {
-                diag::log("WARNING", "node.radio", "radio.recovery_skipped", "level=3 reboots_in_window=%u action=retry_radio\n", static_cast<unsigned>(g_reboots_window));
-                break;
-            }
-            g_reboots_window++;
-            g_health.reboots++;
-            diag::log("INFO", "node.radio", "radio.recovery", "level=3 action=node_restart reason=%s health_saved=true\n", causa);
-            Serial.flush();
-            health::save(g_health);
-            delay(100);
-            ESP.restart();
+            diag::log("ERROR", "node.radio", "radio.recovery_exhausted",
+                      "level=3 reason=%s action=retry_radio restarting=false retry_ms=%lu",
+                      causa, static_cast<unsigned long>(kExhaustedRetryMs));
             break;
         }
         default:
@@ -2528,14 +2530,13 @@ void nodeHealthTick(uint32_t now) {
 }
 
 // Construcción y publicación del mensaje de telemetría MQTT
-// (batch-format.md v3.0, formato unificado con el gateway):
-//   {schema_version, samples[{origin, seq, ts, v}], debug?}
+// (batch-format.md 4.0, con despliegue y equipo en cada muestra).
 // El sobre debug lo gobierna nbiot.debug del config. Entrega confirmada
 // (at-least-once) con stop-and-wait: un mensaje en vuelo a la vez; sus
 // muestras siguen en la outbox marcadas in_flight hasta que el servicio
 // confirma el publish (lastPublishedBatchId). Si no confirma en
 // kBatchAckTimeoutMs se reintenta; el backend deduplica por
-// (origin, ts, seq) si el mensaje anterior sí había llegado.
+// (origin, device_uid, boot_id, ts, seq) si el mensaje ya había llegado.
 void batchTick(uint32_t now) {
     if (!g_cfg.super_node) return;
 
@@ -2563,7 +2564,27 @@ void batchTick(uint32_t now) {
         }
     }
 
-    if (!nbsvc.ready() || outbox.count() == 0) return;
+    if (!nbsvc.ready()) return;
+    static uint8_t catalog_part=0;
+    static uint32_t catalog_due=0;
+    const uint8_t catalog_parts=uint8_t((g_reg_catalog_len+159)/160);
+    if (catalog_parts && (catalog_part || now>=catalog_due)) {
+        uint8_t root[6]; if (!deviceid::gateway(root) || deviceid::blocked(g_cfg.node_id)) return;
+        char deployment[13],uid[13],tag[17],chunk[321],topic[96],json[768];
+        const auto own=deviceid::own(); deviceid::text(root,6,deployment); deviceid::text(own.uid,6,uid); deviceid::text(own.catalog,8,tag);
+        const size_t offset=size_t(catalog_part)*160;
+        const size_t bytes=min(size_t(160),g_reg_catalog_len-offset);
+        deviceid::text(g_reg_catalog+offset,bytes,chunk);
+        JsonDocument registration; registration["schema_version"]="4.0"; registration["deployment_id"]=deployment;
+        registration["node_id"]=g_cfg.node_id; registration["device_uid"]=uid; registration["boot_id"]=own.boot;
+        registration["catalog_tag"]=tag; registration["frag_idx"]=catalog_part; registration["frag_total"]=catalog_parts;
+        registration["catalog_fragment"]=chunk;
+        snprintf(topic,sizeof(topic),"modulinkr/v2/%s/%u/register/%s/%u",deployment,g_cfg.node_id,tag,catalog_part);
+        if (serializeJson(registration,json,sizeof(json))>=sizeof(json)-1 || !nbsvc.publishMessage(topic,json)) return;
+        if (++catalog_part>=catalog_parts) { catalog_part=0; catalog_due=now+600000; }
+        return;
+    }
+    if (outbox.count()==0) return;
 
     // Agrupado corto: espera kBatchCoalesceMs desde la muestra más
     // antigua por si están llegando más en ráfaga.
@@ -2573,7 +2594,10 @@ void batchTick(uint32_t now) {
     const uint32_t batch_id = g_batch_id + 1;
 
     JsonDocument doc;  // ArduinoJson 7
-    doc["schema_version"] = "3.3";
+    doc["schema_version"] = "4.0";
+    uint8_t gateway_uid[6]; if (!deviceid::gateway(gateway_uid) || deviceid::blocked(g_cfg.node_id)) return;
+    char deployment[13],publisher_uid[13]; deviceid::text(gateway_uid,6,deployment); deviceid::text(deviceid::own().uid,6,publisher_uid);
+    doc["deployment_id"]=deployment; doc["publisher_uid"]=publisher_uid; doc["publisher_boot"]=deviceid::own().boot;
 
     // Se cuenta el mensaje completo, incluido el sobre más largo posible.
     if (g_cfg.nbiot_debug) {
@@ -2591,6 +2615,8 @@ void batchTick(uint32_t now) {
     for (size_t i = 0; i < Outbox::capacity() && n_included < kBatchMaxSamples; ++i) {
         Outbox::Entry* e = outbox.at(i);
         if (e == nullptr) continue;
+        uint8_t identified=0; for(uint8_t value:e->identity.uid) identified|=value;
+        if (!identified || !e->identity.boot) continue;
 
         // ts de captura, inmutable (misma regla que la trama LoRa). Con el
         // gate de v3.0 y el rechazo de custodia con ts=0, aquí es siempre
@@ -2602,6 +2628,8 @@ void batchTick(uint32_t now) {
         }
 
         JsonObject s = samples.add<JsonObject>();
+        char uid[13],tag[17]; deviceid::text(e->identity.uid,6,uid); deviceid::text(e->identity.catalog,8,tag);
+        s["device_uid"]=uid; s["boot_id"]=e->identity.boot; s["catalog_tag"]=tag;
         s["origin"] = e->origin;
         s["seq"]    = e->seq;
         s["ts"]     = ts;
@@ -2780,6 +2808,7 @@ void setup() {
     // Se carga ANTES que todo: el resto del arranque depende de él. Sin
     // config o con config inválido el nodo no opera: el loop queda en
     // modo comisionamiento esperando un CFG.PUT por USB.
+    const bool identity_ready = deviceid::begin();
     const bool fs_ready = configstore::begin();
     if (!fs_ready) {
         snprintf(g_cfg_err, sizeof(g_cfg_err),
@@ -2797,6 +2826,7 @@ void setup() {
         }
     }
 
+    if (!identity_ready) { g_configured=false; snprintf(g_cfg_err,sizeof(g_cfg_err),"identity session storage failed"); }
     // Registro de salud (fase 3): vive en la misma LittleFS que el config, así
     // que se carga con ella montada. La causa del arranque distingue un
     // encendido normal de un reinicio propio (ultimo nivel de la escalera),
@@ -2878,7 +2908,9 @@ void setup() {
     nodeclock::begin();
 
     // ----- Catálogo del registro (v2.1, frame-format.md §13.2) -----
+    deviceid::configure(g_cfg.node_id,g_cfg.deployment_id);
     g_reg_catalog_len = buildCatalog(g_reg_catalog, sizeof(g_reg_catalog));
+    if (g_reg_catalog_len) deviceid::setCatalog(g_reg_catalog,g_reg_catalog_len);
     if (g_reg_catalog_len > 0) {
         g_reg_frag_total = static_cast<uint8_t>(
             (g_reg_catalog_len + kRegFragMax - 1) / kRegFragMax);
@@ -2920,8 +2952,9 @@ void setup() {
     // El rol lo decide node.type del config en runtime: un mismo binario
     // sirve de nodo o de supernodo según el JSON embebido.
     if (g_cfg.super_node) {
-        snprintf(g_client_id, sizeof(g_client_id), "modulinkr-node%u",
-                 g_cfg.node_id);
+        char identity_uid[13]; deviceid::text(deviceid::own().uid,6,identity_uid);
+        snprintf(g_client_id, sizeof(g_client_id), "ml-node-%s",
+                 identity_uid);
         NbiotService::Config nbcfg;
         nbcfg.uart        = &Serial2;
         nbcfg.rx_pin      = kNbiotRxPin;
@@ -2936,9 +2969,9 @@ void setup() {
         nbcfg.mqtt_user   = g_cfg.mqtt_user;
         nbcfg.mqtt_pass   = g_cfg.mqtt_pass;
         nbcfg.client_id   = g_client_id;
-        nbcfg.topic_batch = g_cfg.topic_batch;
-        snprintf(g_command_topic,sizeof(g_command_topic),"modulinkr/v1/%u/cmd",g_cfg.node_id);
-        nbcfg.topic_commands = g_command_topic;
+        nbcfg.topic_batch = nullptr;
+
+        nbcfg.topic_commands = nullptr;
         g_led_nb_started = nbsvc.begin(nbcfg);
         if (g_led_nb_started) {
             diag::log("INFO", "node.init", "init.nb_iot_service_started", "core=0 blocking=false");

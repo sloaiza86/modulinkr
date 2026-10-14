@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "model": "RAK3172-E",
+  "target_version": "4.3.0",
+  "approved_versions": ["4.3.0"],
+  "upgrade_floor": "4.0.6",
+  "image": {
+    "version": "RUI_4.3.0_RAK3172-E",
+    "size": 190784,
+    "sha256": "a9937177659e26d0f8c6483d9a58f46f3c84ee66be00b53866addc421325df21",
+    "url": "https://downloads.rakwireless.com/RUI/RUI3/Image/RAK3172-E_latest.bin"
+  },
+  "uploader": {
+    "source_sha256": "660552428f635746ecb5978d5488b5eb2bc2c81c70c61790c279dfda6ed4413a",
+    "url": "https://downloads.rakwireless.com/RUI/RUI3/Tools/uploader_ymodem_macos_v1.0.0.tar.gz"
+  }
+}

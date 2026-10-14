@@ -12,6 +12,12 @@ import unittest
 from test_maintenance import api_functions, HttpError
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'pi-service'))
 from buffer import GatewayBuffer
+import identity
+from types import SimpleNamespace
+
+def identity_require(c,origin):
+    reason=identity.blocked(c,origin)
+    if reason: raise HttpError(409,reason)
 
 
 class NodeMaintenanceApiTests(unittest.TestCase):
@@ -21,9 +27,12 @@ class NodeMaintenanceApiTests(unittest.TestCase):
         self.path = str(Path(self.tmp.name) / 'test.db')
         self.buf = GatewayBuffer(self.path)
         self.addCleanup(self.buf.close)
+        identity.observe(self.buf.conn,255,"ffffffffffff",1)
+        identity.observe(self.buf.conn,1,"010101010101",1)
+        self.buf.conn.commit()
         self.node = dict(origin=1,name='Sensor',fw_version='0.0.68+abc',online=True,hop_count=1)
         self.state = dict(nodes=[self.node],service_online=True,lora_link=True)
-        self.ns = api_functions(time=time,re=re,configapi=types.SimpleNamespace(_serial_lock=threading.Lock()),
+        self.ns = api_functions(identityapi=SimpleNamespace(require=identity_require),time=time,re=re,configapi=types.SimpleNamespace(_serial_lock=threading.Lock()),
             netstatus=types.SimpleNamespace(DB_PATH=self.path,_conn=lambda: contextlib.nullcontext(self.buf.conn),network_state=lambda:self.state))
         self.request=types.SimpleNamespace(headers={'x-modulinkr-maintenance':'1'})
 

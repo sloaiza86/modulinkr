@@ -4,7 +4,7 @@
 
 bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
                         uint8_t n_values, uint32_t now_ms, uint8_t dest,
-                        uint32_t capture_ms, uint32_t ts, uint32_t timeout_ms) {
+                        uint32_t capture_ms, uint32_t ts, uint32_t timeout_ms, const deviceid::Stamp* identity) {
     if (n_values > kMaxValues) n_values = kMaxValues;
 
     // Busca un hueco libre.
@@ -12,6 +12,7 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
         if (!entries_[i].in_use) {
             Entry& e = entries_[i];
             e.in_use     = true;
+            e.identity = identity ? *identity : deviceid::own();
             e.seq        = seq;
             e.sent_ms    = now_ms;
             e.awaiting_tx = true;
@@ -35,7 +36,8 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
     // (aproximación FIFO suficiente; la entrada pisada se pierde).
     Entry& e = entries_[next_slot_];
     next_slot_ = (next_slot_ + 1) % kCapacity;
-    e.seq        = seq;
+    e.identity = identity ? *identity : deviceid::own();
+            e.seq        = seq;
     e.sent_ms    = now_ms;
     e.awaiting_tx = true;
     e.tx_failed = false;
@@ -52,9 +54,9 @@ bool PendingQueue::push(uint16_t seq, const float* values, const uint8_t* st,
     return false;
 }
 
-bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out, uint8_t expected) {
+bool PendingQueue::ack(uint16_t seq, uint8_t& dest_out, uint8_t expected, uint32_t boot, uint32_t ts) {
     for (size_t i = 0; i < kCapacity; ++i) {
-        if (entries_[i].in_use && entries_[i].seq == seq && (!expected || entries_[i].dest == expected)) {
+        if (entries_[i].in_use && entries_[i].seq == seq && (!expected || entries_[i].dest == expected) && (!boot || entries_[i].identity.boot==boot) && (!ts || entries_[i].ts==ts)) {
             dest_out = entries_[i].dest;
             entries_[i].in_use = false;
             count_--;

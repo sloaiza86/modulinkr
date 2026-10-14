@@ -75,9 +75,13 @@ def cloud_status(now):
             result['size'] = cur.fetchone()[0]
             cur.execute('SELECT COUNT(*) FROM quarantine')
             result['quarantine'] = cur.fetchone()[0]
+            cur.execute("SELECT to_regclass('identity_incidents')")
+            if cur.fetchone()[0] is not None:
+                cur.execute('SELECT kind,origin,detail FROM identity_incidents')
+                result['identity_incidents']=[dict(kind=r[0],origin=r[1],detail=r[2]) for r in cur.fetchall()]
             cur.execute("SELECT to_regclass('public.system_health')")
             if cur.fetchone()[0] is not None:
-                cur.execute('SELECT EXTRACT(EPOCH FROM measured_at),payload FROM system_health WHERE id=1')
+                cur.execute('SELECT EXTRACT(EPOCH FROM measured_at),payload FROM public.system_health WHERE id=1')
                 row = cur.fetchone()
                 if row and 0 <= now - float(row[0]) <= 90:
                     payload = row[1]

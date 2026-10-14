@@ -196,6 +196,12 @@ class Notifications:
     def update(self, local, cloud, snapshot=None, conn=None, now=None):
         now = time.time() if now is None else now
         with self.lock:
+            obsolete=lambda key: key=='identity.legacy_pending.0' or key.startswith('identity.unverified.')
+            for key in list(self.data['active']):
+                if obsolete(key): self.data['active'].pop(key,None)
+            for key in list(self.pending):
+                if obsolete(key): self.pending.pop(key,None)
+            self.data['events']=[item for item in self.data['events'] if not obsolete(item.get('key',''))]
             for item in self.data['active'].values():
                 item['observable'] = False
             if snapshot:
@@ -236,12 +242,33 @@ class Notifications:
                     self.observe('cloud.write', consumer.get('write_error') if consumer else None,
                                  'No se están guardando los datos en la nube', 'El consumidor informó de un fallo de escritura.',
                                  'critical', '#/configuracion/bd', now, 'Guardado en la nube recuperado')
+                    cloud_keys={f"cloud.identity.{c['kind']}.{c['origin']}" for c in cloud.get('identity_incidents',[])}
+                    if 'identity_incidents' in cloud:
+                        for key in list(self.data['active']):
+                            if key.startswith('cloud.identity.') and key not in cloud_keys:
+                                self.observe(key,False,'','La incidencia se resolvió explícitamente.','critical','#/red',now,'Conflicto de la nube resuelto')
+                    for conflict in cloud.get('identity_incidents',[]):
+                        self.observe(f"cloud.identity.{conflict['kind']}.{conflict['origin']}",True,
+                                     'Conflicto de identidad o contenido en la nube',conflict['detail'],
+                                     'critical','#/red',now)
                     quarantine = cloud.get('quarantine')
                     self.observe('cloud.quarantine', None if quarantine is None else quarantine > 0,
                                  'Hay muestras en cuarentena', f"{cloud.get('quarantine', 0)} muestras pendientes de incorporarse al histórico.",
                                  'warning', '#/configuracion/servidor/cuarentena', now,
                                  'La cuarentena quedó vacía', delay=30)
             if conn is not None:
+                try:
+                    conflicts=list(conn.execute('SELECT kind,origin,detail,active FROM identity_incidents'))
+                    for kind,origin,detail,active in conflicts:
+                        if kind in ('legacy_pending','unverified'): continue
+                        title={'gateway_conflict':'Conflicto entre gateways','node_conflict':'Conflicto de identidad',
+                               'clock_rollback':'El reloj del nodo retrocedió','catalog_missing':'Falta el catálogo de una muestra',
+                               'sample_conflict':'Una muestra llegó con contenidos distintos'}.get(kind,'Identidad o datos no verificables')
+                        self.observe(f'identity.{kind}.{origin}',bool(active),title,detail,
+                                     'warning' if kind in ('unverified','clock_rollback','catalog_missing') else 'critical','#/red',now,
+                                     'Conflicto resuelto explícitamente' if kind in ('node_conflict','gateway_conflict') else 'Identidad y catálogo verificados')
+                except Exception:
+                    pass
                 self.operations(conn, now)
             self.save(now)
 

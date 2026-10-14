@@ -2,7 +2,7 @@
 """ModuLinkr, persistencia del histórico de salud de radio.
 
 Implementa db-schema.md §6: procesa los mensajes que el gateway publica en
-`modulinkr/v1/{node_id}/health` a partir de la trama NODE_HEALTH
+`modulinkr/v2/{deployment_id}/{node_id}/health` a partir de la trama NODE_HEALTH
 (frame-format.md §16) y los guarda en la tabla `node_health`.
 
 Un nodo que se recupera solo borra la prueba de que algo iba mal. Sin este
@@ -21,7 +21,7 @@ import logging
 
 LOG = logging.getLogger("modulinkr.health")
 
-SCHEMA_MAJOR = "3"
+SCHEMA_MAJOR = "4"
 
 # Motivos válidos de fallo (frame-format.md §16.1). Un valor fuera de la
 # lista no invalida el mensaje: se guarda tal cual y queda visible en la
@@ -48,15 +48,16 @@ def process_health(db, topic_id: int, payload: dict, stats: dict) -> None:
         return
 
     node_id = payload.get("node_id")
-    if not isinstance(node_id, int) or not 1 <= node_id <= 254:
+    if type(node_id) is not int or not 1 <= node_id <= 254:
         stats["hlt_bad"] += 1
         LOG.warning("event=health.rejected reason=invalid_node_id node_id=%r", node_id)
         return
     if node_id != topic_id:
-        # El topic manda para las ACL, pero el payload es el dato: se procesa
-        # y se deja constancia, igual que en el register.
+        # Una discrepancia de origen no puede atribuirse a otro equipo.
         LOG.warning("event=health.rejected reason=topic_node_mismatch node_id=%d topic_node_id=%d",
                     node_id, topic_id)
+        stats['hlt_bad']+=1
+        return
 
     fault = str(payload.get("fault") or "desconocido")
     if fault not in KNOWN_FAULTS:

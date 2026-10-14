@@ -41,6 +41,24 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(restored.snapshot()['active'], [])
         self.assertEqual(restored.snapshot()['events'][0]['duration_s'], 45)
 
+    def test_duplicate_identity_notification_survives_reading_until_resolution(self):
+        import identity
+        buf=GatewayBuffer(str(Path(self.tmp.name)/'state.db')); self.addCleanup(buf.close)
+        identity.observe(buf.conn,1,'010101010101',1)
+        identity.observe(buf.conn,1,'020202020202',1); buf.conn.commit()
+        snapshot={'state':{'service_online':True,'lora_link':True,'nodes':[]}}
+        self.store.update({}, {}, snapshot, buf.conn,100)
+        self.assertEqual(self.store.snapshot()['active'][0]['severity'],'critical')
+        self.store.read()
+        restored=Notifications(self.path)
+        restored.update({}, {}, snapshot, buf.conn,110)
+        self.assertEqual(len(restored.snapshot()['active']),1)
+        self.assertEqual(restored.snapshot()['unread'],0)
+        buf.conn.execute("UPDATE identity_incidents SET active=0 WHERE kind='node_conflict'");buf.conn.commit()
+        restored.update({}, {}, snapshot, buf.conn,120)
+        self.assertEqual(restored.snapshot()['active'],[])
+        self.assertEqual(restored.snapshot()['events'][0]['kind'],'resolved')
+
     def test_unknown_does_not_recover_and_cancels_unconfirmed_failure(self):
         self.observe(True, 100)
         self.observe(None, 110)
@@ -49,6 +67,17 @@ class NotificationTests(unittest.TestCase):
         self.observe(True, 130)
         self.observe(None, 140)
         self.assertEqual(len(self.store.snapshot()['active']), 1)
+
+    def test_development_identity_notices_are_retired_without_hiding_real_conflicts(self):
+        for key in ('identity.legacy_pending.0','identity.unverified.1','identity.node_conflict.2'):
+            self.store.observe(key,True,'Incidencia','Detalle','critical','#/red',100)
+        self.store.save(100)
+        restored=Notifications(self.path)
+        restored.update({}, {}, now=110)
+        self.assertEqual([entry['key'] for entry in restored.snapshot()['active']],['identity.node_conflict.2'])
+        self.assertEqual([entry['key'] for entry in restored.snapshot()['events']],['identity.node_conflict.2'])
+        self.assertEqual(restored.snapshot()['unread'],1)
+        self.assertEqual(len(Notifications(self.path).snapshot()['events']),1)
 
     def test_disk_hysteresis_and_stale_measurement(self):
         def disk(percent, at):
@@ -189,7 +218,7 @@ class CapacityTests(unittest.TestCase):
     def test_cloud_queries_are_independent_of_mqtt(self):
         from unittest.mock import MagicMock
         conn=MagicMock()
-        conn.cursor.return_value.__enter__.return_value.fetchone.side_effect=[(1,),(100,),(0,),('system_health',),(120,dict(disk=dict(checked_at=120,percent=20),consumer=dict(checked_at=120,last_saved=119)))]
+        conn.cursor.return_value.__enter__.return_value.fetchone.side_effect=[(1,),(100,),(0,),(None,),('system_health',),(120,dict(disk=dict(checked_at=120,percent=20),consumer=dict(checked_at=120,last_saved=119)))]
         with patch.object(systemapi.dataapi,'PG_HOST','example'),patch.object(systemapi.dataapi,'_conn',return_value=conn):
             data=systemapi.cloud_status(150)
         self.assertTrue(data['connected'])

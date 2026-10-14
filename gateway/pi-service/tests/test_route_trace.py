@@ -29,7 +29,7 @@ class RouteTraceTests(unittest.TestCase):
         self.addCleanup(self.buf.close)
 
     def test_actual_three_hop_path_survives_buffer_and_batch(self):
-        parsed = p.parse_frame(frame([3, 2, 1]))
+        parsed = p._decode_payload_frame(frame([3, 2, 1]))
         self.assertNotIn('error', parsed)
         self.assertEqual(parsed['path'], [3, 2, 1, 255])
         self.assertEqual(parsed['reads'], [21.5])
@@ -45,17 +45,17 @@ class RouteTraceTests(unittest.TestCase):
     def test_authenticated_trace_and_tampering(self):
         key = bytes(range(16))
         raw = frame([3,2,1], key=key)
-        self.assertEqual(p.parse_frame(raw,key)['path'], [3,2,1,255])
+        self.assertEqual(p._decode_payload_frame(raw,key)['path'], [3,2,1,255])
         bad = bytearray(raw); bad[-4] ^= 1
         bad[-2:] = struct.pack('<H',p.crc16_modbus(bad[:-2]))
-        self.assertTrue(p.parse_frame(bytes(bad),key)['mic_fail'])
+        self.assertTrue(p._decode_payload_frame(bytes(bad),key)['mic_fail'])
 
     def test_loops_reserved_addresses_and_inconsistent_plan_rejected(self):
         for trace,plan,dest in [([3,2,3],(),255),([3,255,1],(),255),
                                 ([3,0,1],(),255),([3,2],[3,4,1],1)]:
-            self.assertIn('error',p.parse_frame(frame(trace,plan,dest,dest)))
-        self.assertEqual(p.parse_frame(frame([3,2],[3,2,1],1,1))['path'],[3,2,1])
-        self.assertNotIn('path',p.parse_frame(frame([3],receiver=2)))
+            self.assertIn('error',p._decode_payload_frame(frame(trace,plan,dest,dest)))
+        self.assertEqual(p._decode_payload_frame(frame([3,2],[3,2,1],1,1))['path'],[3,2,1])
+        self.assertNotIn('path',p._decode_payload_frame(frame([3],receiver=2)))
 
     def test_republished_backlog_does_not_refresh_path(self):
         self.buf.observe_route(3,990,1,'nbiot',1,[3,2,1],1000,1010)

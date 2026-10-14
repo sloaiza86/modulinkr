@@ -4,6 +4,8 @@ ModuLinkr es un sistema IoT industrial para adquisición Modbus RTU con transpor
 
 ## Estado actual
 
+El proyecto sigue en desarrollo y aún no se ha publicado su primera versión pública. La identidad física formará parte de esa versión desde el inicio. Los formatos y números de versión anteriores corresponden al banco de desarrollo, sin una base instalada de clientes que requiera compatibilidad con ellos.
+
 El banco dispone de un nodo, un supernodo y un gateway. Nodo y supernodo ejecutan el mismo firmware sobre M5Stack Atom Lite; el rol y los periféricos se definen mediante `config.json`. El gateway combina un Heltec WiFi LoRa 32 v3 como radio y un Raspberry Pi Zero 2W para el servicio, el visor y el enlace con la nube.
 
 La última validación de hardware registrada corresponde a `2026-08-02`. Incluye difusión de firmware a dos nodos y cambio coordinado de parámetros de red. Esta fecha describe la evidencia conservada, no el estado instantáneo de los dispositivos.
@@ -25,7 +27,7 @@ La arquitectura vigente, los flujos y las fuentes de verdad se describen en [`AR
 
 El sistema adquiere lecturas Modbus, las transporta por LoRa directo o mediante relay y utiliza NB-IoT cuando no existe ruta al gateway. El gateway conserva un buffer de reenvío, publica al broker cloud y sirve una interfaz local. También están implementados el aprovisionamiento por USB, la configuración por LoRa, la lectura remota de configuración, la actualización individual y difundida de firmware, el diagnóstico Modbus, la salud de radio y el cambio coordinado de parámetros de red.
 
-El canal general de comandos y escrituras Modbus sigue sin implementar. Las secciones correspondientes de `commands-format.md` son normativas para trabajo futuro, no una capacidad disponible.
+El canal general de comandos sigue sin implementar. Las escrituras Modbus declaradas utilizan el contrato de identidad física. Las secciones correspondientes de `commands-format.md` son normativas para trabajo futuro, no una capacidad disponible.
 
 ## Versiones de los formatos
 
@@ -33,12 +35,12 @@ Los formatos han evolucionado con números distintos en la implementación actua
 
 | Formato | Versión utilizada |
 | --- | --- |
-| Trama LoRa | `3.9` (`0x39`) |
-| Configuración del nodo | `3.3` en las configuraciones de banco; el firmware acepta `3.0` a `3.3` |
-| Mensaje MQTT de telemetría | `3.2` |
-| Comandos MQTT | Diseño histórico `2.0`, pendiente de implementación |
+| Trama LoRa | `4.0` (`0x40`), coincidencia exacta |
+| Configuración del nodo | `3.3`, único contrato admitido |
+| Mensaje MQTT de telemetría | `4.0`, temas `modulinkr/v2` |
+| Comandos MQTT | `4.0` para escrituras Modbus; comandos generales pendientes |
 
-La relación definitiva entre estos versionados y la compatibilidad entre versiones menores está pendiente de decisión. Hasta resolverla, no se debe inferir compatibilidad solo porque coincida el major.
+Los formatos tienen contratos independientes. Los números previos registran evolución interna; no existe una obligación de aceptar versiones anteriores de desarrollo.
 
 ## Fuentes de verdad
 

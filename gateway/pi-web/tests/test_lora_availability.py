@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 
+
 class Router:
     def __init__(self, **kwargs):
         pass
@@ -30,6 +31,9 @@ WEB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB))
 spec = importlib.util.spec_from_file_location("ota_availability_test", WEB / "otaapi.py")
 api = importlib.util.module_from_spec(spec)
+sys.path.insert(0,str(WEB.parent/"pi-service"))
+import identityapi
+import identity
 with patch.dict(sys.modules, {
     "fastapi": types.SimpleNamespace(APIRouter=Router, Body=lambda *a, **k: None),
     "fastapi.responses": types.SimpleNamespace(JSONResponse=Response),
@@ -56,6 +60,9 @@ class AvailabilityTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         with sqlite3.connect(self.db) as c:
+            identity.init(c)
+            identity.observe(c,255,"ffffffffffff",1)
+            identity.observe(c,1,"010101010101",1)
             c.executescript("""
                 CREATE TABLE node_catalog(origin_id INTEGER, fw_version TEXT);
                 INSERT INTO node_catalog VALUES(1, '0.0.58');
@@ -80,7 +87,7 @@ class AvailabilityTests(unittest.TestCase):
             return c.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
 
     def request(self, write=False):
-        return api.enviar({"origin": 1, "config": json.dumps({"id": 1})}) if write else api.leer({"origin": 1})
+        return api.enviar({"origin": 1, "config": json.dumps({"node":{"id":1}})}) if write else api.leer({"origin": 1})
 
     def assert_error(self, code, write=False):
         result = self.request(write)
@@ -100,6 +107,14 @@ class AvailabilityTests(unittest.TestCase):
         self.assert_error("gateway_service_unavailable")
         self.link = {"service_online": None, "lora_link": None}
         self.assert_error("lora_status_unknown")
+
+    def test_missing_version_does_not_bypass_availability_probe(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute('UPDATE node_catalog SET fw_version=NULL')
+        self.reply='silent'
+        self.assert_error('node_no_response')
+        self.assertEqual(self.count('node_probe'),1)
+        self.assertEqual(self.count('config_read'),0)
 
     def test_node_timeout_is_not_an_operation_in_progress(self):
         self.reply = "silent"

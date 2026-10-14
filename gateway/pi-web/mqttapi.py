@@ -21,6 +21,7 @@ El estado vivo (habilitado, conectado) sale del latido del servicio
 """
 
 from __future__ import annotations
+import uuid
 
 import json
 import logging
@@ -192,6 +193,7 @@ async def guardar(request: Request):
 
 @router.post("/probar")
 async def probar(request: Request):
+    probe_id='ml-probe-'+uuid.uuid4().hex[:12]
     """Prueba sin guardar; el campo vacío usa la contraseña vigente."""
     try:
         import paho.mqtt.client as mqtt
@@ -217,10 +219,10 @@ async def probar(request: Request):
 
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
-                             client_id="modulinkr-web-probe",
+                             client_id=probe_id,
                              protocol=mqtt.MQTTv311)
     except (AttributeError, TypeError):
-        client = mqtt.Client(client_id="modulinkr-web-probe",
+        client = mqtt.Client(client_id=probe_id,
                              protocol=mqtt.MQTTv311)
     if cfg["user"]:
         client.username_pw_set(cfg["user"], password or None)

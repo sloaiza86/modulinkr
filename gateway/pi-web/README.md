@@ -482,3 +482,8 @@ Configuración, Servidor, Base de datos muestra el tamaño de PostgreSQL, el úl
 La advertencia de disco se abre a partir del ochenta por ciento y la crítica a partir del noventa, después de treinta segundos de observación. Se recupera por debajo del setenta y cinco por ciento; la crítica baja a advertencia por debajo del ochenta y cinco. Los pendientes usan el ochenta y noventa por ciento de la capacidad configurada y se recuperan por debajo del setenta y cinco. Los descartes sin publicar se contabilizan en `buffer_runtime` y generan eventos críticos. El límite y la política de eliminación existentes se conservan. No se añade un borrado automático del histórico cloud.
 
 La API `/api/sistema/estado` y la lectura paginada `/api/sistema/notificaciones` utilizan la autenticación del visor. La marca de lectura se realiza mediante `/api/sistema/notificaciones/leidas` con la cabecera específica del visor. Las mediciones remotas requieren la migración y el monitor instalados en la VM. La falta de mediciones se muestra como información no actual, sin valores ficticios ni indicadores verdes. La actualización del gateway detecta las rutas de los servicios y conserva una copia previa del código para restaurarla si el arranque falla.
+
+
+## Identidad física y despliegues
+
+El código del nodo 0.0.83 utiliza la radio 4.0, catálogos por huella y muestras vinculadas a equipo y sesión. El gateway bloquea identificadores repetidos y el consumidor separa los despliegues. El contrato actual, la conservación interna del banco y el procedimiento de despliegue se describen en [`identity-safety.md`](../../shared/protocol/identity-safety.md). El banco debe utilizar nodos y relays del contrato de radio 4.0; las versiones internas previas no representan clientes publicados.

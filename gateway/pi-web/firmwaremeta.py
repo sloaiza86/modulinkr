@@ -47,6 +47,12 @@ def comparison(installed, available):
 
 def release_notes(component, version):
     notes = {
+        ('node', (0, 0, 83)): ['Configuración limitada al contrato 3.3 y modos de diagnóstico explícitos.',
+                              'Protocolo de radio 4.0 comprobado antes de recibir operaciones.',
+                              'Datos pendientes protegidos por equipo, sesión y catálogo.'],
+        ('node', (0, 0, 82)): ['Identidad física y sesiones persistentes para detectar identificadores repetidos.',
+                              'Confirmaciones vinculadas a equipo, sesión y momento de captura.',
+                              'Catálogos de medidas conservados por versión y aislamiento del despliegue.'],
         ('node', (0, 0, 78)): ['Muestreo sin ráfagas al completar el registro o tras una espera.',
                               'Espera del ACK desde la confirmación de transmisión del módulo, también en reintentos.',
                               'Protección de la recepción del ACK y recuperación ante fallos de transmisión local.'],

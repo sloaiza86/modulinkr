@@ -944,6 +944,7 @@ async function refrescarRed() {
       redRecibidaMs = performance.now();
       redConectada = true;
       cacheCatalogosRed = data.catalogs;
+      window.ModulinkrIdentity?.render(data.state);
       const aviso = document.getElementById("red-aviso");
       aviso.innerHTML = data.state.nodes.length ? "" : 'No hay nodos configurados. <a href="#/configuracion/nodo/form">Añadir nodo</a>';
     } catch (error) {
@@ -2758,7 +2759,7 @@ let cfgPuerto = null;   // puerto serie del nodo detectado
 // Versiones del config que el nodo detectado dice entender. Llegan en el
 // CFG.HELLO, igual que por radio llegan en el catálogo del registro, así que
 // la comprobación es la misma para las dos vías. Vacío si el nodo no las
-// declara (firmware anterior a v3.7) o si no hay nodo detectado.
+// declara o si todavía no se ha identificado el nodo.
 let cfgSchemas = "";
 
 let servidorTab = "bd";
@@ -3396,8 +3397,9 @@ async function cfgLocalEnviar() {
   const T = "Guardar configuración";
   cfgDialogo(T, SPIN + "Guardando la configuración...");
   try {
-    await cfgLocalSes.hello();
-    const detail = await cfgLocalSes.put(texto);
+    const before = await cfgLocalSes.hello();
+    const prepared = await identidadPreparar(texto, before?.device_uid);
+    const detail = await cfgLocalSes.put(prepared);
     cfgDialogo(T, SPIN + "Comprobando el nodo...");
     let ident = null;
     try { ident = await cfgLocalSes.hello(); } catch (e) { /* */ }
@@ -3495,67 +3497,20 @@ async function cfgLeer() {
   }
 }
 
-// Puerta de compatibilidad de schema, común a las tres vías de envío.
-//
-// Los cuatro casos posibles y qué hace cada uno, en un solo sitio para que no
-// puedan divergir:
-//
-//   el nodo declara y la versión encaja     pasa sin decir nada
-//   el nodo declara y no encaja             diálogo que NO deja enviar
-//   el nodo no declara                      diálogo que avisa y deja elegir
-//   no se sabe qué se envía o a quién       pasa (no hay nada que comparar)
-//
-// En diálogo y no en una línea al lado del botón: una línea junto a un botón
-// que sigue funcionando se lee después de haber pulsado, y el caso que
-// importa, el que va a fallar seguro, tiene que interrumpir. El bloqueo no
-// ofrece "enviar de todos modos" a propósito: no es una advertencia sobre un
-// riesgo, es la certeza de que el nodo lo va a rechazar.
-//
-// Devuelve una promesa: true si se puede seguir.
+// Se comprueba el contrato del nodo antes de transferir una configuración.
 function schemaPuerta(versionTexto, declarados) {
-  const T = "Compatibilidad de la configuración";
-  const lista = (declarados || "").split(",").map((x) => x.trim()).filter(Boolean);
-
-  if (!versionTexto) return Promise.resolve(true);
-
-  if (!lista.length) {
-    return new Promise((resolve) => {
-      cfgConfirmarCb = () => { cfgDialogoCerrar(); resolve(true); };
-      cfgDialogo(T,
-        "<p>No se puede confirmar si esta configuración es compatible con el nodo. Si continúas, el nodo podría rechazarla.</p>",
-        { cancelar: true, confirmar: true, confirmarText: "Continuar",
-          confirmarPeligro: false,
-          onCancelar: () => { cfgDialogoCerrar(); resolve(false); } });
-    });
-  }
-
-  if (lista.includes(String(versionTexto))) return Promise.resolve(true);
-
-  return new Promise((resolve) => {
-    cfgDialogo(T,
-      "<p>Esta configuración no es compatible con el nodo. Actualiza el nodo o selecciona otro archivo.</p>",
-      { cerrar: true });
-    // Sin botón de seguir: el único camino es cerrar y arreglarlo. El cierre
-    // del diálogo ya lo hace su listener permanente; aquí solo hace falta
-    // enterarse, y por eso el oyente es de una sola vez.
-    document.getElementById("cfg-dialogo-cerrar").addEventListener(
-      "click", () => resolve(false), { once: true });
+  const lista=(declarados || '').split(',').map(x=>x.trim()).filter(Boolean);
+  if(String(versionTexto)===SCHEMA_GENERADO && lista.includes(SCHEMA_GENERADO)) return Promise.resolve(true);
+  return new Promise(resolve=>{
+    const message=!versionTexto ? 'La configuración no declara su formato. Revisa el archivo.' : !lista.length
+      ? 'No se pudo verificar qué configuración acepta el nodo. Vuelve a identificarlo o consulta su catálogo.'
+      : 'El formato de la configuración no coincide con el que acepta el nodo. Revisa el archivo y la versión instalada.';
+    cfgDialogo('Comprobar configuración', '<p>'+message+'</p>',{cerrar:true});
+    document.getElementById('cfg-dialogo-cerrar').addEventListener('click',()=>resolve(false),{once:true});
   });
 }
 
-// Comprobación previa de esta página, que envía el texto TAL CUAL.
-//
-// El asistente no la necesita porque regenera el JSON con la versión que él
-// sabe escribir. Aquí no: el texto puede venir de un archivo, de una lectura
-// del nodo o de una edición a mano, y ahí es donde se cuela una versión que el
-// nodo no entiende. Pasó en banco el 1-ago-2026 con un config de schema 3.9
-// contra un nodo que acepta hasta 3.3.
-//
-// Solo bloquea cuando SE SABE que va a fallar, o sea cuando el nodo declara su
-// lista y la versión del texto no está en ella. Si el nodo no la declara, se
-// deja pasar: castigar por no saber impediría justo lo que haría falta, mandar
-// una configuración a un nodo viejo. Es el mismo criterio de §17 y del
-// asistente, y tenerlo distinto en dos sitios sería peor que no tenerlo.
+// El texto importado conserva su formato y se verifica antes de transferirlo.
 function cfgSchemaVersion(texto) {
   try {
     const v = JSON.parse(texto).schema_version;
@@ -4779,7 +4734,8 @@ function bcEvento(e) {
     6:"Recepción sin actividad",7:"Error al escribir flash",8:"Error al borrar flash",9:"RAM insuficiente",
     10:"No se pudo guardar el estado",11:"Oferta no válida",12:"No se pudo confirmar el arranque",
     13:"Error al leer flash",14:"Error al calcular el hash",15:"Imagen verificada",
-    16:"Arrancó la imagen anterior",17:"La nueva imagen no logró registrarse"};
+    16:"Arrancó la imagen anterior",17:"La nueva imagen no logró registrarse",
+    18:"Instalación cancelada: la radio no confirmó que estaba preparada para reiniciar. Se conserva la imagen recibida."};
   if (e.kind === "map") return e.missing === 0 ? "Recepción completa confirmada" : `Recepción incompleta: faltan ${e.missing} fragmentos`;
   if (e.kind === "report") return `${fases[e.phase] || "Firmware"}: ${causas[e.cause] || "Resultado desconocido"}${e.total ? `. Faltan ${e.missing} de ${e.total} fragmentos` : ""}`;
   const estados = {offering:"Envío solicitado",sending:"Envío iniciado",polling:"Comprobando recepción",
@@ -5550,8 +5506,8 @@ async function fwCargar() {
 }
 
 // Flasheo por navegador (camino A, esptool-js): reescribe solo el firmware en
-// 0x0 con eraseAll:false, así CONSERVA el config.json del nodo (a diferencia
-// de esp-web-tools, que borra la flash entera). esptool-js se sirve del vendor
+// dos segmentos que excluyen NVS, con eraseAll:false y config conservado.
+// esptool-js se sirve del vendor
 // y se expone en window (ver el shim de index.html), así que funciona offline.
 
 function fwModo(modo) {
@@ -5606,6 +5562,23 @@ function fwUsbResultado(text, tipo) {
   cfgDialogo("Actualización del nodo", htmlSeguro(text), {cerrar:true, error:tipo === "error"});
 }
 
+function fwFlashParts(bytes) {
+  if (bytes.length <= 0x10000) throw new Error('La imagen completa del nodo está truncada.');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const nvs=[];
+  for (let at=0x8000;at<0x9000;at+=32) {
+    if(view.getUint16(at,true)!==0x50AA) break;
+    if(bytes[at+2]===1 && bytes[at+3]===2) nvs.push([view.getUint32(at+4,true),view.getUint32(at+8,true)]);
+  }
+  if(nvs.length!==1 || nvs[0][0]!==0x9000 || nvs[0][1]!==0x5000)
+    throw new Error('La tabla de particiones no permite conservar las sesiones del nodo.');
+  return [[0,bytes.subarray(0,0x9000)],[0xE000,bytes.subarray(0xE000)]].map(([address,part])=>{
+    let data='';
+    for(let at=0;at<part.length;at+=0x8000) data+=String.fromCharCode.apply(null,part.subarray(at,at+0x8000));
+    return {address,data};
+  });
+}
+
 async function fwLocalFlash() {
   if (fwUsbBusy) return;
   const aviso = document.getElementById("fw-local-aviso");
@@ -5657,20 +5630,15 @@ async function fwLocalFlash() {
     if (r.headers.get("X-Modulinkr-Firmware-Version") !== fwDisponible)
       throw new Error("El firmware disponible ha cambiado. Vuelve a abrir esta página antes de instalar.");
     const bytes = new Uint8Array(await r.arrayBuffer());
+    const fileArray=fwFlashParts(bytes);
     transport = new window.Transport(port, false);
     const loader = new window.ESPLoader({ transport, baudrate: 115200,
                                           romBaudrate: 115200, terminal: term });
     fwMensaje(aviso, "Conectando con el nodo...", "progreso");
     await loader.main();
-    // esptool-js espera los datos como binary string (un carácter por byte).
-    let data = "";
-    const CH = 0x8000;
-    for (let i = 0; i < bytes.length; i += CH) {
-      data += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
-    }
     fwMensaje(aviso, "Instalando la actualización...", "progreso");
     await loader.writeFlash({
-      fileArray: [{ data, address: 0 }],
+      fileArray,
       flashSize: "keep", flashMode: "keep", flashFreq: "keep",
       eraseAll: false, compress: true,
       reportProgress: (idx, written, total) => {
@@ -5836,10 +5804,7 @@ let idLeido = null;              // ID leído de un nodo (reconfiguración legí
 // vuelto a registrarse, estará atrasado.
 let fwPorNodo = new Map();       // origin -> versión declarada al registrarse
 let fwGateway = null;            // versión del nodo.bin que sirve el gateway
-// Schemas del config.json que declara soportar el nodo destino, tal cual los
-// anuncia él. Cadena vacía significa que no lo declara (firmware anterior a
-// v3.7), que no es lo mismo que no soportar ninguno: en ese caso solo se
-// avisa, porque bloquear por no saber castigaría a los nodos viejos.
+// El formato aceptado debe declararse antes de configurar el destino.
 let schemasDestino = "";
 let schemasPorNodo = new Map();  // origin -> cadena declarada al registrarse
 // Destino confirmado: nodo encontrado por cable o elegido de la lista por
@@ -6205,29 +6170,11 @@ async function formCargarNodos() {
   formLive();
 }
 
-// ----- Compatibilidad del schema con el firmware del destino -----
-
-// Devuelve null si el config que genera el visor es compatible con lo que el
-// nodo declara, y si no, un objeto con el aviso y si debe bloquear el envío.
-//
-// Tres respuestas y no dos, porque hay tres situaciones distintas:
-//
-//   el nodo declara y encaja        se envía sin decir nada
-//   el nodo declara y no encaja     se bloquea: se sabe que va a fallar
-//   el nodo no declara              se avisa y se deja pasar
-//
-// El tercer caso es un firmware anterior a v3.7, que no anuncia sus schemas.
-// Bloquear ahí sería castigar por no saber, y además impediría justo lo que
-// haría falta: enviarle una configuración a un nodo viejo.
+// ----- Comprobación del contrato de configuración del destino -----
 function schemaCompat(declarados) {
-  if (!declarados) {
-    return { bloquea: false, texto:
-      "No se puede confirmar la compatibilidad con este nodo. Si la configuración no es compatible, el nodo conservará la actual." };
-  }
-  const lista = declarados.split(",").map((x) => x.trim()).filter(Boolean);
-  if (lista.includes(SCHEMA_GENERADO)) return null;
-  return { bloquea: true, texto:
-    "Esta configuración no es compatible con el nodo. Actualiza el nodo antes de continuar." };
+  if(!declarados) return {bloquea:true,texto:'No se pudo verificar qué configuración acepta el nodo. Vuelve a identificarlo o consulta su catálogo.'};
+  const lista=declarados.split(',').map(x=>x.trim()).filter(Boolean);
+  return lista.includes(SCHEMA_GENERADO) ? null : {bloquea:true,texto:'El formato generado no coincide con el que acepta el nodo. Revisa la versión instalada.'};
 }
 
 // Pinta el veredicto donde toca y devuelve si bloquea. El aviso va en la caja
@@ -6261,13 +6208,11 @@ function formDestino(listo) {
   formDestinoListo = !!listo;
   const enviar = document.getElementById("f-enviar");
   if (!enviar) return;
-  // Dos condiciones para el botón: destino y formulario sin errores. El schema
-  // ya no lo deshabilita, aunque se sigue pintando el aviso al lado: quien
-  // decide es el diálogo de schemaPuerta al pulsar enviar. Un botón apagado no
-  // dice por qué está apagado, y el motivo es justo lo que hay que leer.
-  schemaAviso(schemasDestino);
+  // El aviso explica el bloqueo cuando no se conoce el contrato del destino.
+  const esquemaBloqueado=schemaAviso(schemasDestino);
   enviar.disabled = !formDestinoListo
-                    || fValidate(collectForm()).length > 0 || !!formRadioMotivo();
+                    || fValidate(collectForm()).length > 0 || !!formRadioMotivo() || esquemaBloqueado
+                    || (nodosConocidos.has(Number(collectForm().node.id)) && Number(collectForm().node.id)!==idLeido);
 }
 
 function marcarCampo(id, malo) {
@@ -6560,7 +6505,6 @@ function collectForm() {
     nbiot: { apn: gv("f-apn"), apn_user: gv("f-apnuser"), apn_pass: gv("f-apnpass"),
              mqtt_broker: gv("f-mbroker"), mqtt_port: gv("f-mport"), tls: gc("f-mtls"),
              mqtt_user: gv("f-muser"), mqtt_pass: gv("f-mpass"),
-             topic_telemetry: gv("f-ttel"), topic_commands: gv("f-tcmd"),
              debug: gc("f-mdebug"), relay_enabled: gc("f-nbrelay"), relay_queue_max: gv("f-relayqueue") },
     modbus: { baudrate: gv("f-baud"), parity: gv("f-parity"), stopbits: gv("f-stopbits"),
               debug: gv("f-mbdebug"), devices },
@@ -6612,12 +6556,11 @@ function buildDevice(d) {
   return dev;
 }
 
-// Normaliza modbus.debug (string v3.3, booleano v3.2 o ausente) a uno de
-// los cinco valores del selector del asistente.
+// El diagnóstico utiliza los cinco modos del contrato actual.
 function mbDebugValor(d) {
-  if (d === true) return "errors_last";
-  if (d === false || d == null) return "off";
-  return ["off", "errors_last", "errors_each", "all_last", "all_each"].includes(d) ? d : "off";
+  if (d == null) return "off";
+  if (["off", "errors_last", "errors_each", "all_last", "all_each"].includes(d)) return d;
+  throw new Error("El modo de diagnóstico Modbus no es válido. Selecciona un modo de la configuración actual.");
 }
 
 // Schema del config.json que genera este visor. En un solo sitio porque hay
@@ -6655,8 +6598,6 @@ function buildConfig(f) {
     const nb = {
       apn: f.nbiot.apn || "", mqtt_broker: f.nbiot.mqtt_broker || "",
       mqtt_port: fNum(f.nbiot.mqtt_port, 8883), tls: !!f.nbiot.tls,
-      topic_telemetry: f.nbiot.topic_telemetry || "modulinkr/v1/{node_id}/telemetry",
-      topic_commands: f.nbiot.topic_commands || "modulinkr/v1/{node_id}/cmd",
       debug: !!f.nbiot.debug, relay_enabled: !!f.nbiot.relay_enabled,
       relay_queue_max: fNum(f.nbiot.relay_queue_max, 128),
     };
@@ -6710,6 +6651,7 @@ function fValidate(f) {
   if (f.modbus.devices.reduce((total, d) => total + d.reads.length, 0) > 8)
     e.push("el nodo admite como máximo 8 medidas en total, sumando todos los dispositivos");
   const identificadores = new Set();
+  const direccionesBus = new Set();
   f.modbus.devices.forEach((d, i) => {
     const p = `dispositivo ${i + 1}: `;
     const devicePending = new Set(d.pending_fields || []);
@@ -6717,6 +6659,8 @@ function fValidate(f) {
     const ds = Number(d.default_slave_id), de = Number(d.desired_slave_id);
     if (!(ds >= 1 && ds <= 247)) e.push(p + "la dirección actual debe estar entre 1 y 247");
     if (!(de >= 1 && de <= 247)) e.push(p + "la nueva dirección debe estar entre 1 y 247");
+    if (direccionesBus.has(de)) e.push(p + "la dirección Modbus ya se utiliza en este bus");
+    direccionesBus.add(de);
     if (ds !== de && !d.change_function && !devicePending.has("change_function"))
       e.push(p + "selecciona cómo cambiar la dirección Modbus");
     if (!d.reads.length) e.push(p + "añade al menos una medida");
@@ -6801,7 +6745,6 @@ function fillForm(cfg) {
     sV("f-apn", nb.apn); sV("f-mbroker", nb.mqtt_broker); sV("f-mport", nb.mqtt_port);
     sC("f-mtls", nb.tls !== false); sV("f-muser", nb.mqtt_user); sV("f-mpass", nb.mqtt_pass);
     sV("f-apnuser", nb.apn_user); sV("f-apnpass", nb.apn_pass);
-    sV("f-ttel", nb.topic_telemetry); sV("f-tcmd", nb.topic_commands);
     sC("f-mdebug", nb.debug !== false); sC("f-nbrelay", nb.relay_enabled !== false); sV("f-relayqueue", nb.relay_queue_max);
   }
   formNbiotVis();
@@ -7729,7 +7672,9 @@ async function formEnviar() {
     try {
       cfgDialogo(T, SPIN + "Guardando la configuración...");
       const ses = await cfgLocalAsegurar();
-      const detalle = await ses.put(texto);
+      const identified = await ses.hello();
+      const prepared = await identidadPreparar(texto, identified?.device_uid);
+      const detalle = await ses.put(prepared);
       // El nodo se reinicia tras aceptar el config, así que la sesión abierta
       // deja de servir: se cierra para que la próxima búsqueda parta limpia.
       await cfgLocalCerrar();
@@ -7977,3 +7922,12 @@ document.addEventListener("modulinkr-control-write", async event => {
     complete(response.ok ? null : result.detail || result.error || "No se pudo registrar la operación.", response.ok ? result : null);
   } catch (failure) { complete("No se pudo confirmar el registro de la operación. Consulta su actividad antes de repetirla."); }
 });
+
+
+async function identidadPreparar(config, device_uid) {
+  const response=await fetchApi('/api/identidad/configurar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,device_uid})});
+  const result=await response.json();
+  if(!response.ok) throw new Error(result.detail || result.error || 'No se pudo comprobar la identidad del equipo.');
+  return result.config;
+}
+

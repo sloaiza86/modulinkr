@@ -1,4 +1,4 @@
-"""Órdenes repetidas, confirmación por nodo y compatibilidad del diagnóstico."""
+"""Órdenes repetidas, confirmación por nodo y contrato del diagnóstico."""
 from pathlib import Path
 import struct
 import sys
@@ -42,7 +42,7 @@ class NodeMaintenanceTests(unittest.TestCase):
         m.tick(self.service, 1012)
         self.assertEqual(len(self.frames), 2)
         for raw in self.frames:
-            parsed = p.parse_frame(raw)
+            parsed = p._decode_payload_frame(raw)
             self.assertNotIn('error', parsed)
             self.assertEqual(raw[p.OFF_FRAME_TYPE], 0x28)
             self.assertEqual(struct.unpack_from('<IBI', raw, p.OFF_PAYLOAD), (1000,1,1060))
@@ -77,23 +77,24 @@ class NodeMaintenanceTests(unittest.TestCase):
     def test_encrypted_command_rejects_tampering(self):
         key = bytes(range(16))
         raw = p.build_node_maintenance(1,2,1000,1,1060,9,1,6,key,1000)
-        parsed = p.parse_frame(raw,key)
+        parsed = p._decode_payload_frame(raw,key)
         self.assertNotIn('error',parsed)
         self.assertEqual(struct.unpack('<IBI',parsed['payload']),(1000,1,1060))
         altered = bytearray(raw)
         altered[p.OFF_SEC_PAYLOAD] ^= 1
         struct.pack_into('<H',altered,len(altered)-2,p.crc16_modbus(altered[:-2]))
-        self.assertTrue(p.parse_frame(bytes(altered),key)['mic_fail'])
+        self.assertTrue(p._decode_payload_frame(bytes(altered),key)['mic_fail'])
 
     def test_protocol_health_and_result_lengths(self):
-        for length in (25,29):
-            parsed = p.parse_frame(self.frame(p.FRAME_NODE_HEALTH, bytes(length)))
+        for length in (29,):
+            parsed = p._decode_payload_frame(self.frame(p.FRAME_NODE_HEALTH, bytes(length)))
             self.assertNotIn('error', parsed)
             self.assertEqual(parsed['hl_counters_since'],0)
+        self.assertIn('error',p._decode_payload_frame(self.frame(p.FRAME_NODE_HEALTH,bytes(25))))
         data = struct.pack('<IBBIBBIIIII',1000,2,1,900,2,3,0,0,0,0,0)
-        parsed = p.parse_frame(self.frame(0x29, data))
+        parsed = p._decode_payload_frame(self.frame(0x29, data))
         self.assertEqual(parsed['maintenance']['id'],1000)
-        self.assertIn('error',p.parse_frame(self.frame(0x29,data[:-1])))
+        self.assertIn('error',p._decode_payload_frame(self.frame(0x29,data[:-1])))
 
 
 if __name__ == '__main__':

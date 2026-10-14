@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 import netstatus
+import identityapi
 import maintenanceapi
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent / 'pi-service'))
@@ -83,8 +84,12 @@ def node_control(origin: int):
     cat=catalog(origin)
     state=netstatus.network_state()
     node=next((n for n in state['nodes'] if n['origin']==origin),None)
-    unavailable=''
-    if not cat.get('write_capable'):
+    with netstatus._conn() as c:
+        identity_reason=__import__('identity').blocked(c,origin)
+    unavailable=identity_reason
+    if unavailable:
+        pass
+    elif not cat.get('write_capable'):
         unavailable='El nodo necesita firmware con control Modbus y anunciar su catálogo actualizado.'
     elif not state.get('service_online'):
         unavailable='El servicio de comunicaciones del gateway no está disponible.'
@@ -102,6 +107,11 @@ def node_control(origin: int):
     except sqlite3.OperationalError as exc:
         raise HTTPException(503,'Actualiza el servicio del gateway para habilitar el control Modbus.') from exc
     now=time.time()
+    if sample:
+        sample_data=json.loads(sample['reads_json'])
+        if isinstance(sample_data,dict) and sample_data.get('catalog_tag') and (
+            sample_data['catalog_tag']!=cat.get('catalog_tag') or sample_data.get('device_uid')!=cat.get('device_uid')):
+            sample=None
     actions=observed_actions(cat, sample)
     for item in history:
         item['value']=json.loads(item.pop('value_json'))
@@ -146,6 +156,7 @@ def write_action(origin: int, body: dict, request: Request):
     try:
         with sqlite3.connect(netstatus.DB_PATH,timeout=2) as c:
             c.execute('BEGIN IMMEDIATE')
+            identityapi.require(c,origin)
             # Un catálogo sustituido entre la confirmación y el encolado exige revisar la acción.
             row=c.execute('SELECT catalog_json FROM node_catalog WHERE origin_id=?',(origin,)).fetchone()
             current=json.loads(row[0]) if row else {}

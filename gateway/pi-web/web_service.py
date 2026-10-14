@@ -311,11 +311,13 @@ import maintenanceapi  # noqa: E402
 
 import commandapi  # noqa: E402
 import systemapi  # noqa: E402
+import identityapi
 
 for r in (red, topo, cats):
     app.include_router(r)
 app.include_router(commandapi.router, dependencies=[Depends(require_auth)])
 app.include_router(systemapi.router, dependencies=[Depends(require_auth)])
+app.include_router(identityapi.router, dependencies=[Depends(require_auth)])
 # Los routers de datos y comisionamiento viven en sus módulos; la auth se
 # aplica al incluirlos (las dependencias de router se fijan en el include,
 # no a posteriori).

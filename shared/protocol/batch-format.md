@@ -1,283 +1,106 @@
-# ModuLinkr, especificación del mensaje de telemetría MQTT
+# ModuLinkr, mensajes MQTT de telemetría y catálogo
 
-Documento normativo del **formato JSON** con el que la telemetría del despliegue llega al broker cloud. Es un formato **único para las cuatro rutas de entrega**: LoRa directo y LoRa multi-salto (publica el gateway) y NB-IoT propio y NB-IoT en custodia (publica el supernodo). El consumidor cloud procesa un solo formato, un solo topic con wildcard y una sola clave de deduplicación.
-
-> **Actualización del 2026-07-20 (v3.2)**: acompaña al estado Modbus por read de la trama LoRa (`frame-format.md` §3.1). Cada sample puede llevar `null` en `v[]` (lectura fallida, NaN en la trama) y un array opcional `st` con los bytes de estado (§4). El debug Modbus crudo (trama MODBUS_DEBUG, `frame-format.md` §15) **no pasa por MQTT**: se observa en el log del Pi del gateway.
-
-> **Reescritura del 2026-07-16 (v3.0)**: hasta v2.x este documento describía solo el batch NB-IoT del supernodo, y el gateway publicaba aparte un mensaje por muestra con formato propio. v3.0 unifica ambos caminos en este mensaje. Cambios respecto al batch v2.x: desaparecen `boot_id` y `clock_synced` (sin hora no se muestrea, `frame-format.md` §13.4, así que toda muestra lleva `ts` válido), y los metadatos de diagnóstico (`publisher`, `batch_id`, `trigger`, `fw_version`) pasan a un sobre `debug` opcional activable por configuración. El nombre del archivo se conserva por las referencias cruzadas del repo.
-
-Este formato es complemento de:
-
-- [`node-config.md`](node-config.md): define qué `reads[]` existen y en qué orden van los valores de `v[]`.
-- [`frame-format.md`](frame-format.md): define la trama LoRa de la que cada muestra arrastra su identidad `(origin, ts, seq)`.
-- [`db-schema.md`](db-schema.md): define cómo el consumidor persiste y deduplica lo que aquí se describe.
+El contrato actual utiliza mensajes JSON 4.0 y temas `modulinkr/v2`. ModuLinkr todavía no ha publicado su primera versión. Los contratos internos anteriores no se admiten como entradas operativas ni obligan a conservar compatibilidad con clientes.
 
 ## 1. Emisores y disparadores
 
-| Emisor | Cuándo publica | Contenido |
-| --- | --- | --- |
-| **Gateway** (Pi) | Al drenar su buffer local: agrupa las muestras pendientes de cada vuelta de drenado (hasta `MODULINKR_MQTT_DRAIN_MAX`) en un mensaje. | Muestras recibidas por LoRa (directo o multi-salto), de cualquier origen. |
-| **Supernodo**, trigger `"failover"` | Automático: muestras propias sin ACK LoRa acumuladas en el buzón de reenvío (`node-config.md` §4.4). | Muestras propias no confirmadas. |
-| **Supernodo**, trigger `"relay"` | Automático: tramas de vecinos aceptadas en custodia (`frame-format.md` §8). | Muestras ajenas, cada una con su `origin` real. Puede mezclar propias si hay failover simultáneo. |
-| **Supernodo**, trigger `"manual"` | Previsto para el comando externo `{"type":"flush_batch"}` de `commands-format.md`, todavía no implementado. | Todo lo no confirmado en cola. |
-| **Supernodo**, trigger `"test"` | Previsto para el comando externo `{"type":"test_batch"}` de `commands-format.md`, todavía no implementado. | `samples` vacío: ping extremo a extremo. |
+El gateway publica muestras recibidas por LoRa. El supernodo publica sus muestras pendientes sin confirmación LoRa y las aceptadas en custodia. El origen de la muestra permanece independiente del publicador. Los comandos generales `flush_batch` y `test_batch` no están implementados.
 
-En condiciones normales el supernodo no publica nada: NB-IoT sigue siendo respaldo selectivo. El gateway sí publica de continuo: es el camino primario de la telemetría hacia el cloud.
+## 2. Transporte
 
-## 2. Principios generales
+El tema de telemetría es `modulinkr/v2/<deployment_id>/<publicador>/telemetry`. El despliegue es el UID físico del gateway, doce caracteres hexadecimales minúsculos y distinto de cero. El publicador es un ID decimal de 1 a 255; 255 corresponde al gateway. Los temas se calculan automáticamente.
 
-- **Formato**: JSON UTF-8, sin BOM.
-- **Topic**: `modulinkr/v1/{publisher}/telemetry`, donde `{publisher}` es el `node.id` decimal del emisor y `255` el gateway (coherente con su dirección LoRa `0xFF`). El publisher del topic habilita las ACL por dispositivo en Mosquitto; el dueño de cada dato va en `samples[].origin`. El consumidor se suscribe a `modulinkr/v1/+/telemetry`.
-- **QoS**: 1 (at-least-once). El emisor no considera el mensaje entregado hasta el PUBACK.
-- **Retained**: `false` (los mensajes son hechos en el tiempo, no estado retenible).
-- **TLS**: según `nbiot.tls` del config (supernodo) o `MODULINKR_MQTT_TLS` (gateway). Recomendado `true`.
+La publicación utiliza QoS 1 y no se retiene. El emisor conserva las muestras hasta el PUBACK. Ese acuse confirma recepción en el broker; el consumidor confirma su propia recepción después del procesamiento y guardado. Un fallo de almacenamiento mantiene la reentrega de la sesión persistente.
 
 ## 3. Estructura raíz
 
 ```json
 {
-  "schema_version": "3.2",
-  "samples":        [ ... ],
-  "debug":          { ... }
-}
-```
-
-| Campo | Tipo | Obligatorio | Notas |
-| --- | --- | --- | --- |
-| `schema_version` | string | sí | Versión de este esquema MQTT. La implementación vigente publica `3.3`. |
-| `samples` | array | sí | Lista de muestras. Vacía solo con `debug.trigger == "test"` (§5). Ver §4. |
-| `debug` | object | no | Sobre de diagnóstico, activable por configuración. El consumidor procesa el dato exactamente igual con o sin él. Ver §5. |
-
-## 4. Estructura de una sample
-
-Cada elemento de `samples` representa **una muestra capturada en un instante**, la unidad canónica del sistema: equivale uno a uno al payload TELEMETRY LoRa más su identidad de cabecera.
-
-```json
-{
-  "origin": 3,
-  "seq":    220,
-  "ts":     1718000105,
-  "v":      [22.1, null],
-  "st":     [0, 1]
-}
-```
-
-| Campo | Tipo | Obligatorio | Notas |
-| --- | --- | --- | --- |
-| `origin` | integer | sí | `node.id` del nodo que **capturó** la muestra (el `origin_id` de la trama LoRa). Rango 1-254. |
-| `seq` | integer | sí | `seq` original (uint16) de la trama LoRa. Contador efímero de enlace; desempata muestras del mismo segundo. |
-| `ts` | integer | sí, **nunca nulo** | Instante de captura, epoch Unix en segundos, UTC. Arrastrado tal cual desde la trama LoRa por cualquier ruta (inmutabilidad de `frame-format.md` §3.1). Desde v3.0 no existe muestra sin hora: el nodo no muestrea sin reloj sincronizado. |
-| `v` | array de floats o null | sí | Valores en el orden estricto de `reads[]` del config del nodo **origen**, ya convertidos a unidad real (edge computing). Desde v3.2 una posición puede ser `null`: lectura fallida ese ciclo (NaN en la trama LoRa); el estado correspondiente en `st` dice por qué. El emisor no valida la longitud contra el catálogo del origen; esa validación es del consumidor. |
-| `st` | array de integers | no (v3.2) | Bytes de estado `st[]` de la trama LoRa (`frame-format.md` §3.1: nibble bajo estado, nibble alto código de excepción), misma longitud y orden que `v`. Se **omite cuando todos son 0** (todo `ok`), que es el caso normal; su ausencia equivale a todo cero. |
-
-### 4.1 Orden de las muestras
-
-Agrupadas por `origin` y, dentro de cada grupo, por `seq` ascendente con la aritmética modular de `frame-format.md` §5.4. El gateway, que drena un buffer multi-origen, respeta el mismo criterio.
-
-### 4.2 Tamaño del array
-
-Sin máximo formal. En la práctica: el gateway agrupa lo que drena por vuelta (default 50); el supernodo, lo acumulado en una racha de fallos LoRa (típico 5 a 50, tope la cola de 256 de `frame-format.md` §5.1). Rachas mayores se fragmentan en mensajes consecutivos.
-
-## 5. Sobre `debug`
-
-Metadatos de diagnóstico. No participan en la ingesta del dato: el consumidor puede ignorar el objeto completo. Se activan con `nbiot.debug` en el config del supernodo (`node-config.md` §4.3, default `true`) y con `MODULINKR_MQTT_DEBUG` en el gateway (default `1`).
-
-```json
-{
-  "publisher":  10,
-  "batch_id":   44,
-  "trigger":    "relay",
-  "fw_version": "0.0.7"
-}
-```
-
-| Campo | Notas |
-| --- | --- |
-| `publisher` | `node.id` del emisor (255 = gateway). Redundante con el topic, útil en logs desconectados del topic. |
-| `batch_id` | Contador monotónico de mensajes del emisor, por sesión. Detecta mensajes perdidos entre PUBACK y consumidor. |
-| `trigger` | Uno de `"gateway"`, `"failover"`, `"relay"`, `"manual"`, `"test"`. Identifica la ruta de entrega (§1). |
-| `fw_version` | Versión del firmware o servicio del emisor. |
-
-Excepción: el mensaje de `test_batch` lleva el sobre **siempre**, aunque `debug` esté desactivado en config, porque `samples` vacío solo es válido acompañado de `trigger: "test"` (§8).
-
-## 6. Hora del sistema
-
-La jerarquía de fuentes de hora y la regla "sin hora no se muestrea" son normativas en `frame-format.md` §13.4. Consecuencia para este formato: **nunca se publica una muestra sin `ts`**. Un emisor sin reloj no tiene muestras que publicar; su primera tarea es conseguir hora (NTP activo desde el arranque en el supernodo, `epoch` del WELCOME, BEACON o SN_OFFER en los demás).
-
-## 7. Ejemplos
-
-### 7.1 Gateway, vuelta de drenado con dos orígenes
-
-```json
-{
-  "schema_version": "3.2",
+  "schema_version": "4.0",
+  "deployment_id": "ffffffffffff",
+  "publisher_uid": "ffffffffffff",
   "samples": [
-    { "origin": 1,  "seq": 88,   "ts": 1718000010, "v": [24.5, 51.2] },
-    { "origin": 1,  "seq": 89,   "ts": 1718000015, "v": [24.5, 51.3] },
-    { "origin": 5,  "seq": 3021, "ts": 1718000012, "v": [22.9, 60.1] }
-  ],
-  "debug": {
-    "publisher": 255, "batch_id": 1071, "trigger": "gateway", "fw_version": "gw-0.4.0"
-  }
-}
-```
-
-### 7.2 Supernodo, failover propio
-
-```json
-{
-  "schema_version": "3.2",
-  "samples": [
-    { "origin": 10, "seq": 1431, "ts": 1718000010, "v": [24.5, 51.2] },
-    { "origin": 10, "seq": 1432, "ts": 1718000011, "v": [24.5, 51.3] },
-    { "origin": 10, "seq": 1434, "ts": 1718000013, "v": [24.6, 51.2] }
-  ],
-  "debug": {
-    "publisher": 10, "batch_id": 42, "trigger": "failover", "fw_version": "0.0.7"
-  }
-}
-```
-
-El `seq` 1433 no está: se confirmó por LoRa. Si su ACK se hubiera perdido y la muestra llegara también por aquí, el consumidor la deduplica por `(origin, ts, seq)`.
-
-### 7.3 Supernodo, custodia de un vecino
-
-```json
-{
-  "schema_version": "3.2",
-  "samples": [
-    { "origin": 3, "seq": 220, "ts": 1718000105, "v": [22.1, 63.0] },
-    { "origin": 3, "seq": 221, "ts": 1718000110, "v": [22.2, 62.8] }
-  ],
-  "debug": {
-    "publisher": 10, "batch_id": 44, "trigger": "relay", "fw_version": "0.0.7"
-  }
-}
-```
-
-El consumidor acredita las muestras al nodo 3, no al 10.
-
-### 7.4 Test (vacío, sobre forzado)
-
-```json
-{
-  "schema_version": "3.2",
-  "samples": [],
-  "debug": {
-    "publisher": 10, "batch_id": 43, "trigger": "test", "fw_version": "0.0.7"
-  }
-}
-```
-
-## 8. Reglas de validación
-
-El consumidor aplica, por mensaje:
-
-1. `schema_version` con major no soportado: mensaje descartado con log.
-2. `samples` ausente o no array: mensaje descartado con log.
-3. `samples` vacío sin `debug.trigger == "test"`: mensaje descartado con log (indica bug del emisor).
-
-Y por muestra (una muestra inválida se descarta con log; las demás del mensaje se procesan):
-
-4. `origin` ausente o fuera de 1-254.
-5. `seq` ausente o fuera de uint16 (0 a 65535).
-6. `ts` ausente, nulo o 0. Desde v3.0 no hay semántica de "sin hora": es un dato malformado.
-7. `v` ausente, vacío o con elementos que no son número ni `null` (v3.2: `null` = lectura fallida; la posición no genera fila en `sample_values`, la ausencia es la representación del hueco).
-8. `st` presente con longitud distinta de la de `v` o con no-enteros: se ignora el array con log, la muestra se procesa igual (el estado es diagnóstico, no dato).
-
-La longitud de `v` contra el catálogo del origen **no es motivo de rechazo**: una muestra de un origen sin catálogo, o cuya longitud no cuadra con los canales vigentes, va a la cuarentena de `db-schema.md` §4 (alta zero-touch: rechazarla perdería datos ya confirmados con PUBACK al emisor).
-
-El sobre `debug`, si aparece, se valida best-effort (log, nunca rechazo): `trigger` dentro del enum, y coherencia `trigger`/`origin` (con `"failover"` o `"test"` todo `origin` debe igualar a `publisher`; `"gateway"` implica `publisher` 255).
-
-### 8.1 Identidad y deduplicación
-
-Clave única: **`(origin, ts, seq)`**. La misma muestra llegando por dos rutas (LoRa al gateway y NB-IoT del supernodo, ACK de custodia perdido, reenvío tras PUBACK perdido) produce la misma clave y se descarta como duplicado. Entre arranques no hay colisión: el tiempo no se repite y el `seq` desempata dentro del mismo segundo. Las identidades secundarias de v2.x (`boot_id` para muestras sin hora, el residuo de custodia sin deduplicación fuerte) desaparecen con la premisa de v3.0.
-
-## 9. Tamaños esperados y consumo de datos
-
-El supernodo limita cada publicación a 1024 bytes de JSON, capacidad declarada por el módem del banco mediante `AT+CMQTTPAYLOAD=?`. Desde el firmware 0.0.64 se mide el mensaje completo, incluidos `path`, `path_at` y el sobre opcional `debug`, antes de aceptar cada muestra. Se incluyen como máximo 16 muestras y se cierra el lote antes de superar el límite. Las restantes permanecen en la bandeja para publicaciones posteriores; las incluidas solo se liberan tras confirmar la publicación. No cambia el schema 3.3.
-
-Para el caso típico (XY-MD02 con 2 reads), estas estimaciones representan el volumen de muestras antes de dividirlo en publicaciones y sin recorridos. Los casos mayores de 1024 bytes requieren varios mensajes celulares y repiten el sobre JSON y la sobrecarga de transporte:
-
-| Escenario | Muestras | Tamaño aprox JSON | Con MQTT+TLS |
-| --- | --- | --- | --- |
-| Gateway, vuelta de drenado (10 muestras) | 10 | ~700 B | ~750 B |
-| Failover corto | 5 | ~450 B | ~500 B |
-| Failover medio | 30 | ~2,1 KB | ~2,2 KB |
-| Failover largo (cola al límite) | 256 | ~17 KB | ~17,2 KB |
-| Test (vacío) | 0 | ~170 B | ~240 B |
-
-Con `debug` desactivado, cada mensaje ahorra aproximadamente 90 B. El consumo efectivo depende de los recorridos, del número de publicaciones necesario y de los reintentos; las cifras de la tabla no incorporan ese coste adicional.
-
-## 10. Mensaje de registro (register retenido)
-
-> **Añadido el 2026-07-12** como parte del alta zero-touch (`db-schema.md`); equivalente MQTT del NODE_REGISTER LoRa (`frame-format.md` §13), inspirado en el patrón BIRTH de Sparkplug B. **Actualizado el 2026-07-16 (v3.0)**: se retira `boot_id` del payload (eliminado del protocolo).
-
-### 10.1 Publicación
-
-- **Quién**: el supernodo, anunciando **su propio** catálogo (el de vecinos en custodia va por la variante de §10.4 o lo absorbe la cuarentena). El **gateway** publica el mismo mensaje en nombre de cada nodo cuyo NODE_REGISTER recibió por LoRa (republicación de su `node_catalog`): un único punto de ingesta de catálogos para el consumidor.
-- **Cuándo**: el supernodo, al abrir sesión MQTT, **antes** del primer mensaje de telemetría de la sesión. El gateway, cada vez que un NODE_REGISTER cree o modifique una entrada de `node_catalog`, y siempre antes de la telemetría de esa vuelta (la leyenda antes que los datos).
-- **Topic**: `modulinkr/v1/{node_id}/register`, donde `{node_id}` es el **dueño del catálogo**.
-- **QoS**: 1. **Retained**: `true`: el broker conserva la última versión y la entrega a cualquier suscriptor futuro. Un register nuevo sobreescribe al anterior.
-
-### 10.2 Payload
-
-```json
-{
-  "schema_version": "3.2",
-  "node_id":        10,
-  "name":           "Supernodo planta 2",
-  "fw_version":     "0.0.7",
-  "reads": [
-    { "id": "temp", "name": "temperature", "unit": "C"   },
-    { "id": "hum",  "name": "humidity",    "unit": "%RH" }
-  ],
-  "writes": [
-    { "id": "fan", "name": "ventilator_relay", "unit": null }
+    {"origin": 1, "device_uid": "010203040501", "boot_id": 2,
+     "catalog_tag": "1020304050607080", "ts": 1791972000, "seq": 7,
+     "v": [24.5, null], "st": [0, 1], "path": [1, 255], "path_at": 1791972001}
   ]
 }
 ```
 
-Contenido idéntico al anuncio del NODE_REGISTER LoRa: `id`, `name`, `unit` de cada read y write, **en orden estricto de serialización** (el orden de `reads[]` define las posiciones de `v[]`). Los campos Modbus internos no se anuncian. Tamaño típico: ~300 bytes, una vez por sesión MQTT.
+`schema_version` debe ser exactamente `4.0`. `deployment_id` debe coincidir con el tema. `samples` es un array. Los emisores actuales añaden `publisher_uid`; el consumidor acredita la vía mediante el publicador del tema y comprueba la identidad física en cada muestra.
+
+## 4. Muestra
+
+| Campo | Contrato |
+| --- | --- |
+| `origin` | ID del equipo que capturó, entero entre 1 y 254 |
+| `device_uid` | UID físico, doce caracteres hexadecimales minúsculos y distinto de cero |
+| `boot_id` | Sesión persistida, entero entre 1 y 4294967295 |
+| `catalog_tag` | Primeros ocho bytes de SHA-256 del catálogo, dieciséis caracteres hexadecimales |
+| `ts` | Epoch UTC de captura, entero positivo uint32 |
+| `seq` | Secuencia uint16 de la muestra original |
+| `v` | Entre una y ocho lecturas, en el orden del catálogo de esa huella; número finito o `null` |
+| `st` | Diagnóstico Modbus opcional, mismo orden que `v`; la ausencia equivale a estados correctos |
+| `path`, `path_at` | Recorrido observado y fecha de observación, utilizados por el gateway |
+
+Una lectura fallida se representa con `null` y no genera un valor numérico en PostgreSQL. No se muestrea sin hora sincronizada. Un relay conserva equipo, sesión, catálogo y captura durante todos los reintentos.
+
+### 4.1 Orden y lotes
+
+El gateway agrupa por origen y secuencia. El supernodo prepara hasta dieciséis muestras por mensaje sin superar 1024 bytes de JSON, límite del módem del banco. Las muestras restantes esperan otro lote.
+
+## 5. Diagnóstico
+
+El objeto opcional `debug` contiene `publisher`, `batch_id`, `trigger` y `fw_version`. No cambia la identidad ni las reglas de guardado. El debug Modbus crudo permanece en el diagnóstico local del gateway.
+
+## 6. Hora
+
+El timestamp describe la captura, no la llegada al broker. La renovación de sesión física evita confundir muestras cuando se reinicia, vuelve la secuencia o retrocede el reloj. La sincronización y la sesión son mecanismos independientes.
+
+## 7. Rutas de entrega
+
+LoRa directo y por relays terminan en el publicador 255 y se almacenan con vía `lora`. La entrega celular propia o en custodia termina en un supernodo y se almacena con vía `nbiot`. La primera recepción guardada determina esa vía; la deduplicación no crea un historial de recepciones alternativas.
+
+## 8. Validación y confirmación
+
+Se rechazan temas fuera del contrato, despliegues nulos, publicadores fuera de rango y sobres que no coincidan con tema y versión. Los mensajes inválidos se confirman a MQTT para evitar reentrega indefinida. Un fallo de almacenamiento revierte la transacción y desconecta sin confirmar.
+
+Una muestra sin catálogo, con conflicto de identidad o con longitud incompatible se guarda en cuarentena dentro de su despliegue. La llegada del catálogo permite materializar muestras de su equipo y huella. Los valores malformados se rechazan sin invalidar las demás muestras.
+
+### 8.1 Identidad y deduplicación
+
+La clave dentro del despliegue es `(origin, device_uid, boot_id, ts, seq)`. La misma muestra por distintas rutas conserva esa clave. Si vuelve con otro catálogo o contenido, se conserva el primer valor y se registra `sample_conflict`. El catálogo se resuelve por `(device_uid, catalog_tag)`; una configuración posterior no reinterpreta el backlog.
+
+## 9. Tamaños
+
+El límite celular se comprueba sobre el mensaje completo, incluidas identidades, recorrido y diagnóstico. Las estimaciones de formatos anteriores no sirven para calcular la capacidad actual. El tamaño real se verifica mediante las pruebas del constructor MQTT.
+
+## 10. Registro retenido
+
+### 10.1 Temas
+
+El gateway publica el catálogo completo en `modulinkr/v2/<deployment_id>/<origen>/register/<catalog_tag>`, QoS 1 y retenido. Conserva las versiones por huella. Puede publicar también el catálogo vigente en `register`.
+
+### 10.2 Contenido
+
+El JSON contiene `schema_version`, `deployment_id`, `node_id`, `device_uid`, `catalog_tag`, nombre, firmware, lecturas y escrituras. Las lecturas incluyen su definición semántica Modbus. El consumidor conserva el catálogo y los canales asociados por equipo y huella.
 
 ### 10.3 Consumo
 
-El consumidor procesa todo register según `db-schema.md` §3: alta automática del nodo si no existía, sincronización de canales (cierre y creación si el catálogo difiere), y reintento de materialización de la cuarentena del origen. La carrera register/telemetría dentro de una sesión (MQTT solo garantiza orden por topic) la absorbe la cuarentena: una muestra que gane la carrera espera y se materializa segundos después.
+Un ID ocupado por otro UID genera conflicto, salvo resolución explícita del gateway. Cambiar el catálogo cierra los canales vigentes y crea los asociados a la nueva definición. Las muestras del catálogo anterior conservan sus canales originales.
 
-### 10.4 Register en custodia (nodo sin NB-IoT, vía supernodo)
+### 10.4 Catálogo celular fragmentado
 
-> **Añadido el 2026-07-12 (decisión B1: supernodo mensajero), pendiente de implementación.** Cubre el alta de un nodo normal cuando ni él ni el gateway se han visto nunca: el nodo entrega su NODE_REGISTER al supernodo en custodia (`frame-format.md` §8.4) y el supernodo lo reenvía crudo.
-
-Cuando el supernodo tiene el blob completo del catálogo de un vecino, lo publica en el **topic register del origen** (no el propio), retained y QoS 1, con esta variante de payload:
-
-```json
-{
-  "schema_version": "3.2",
-  "node_id":        3,
-  "via":            10,
-  "raw_catalog":    "<blob de frame-format.md §13.2, en base64>"
-}
-```
-
-| Campo | Notas |
-| --- | --- |
-| `node_id` | El **origen** dueño del catálogo, no el supernodo que publica. |
-| `via` | Id del supernodo mensajero. Informativo (diagnóstico). |
-| `raw_catalog` | El descriptor binario del NODE_REGISTER tal cual se reensambló, codificado en base64. El supernodo **no lo interpreta**. |
-
-El consumidor detecta la variante por la presencia de `raw_catalog` (en lugar de `reads`/`writes`), decodifica el blob con el mismo parser del gateway (`parse_catalog` de `protocol.py`) y procede exactamente igual que con un register normal (§10.3). Un blob malformado se registra en log y se descarta; las muestras de ese origen permanecen en cuarentena hasta un register válido.
+El nodo publica fragmentos retenidos de hasta 160 bytes en `register/<catalog_tag>/<índice>`. El sobre incluye `frag_idx`, `frag_total` y `catalog_fragment` hexadecimal, junto con despliegue, ID, UID y huella. El consumidor admite hasta trece fragmentos y 2048 bytes, reensambla, verifica SHA-256 e ID de nodo y obtiene los descriptores de medidas. No se utiliza la variante interna anterior `raw_catalog` en base64.
 
 ## 11. Documentos relacionados
 
-- [`node-config.md`](node-config.md): qué se muestrea, parámetros del bloque `nbiot` y flag `debug`.
-- [`frame-format.md`](frame-format.md): la trama LoRa de la que cada muestra hereda `(origin, ts, seq)`.
-- [`db-schema.md`](db-schema.md): persistencia, deduplicación y cuarentena en el consumidor.
-- [`commands-format.md`](commands-format.md): comandos `flush_batch` / `test_batch`.
+El contrato de radio se describe en [`frame-format.md`](frame-format.md), la configuración en [`node-config.md`](node-config.md), el almacenamiento en [`db-schema.md`](db-schema.md) y las órdenes en [`commands-format.md`](commands-format.md).
 
-## 12. Recorrido observado (v3.3)
+## 12. Recorrido observado
 
-Cada muestra puede añadir `path`, lista ordenada de identificadores desde el origen hasta el publicador, y `path_at`, fecha epoch de la observación de ese recorrido. Una recepción LoRa de 3 mediante 2 hasta el gateway lleva `[3, 2, 255]`; una custodia equivalente hasta el supernodo 1 lleva `[3, 2, 1]`. Una muestra propia del supernodo lleva `[1]` y no confirma actividad LoRa. El receptor valida longitud de 1 a 16, ausencia de repeticiones, origen inicial y coincidencia del extremo con el publicador del topic. Una ruta inválida no sirve como evidencia de topología.
+`path` empieza en el origen, termina en el publicador y contiene entre uno y dieciséis IDs sin repetir. 255 solo aparece como extremo del gateway. `path_at` no se rejuvenece al republicar una muestra. El consumidor no almacena el recorrido en PostgreSQL; el gateway conserva la evidencia para proyectar la topología. Una ruta inválida no acredita conectividad.
 
-El gateway conserva el último recorrido de cada origen y vía en SQLite, junto con la fecha de observación y la de recepción MQTT. Una republicación atrasada no rejuvenece el recorrido. Se mantiene la recepción de muestras antiguas sin estos campos, con recorrido no reportado. El consumidor cloud acepta el major 3 y conserva el comportamiento de `samples.source`: vía de la primera recepción almacenada, `lora` para el publicador 255 y `nbiot` para un supernodo. La deduplicación no crea un historial de recepciones alternativas ni conserva `path` en PostgreSQL. No se requiere una migración de esa base de datos para mostrar la vía.
+## 13. Identidad física desde la primera publicación
 
-La consulta de datos admite `via=all`, `via=lora` o `via=nbiot`. Cada punto agregado contiene `[epoch, promedio, cantidad_lora, cantidad_nbiot]`. Un promedio mixto conserva ambos recuentos; no se atribuye a una sola vía. El CSV incorpora la columna `via` por muestra y respeta el mismo filtro.
+No existe un selector de histórico sin identidad ni una vía de ingesta MQTT anterior. Los datos internos del banco pueden conservarse para recuperación, fuera del espacio operativo. Se mantiene el histórico normal de mediciones y versiones de catálogo del despliegue actual.

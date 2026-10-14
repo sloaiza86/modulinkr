@@ -24,6 +24,7 @@ enum class Result : uint8_t {
     SET_FAILED = 3,
     ROLLED_BACK = 4,
     INSTALLING = 5,
+    RADIO_NOT_READY = 6,
 };
 
 enum class Phase : uint8_t { RECEIVE = 1, VERIFY = 2, INSTALL = 3, BOOT = 4 };
@@ -32,6 +33,7 @@ enum class Cause : uint8_t {
     ROLLED_BACK = 4, INSTALLING = 5, RECEIVE_IDLE = 6, FLASH_WRITE = 7,
     FLASH_ERASE = 8, NO_MEMORY = 9, STORAGE = 10, INVALID_OFFER = 11,
     CONFIRM_FAILED = 12, FLASH_READ = 13, HASH_ENGINE = 14, VERIFIED = 15, PREVIOUS_IMAGE = 16, TRIAL_TIMEOUT = 17,
+    RADIO_NOT_READY = 18,
 };
 struct Report {
     uint32_t id = 0, xfer = 0;
@@ -56,8 +58,8 @@ bool adoptCompleted(uint32_t xfer, uint32_t total_len, const uint8_t sha[32]);
 // Relee la imagen para comprobar que conserva el hash anunciado.
 bool verify();
 
-// Marca la partición de arranque tras reverificarla. El llamador reinicia.
-Result install(uint32_t xfer, const uint8_t sha[32]);
+// Reverifica la imagen y exige preparar la radio antes de cambiar el arranque.
+Result install(uint32_t xfer, const uint8_t sha[32], bool (*prepare_restart)());
 
 bool pendingVerify();
 bool confirmRunning();

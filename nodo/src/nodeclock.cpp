@@ -10,8 +10,7 @@ volatile uint32_t g_offset  = 0;   // epoch - millis()/1000 al sincronizar
 }  // namespace
 
 void begin() {
-    // Sin estado que generar desde v3.0 (el boot_id desapareció con las
-    // muestras sin hora). Se conserva el hook por simetría del arranque.
+    // La sincronización se establece al recibir una fuente de hora.
 }
 
 void sync(uint32_t epoch_now_s) {

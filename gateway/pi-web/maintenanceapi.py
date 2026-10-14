@@ -10,6 +10,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request
 import configapi
 import netstatus
+import identityapi
 
 router = APIRouter(prefix='/api/mantenimiento')
 HELPER = Path('/usr/local/libexec/modulinkr-maintenance')
@@ -87,6 +88,8 @@ def nodes_pending():
 
 
 def node_capability(node, state):
+    if node.get('identity_blocked'):
+        return node['identity_blocked']
     def supported(n):
         version = tuple(int(x) for x in re.findall(r'\d+', n.get('fw_version') or '')[:3])
         return len(version) == 3 and version >= (0, 0, 68)
@@ -146,6 +149,7 @@ def node_action(origin: int, action: str, request: Request):
     try:
         with sqlite3.connect(netstatus.DB_PATH, timeout=2) as c:
             c.execute('BEGIN IMMEDIATE')
+            identityapi.require(c,origin)
             if c.execute("SELECT 1 FROM node_maintenance WHERE state IN ('queued','sent','accepted') AND created>?", (now - 180,)).fetchone():
                 raise HTTPException(409, 'Hay una operación de mantenimiento en curso.')
             previous = c.execute('SELECT MAX(id) FROM node_maintenance').fetchone()[0] or 0

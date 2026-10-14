@@ -48,18 +48,19 @@ test("el contador conserva segundos también después del primer minuto", () => 
 
 function pollingContext() {
   const elements = {};
+  const notifications=[];
   const c = vm.createContext({
-    document: {hidden:false, getElementById:id => elements[id] ||= {innerHTML:"",textContent:"",hidden:false}},
+    window:{ModulinkrSupervision:{network:(...args)=>notifications.push(args)}}, document: {hidden:false, getElementById:id => elements[id] ||= {innerHTML:"",textContent:"",hidden:false}},
     AbortController, setTimeout, clearTimeout, performance:{now:()=>5000},
     redPeticion:null, redAbort:null, redSnapshot:null, redRecibidaMs:0, redConectada:false,
     cacheCatalogosRed:null, catalogo:null, formRadioActualizar:()=>{}, proyectarRed:()=>{},
   });
   vm.runInContext(section("async function refrescarRed(", "// ----- Modal de minigráfica"), c);
-  return {c,elements};
+  return {c,elements,notifications};
 }
 
 test("dos solicitudes simultáneas comparten la consulta y la respuesta fallida no borra los datos", async () => {
-  const {c,elements} = pollingContext();
+  const {c,elements,notifications} = pollingContext();
   let resolve, calls=0;
   c.fetchApi = () => {calls++; return new Promise(r => resolve=r);};
   const first = c.refrescarRed(), second = c.refrescarRed();
@@ -71,7 +72,7 @@ test("dos solicitudes simultáneas comparten la consulta y la respuesta fallida 
   await c.refrescarRed();
   assert.equal(c.redSnapshot,saved);
   assert.equal(c.redConectada,false);
-  assert.match(elements["red-observacion"].textContent,/Sin conexión con el gateway/);
+  assert.deepEqual(notifications,[[false,null]]);
   c.fetchApi=async()=>({ok:true,json:async()=>fixture()});
   await c.refrescarRed();
   assert.equal(c.redConectada,true);

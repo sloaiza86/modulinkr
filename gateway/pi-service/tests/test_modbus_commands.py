@@ -13,6 +13,7 @@ sys.path.insert(0,str(SERVICE))
 import protocol
 import node_commands
 from buffer import GatewayBuffer
+import identity
 from modbus_command import encode_request, fingerprint, catalog_tail
 
 
@@ -29,6 +30,8 @@ class CommandTests(unittest.TestCase):
         self.mqtt=types.SimpleNamespace(connected=True,publish_command=lambda pub,body:self.cell.append((pub,json.loads(body))) or True)
         self.svc=types.SimpleNamespace(buf=self.buf,ser=object(),mqtt=self.mqtt,aire_libre=0,net_id=1,max_ttl=15,sec_key=None,
             _next_gw_seq=lambda:1,_gw_sec_ts=lambda:1000,_tx=self.sent.append,mig_mundo='nuevo',mig=None,bcast=None,quiet=None)
+        for n in (1,2,3,255): identity.observe(self.buf.conn,n,f"{n:012x}",1)
+        self.buf.conn.commit()
         for n in (1,2,3):self.buf.catalog_upsert(n,dict(write_capable=True,writes=[action()],reads=[],class_='C'))
         self.body=encode_request(1000,int(self.now)+300,action(),4294967295)
         self.buf.conn.execute('INSERT INTO modbus_commands(id,origin,device,action,value_json,body,created,expires,updated) VALUES(1000,1,0,?,?,?,?,?,?)',
@@ -45,7 +48,7 @@ class CommandTests(unittest.TestCase):
     def test_lora_is_primary_and_uses_inverse_observed_path(self):
         node_commands.tick(self.svc,self.now)
         self.assertEqual(self.state(),('sent','lora',1));self.assertFalse(self.cell)
-        parsed=protocol.parse_frame(self.sent[0]);self.assertNotIn('error',parsed)
+        parsed=protocol._decode_payload_frame(self.sent[0]);self.assertNotIn('error',parsed)
         self.assertEqual(parsed['frame_type'],protocol.FRAME_MODBUS_WRITE)
         self.assertEqual(parsed['hop_dst'],2);self.assertEqual(parsed['payload'][1:4],bytes([255,2,1]))
         self.assertEqual(parsed['payload'][4:],self.body)
@@ -107,12 +110,13 @@ class CommandTests(unittest.TestCase):
         for bad in (True,4294967296,1.5,float('nan'),float('inf')):
             with self.assertRaises(ValueError):encode_request(1,1000,action(),bad)
 
-    def test_catalog_extension_and_previous_catalog(self):
+    def test_current_catalog_and_truncated_development_catalog_are_distinguished(self):
         def string(s):return bytes([len(s)])+s.encode()
         prefix=string('0.0.79')+string('Nodo')+b'\0\1'+string('setpoint')+string('Consigna')+string('V')+string('3.3')+b'C'
         extended=prefix+bytes([0x57,1,1])+struct.pack('<BBBBIff',0,16,2,2,123,1,0)+string('Motor')
+        extended+=bytes((0x55,1,1))+struct.pack('<HBBIH',0,1,0,0,0)+bytes((0x49,1,0x52,1,0))
         cat=protocol.parse_catalog(extended);self.assertTrue(cat['write_capable']);self.assertEqual(cat['writes'][0]['device_name'],'Motor')
-        old=protocol.parse_catalog(prefix);self.assertFalse(old['write_capable']);self.assertEqual(old['writes'][0]['name'],'Consigna')
+        self.assertIn('error',protocol.parse_catalog(prefix))
         self.assertIn('error',protocol.parse_catalog(extended[:-1]))
 
     def test_real_mqtt_publisher_enqueues_and_correlates_response(self):
@@ -125,10 +129,10 @@ class CommandTests(unittest.TestCase):
         self.svc.mqtt=pub;self.svc.ser=None
         node_commands.tick(self.svc,self.now)
         self.assertEqual(self.state()[0],'sent')
-        self.assertEqual(pub.client.publish.call_args.args[0],'modulinkr/v1/3/cmd')
+        self.assertEqual(pub.client.publish.call_args.args[0],f'{pub.topic_prefix}/3/cmd')
         self.assertEqual(pub.client.publish.call_args.kwargs,dict(qos=1,retain=False))
-        result=dict(schema_version='3.0',origin=1,id=1000,fingerprint=fingerprint(self.body),status=1,modbus_status=0,exception=0)
-        msg=types.SimpleNamespace(topic='modulinkr/v1/3/cmd/response',payload=json.dumps(result).encode(),retain=False)
+        result=dict(schema_version='4.0',deployment_id=pub.deployment,origin=1,id=1000,fingerprint=fingerprint(self.body),status=1,modbus_status=0,exception=0)
+        msg=types.SimpleNamespace(topic=f'{pub.topic_prefix}/3/cmd/response',payload=json.dumps(result).encode(),retain=False)
         pub._on_message(None,None,msg)
         self.assertEqual(self.state()[0],'sent')
         pub.drain_commands(self.svc);self.assertEqual(self.state()[0],'confirmed')
@@ -138,9 +142,9 @@ class CommandTests(unittest.TestCase):
         from unittest.mock import Mock,call
         pub=publisher.MqttPublisher(self.buf);client=Mock()
         pub._on_connect(client,None,None,0)
-        client.subscribe.assert_any_call('modulinkr/v1/+/cmd/response',qos=1)
-        result=dict(schema_version='3.0',origin=1,id=1000,fingerprint=fingerprint(self.body),status=1,modbus_status=0,exception=0)
-        pub._on_message(None,None,types.SimpleNamespace(topic='modulinkr/v1/3/cmd/response',payload=json.dumps(result).encode(),retain=True))
+        client.subscribe.assert_any_call(f'{pub.topic_prefix}/+/cmd/response',qos=1)
+        result=dict(schema_version='4.0',deployment_id=pub.deployment,origin=1,id=1000,fingerprint=fingerprint(self.body),status=1,modbus_status=0,exception=0)
+        pub._on_message(None,None,types.SimpleNamespace(topic=f'{pub.topic_prefix}/3/cmd/response',payload=json.dumps(result).encode(),retain=True))
         self.assertFalse(pub._command_q)
 
     def test_result_frame_checks_the_return_path(self):
@@ -148,16 +152,16 @@ class CommandTests(unittest.TestCase):
         frame=bytearray(protocol.HEADER_BYTES+len(payload))
         frame[:11]=bytes([protocol.SCHEMA_VERSION,1,2,255,1,255,1,0,protocol.FRAME_MODBUS_WRITE_RESULT,4,len(payload)])
         frame[11:]=payload
-        parsed=protocol.parse_frame(protocol._finalize(frame))
+        parsed=protocol._decode_payload_frame(protocol._finalize(frame))
         self.assertEqual(parsed['write_result']['status'],1)
         frame[2]=3
-        self.assertIn('error',protocol.parse_frame(protocol._finalize(frame)))
+        self.assertIn('error',protocol._decode_payload_frame(protocol._finalize(frame)))
 
     def test_encrypted_request_rejects_tampering(self):
         key=bytes(range(16));raw=protocol.build_modbus_write(1,[255,2,1],self.body,1,1,15,key,1000)
-        self.assertNotIn('error',protocol.parse_frame(raw,key))
+        self.assertNotIn('error',protocol._decode_payload_frame(raw,key))
         damaged=bytearray(raw);damaged[25]^=1
         struct.pack_into('<H',damaged,len(damaged)-2,protocol.crc16_modbus(damaged[:-2]))
-        self.assertIn('error',protocol.parse_frame(bytes(damaged),key))
+        self.assertIn('error',protocol._decode_payload_frame(bytes(damaged),key))
 
 if __name__=='__main__':unittest.main()

@@ -1,3 +1,4 @@
+from identity_fixture import CPP as IDENTITY_CPP
 """Ejecuta los manejadores reales con recorridos LoRa y recepción celular simulados."""
 from pathlib import Path
 import subprocess
@@ -53,11 +54,15 @@ int main(){
  f.payload[3]=1;g_cfg.node_id=2;f.hop_dst=2;f.hop_src=255;handleWriteFrame(f);assert(forwarded==1&&last_hop==1);
  g_cfg.node_id=3;g_cfg.super_node=true;
  std::string hex;char pair[3];for(uint8_t b:body){snprintf(pair,3,"%02x",b);hex+=pair;}
- incoming="{\"schema_version\":\"3.0\",\"path\":[3,2,1],\"body\":\""+hex+"\"}";
+ incoming="{\"schema_version\":\"4.0\",\"deployment_id\":\"ffffffffffff\",\"destination_uid\":\"010101010101\",\"target_uid\":\"010101010101\",\"path\":[3,2,1],\"body\":\""+hex+"\"}";
+ const std::string valid=incoming;
+ incoming.replace(incoming.find("target_uid")+13,12,"020202020202");
+ const int before=transmissions;incomingCellularWrites();assert(transmissions==before);
+ incoming=valid;
  incomingCellularWrites();assert(last_hop==2&&last_dest==1&&last_type==protocol::kFrameModbusWrite);
- incoming="{\"schema_version\":\"3.0\",\"path\":[3],\"body\":\""+hex+"\"}";
+ incoming="{\"schema_version\":\"4.0\",\"deployment_id\":\"ffffffffffff\",\"destination_uid\":\"010101010101\",\"target_uid\":\"010101010101\",\"path\":[3],\"body\":\""+hex+"\"}";
  writeTick();assert(executions==2&&!published.empty());
- const int old=transmissions;incoming="{\"schema_version\":\"3.0\",\"path\":[1,3],\"body\":\""+hex+"\"}";incomingCellularWrites();assert(transmissions==old);
+ const int old=transmissions;incoming="{\"schema_version\":\"4.0\",\"deployment_id\":\"ffffffffffff\",\"destination_uid\":\"010101010101\",\"target_uid\":\"010101010101\",\"path\":[1,3],\"body\":\""+hex+"\"}";incomingCellularWrites();assert(transmissions==old);
 }
 '''
 
@@ -68,7 +73,7 @@ class RoutingTests(unittest.TestCase):
         library=SRC.parent/'.pio/libdeps/atom-lite/ArduinoJson/src'
         self.assertTrue(library.exists(),'ArduinoJson debe estar disponible para la prueba nativa.')
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);(root/'Arduino.h').write_text(ARDUINO);(root/'test.cpp').write_text(HARNESS.replace('// HANDLERS',handlers))
+            root=Path(tmp);(root/'Arduino.h').write_text(ARDUINO);(root/'test.cpp').write_text(IDENTITY_CPP+HARNESS.replace('// HANDLERS',handlers))
             subprocess.run(['clang++','-std=c++17','-Wall','-Wextra','-I',tmp,'-I',str(SRC),'-I',str(library),str(root/'test.cpp'),'-o',str(root/'test')],check=True)
             subprocess.run([str(root/'test')],check=True)
 

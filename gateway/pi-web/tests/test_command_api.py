@@ -15,6 +15,12 @@ WEB=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(WEB.parent/'pi-service'))
 import protocol
 from buffer import GatewayBuffer
+import identity
+from types import SimpleNamespace
+
+def identity_require(c,origin):
+    reason=identity.blocked(c,origin)
+    if reason: raise HttpError(409,reason)
 from modbus_command import ACTIVE, encode_request, validate_value
 
 class HttpError(Exception):
@@ -24,6 +30,9 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.path=str(Path(self.tmp.name)/'buffer.db');self.buf=GatewayBuffer(self.path);self.addCleanup(self.buf.close)
+        identity.observe(self.buf.conn,255,"ffffffffffff",1)
+        identity.observe(self.buf.conn,1,"010101010101",1)
+        self.buf.conn.commit()
         self.action=dict(id='setpoint',name='Consigna',device=0,device_name='Motor',signature=123,
                          function='write_single_register',type='uint16',count=1,scale=1,offset=0)
         self.buf.catalog_upsert(1,dict(write_capable=True,writes=[self.action],reads=[]))
@@ -31,7 +40,7 @@ class ApiTests(unittest.TestCase):
         tree=ast.parse((WEB/'commandapi.py').read_text());functions=[]
         for node in tree.body:
             if isinstance(node,ast.FunctionDef):node.decorator_list=[];functions.append(node)
-        self.ns=dict(math=math,json=json,sqlite3=sqlite3,time=time,HTTPException=HttpError,Request=object,ACTIVE=ACTIVE,
+        self.ns=dict(identityapi=SimpleNamespace(require=identity_require),math=math,json=json,sqlite3=sqlite3,time=time,HTTPException=HttpError,Request=object,ACTIVE=ACTIVE,
             encode_request=encode_request,validate_value=validate_value,
             netstatus=types.SimpleNamespace(DB_PATH=self.path,_conn=lambda:contextlib.nullcontext(self.buf.conn),network_state=lambda:self.state),
             maintenanceapi=types.SimpleNamespace(check_operations=lambda **kw:None))

@@ -12,7 +12,7 @@
 namespace fwbcast {
 
 // Tamaño del fragmento de difusión. El porqué del 212, arriba y en §20.1.
-constexpr size_t kFragBytes = 212;
+constexpr size_t kFragBytes = 160;
 
 // Topes de los parámetros que anuncia la oferta. No están fijados en el
 // firmware (viajan en el FW_BCAST_OFFER) para no atar el formato a una

@@ -175,6 +175,7 @@ private:
     void run();
     bool step();  // ejecuta un paso de la máquina; false si debe ir a backoff
 
+    char identity_batch_topic_[96] = {}, identity_command_topic_[96] = {};
     Config  cfg_{};
     Nbiot   modem_;
 

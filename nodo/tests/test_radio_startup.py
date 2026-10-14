@@ -37,17 +37,25 @@ constexpr uint16_t kPreambleSymbols=8;
 struct HardwareSerial {
  std::string command,response,reset_answer="RAKwireless RAK3172\r\nVersion: RUI_4.0.6_RAK3172-E\r\n",reject,fixed_answer;
  std::vector<std::string> commands;
- bool stuck=true,reset_recovers=true,dead=false,noise=false,events_only=false;
+ bool stuck=false,reset_recovers=true,dead=false,noise=false,events_only=false;
+ bool sleep=false,begin_called=false,buffer_ok=true,paced_recovers=false,paced=false;int mode=0,mode_switches=0,ends=0;size_t buffer=256;
  size_t offset=0;uint32_t ready=0;
- void begin(int,int,int,int){}
+ void begin(int,int,int,int){begin_called=true;}
+ void end(){++ends;begin_called=false;}
+ void flush(){}
+ size_t setRxBufferSize(size_t n){assert(!begin_called);buffer=n;return buffer_ok?n:0;}
  void print(const char* s){
-  if(strcmp(s,"\r\n")){command+=s;return;}
+  if(strcmp(s,"\r\n")){if(command.empty())paced=strlen(s)==1;command+=s;return;}
   commands.push_back(command);
+  if(paced_recovers && paced && command=="AT")stuck=false;
+  if(sleep){sleep=false;response="";command.clear();offset=0;return;}
   if(command=="ATZ"){
    if(reset_recovers)stuck=false;
    response=reset_answer;
   }else if(command==reject)response="AT_PARAM_ERROR\r\n";
   else if(stuck)response="A0101FF01FF9B192506123C08C46ACB075FB838B0B8D858D36D20FA04672CCDD3F87E304F5235\r\n";
+  else if(command=="AT+NWM=?")response="AT+NWM="+std::to_string(mode)+"\r\nOK\r\n";
+  else if(command=="AT+NWM=0"){mode=0;++mode_switches;response="OK\r\n";}
   else response="OK\r\n";
   if(!fixed_answer.empty())response=fixed_answer;
   if(events_only)response="+EVT:RXP2P:OK\r\n";
@@ -63,6 +71,8 @@ public:
  HardwareSerial* uart_=&uart;int8_t rx_pin_=19,tx_pin_=22;
  unsigned long freq_hz_=869525000;uint8_t sf_=7,cr_index_=0,tx_dbm_=10,network_id_=1,node_id_=2,ttl_=6;
  uint16_t bw_khz_=125;
+ size_t line_len_=0;bool line_discard_=false;bool tx_in_flight_=false;uint32_t in_flight_at_ms_=0,in_flight_guard_ms_=0;
+ int8_t work_mode_=-1;bool reset_attempted_=false;uint32_t last_reset_ms_=0;
  bool cad_ok_=false,probe_ok_=false,initialized_=false;
  unsigned queued=3,discarded=0,cleared=0;
  static constexpr uint32_t kResetSettleMs=2000;
@@ -72,6 +82,7 @@ public:
  bool begin(HardwareSerial&,int8_t,int8_t,unsigned long,uint8_t,uint16_t,uint8_t,uint8_t,uint8_t,uint8_t,uint8_t);
  bool radioCommand(const char*,const char*,uint32_t,bool=true);
  bool applyRadioConfig();bool reinitRadio();bool resetModule();bool prepareForRestart();
+ bool synchronizeModule();bool stopReception(const char*);bool softReset();
 };
 '''
 
@@ -80,25 +91,31 @@ bool boot(LoraP2P& radio){return radio.begin(uart,19,22,869525000,7,125,0,10,1,2
 int main(int argc,char** argv){
  assert(argc==2);std::string test=argv[1];LoraP2P radio;
  if(test=="warm_boot"){
-  assert(boot(radio));assert(radio.initialized_ && !radio.probe_ok_ && radio.cad_ok_);
-  assert(uart.commands[0]=="AT" && uart.commands[1]=="AT+PRECV=0" && uart.commands[2]=="ATZ");
-  assert(uart.count("ATZ")==1 && uart.commands.back()=="AT+PRECV=65533");
-  assert(diag::has("radio.startup_recovery reason=probe_failed"));
-  assert(diag::has("radio.reset_observed stage=reset evidence=boot_banner"));
-  assert(!diag::has("radio.init_failed stage=reset"));
+  uart.command="AT+PSEND=012345";uart.sleep=true;
+  assert(boot(radio));assert(radio.initialized_ && radio.probe_ok_ && radio.cad_ok_);
+  assert(uart.count("ATZ")==0 && uart.count("AT+NWM=0")==0);
+  assert(uart.commands.back()=="AT+PRECV=65533" && uart.buffer==4096);
  }else if(test=="cold_boot"){
-  uart.stuck=false;assert(boot(radio));assert(radio.probe_ok_);
-  assert(!diag::has("radio.startup_recovery"));
+  uart.mode=1;assert(boot(radio));assert(radio.probe_ok_);
+  assert(uart.count("ATZ")==0 && uart.mode_switches==1 && uart.mode==0);
+  assert(uart.count("AT+NWM=?")==2);
+ }else if(test=="repeated_hot_boot"){
+  for(int n=0;n<100;++n){uart.command="AT+PSEND=0123";assert(boot(radio));}
+  assert(uart.count("ATZ")==0 && uart.mode_switches==0 && uart.ends==100);
+ }else if(test=="reset_fallback"){
+  uart.stuck=true;assert(boot(radio));assert(radio.initialized_);
+  assert(uart.count("ATZ")==1 && diag::has("radio.reset_observed"));
  }else if(test=="banner_without_ready"){
-  uart.reset_recovers=false;
+  uart.stuck=true;uart.reset_recovers=false;
   assert(!boot(radio));assert(!radio.initialized_);
-  assert(diag::has("radio.reset_observed") && diag::has("radio.init_failed stage=after_reset"));
+  assert(diag::has("radio.reset_observed") && diag::has("radio.init_failed stage=probe"));
   assert(uart.count("AT+P2P=869525000:7:125:0:8:10")==0);
  }else if(test=="silent_then_retry"){
   uart.dead=true;auto start=clock_ms;
-  assert(!boot(radio));assert(!radio.initialized_ && clock_ms-start<=8000);
+  assert(!boot(radio));assert(!radio.initialized_ && clock_ms-start<26000);
   assert(uart.count("ATZ")==1);
-  uart.dead=false;assert(boot(radio));assert(radio.initialized_ && uart.count("ATZ")==2);
+  assert(!boot(radio));assert(uart.count("ATZ")==1 && diag::has("radio.reset_deferred"));
+  uart.dead=false;assert(boot(radio));assert(radio.initialized_ && uart.count("ATZ")==1);
  }else if(test=="banner_only_for_reset"){
   uart.fixed_answer="RAKwireless RAK3172\r\n";
   assert(radio.radioCommand("reset","ATZ",1000));
@@ -106,18 +123,19 @@ int main(int argc,char** argv){
   uart.events_only=true;assert(!radio.radioCommand("reset","ATZ",1000));
   assert(!radio.radioCommand("probe","AT",1500));
  }else if(test=="reset_without_banner"){
-  uart.reset_answer="";assert(boot(radio));assert(radio.initialized_);
-  assert(diag::has("radio.init_failed stage=reset") && !diag::has("radio.init_failed stage=after_reset"));
+  uart.stuck=true;uart.reset_answer="";assert(boot(radio));assert(radio.initialized_);
+  assert(diag::has("radio.init_failed stage=reset"));
  }else if(test=="prepare_ota"){
-  radio.initialized_=true;
-  assert(radio.prepareForRestart());assert(!radio.initialized_ && radio.queued==0 && radio.discarded==3);
-  assert(uart.count("ATZ")==1 && uart.count("AT+PRECV=0")==2);
-  assert(uart.commands.back()=="AT+PRECV=0" && uart.count("AT+PRECV=65533")==0);
+  radio.initialized_=true;radio.tx_in_flight_=true;radio.in_flight_guard_ms_=3000;
+  assert(radio.prepareForRestart());assert(clock_ms>=3000);
+  assert(!radio.initialized_ && radio.queued==0 && radio.discarded==3);
+  assert(uart.count("ATZ")==0 && uart.count("AT+PRECV=0")==1);
+  assert(uart.commands.back()=="AT" && uart.count("AT+PRECV=65533")==0);
   assert(boot(radio));assert(radio.initialized_);
  }else if(test=="prepare_ota_unconfirmed"){
   uart.dead=true;auto start=clock_ms;
-  assert(!radio.prepareForRestart());assert(!radio.initialized_ && clock_ms-start<=8000);
-  assert(uart.count("ATZ")==1);
+  assert(!radio.prepareForRestart());assert(!radio.initialized_ && clock_ms-start<6000);
+  assert(uart.count("ATZ")==0);
  }else if(test=="prepare_ota_idle_rejected"){
   uart.reject="AT+PRECV=0";assert(!radio.prepareForRestart());
   assert(diag::has("radio.init_failed stage=restart_idle"));
@@ -125,11 +143,24 @@ int main(int argc,char** argv){
   assert(radio.resetModule());assert(radio.initialized_ && uart.count("ATZ")==1);
  }else if(test=="noise_bounded"){
   uart.noise=true;auto start=clock_ms;
-  assert(!boot(radio));assert(!radio.initialized_ && clock_ms-start<=8100);
-  assert(uart.count("ATZ")==1);
+  assert(!boot(radio));assert(!radio.initialized_ && clock_ms-start<7500);
+  assert(uart.count("ATZ")==0 && diag::has("reason=uart_not_quiet"));
  }else if(test=="receive_rejected"){
   uart.reject="AT+PRECV=65533";assert(!boot(radio));assert(!radio.initialized_);
   assert(diag::has("radio.init_failed stage=receive"));
+ }else if(test=="mode_unknown"){
+  uart.fixed_answer="OK\r\n";assert(!boot(radio));
+  assert(uart.count("AT+NWM=0")==0 && uart.count("AT+P2P=869525000:7:125:0:8:10")==0);
+ }else if(test=="paced_boot"){
+  uart.stuck=true;uart.paced_recovers=true;assert(boot(radio));
+  assert(uart.count("ATZ")==0 && diag::has("radio.uart_recovery") && radio.initialized_);
+  assert(uart.count("AT+LPM=0")>=1);
+ }else if(test=="unknown_command_rejected"){
+  uart.fixed_answer="AT_COMMAND_NOT_FOUND\r\n";auto start=clock_ms;
+  assert(!radio.radioCommand("probe","AT",1500));assert(clock_ms-start<1500);
+  assert(diag::has("reason=rejected"));
+ }else if(test=="buffer_failure"){
+  uart.buffer_ok=false;assert(!boot(radio));assert(uart.commands.empty());
  }else assert(false);
 }
 '''
@@ -144,6 +175,7 @@ class RadioStartupTests(unittest.TestCase):
             "bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required)",
             "bool LoraP2P::applyRadioConfig()", "bool LoraP2P::reinitRadio()",
             "bool LoraP2P::resetModule()", "bool LoraP2P::prepareForRestart()",
+            "bool LoraP2P::synchronizeModule()", "bool LoraP2P::stopReception(const char* stage)", "bool LoraP2P::softReset()",
         ))
         cls.folder = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.folder.cleanup)
@@ -160,7 +192,7 @@ class RadioStartupTests(unittest.TestCase):
 for case in ("warm_boot", "cold_boot", "banner_without_ready", "silent_then_retry",
              "banner_only_for_reset", "reset_without_banner", "prepare_ota",
              "prepare_ota_unconfirmed", "prepare_ota_idle_rejected", "reset_single_attempt",
-             "noise_bounded", "receive_rejected"):
+             "noise_bounded", "receive_rejected", "mode_unknown", "buffer_failure", "repeated_hot_boot", "reset_fallback", "paced_boot", "unknown_command_rejected"):
     setattr(RadioStartupTests, "test_" + case, lambda self, name=case: self.check_case(name))
 
 

@@ -19,11 +19,11 @@ class ConsumerTests(unittest.TestCase):
         with patch.object(consumer_service,'ConsumerStatus',return_value=self.status):
             self.consumer=consumer_service.Consumer()
         self.client=Mock()
-        self.message=types.SimpleNamespace(topic='modulinkr/v1/255/telemetry',mid=17,qos=1,
-                                          payload=b'{"schema_version":"3.3","samples":[{}]}')
+        self.message=types.SimpleNamespace(topic='modulinkr/v2/010203040506/255/telemetry',mid=17,qos=1,
+                                          payload=b'{"schema_version":"4.0","deployment_id":"010203040506","samples":[{}]}')
 
     def test_commit_failure_is_not_acknowledged(self):
-        with patch.object(consumer_service,'ingest_message',side_effect=OSError('full')):
+        with patch.object(consumer_service.identity_ingest,'telemetry',side_effect=OSError('full')):
             self.consumer._on_message(self.client,None,self.message)
         self.client.ack.assert_not_called()
         self.client.disconnect.assert_called_once()
@@ -33,7 +33,7 @@ class ConsumerTests(unittest.TestCase):
     def test_confirmed_commit_clears_error_before_ack(self):
         self.status.failed()
         def ingest(db,publisher,payload,stats): stats['inserted']+=1
-        with patch.object(consumer_service,'ingest_message',side_effect=ingest):
+        with patch.object(consumer_service.identity_ingest,'telemetry',side_effect=ingest):
             self.consumer._on_message(self.client,None,self.message)
         self.client.ack.assert_called_once_with(17,1)
         self.assertFalse(self.status.values['write_error'])
@@ -44,6 +44,45 @@ class ConsumerTests(unittest.TestCase):
         self.consumer._on_message(self.client,None,self.message)
         self.client.ack.assert_called_once_with(17,1)
         self.client.disconnect.assert_not_called()
+
+    def test_wrong_deployment_does_not_enter_retry_loop(self):
+        self.message.topic='modulinkr/v2/010203040506/255/telemetry'
+        self.message.payload=b'{"schema_version":"4.0","deployment_id":"102030405060","samples":[]}'
+        with patch.object(consumer_service.identity_ingest,'telemetry') as ingest:
+            self.consumer._on_message(self.client,None,self.message)
+        ingest.assert_not_called()
+        self.client.ack.assert_called_once_with(17,1)
+        self.client.disconnect.assert_not_called()
+
+    def test_health_origin_mismatch_is_rejected_before_storage(self):
+        from health import process_health
+        stats={'hlt_bad':0}
+        db=Mock()
+        process_health(db,1,{'schema_version':'4.0','node_id':2},stats)
+        self.assertEqual(stats['hlt_bad'],1)
+        db.conn.assert_not_called()
+
+    def test_subscription_includes_versioned_and_fragmented_catalogs(self):
+        self.consumer._on_connect(self.client,None,{},0)
+        topics=dict(self.client.subscribe.call_args.args[0])
+        self.assertEqual(topics['modulinkr/v2/+/+/register/#'],1)
+        for suffix in ('0011223344556677','0011223344556677/0'):
+            self.assertIsNotNone(consumer_service.TOPIC_RE.match('modulinkr/v2/010203040506/1/register/'+suffix))
+
+    def test_unsupported_topics_are_acknowledged_without_ingestion(self):
+        topics=('modulinkr/v1/1/telemetry',
+                'modulinkr/v2/000000000000/255/telemetry',
+                'modulinkr/v2/010203040506/0/telemetry',
+                'modulinkr/v2/010203040506/256/telemetry',
+                'modulinkr/v2/010203040506/255/health')
+        for topic in topics:
+            with self.subTest(topic=topic), patch.object(consumer_service.identity_ingest,'telemetry') as ingest:
+                self.client.reset_mock()
+                self.message.topic=topic
+                self.consumer._on_message(self.client,None,self.message)
+                ingest.assert_not_called()
+                self.client.ack.assert_called_once_with(17,1)
+                self.client.disconnect.assert_not_called()
 
     def test_restart_preserves_last_commit_and_unresolved_failure(self):
         self.status.update(last_saved=100)

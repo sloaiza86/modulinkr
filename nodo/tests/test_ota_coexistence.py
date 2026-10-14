@@ -151,7 +151,9 @@ int main(){
     def test_radio_startup_commands_accept_delays_reject_errors_and_bound_noise(self):
         source = (ROOT / "nodo/src/lora.cpp").read_text()
         command = function(source, "bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required)")
-        config = function(source, "bool LoraP2P::applyRadioConfig()")
+        config = "\n".join(function(source, sig) for sig in (
+            "bool LoraP2P::applyRadioConfig()", "bool LoraP2P::synchronizeModule()",
+            "bool LoraP2P::stopReception(const char* stage)", "bool LoraP2P::softReset()"))
         self.compile_run(r'''
 #include <cstdint>
 #include <cstddef>
@@ -179,8 +181,9 @@ struct HardwareSerial {
  std::vector<std::string> commands;
  size_t offset=0;uint32_t ready=0,latency=500;bool noise=false,noise_on_send=false;
  void begin(int,int,int,int){}
+ void end(){} void flush(){} size_t setRxBufferSize(size_t n){return n;}
  void print(const char* s){if(std::strcmp(s,"\r\n")){command+=s;return;}
- commands.push_back(command);response=command==fail_command?"AT_PARAM_ERROR\r\n":answer;
+ commands.push_back(command);response=command==fail_command?"AT_PARAM_ERROR\r\n":(command=="AT+NWM=?" && answer=="OK\r\n"?"AT+NWM=0\r\nOK\r\n":answer);
  offset=0;ready=clock_ms+latency;command.clear();noise=noise_on_send;}
  int available(){return clock_ms>=ready && (noise || offset<response.size());}
  int read(){if(noise){++clock_ms;return 'x';}return response[offset++];}
@@ -189,10 +192,11 @@ class LoraP2P {
 public:
  HardwareSerial* uart_=&uart;int rx_pin_=19,tx_pin_=22;
  unsigned long freq_hz_=869525000;unsigned sf_=7,bw_khz_=125,cr_index_=0,tx_dbm_=10;
+ int8_t work_mode_=-1;bool reset_attempted_=false,line_discard_=false;uint32_t last_reset_ms_=0;size_t line_len_=0;
  bool cad_ok_=false,probe_ok_=false;static constexpr uint32_t kResetSettleMs=2000;
  void queryVersion(){}
  bool radioCommand(const char*,const char*,uint32_t,bool=true);
- bool applyRadioConfig();
+ bool applyRadioConfig();bool synchronizeModule();bool stopReception(const char*);bool softReset();
 };
 ''' + command + config + r'''
 int main(){
@@ -204,19 +208,19 @@ int main(){
  assert(!radio.applyRadioConfig());assert(diag::has("reason=rejected response=AT_PARAM_ERROR"));
  uart.fail_command="AT+CAD=1";assert(radio.applyRadioConfig());assert(!radio.cad_ok_);
  uart.fail_command="";uart.answer="";
- auto t=clock_ms;assert(!radio.radioCommand("probe","AT",1500));assert(clock_ms-t==1500);
+ auto t=clock_ms;assert(!radio.radioCommand("probe","AT",1500));assert(clock_ms-t==1520);
  assert(diag::has("reason=timeout"));
  uart.answer="+EVT:RXP2P:OK\r\n";assert(!radio.radioCommand("probe","AT",1500));
  uart.answer=std::string(250,'x')+"\r\nOK\r\n";
  assert(radio.radioCommand("probe","AT",1500));assert(diag::has("truncated=true"));
  uart.answer="";uart.noise=false;uart.latency=0;
  uart.noise_on_send=true;
- t=clock_ms;assert(!radio.radioCommand("probe","AT",10));assert(clock_ms-t<=11);
  t=clock_ms;assert(!radio.radioCommand("probe","AT",10));assert(clock_ms-t<=31);
+ t=clock_ms;assert(!radio.radioCommand("probe","AT",10));assert(clock_ms-t<=201);
 }
 ''')
 
-    def test_install_prepares_radio_only_after_acceptance_and_reboots_if_unconfirmed(self):
+    def test_install_requires_radio_preparation_and_preserves_image_on_rejection(self):
         source = (ROOT / "nodo/src/main.cpp").read_text()
         body = function(source, "void handleFwInstall(const LoraP2P::RxFrame& f)")
         self.compile_run(r'''
@@ -233,19 +237,21 @@ namespace health { template<class T> void save(T&){actions.push_back("health");}
 namespace fwbcast { void reset(){actions.push_back("map_reset");} }
 namespace statusled { constexpr int violet=1; }
 void setLed(int){}
+bool g_lora_ready=true;
 uint16_t g_lora_seq=0;
 void nextSeq(){++g_lora_seq;}
 struct { uint8_t parentId(){return 255;} } mesh;
 namespace fwota {
-enum class Result { INSTALLING, INVALID };
+enum class Result { INSTALLING, INVALID, RADIO_NOT_READY };
 Result result=Result::INSTALLING;
-Result install(uint32_t xfer,const uint8_t*){assert(xfer==123);actions.push_back("install");return result;}
+Result install(uint32_t xfer,const uint8_t*,bool (*prepare)()){assert(xfer==123);actions.push_back("install");if(result!=Result::INSTALLING)return result;return prepare()?Result::INSTALLING:Result::RADIO_NOT_READY;}
 }
 struct LoraP2P {
  struct RxFrame { uint8_t dest_id=2,payload_length=36,payload[36]={}; };
- bool ready=true;
+ bool ready=true,restore=true;
+ bool reinitRadio(){actions.push_back("restore_radio");return restore;}
  bool prepareForRestart(){actions.push_back("prepare_radio");return ready;}
- void sendFwResult(uint16_t,uint8_t,uint32_t,uint8_t,void*){actions.push_back("rejected");}
+ void sendFwResult(uint16_t,uint8_t,uint32_t,uint8_t,const char*){actions.push_back("rejected");}
 } lora;
 void relayDownlink(const LoraP2P::RxFrame&,const char*){actions.push_back("relay");}
 struct { void flush(){actions.push_back("flush");} } Serial;
@@ -254,10 +260,15 @@ struct { void restart(){actions.push_back("restart");} } ESP;
 ''' + body + r'''
 int main(){
  LoraP2P::RxFrame frame;uint32_t xfer=123;std::memcpy(frame.payload,&xfer,4);
- for(bool ready:{true,false}){
-  actions.clear();lora.ready=ready;handleFwInstall(frame);
-  assert(actions==std::vector<std::string>({"install","health","map_reset","prepare_radio","flush","restart"}));
+ handleFwInstall(frame);
+ assert(actions==std::vector<std::string>({"install","prepare_radio","health","map_reset","flush","restart"}));
+ auto installs=g_health.fw_installs;
+ for(bool restore:{true,false}){
+  actions.clear();g_lora_ready=true;lora.ready=false;lora.restore=restore;handleFwInstall(frame);
+  assert(actions==std::vector<std::string>({"install","prepare_radio","restore_radio","rejected"}));
+  assert(g_lora_ready==restore && g_health.fw_installs==installs);
  }
+ g_lora_ready=true;
  actions.clear();fwota::result=fwota::Result::INVALID;handleFwInstall(frame);
  assert(actions==std::vector<std::string>({"install","rejected"}));
  actions.clear();frame.payload_length=35;handleFwInstall(frame);assert(actions.empty());

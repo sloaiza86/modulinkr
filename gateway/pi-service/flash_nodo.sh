@@ -54,8 +54,12 @@ echo "Puerto  : $PORT"
 # al verificar el flash al subir de baud). El binario es pequeño, así que
 # el tiempo extra es asumible. (La radio Heltec, con otro adaptador, sí
 # admite 460800 en flash_heltec.sh.)
-echo "[INFO] Escribiendo la imagen completa del nodo desde 0x0..."
+ml_images="$(mktemp -d)"
+trap 'rm -rf "$ml_images"' EXIT
+"$PY" "$DIR/firmware_images.py" "$BIN" "$ml_images" > "$ml_images/arguments"
+mapfile -t ml_parts < "$ml_images/arguments"
+echo "[INFO] Escribiendo firmware; NVS conservada: 0x9000-0xDFFF"
 "$PY" -m esptool --chip esp32 --port "$PORT" --baud 115200 \
-    write_flash 0x0 "$BIN"
+    write_flash "${ml_parts[@]}"
 
 echo "[ OK ] Firmware del nodo escrito. El Atom arranca con la imagen nueva."

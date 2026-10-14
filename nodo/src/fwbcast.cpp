@@ -208,7 +208,7 @@ void openBlock(uint16_t b) {
 bool writeOrig(uint16_t i, const uint8_t* data, size_t len) {
     if (part_ == nullptr) return false;
     // La escritura pide tamaño múltiplo de cuatro. El desplazamiento ya lo es
-    // por construcción (212·i); solo el último fragmento puede quedar corto, y
+    // por construcción (160·i); solo el último fragmento puede quedar corto, y
     // se rellena con 0xFF, que es el valor de la flash borrada: escribirlo no
     // cambia nada y evita un caso especial en la lectura.
     uint8_t buf[kFragBytes];
@@ -551,13 +551,13 @@ bool     complete()   { return map_ != nullptr && got_ == n_orig_ && n_orig_ > 0
 
 uint8_t mapParts() {
     if (map_ == nullptr) return 0;
-    const size_t cabe = 212;    // payload menos los 6 bytes de cabecera propia
+    const size_t cabe = 160;    // payload menos los 6 bytes de cabecera propia
     return static_cast<uint8_t>((map_bytes_ + cabe - 1) / cabe);
 }
 
 size_t mapPart(uint8_t n, uint8_t* out, size_t out_max) {
     if (map_ == nullptr) return 0;
-    const size_t cabe = (out_max < 212) ? out_max : 212;
+    const size_t cabe = (out_max < 160) ? out_max : 160;
     const size_t ini = static_cast<size_t>(n) * cabe;
     if (ini >= map_bytes_) return 0;
     size_t len = map_bytes_ - ini;

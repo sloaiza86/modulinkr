@@ -1,4 +1,4 @@
-// ModuLinkr, constantes del protocolo LoRa schema v3.0
+// ModuLinkr, constantes del protocolo LoRa schema v4.0
 //
 // Fuente normativa: shared/protocol/frame-format.md. Este archivo solo
 // materializa en C++ los valores de la spec; cualquier cambio se hace
@@ -20,7 +20,7 @@
 namespace protocol {
 
 // Versión del schema (major en el nibble alto, minor en el bajo).
-constexpr uint8_t kSchemaVersion = 0x3B;  // v3.11
+constexpr uint8_t kSchemaVersion = 0x40;  // v4.0, identidad física
 constexpr uint8_t kSchemaMajorMask = 0xF0;
 
 // Direcciones especiales (frame-format.md §1.5).
@@ -104,10 +104,10 @@ constexpr uint8_t kAckDecodeError    = 0x04;
 constexpr uint8_t kAckOkViaNbiot     = 0x05;
 
 // Geometría de la trama (frame-format.md §1.4).
-// Cabecera de 11 bytes + payload variable + CRC16.
-constexpr size_t kHeaderBytes = 11;
+// Cabecera de 48 bytes + payload variable + CRC16.
+constexpr size_t kHeaderBytes = 48;
 constexpr size_t kCrcBytes    = 2;
-constexpr size_t kOverhead    = kHeaderBytes + kCrcBytes;  // 13 bytes
+constexpr size_t kOverhead    = kHeaderBytes + kCrcBytes;  // 50 bytes
 
 // Offsets de los campos de cabecera.
 constexpr size_t kOffSchema     = 0;
@@ -121,29 +121,36 @@ constexpr size_t kOffSeqHigh    = 7;
 constexpr size_t kOffFrameType  = 8;
 constexpr size_t kOffTtl        = 9;
 constexpr size_t kOffPayloadLen = 10;
-constexpr size_t kOffPayload    = 11;
+constexpr size_t kOffOriginUid = 11;
+constexpr size_t kOffDestUid = 17;
+constexpr size_t kOffCatalog = 23;
+constexpr size_t kOffOriginBoot = 31;
+constexpr size_t kOffTxUid = 35;
+constexpr size_t kOffTxBoot = 41;
+constexpr size_t kOffTxCounter = 45;
+constexpr size_t kOffPayload    = 48;
 
 // Límite práctico de payload para SF7 BW125 (PHY ~242 B menos overhead).
-constexpr size_t kMaxPayload = 229;
+constexpr size_t kMaxPayload = 192;
 
 // ----- Seguridad de la interfaz aire (v2.2, frame-format.md §14) -----
 //
-// Trama con security ON: cabecera (11 B, claro) + sec_ts (4 B LE, claro)
+// Trama con security ON: cabecera (48 B, claro) + sec_ts (4 B LE, claro)
 // + ciphertext (N B) + MIC (4 B) + CRC16. El CRC sigue cubriendo todos
 // los bytes anteriores y se recalcula por salto; el MIC es la validación
 // criptográfica (AES-CCM, clave de red de 128 bits).
 constexpr size_t kSecTsBytes  = 4;
 constexpr size_t kMicBytes    = 4;
 constexpr size_t kSecEnvelope = kSecTsBytes + kMicBytes;    // +8 B por trama
-constexpr size_t kSecOverhead = kOverhead + kSecEnvelope;   // 21 B fijos
-constexpr size_t kOffSecTs      = 11;  // sec_ts, solo con security ON
-constexpr size_t kOffSecPayload = 15;  // ciphertext, solo con security ON
+constexpr size_t kSecOverhead = kOverhead + kSecEnvelope;   // 58 B fijos
+constexpr size_t kOffSecTs      = 48;  // sec_ts, solo con security ON
+constexpr size_t kOffSecPayload = 52;  // ciphertext, solo con security ON
 
 constexpr size_t kKeyBytes   = 16;     // AES-128
 constexpr size_t kNonceBytes = 13;     // CCM con L = 2 (spec §14.3)
 
-// Payload máximo con security ON: 242 (PHY SF7) - 21 de overhead fijo.
-constexpr size_t kMaxPayloadSecure = 221;
+// Payload máximo con security ON: 242 (PHY SF7) - 58 de overhead fijo.
+constexpr size_t kMaxPayloadSecure = 184;
 
 // sec_ts por debajo de este valor = salt de emisor sin hora (spec §14.4):
 // exento del control de frescura. 0x40000000 ~ año 2004, muy por debajo

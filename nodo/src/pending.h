@@ -10,6 +10,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "device_identity.h"
 
 class PendingQueue {
 public:
@@ -22,6 +23,7 @@ public:
     static constexpr size_t kCapacity = 32;
 
     struct Entry {
+        deviceid::Stamp identity;
         bool     in_use  = false;
         uint16_t seq     = 0;
         uint32_t sent_ms = 0;   // millis() de TXP2P DONE o del último aplazamiento
@@ -52,11 +54,11 @@ public:
     //   st          byte de estado por read (v3.2), mismo orden que values.
     bool push(uint16_t seq, const float* values, const uint8_t* st,
               uint8_t n_values, uint32_t now_ms, uint8_t dest,
-              uint32_t capture_ms, uint32_t ts, uint32_t timeout_ms = 0);
+              uint32_t capture_ms, uint32_t ts, uint32_t timeout_ms = 0, const deviceid::Stamp* identity = nullptr);
 
     // Procesa un ACK entrante. Devuelve true si el seq estaba en cola
     // (la entrada se libera) y deja en dest_out el destino que llevaba.
-    bool ack(uint16_t seq, uint8_t& dest_out, uint8_t expected = 0);
+    bool ack(uint16_t seq, uint8_t& dest_out, uint8_t expected = 0, uint32_t boot = 0, uint32_t ts = 0);
 
     // Devuelve la primera entrada cuyo timeout venció, o nullptr.
     // El llamante decide: reintentar (markRetry) o abandonar (drop).

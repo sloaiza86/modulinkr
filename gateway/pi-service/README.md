@@ -176,3 +176,8 @@ El umbral `MODULINKR_MQTT_PUB_TIMEOUT` produce un aviso cuando falta el PUBACK, 
 LoRa conserva la prioridad. El agotamiento de tres intentos o la ausencia de una ruta compatible permite pasar a NB-IoT, con el mismo identificador y contenido. La suscripción a `modulinkr/v1/+/cmd/response` recoge resultados publicados por el supernodo. Los mensajes a `modulinkr/v1/{supernodo}/cmd` utilizan QoS 1 y no se retienen. El usuario MQTT del gateway necesita publicar en esos topics y suscribirse a sus respuestas; el del supernodo necesita los permisos inversos. Los permisos reales del broker y la recepción del módem deben comprobarse en banco.
 
 La aceptación por el broker no confirma la ejecución. El resultado se correlaciona con el nodo, la operación, su huella y el supernodo utilizado. Una confirmación tardía puede resolver una operación que quedó sin confirmación. El servicio no vuelve a ejecutar automáticamente una operación que el dispositivo dejó como incierta.
+
+
+## Identidad física y despliegues
+
+El código del nodo 0.0.83 utiliza la radio 4.0, catálogos por huella y muestras vinculadas a equipo y sesión. El gateway bloquea identificadores repetidos y el consumidor separa los despliegues. El contrato actual, la conservación interna del banco y el procedimiento de despliegue se describen en [`identity-safety.md`](../../shared/protocol/identity-safety.md). El banco debe utilizar nodos y relays del contrato de radio 4.0; las versiones internas previas no representan clientes publicados.

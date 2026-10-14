@@ -19,7 +19,7 @@ function setup() {
   const context = vm.createContext({
     document: { getElementById: id => elements[id] },
     formRadioEstado: null, formLecturaLoraEnCurso: false, formDestinoListo: true,
-    schemasDestino: null, schemaAviso: () => {}, collectForm: () => ({}),
+    schemasDestino: null, schemaAviso: () => {}, collectForm: () => ({node:{id:1}}), nodosConocidos:new Set(), idLeido:null,
     fValidate: () => [],
   });
   vm.runInContext(section("const MENSAJES_LORA", "function textoCliente")
@@ -101,4 +101,14 @@ test("cambiar a USB elimina el bloqueo de LoRa", () => {
   assert.equal(e["f-leer"].disabled, false);
   assert.equal(e["f-enviar"].disabled, false);
   assert.equal(e["f-radio-aviso"].hidden, true);
+});
+
+test('un identificador conocido bloquea el envío hasta identificar ese mismo nodo', () => {
+  const {context:c,elements}=setup();
+  c.nodosConocidos.add(1);
+  c.formRadioActualizar(online);
+  assert.equal(elements['f-enviar'].disabled,true);
+  c.idLeido=1;
+  c.formRadioPintar();
+  assert.equal(elements['f-enviar'].disabled,false);
 });

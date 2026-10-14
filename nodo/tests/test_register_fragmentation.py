@@ -1,6 +1,8 @@
+from identity_fixture import CPP as IDENTITY_CPP
 """Comprueba catálogo, fragmentación, sobre seguro y reensamblado del registro."""
 import ast
 import json
+import hashlib
 import logging
 from pathlib import Path
 import re
@@ -92,6 +94,7 @@ void sendRound(){
  g_reg_frag_next=0;g_reg_next_ms=clock_ms;g_reg_backoff_ms=kRegBackoffMinMs;
  configureFragments();assert(g_reg_frag_total>0);
  std::cout<<"CAT ";hex(g_reg_catalog,g_reg_catalog_len);std::cout<<std::endl;
+ std::string tag;std::cin>>tag;assert(deviceid::parse(tag.c_str(),8,deviceid::currentStamp().catalog));
  const size_t before=sent.size();
  for(uint8_t i=0;i<g_reg_frag_total;++i){
   registrationTick(clock_ms);assert(sent.size()==before+i+1);
@@ -103,6 +106,7 @@ void sendRound(){
 int main(int argc,char** argv){
  assert(argc==2);std::string json;std::getline(std::cin,json);char error[256];
  if(!cfg::load(json.c_str(),g_cfg,error,sizeof(error))){std::cerr<<error;return 2;}
+ deviceid::currentAddress()=g_cfg.node_id;memset(deviceid::currentStamp().uid,g_cfg.node_id,6);
  lora.initialized_=true;lora.sec_enabled_=g_cfg.security_enabled;lora.ccm_ready_=true;
  lora.node_id_=g_cfg.node_id;lora.network_id_=g_cfg.network_id;lora.ttl_=g_cfg.max_ttl;
  const std::string mode=argv[1];
@@ -116,7 +120,7 @@ int main(int argc,char** argv){
   }
  }else if(mode=="limits"){
   uint8_t data[228]={};
-  const uint8_t max=lora.sec_enabled_ ? 219 : 227;
+  const uint8_t max=lora.sec_enabled_ ? 182 : 190;
   assert(lora.sendNodeRegister(255,0,1,data,max)==LoraP2P::Status::OK);
   const size_t count=sent.size();
   assert(lora.sendNodeRegister(255,0,1,data,max+1)==LoraP2P::Status::INVALID_ARGS);
@@ -169,7 +173,7 @@ class RegisterFragmentationTests(unittest.TestCase):
         (root / 'Arduino.h').write_text(arduino + '\nstruct HardwareSerial {};\n')
         (root / 'mbedtls').mkdir()
         (root / 'mbedtls/ccm.h').write_text(CCM)
-        (root / 'test.cpp').write_text(source)
+        (root / 'test.cpp').write_text(IDENTITY_CPP+source)
         cls.binary = root / 'test'
         library = SRC.parent / '.pio/libdeps/atom-lite/ArduinoJson/src'
         subprocess.run(['clang++', '-std=c++17', '-Wno-deprecated-declarations',
@@ -208,6 +212,8 @@ class RegisterFragmentationTests(unittest.TestCase):
                 elif fields[0] == 'CAT':
                     frames = []
                     groups.append((bytes.fromhex(fields[1]), frames))
+                    process.stdin.write(hashlib.sha256(groups[-1][0]).hexdigest()[:16]+"\n")
+                    process.stdin.flush()
                 elif fields[0] == 'RAW':
                     raw = bytes.fromhex(fields[1])
                     self.assertLessEqual(len(raw), 242)
@@ -233,7 +239,7 @@ class RegisterFragmentationTests(unittest.TestCase):
         catalog, frames = groups[0]
         if expected_size is not None: self.assertEqual(len(catalog), expected_size)
         self.assertGreater(len(catalog), 219)
-        self.assertEqual([len(f['catalog_frag']) for f in frames], [min(219,len(catalog)-i) for i in range(0,len(catalog),219)])
+        self.assertEqual([len(f['catalog_frag']) for f in frames], [min(182,len(catalog)-i) for i in range(0,len(catalog),182)])
         self.assertEqual(b''.join(f['catalog_frag'] for f in frames), catalog)
         with tempfile.TemporaryDirectory() as tmp:
             buffer = GatewayBuffer(str(Path(tmp) / 'buffer.db'))
@@ -270,10 +276,10 @@ class RegisterFragmentationTests(unittest.TestCase):
     def test_fragment_boundaries_and_full_capacity(self):
         for secure in (True, False):
             for catalog, frames in self.run_native('nodo1-escrituras-xymd02.json', secure, 'sizes'):
-                self.assertEqual(len(frames), (len(catalog) + 218) // 219)
+                self.assertEqual(len(frames), (len(catalog) + 181) // 182)
                 self.assertEqual([f['frag_idx'] for f in frames], list(range(len(frames))))
                 self.assertTrue(all(f['frag_total'] == len(frames) for f in frames))
-                self.assertTrue(all(0 < len(f['catalog_frag']) <= 219 for f in frames))
+                self.assertTrue(all(0 < len(f['catalog_frag']) <= 182 for f in frames))
                 self.assertEqual(b''.join(f['catalog_frag'] for f in frames), catalog)
 
     def test_driver_limits_with_security(self):

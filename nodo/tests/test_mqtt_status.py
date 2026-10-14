@@ -1,3 +1,4 @@
+from identity_fixture import CPP as IDENTITY_CPP
 """Prueba el servicio real con reloj y módem simulados, sin compilar para ESP32."""
 
 from pathlib import Path
@@ -254,7 +255,7 @@ class MqttStatusTests(unittest.TestCase):
                 (root / "freertos" / name).write_text(FREERTOS if name == "FreeRTOS.h"
                                                       else '#include "FreeRTOS.h"\n')
             harness = root / "test.cpp"
-            harness.write_text(HARNESS.replace("// DRIVER_QUERY", driver[start:end]
+            harness.write_text(IDENTITY_CPP+HARNESS.replace("// DRIVER_QUERY", driver[start:end]
                                               + driver[registration_start:registration_end]))
             executable = root / "test-mqtt"
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",

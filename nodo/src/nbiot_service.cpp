@@ -1,3 +1,4 @@
+#include "device_identity.h"
 #include "../../shared/diagnostic_log.h"
 // ModuLinkr, servicio NB-IoT no bloqueante (implementación)
 
@@ -156,6 +157,12 @@ bool NbiotService::step() {
         }
 
         case State::MQTT_CONNECT: {
+            uint8_t root[6];
+            if (!deviceid::gateway(root) || deviceid::blocked(deviceid::address())) return false;
+            char deployment[13]; deviceid::text(root,6,deployment);
+            snprintf(identity_batch_topic_,sizeof(identity_batch_topic_),"modulinkr/v2/%s/%u/telemetry",deployment,deviceid::address());
+            snprintf(identity_command_topic_,sizeof(identity_command_topic_),"modulinkr/v2/%s/%u/cmd",deployment,deviceid::address());
+            cfg_.topic_batch=identity_batch_topic_; cfg_.topic_commands=identity_command_topic_;
             if (!modem_.mqttConnect(cfg_.broker, cfg_.port, 300, true,
                                     cfg_.mqtt_user, cfg_.mqtt_pass)) {
                 logNbiotError("mqtt_connect", modem_.lastResponse().c_str());
