@@ -4,7 +4,7 @@ El directorio contiene el firmware común de los dispositivos de campo ModuLinkr
 
 ## Estado actual
 
-La versión declarada en `src/main.cpp` es `0.0.84`. El firmware exige identidad física, protocolo LoRa 4.0 y configuración 3.3. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`. ModuLinkr permanece antes de su primera publicación; los formatos internos previos no constituyen versiones desplegadas en clientes.
+La versión declarada en `src/main.cpp` es `0.0.85`. El firmware exige identidad física, protocolo LoRa 4.0, configuración 3.3 y una versión del RAK aprobada explícitamente. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`. ModuLinkr permanece antes de su primera publicación; los formatos internos previos no constituyen versiones desplegadas en clientes.
 
 El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
@@ -61,7 +61,9 @@ La ausencia de `TXP2P DONE` detiene las transmisiones posteriores hasta recupera
 
 La instalación OTA verifica la imagen antes de detener RX y confirmar el sondeo final. Si no se confirma la preparación, no se selecciona la partición nueva ni se reinicia: se conserva la imagen recibida y se comunica `RADIO_NOT_READY`, causa 18. El gateway y el visor muestran que la instalación se detuvo porque la radio no quedó preparada y que la imagen continúa disponible.
 
-El RAK3172-E del banco se actualizó de RUI 4.0.6 a RUI 4.3.0 mediante el USB del Atom. Esta versión incluye la corrección del fabricante para el bloqueo de UART2 con un ESP32 anfitrión. Se validaron la restauración de ModuLinkr y una carga USB posterior, sin desconexión total, con lecturas Modbus y ACK del gateway. La actualización interna del RAK se realiza mediante el entorno temporal `rak-bridge`; después se restaura `atom-lite`. El procedimiento, las pruebas y sus límites figuran en [`../shared/protocol/radio-recovery.md`](../shared/protocol/radio-recovery.md).
+El RAK3172-E del banco se actualizó de RUI 4.0.6 a RUI 4.3.0 mediante el USB del Atom. Esta versión incluye la corrección del fabricante para el bloqueo de UART2 con un ESP32 anfitrión. Se validaron la restauración de ModuLinkr y una carga USB posterior, sin desconexión total, con lecturas Modbus y ACK del gateway. El procedimiento y sus límites figuran en [`../shared/protocol/radio-recovery.md`](../shared/protocol/radio-recovery.md).
+
+El mantenimiento del RAK queda incluido en el firmware común desde 0.0.85. El alta USB comprueba modelo y versión antes de guardar la configuración. Conserva una versión aprobada, actualiza una anterior admitida y bloquea una posterior desconocida sin downgrade automático. La imagen se verifica en el gateway o navegador y de nuevo en el nodo antes de entrar en BOOT. El entorno temporal `rak-bridge` permanece como herramienta de mantenimiento; el alta normal utiliza `atom-lite` durante toda la operación. La política compartida, la recuperación y las pruebas se describen en [`../shared/protocol/rak-onboarding.md`](../shared/protocol/rak-onboarding.md).
 
 ## Documentos relacionados
 

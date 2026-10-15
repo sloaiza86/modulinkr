@@ -47,6 +47,9 @@ def comparison(installed, available):
 
 def release_notes(component, version):
     notes = {
+        ('node', (0, 0, 85)): ['Mantenimiento del RAK3172-E incluido en el firmware común.',
+                              'Comprobación y preparación de la radio durante el alta por USB.',
+                              'Versiones posteriores desconocidas bloqueadas sin downgrade automático.'],
         ('node', (0, 0, 83)): ['Configuración limitada al contrato 3.3 y modos de diagnóstico explícitos.',
                               'Protocolo de radio 4.0 comprobado antes de recibir operaciones.',
                               'Datos pendientes protegidos por equipo, sesión y catálogo.'],

@@ -13,6 +13,7 @@
 
 #include "configstore.h"
 #include "device_identity.h"
+#include "rak_maintenance.h"
 
 namespace commission {
 
@@ -31,7 +32,7 @@ size_t g_line_len = 0;
 // Respuesta en UNA escritura, \n incluido: los logs de otras tareas (la
 // del NB-IoT en el núcleo 0) no pueden partir la línea.
 void respond(const char* line) {
-    char buf[448];
+    char buf[896];
     const size_t n = strnlen(line, sizeof(buf) - 2);
     memcpy(buf, line, n);
     buf[n] = '\n';
@@ -82,6 +83,12 @@ void handleHello() {
     // rechazar, en vez de descubrirlo tras escribirlo y revertirlo.
     doc["schemas"]    = cfg::kSchemasSoportados;
     doc["configured"] = g_id.configured;
+    doc["rak_maintenance"] = 1;
+    doc["rak"]["version"] = rak::version();
+    doc["rak"]["state"] = rak::stateName(rak::classify(rak::version()));
+    doc["rak"]["approved"] = rak::approved();
+    doc["rak"]["recoverable"] = rak::busy();
+    doc["rak"]["target_version"] = rakpolicy::target;
     if (g_id.configured && g_id.config != nullptr) {
         doc["node_id"] = g_id.config->node_id;
         doc["type"]    = g_id.config->super_node ? "super_node" : "node";
@@ -90,13 +97,13 @@ void handleHello() {
         doc["error"] = (g_id.err != nullptr) ? g_id.err : "configuration missing";
     }
 
-    char json[400];
+    char json[768];
     const size_t n = serializeJson(doc, json, sizeof(json));
     if (n == 0 || n >= sizeof(json)) {
         respondErr("identity serialization failed");
         return;
     }
-    char line[416];
+    char line[784];
     snprintf(line, sizeof(line), "CFG:HELLO %s", json);
     respond(line);
 }
@@ -153,6 +160,10 @@ bool readPayload(uint8_t* buf, size_t len) {
 }
 
 void handlePut(const char* args) {
+    if (rak::busy() || !rak::approved()) {
+        respondErr("RAK firmware not approved; prepare radio before configuration");
+        return;
+    }
     unsigned long len = 0;
     char sha_hex[65] = {0};
     if (sscanf(args, "%lu %64s", &len, sha_hex) != 2) {
@@ -243,6 +254,7 @@ void handlePut(const char* args) {
 }
 
 void handleDel() {
+    if (rak::busy()) { respondErr("RAK maintenance is active"); return; }
     if (!configstore::remove()) {
         respondErr("configuration delete from flash failed");
         return;
@@ -251,6 +263,27 @@ void handleDel() {
     Serial.flush();
     delay(300);
     ESP.restart();
+}
+
+void handleRakBegin(const char* args) {
+    unsigned long length = 0;
+    char sha_hex[65] = {};
+    uint8_t sha[32] = {};
+    if (sscanf(args, "%lu %64s", &length, sha_hex) != 2 || !parseSha256Hex(sha_hex, sha)) {
+        respondErr("usage: CFG.RAK.BEGIN <len> <sha256hex>"); return;
+    }
+    rak::startUpload(length, sha);
+}
+
+void handleRakData(const char* args) {
+    unsigned long offset = 0, length = 0;
+    if (sscanf(args, "%lu %lu", &offset, &length) != 2 || !length || length > 1024) {
+        respondErr("RAK chunk length invalid (1-1024)"); return;
+    }
+    uint8_t bytes[1024];
+    respond("CFG:READY");
+    if (!readPayload(bytes, length)) { respondErr("RAK payload receive timeout"); rak::abort(); return; }
+    rak::writeChunk(offset, bytes, length);
 }
 
 void handleLine(const char* line) {
@@ -262,6 +295,16 @@ void handleLine(const char* line) {
         handlePut(line + 8);
     } else if (strcmp(line, "CFG.DEL") == 0) {
         handleDel();
+    } else if (strcmp(line, "CFG.RAK.INFO") == 0) {
+        rak::inspect();
+    } else if (strncmp(line, "CFG.RAK.BEGIN ", 14) == 0) {
+        handleRakBegin(line + 14);
+    } else if (strncmp(line, "CFG.RAK.DATA ", 13) == 0) {
+        handleRakData(line + 13);
+    } else if (strcmp(line, "CFG.RAK.INSTALL") == 0) {
+        rak::install();
+    } else if (strcmp(line, "CFG.RAK.ABORT") == 0) {
+        rak::abort();
     }
     // Cualquier otra línea (logs ajenos, ruido del monitor) se ignora.
 }

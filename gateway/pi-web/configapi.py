@@ -34,7 +34,10 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
+import rak_commission
+from rak_firmware import load_policy
 
 import serial
 from fastapi import APIRouter, Request
@@ -69,6 +72,7 @@ LORA_REGION = os.environ.get("MODULINKR_LORA_REGION", "EU868")
 LORA_FREQ_HZ = int(os.environ.get("MODULINKR_LORA_FREQ_HZ", "869525000"))
 
 _serial_lock = threading.Lock()
+_rak_jobs = {}
 
 router = APIRouter(prefix="/api/config")
 
@@ -319,6 +323,8 @@ async def subir(request: Request):
         with _open(port) as ser:
             ident = _hello(ser)
             config_text=identityapi.prepare(config_text,ident.get('device_uid'))
+            rak_commission.require_identity(ident, ident.get('device_uid'))
+            rak_commission.require_approved(rak_commission.Client(ser).inspect())
             payload=config_text.encode('utf-8')
             if len(payload)>MAX_CONFIG_LEN: return _err(400,'Configuración demasiado grande.')
             digest=hashlib.sha256(payload).hexdigest()
@@ -342,6 +348,99 @@ async def subir(request: Request):
 
 
 # ----- Flasheo del firmware del nodo (Atom, ESP32) por USB -----
+
+@router.get("/rak")
+def rak_policy():
+    return load_policy()
+
+
+@router.get("/rak/image")
+def rak_image():
+    try:
+        path = rak_commission.cached_image()
+        return FileResponse(str(path), media_type="application/octet-stream",
+                            headers={"Cache-Control": "no-store"})
+    except (OSError, ValueError) as error:
+        return _err(502, str(error))
+
+
+@router.post("/rak/info")
+async def rak_info(request: Request):
+    try:
+        body = json.loads(await request.body())
+        port = body.get("port", "")
+        if not _port_allowed(port):
+            return _err(400, "Puerto USB no admitido.")
+        if not _serial_lock.acquire(blocking=False):
+            return _busy()
+        try:
+            with _open(port) as ser:
+                ident = _hello(ser)
+                rak_commission.require_identity(ident, body.get("device_uid"))
+                report = rak_commission.Client(ser).inspect()
+                return {"node": ident, "rak": report}
+        finally:
+            _serial_lock.release()
+    except (OSError, ValueError, TimeoutError) as error:
+        return _err(502, str(error))
+
+
+def _rak_update_job(job, port, uid):
+    try:
+        job.update(phase="downloading")
+        with _open(port) as ser:
+            ident = _hello(ser)
+            rak_commission.require_identity(ident, uid)
+            client = rak_commission.Client(ser)
+            current = client.inspect()
+            if current.get("approved"):
+                rak_commission.require_approved(current)
+                job.update(rak=current, phase="complete")
+            else:
+                state = rak_commission.classify(current.get("version"))
+                if not rak_commission.can_prepare(current):
+                    raise ValueError(rak_commission.block_reason(state["state"]))
+                data = rak_commission.cached_image().read_bytes()
+                result = client.update(data, lambda value: job.update(
+                    {key: item for key, item in value.items() if key != "state"}, rak_state=value.get("state")))
+                job.update(rak=result, phase="complete")
+            time.sleep(1)
+            after = _hello(ser)
+            rak_commission.require_identity(after, uid)
+            rak_commission.require_approved(after.get("rak", {}))
+            job.update(node=after)
+        job.update(state="complete")
+    except Exception as error:
+        LOG.warning("event=rak.maintenance_failed error=%s", error)
+        job.update(state="failed", error=str(error))
+    finally:
+        _serial_lock.release()
+
+
+@router.post("/rak/prepare")
+async def rak_prepare(request: Request):
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        return _err(400, "Solicitud JSON no válida.")
+    port, uid = body.get("port", ""), body.get("device_uid")
+    if not _port_allowed(port) or not isinstance(uid, str):
+        return _err(400, "Identifica el nodo USB antes de preparar el RAK.")
+    if not _serial_lock.acquire(blocking=False):
+        return _busy()
+    # Solo se conserva la operación más reciente; el lock impide solapamientos.
+    _rak_jobs.clear()
+    job_id = uuid.uuid4().hex
+    job = {"id": job_id, "state": "running", "phase": "checking", "done": 0}
+    _rak_jobs[job_id] = job
+    threading.Thread(target=_rak_update_job, args=(job, port, uid), daemon=True).start()
+    return {"id": job_id}
+
+
+@router.get("/rak/jobs/{job_id}")
+def rak_job(job_id: str):
+    job = _rak_jobs.get(job_id)
+    return dict(job) if job else _err(404, "No consta esa operación de mantenimiento RAK.")
 
 def _sudo(cmd: list[str], timeout_s: float) -> tuple[bool, str]:
     """Acción privilegiada con sudo no interactivo (regla acotada del
@@ -481,10 +580,16 @@ async def flash(request: Request):
             return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
         try:
             with _open(port) as ser:
-                installed = _hello(ser).get('version')
+                identity = _hello(ser)
+                installed = identity.get('version')
+                if body.get('device_uid') and identity.get('device_uid') != body['device_uid']:
+                    return _err(409, "El nodo conectado ha cambiado. Vuelve a identificarlo.")
         except TimeoutError:
             installed = None
-        if firmwaremeta.comparison(installed, available) != 'different':
+        initial = installed is None and body.get('initial_install') is True and not body.get('device_uid')
+        if initial and firmwaremeta.release_number(available) < (0, 0, 85):
+            return _err(409, "La imagen disponible no incorpora mantenimiento RAK para el alta inicial.")
+        if not initial and firmwaremeta.comparison(installed, available) != 'different':
             return _err(409, "No hay una actualización aplicable. Vuelve a comprobar la versión del nodo.")
         LOG.info("event=node.flash_started port=%s", port)
         ok, out = _sudo([str(FLASH_NODO_SH), port], timeout_s=FLASH_TIMEOUT_S)

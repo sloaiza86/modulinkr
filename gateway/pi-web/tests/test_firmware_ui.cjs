@@ -56,6 +56,15 @@ test('recepción verificada no se presenta como instalación confirmada',()=>{
   assert.match(e.table.innerHTML,/Imagen verificada/);assert.match(e.table.innerHTML,/No solicitada/);
   assert.doesNotMatch(e.table.innerHTML,/Instalación confirmada/);
 });
+test('una operación LoRa antigua se identifica como historial y conserva la versión real en ejecución',()=>{
+  const n=row({installed_version:'0.0.85',available_version:'0.0.85',summary:'Instalación confirmada',primary_action:null});
+  n.operation={...n.operation,version:'0.0.78',state:'done',updated_at:1700000000};
+  const {e}=render(n);
+  assert.match(e.table.innerHTML,/<td>0.0.85<br>/);
+  assert.match(e.table.innerHTML,/Última instalación por LoRa.*Versión 0.0.78/);
+  assert.match(e.table.innerHTML,/Último cambio:/);
+  assert.doesNotMatch(e.table.innerHTML,/Actualización por LoRa en curso/);
+});
 test('la consulta incierta ofrece comprobar sin instalar',()=>{
   const {e}=render(row({summary:'Recepción sin confirmar: falta respuesta del nodo',primary_action:'check',can_check:true,can_install:false}));
   assert.match(e.table.innerHTML,/>Comprobar recepción<\/button>/);

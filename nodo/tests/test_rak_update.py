@@ -95,6 +95,16 @@ class RakUpdateTests(unittest.TestCase):
                 updater.update(port, b"not sent", Modem, resume_boot=True)
         self.assertNotIn(b"at+update\r\n", port.writes)
 
+    def test_newer_unvalidated_radio_is_not_downgraded(self):
+        from unittest.mock import Mock
+        port = Mock()
+        with patch.object(updater.time, "sleep"), patch.object(updater, "command", side_effect=[
+            b"OK\r\n", b"AT+VER=RUI_4.4.0_RAK3172-E\r\nOK\r\n"]):
+            with self.assertRaisesRegex(ValueError, "downgrade"):
+                updater.update(port, b"not sent", None)
+        self.assertEqual(port.write.call_args_list[0].args, (b"\r\n",))
+        self.assertEqual(port.write.call_count, 1)
+
     def test_bridge_preserves_binary_bytes_in_both_directions(self):
         runtime = r'''
 #pragma once

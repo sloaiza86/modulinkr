@@ -1,4 +1,4 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.84"
+#define MODULINKR_FIRMWARE_VERSION "0.0.85"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -81,6 +81,7 @@
 #include "device_identity.h"
 #include "configstore.h"
 #include "commission.h"
+#include "rak_maintenance.h"
 #include "sampler.h"
 #include "write_commands.h"
 #include "nodeclock.h"
@@ -2745,12 +2746,15 @@ void statusLedTick(uint32_t now) {
 uint32_t g_lora_start_attempt_ms = 0;
 
 bool startLora() {
+    g_lora_ready = false;
     if (lora.begin(Serial1,
                    kLoraRxPin, kLoraTxPin,
                    g_cfg.freq_hz,
                    g_cfg.sf, g_cfg.bw_khz, kLoraCrIndex,
                    g_cfg.tx_dbm,
                    g_cfg.network_id, g_cfg.node_id, g_cfg.max_ttl)) {
+        rak::observeVersion(lora.firmwareVersion());
+        rak::confirmOperationalVersion();
         g_lora_ready = true;
         // Seguridad de la interfaz aire (v2.2, frame-format.md §14): del
         // bloque security del config. Ajuste de TODA la red; el Pi del
@@ -2769,8 +2773,27 @@ bool startLora() {
                       lora.securityEnabled() ? "AES-CCM" : "off");
         return true;
     }
+    rak::observeVersion(lora.firmwareVersion());
     diag::log("ERROR", "node.init", "init.lora_failed", "available=false retry_ms=30000");
     return false;
+}
+
+bool prepareRakMaintenance() {
+    if (g_maintenance_restart_ms || bajandoFirmware() || cfgota::active() ||
+        g_trial_active || g_fw_trial_active || g_cfgread_req || configstore::pendingAt()) return false;
+    if (!g_lora_ready) return true;
+    const bool stopped = lora.prepareForRestart();
+    g_lora_ready = false;
+    return stopped;
+}
+
+void resumeRakMaintenance(bool updated) {
+    if (updated && g_configured) {
+        diag::log("INFO", "node.radio", "radio.maintenance_complete", "action=node_restart firmware=%s", rak::version());
+        g_maintenance_restart_ms = millis() + 500;
+        return;
+    }
+    if (g_configured) { startLora(); g_lora_start_attempt_ms = millis(); }
 }
 
 void radioStartupTick(uint32_t now) {
@@ -2889,6 +2912,7 @@ void setup() {
     // El comisionamiento atiende SIEMPRE, configurado o no: es la vía
     // para cargar el primer config y para reemplazarlo sin recompilar.
     {
+        rak::begin(Serial1, kLoraRxPin, kLoraTxPin, prepareRakMaintenance, resumeRakMaintenance);
         commission::Identity ident;
         ident.fw_name    = kFirmwareName;
         ident.fw_version = firmwareIdentity();
@@ -2899,6 +2923,7 @@ void setup() {
     }
 
     if (!g_configured) {
+        rak::inspect();
         diag::log("ERROR", "node.config", "config.status", "state=%s error=%s waiting_for=CFG.PUT\n", g_cfg_missing ? "missing" : "invalid", g_cfg_err);
         setLed(0x200000);
         return;  // el resto del arranque requiere config
@@ -2947,6 +2972,12 @@ void setup() {
     diag::log("INFO", "node.init", "init.lora_starting", "");
     startLora();
     g_lora_start_attempt_ms = millis();
+    if (!rak::approved() || rak::busy()) {
+        diag::log("ERROR", "node.init", "init.radio_requires_onboarding", "version=%s state=%s usb_required=true",
+                  rak::version(), rak::stateName(rak::classify(rak::version())));
+        setLed(0x200000);
+        return;
+    }
 
     // ----- NB-IoT en segundo plano (tarea del nucleo 0) -----
     // El rol lo decide node.type del config en runtime: un mismo binario
@@ -2994,6 +3025,8 @@ void setup() {
 void loop() {
     // Comisionamiento por USB: se atiende siempre, opere el nodo o no.
     commission::poll();
+    rak::tick();
+    if (rak::busy()) { setLed(0x180018); delay(1); return; }
     if (g_maintenance_restart_ms && static_cast<int32_t>(millis() - g_maintenance_restart_ms) >= 0) {
         ESP.restart();
         return;

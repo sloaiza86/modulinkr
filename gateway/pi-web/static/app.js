@@ -3207,7 +3207,8 @@ function cfgPintarNodo(port, n) {
   } else {
     filas.push(["Estado", n.error ?? "Sin configurar"]);
   }
-  filas.push(["Versión", `${n.fw} v${fwVersionTexto(n.version)}`]);
+  filas.push(["Firmware ModuLinkr", `${n.fw} v${fwVersionTexto(n.version)}`]);
+  filas.push(["Firmware de la radio RAK", htmlSeguro(n.rak?.version || "Pendiente de comprobar por USB")]);
   filas.push(["Conexión", port.split("/").pop()]);
   const el = document.getElementById("cfg-nodo");
   el.innerHTML = `
@@ -3229,6 +3230,45 @@ function cfgPintarNodo(port, n) {
 // configapi: CFG.HELLO / CFG.GET / CFG.PUT / CFG.DEL, respuestas "CFG:...".
 // Un lector de fondo recoge líneas; waitLine espera la respuesta con timeout
 // y descarta los logs del nodo, igual que el _read_response del Pi.
+
+async function rakPeticion(url, body) {
+  const response = await fetchApi(url, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "No se pudo preparar el RAK.");
+  return data;
+}
+
+function rakProgreso(title) {
+  return value => cfgDialogo(title, SPIN + htmlSeguro(RakOnboarding.progressText(value)));
+}
+
+async function rakPrepararLocal(session, title) {
+  const policy = await rakPeticion("/api/config/rak");
+  return RakOnboarding.prepareLocal(session, policy, async () => {
+    const response = await fetchApi("/api/config/rak/image");
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "No se pudo descargar la imagen aprobada del RAK.");
+    }
+    return response.arrayBuffer();
+  }, rakProgreso(title));
+}
+
+async function rakPrepararGateway(port, title) {
+  const detected = await rakPeticion("/api/config/detectar", {port});
+  const node = detected.node;
+  const job = await rakPeticion("/api/config/rak/prepare", {port, device_uid: node.device_uid});
+  const progress = rakProgreso(title);
+  for (;;) {
+    const value = await rakPeticion(`/api/config/rak/jobs/${job.id}`);
+    progress(value);
+    if (value.state === "failed") throw new Error(value.error);
+    if (value.state === "complete") return value.node;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
 
 class LocalCfg {
   constructor(port) {
@@ -3304,6 +3344,7 @@ class LocalCfg {
     return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
   }
   async put(jsonText) {
+    await rakPrepararLocal(this, "Preparar nodo y guardar configuración");
     const bytes = new TextEncoder().encode(jsonText);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -3543,6 +3584,7 @@ async function cfgEnviar() {
   const T = "Guardar configuración";
   cfgDialogo(T, SPIN + "Guardando la configuración...");
   try {
+    await rakPrepararGateway(cfgPuerto, T);
     const r = await fetchApi("/api/config/subir", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ port: cfgPuerto, config: texto }) });
@@ -4768,6 +4810,10 @@ function bcPintar(d) {
   const focusAction = focused?.dataset?.action;
   const rows = nodes.map(n => {
     const op = n.operation;
+    const operationLabel = !op ? "" : op.state === "done" ? "Última instalación por LoRa"
+      : ["failed", "cancelled"].includes(op.state) ? "Último intento por LoRa"
+      : op.state === "ready" ? "Imagen recibida por LoRa, pendiente de instalar"
+      : "Actualización por LoRa en curso";
     const button = n.primary_action ? bcBoton(n, n.primary_action) : "";
     let detail = "";
     if (op) {
@@ -4791,7 +4837,7 @@ function bcPintar(d) {
     return `<tr><td><div class="ota-node">${n.can_send ? `<input type="checkbox" class="bc-elegir" data-origin="${n.node_id}" data-action="select" aria-label="Seleccionar ${htmlSeguro(n.name || "nodo")} (${n.node_id})" ${bcSeleccion.has(n.node_id) ? "checked" : ""}>` : ""}<span>${htmlSeguro(n.name || "Nodo")} (${n.node_id})<br><small>${n.online ? "Conectado" : "Sin conexión"}</small></span></div></td>
       <td>${htmlSeguro(fwVersionTexto(n.installed_version))}<br><small>Último registro: ${htmlSeguro(bcFecha(n.running_observed_at))}</small></td>
       <td>${htmlSeguro(fwVersionTexto(n.available_version))}</td>
-      <td>${op ? `<strong>Versión ${htmlSeguro(fwVersionTexto(op.version))}</strong><br>` : ""}${htmlSeguro(n.summary || "Sin operación de actualización")}
+      <td>${op ? `<small>${operationLabel}</small><br><strong>Versión ${htmlSeguro(fwVersionTexto(op.version))}</strong><br><small>Último cambio: ${htmlSeguro(bcFecha(op.updated_at || op.created_at))}</small><br>` : ""}${htmlSeguro(n.summary || "Sin operación de actualización")}
         ${op?.auto_install ? "<p>Instalación automática activada</p>" : ""}
         ${n.blocked_reason ? `<p class="texto-ayuda">${htmlSeguro(n.blocked_reason)}</p>` : ""}${detail}</td><td>${button}</td></tr>`;
   }).join("") || '<tr><td colspan="5">No hay nodos registrados.</td></tr>';
@@ -5470,6 +5516,10 @@ function fwFicha(instalada, disponible = fwDisponible) {
   document.getElementById("fw-nombre").textContent = identity?.name || "Nodo";
   document.getElementById("fw-version-instalada").textContent = fwVersionTexto(instalada);
   document.getElementById("fw-version-disponible").textContent = fwVersionTexto(disponible);
+  document.getElementById("fw-rak-version").textContent = identity?.rak?.version || "Pendiente de comprobar";
+  const rakButton = document.getElementById("fw-rak-prepare");
+  rakButton.hidden = !identity?.rak_maintenance;
+  rakButton.disabled = fwUsbBusy || !identity?.rak_maintenance;
 }
 
 function fwAccion(btn, instalada, disponible, identificado) {
@@ -5531,7 +5581,7 @@ function fwFuenteCtrls() {
 
 function fwUsbBloquear(busy) {
   fwUsbBusy = busy;
-  ["fw-local-buscar", "fw-buscar", "fw-fuente", "fw-puertos", "fw-modo-usb", "fw-modo-lora"].forEach(id => {
+  ["fw-local-buscar", "fw-buscar", "fw-fuente", "fw-puertos", "fw-modo-usb", "fw-modo-lora", "fw-rak-prepare"].forEach(id => {
     document.getElementById(id).disabled = busy;
   });
   if (busy) {
@@ -5789,11 +5839,36 @@ document.getElementById("fw-buscar").addEventListener("click", fwBuscar);
 document.getElementById("fw-flash").addEventListener("click", fwFlash);
 document.getElementById("fw-fuente").addEventListener("change", fwFuenteCtrls);
 document.getElementById("fw-local-flash").addEventListener("click", fwLocalFlash);
+document.getElementById("fw-rak-prepare").addEventListener("click", async () => {
+  if (fwUsbBusy) return;
+  const title = "Preparar la radio RAK";
+  fwUsbBloquear(true);
+  try {
+    if (document.getElementById("fw-fuente").value === "local") {
+      if (!fwLocalPort) throw new Error("Identifica el nodo USB antes de continuar.");
+      const session = new LocalCfg(fwLocalPort.port);
+      try {
+        await session.open();
+        const fresh = await session.hello();
+        RakOnboarding.identity(fresh, fwLocalPort.identity.device_uid);
+        fwLocalPort.identity = await rakPrepararLocal(session, title);
+      } finally { await session.close(true); }
+    } else {
+      if (!fwPuerto) throw new Error("Identifica el nodo USB antes de continuar.");
+      fwIdentificada = await rakPrepararGateway(fwPuerto, title);
+    }
+    cfgDialogo(title, "Versión aprobada del RAK confirmada. El nodo conserva su configuración.", {cerrar: true});
+  } catch (error) {
+    cfgDialogo(title, htmlSeguro(error.message), {cerrar: true, error: true});
+  } finally { fwUsbBloquear(false); fwFuenteCtrls(); }
+});
 document.getElementById("fw-puertos").addEventListener("change", (e) => { fwPuerto = e.target.value; fwIdentificarPuerto(fwPuerto); });
 
 // ----- Configurar nodo: formulario que arma el config.json -----
 
 let formPuerto = null;
+let formUsbIdentity = null;
+let formFirmwareAvailable = null;
 let formInited = false;
 let nodosConocidos = new Map();  // origin -> nombre, para avisar de ID ya en uso
 let idLeido = null;              // ID leído de un nodo (reconfiguración legítima)
@@ -7411,6 +7486,7 @@ function cmpVersionFw(a, b) {
 }
 
 async function formCheckFw(node) {
+  formUsbIdentity = node;
   const est = document.getElementById("f-fw-estado");
   // Por cable la lista de schemas llega en el CFG.HELLO, junto a la versión
   // de firmware. Es el mismo dato que por radio trae el catálogo del
@@ -7420,6 +7496,34 @@ async function formCheckFw(node) {
   const fw = node.fw || "", ver = node.version || "";
   let latest = null;
   try { const fr = await fetchApi("/api/config/firmware"); latest = (await fr.json()).version; } catch (e) { /* sin versión */ }
+  formFirmwareAvailable = latest;
+  const needsMaintenance = node.rak_maintenance !== 1;
+  if (needsMaintenance && (!latest || cmpVersionFw(latest, "0.0.85") < 0)) {
+    est.className = "aviso mal";
+    est.textContent = "No hay firmware disponible con mantenimiento RAK. Actualiza la distribución del gateway antes del alta.";
+    return;
+  }
+  if (needsMaintenance && fwComparar(ver, latest) !== "older") {
+    formMode = "flash";
+    est.className = "aviso";
+    est.textContent = "Al continuar se instalará ModuLinkr, se comprobará la radio RAK y se actualizará si es necesario. Después se guardará la configuración. Mantén conectado el USB.";
+    formDestino(true);
+    return;
+  }
+  if (needsMaintenance) {
+    est.className = "aviso mal";
+    est.textContent = "El firmware del nodo es posterior al disponible y no anuncia mantenimiento RAK. Actualiza la distribución del gateway antes del alta.";
+    return;
+  }
+  const policy = await rakPeticion("/api/config/rak");
+  const state = RakOnboarding.classify(node.rak?.version, policy);
+  if (state !== "approved" && !RakOnboarding.canPrepare(node.rak || {}, policy)) {
+    est.className = "aviso mal";
+    est.textContent = RakOnboarding.reason(state);
+    return;
+  }
+  const rakNote = state === "approved" ? ` Radio RAK: ${node.rak.version}, aprobada.`
+    : " Se comprobará y preparará la radio RAK antes de guardar la configuración.";
 
   if (fw.startsWith("ModuLinkr")) {
     const cmp = cmpVersionFw(ver, latest);
@@ -7429,8 +7533,8 @@ async function formCheckFw(node) {
       formMode = "config";
       est.className = "aviso";
       est.textContent = latest && ver
-        ? `El nodo está actualizado (${fwVersionTexto(ver)}). Al continuar se guardará la configuración.`
-        : "Nodo detectado. Al continuar se guardará la configuración.";
+        ? `ModuLinkr ${fwVersionTexto(ver)}.${rakNote}`
+        : `Nodo detectado.${rakNote}`;
       formDestino(true);
       return;
     }
@@ -7441,7 +7545,7 @@ async function formCheckFw(node) {
     if (cmp === 1) {
       formMode = "config";
       est.className = "aviso";
-      est.textContent = `El nodo tiene una versión más reciente (${fwVersionTexto(ver)}). Solo se guardará la configuración.`;
+      est.textContent = `El nodo tiene ModuLinkr ${fwVersionTexto(ver)}, posterior al disponible.${rakNote}`;
       formDestino(true);
       return;
     }
@@ -7454,19 +7558,6 @@ async function formCheckFw(node) {
       formDestino(true);
       return;
     }
-  }
-
-  // Con la fuente local el flasheo no se ofrece desde aquí: vive en la página
-  // de firmware, que ya tiene su propio camino con esptool-js. Se avisa y se
-  // deja enviar solo la configuración, que sí sabemos hacer.
-  if (formFuenteLocal()) {
-    formMode = "config";
-    est.className = "aviso";
-    est.textContent = fw.startsWith("ModuLinkr")
-      ? "Hay una actualización disponible. Instálala desde Actualizar firmware de nodos antes de continuar."
-      : "El nodo necesita una actualización antes de poder configurarse.";
-    formDestino(fw.startsWith("ModuLinkr"));
-    return;
   }
 
   // Nodo anterior al binario del gateway, o firmware ajeno: Enviar carga el
@@ -7501,10 +7592,11 @@ async function formBuscar() {
       // la Pi (fw y version), así que la comprobación de firmware vale igual.
       await formCheckFw(ident || {});
     } catch (e) {
-      // Sin respuesta al protocolo: por el gateway aquí se ofrecería flashear,
-      // pero el flasheo local vive en la página de firmware. Se dice qué hacer
-      // en vez de dejar al usuario con un error a secas.
-      aviso.textContent = "El nodo necesita una actualización antes de poder configurarse.";
+      if (cfgLocalSes?.opened) {
+        formPuerto = "local";
+        aviso.textContent = "Puerto USB seleccionado. Aún no responde a ModuLinkr.";
+        await formCheckFw({});
+      } else aviso.textContent = fwUsbError(e);
     } finally {
       document.getElementById("f-buscar").disabled = false;
     }
@@ -7570,6 +7662,55 @@ async function formVirgen(aviso, sel, chosenPort) {
   } catch (e) {
     aviso.textContent = textoError(e, "No se pudo comprobar el nodo. Revisa la conexión e inténtalo de nuevo.");
   }
+}
+
+async function formFlashLocal() {
+  if (!cfgLocalSes || !window.ESPLoader || !window.Transport)
+    throw new Error("No se puede instalar ModuLinkr por este navegador. Usa Chrome o Edge con el nodo USB seleccionado.");
+  const previous = formUsbIdentity || {};
+  const session = cfgLocalSes;
+  const port = session.port;
+  const expected = formFirmwareAvailable;
+  if (fwComparar(previous.version, expected) === "older")
+    throw new Error("El firmware disponible es anterior al del nodo. No se realizará un downgrade.");
+  const response = await fetchApi("/api/config/nodo-bin");
+  if (!response.ok || response.headers.get("X-Modulinkr-Firmware-Version") !== expected)
+    throw new Error("El firmware disponible ha cambiado. Vuelve a identificar el nodo.");
+  const fileArray = fwFlashParts(new Uint8Array(await response.arrayBuffer()));
+  if (previous.device_uid) {
+    const fresh = await session.hello();
+    if (fresh.device_uid !== previous.device_uid) throw new Error("El nodo conectado ha cambiado.");
+  }
+  await session.close(true);
+  cfgLocalSes = null;
+  const transport = new window.Transport(port, false);
+  try {
+    const loader = new window.ESPLoader({transport, baudrate: 115200, romBaudrate: 115200,
+      terminal: {clean() {}, write() {}, writeLine() {}}});
+    await loader.main();
+    if (loader.chip?.CHIP_NAME !== "ESP32")
+      throw new Error("El chip conectado no es el ESP32 del Atom Lite. No se ha escrito firmware.");
+    await loader.writeFlash({fileArray, flashSize: "keep", flashMode: "keep", flashFreq: "keep",
+      eraseAll: false, compress: true, reportProgress: (index, written, total) => {
+        cfgDialogo("Preparar nodo", SPIN + `Instalando ModuLinkr: ${Math.round(100 * written / total)} %`);
+      }});
+    if (typeof loader.hardReset === "function") await loader.hardReset();
+    else {
+      await transport.setDTR(false); await transport.setRTS(true);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      await transport.setRTS(false);
+    }
+  } finally { await transport.disconnect(); }
+  await new Promise(resolve => setTimeout(resolve, 800));
+  const next = new LocalCfg(port);
+  await next.open();
+  cfgLocalSes = next;
+  const node = await next.hello();
+  if (node.version !== expected || node.rak_maintenance !== 1 ||
+      (previous.device_uid && node.device_uid !== previous.device_uid))
+    throw new Error("El nodo no confirmó el firmware y la identidad esperados tras la instalación.");
+  formUsbIdentity = node;
+  return next;
 }
 
 async function formEnviar() {
@@ -7665,14 +7806,14 @@ async function formEnviar() {
     return;
   }
 
-  // Fuente local: el navegador escribe el config por Web Serial con el mismo
-  // CFG.PUT que habla la Pi. El flasheo no se ofrece por aquí (vive en la
-  // página de firmware), así que formCheckFw ya dejó formMode en "config".
+  // El alta prepara el firmware y el RAK antes de escribir la configuración.
   if (formFuenteLocal()) {
     try {
       cfgDialogo(T, SPIN + "Guardando la configuración...");
-      const ses = await cfgLocalAsegurar();
+      const ses = formMode === "flash" ? await formFlashLocal() : await cfgLocalAsegurar();
       const identified = await ses.hello();
+      if (formUsbIdentity?.device_uid && identified.device_uid !== formUsbIdentity.device_uid)
+        throw new Error("El nodo conectado ha cambiado. Vuelve a identificarlo.");
       const prepared = await identidadPreparar(texto, identified?.device_uid);
       const detalle = await ses.put(prepared);
       // El nodo se reinicia tras aceptar el config, así que la sesión abierta
@@ -7691,13 +7832,17 @@ async function formEnviar() {
       cfgDialogo(T, SPIN + "Instalando la actualización...");
       const rf = await fetchApi("/api/config/flash", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ port: formPuerto }) });
+        body: JSON.stringify({ port: formPuerto, expected_version: formFirmwareAvailable,
+          device_uid: formUsbIdentity?.device_uid, initial_install: !formUsbIdentity?.version }) });
       const df = await rf.json();
       if (!rf.ok) {
         cfgDialogo(T, df.error ?? "No se pudo actualizar el nodo. Inténtalo de nuevo.", { cerrar: true, error: true });
         return;
       }
     }
+    const preparedNode = await rakPrepararGateway(formPuerto, T);
+    if (formUsbIdentity?.device_uid && preparedNode.device_uid !== formUsbIdentity.device_uid)
+      throw new Error("El nodo conectado ha cambiado. La configuración no se ha enviado.");
     cfgDialogo(T, SPIN + "Guardando la configuración...");
     const r = await fetchApi("/api/config/subir", {
       method: "POST", headers: { "Content-Type": "application/json" },

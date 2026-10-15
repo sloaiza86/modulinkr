@@ -28,6 +28,31 @@
 //     Borra el config de la flash, responde CFG:OK y se reinicia: el nodo
 //     arranca sin configurar (LED rojo, a la espera de un CFG.PUT).
 //
+//   CFG.RAK.INFO
+//     Consulta la radio. CFG:RAK informa versión real, aprobación y fase.
+//     CFG.HELLO incluye rak_maintenance y el último estado comprobado.
+//
+//   CFG.RAK.BEGIN <len> <sha256hex>
+//     Comprueba elegibilidad y reserva una imagen temporal en LittleFS.
+//     Solo admite la identidad fijada por la política compilada.
+//
+//   CFG.RAK.DATA <offset> <len>
+//     Responde CFG:READY y recibe de 1 a 1024 bytes. CFG:RAK confirma la
+//     posición escrita. Una recepción abandonada se cancela a los 30 s.
+//
+//   CFG.RAK.INSTALL
+//     Verifica la imagen completa, vuelve a consultar la versión y guarda
+//     la identidad de recuperación antes de BOOT. La escritura YMODEM es
+//     bloqueante; CFG:RAK anuncia progreso confirmado por el receptor.
+//     Complete exige consultar la versión instalada. Un fallo conserva la
+//     imagen y el marcador; el siguiente alta USB puede repetir el intento.
+//
+//   CFG.RAK.ABORT
+//     Cancela la recepción temporal. No borra una recuperación pendiente.
+//
+// CFG.PUT exige una radio aprobada y sin mantenimiento activo. La radio
+// también comprueba esa aprobación al arrancar, aunque no se use la GUI.
+//
 // Toda respuesta del protocolo empieza por "CFG:" y sale en una única
 // escritura a Serial (una línea contigua): el cliente filtra por ese
 // prefijo y los logs del firmware no la parten (la tarea NB-IoT del

@@ -21,6 +21,7 @@ HARNESS = r'''
 #include <string>
 #include <vector>
 #include <algorithm>
+#include "rak_version.h"
 uint32_t clock_ms=0;
 uint32_t millis(){return clock_ms;}
 void delay(uint32_t ms){clock_ms+=ms;}
@@ -37,6 +38,7 @@ constexpr uint16_t kPreambleSymbols=8;
 struct HardwareSerial {
  std::string command,response,reset_answer="RAKwireless RAK3172\r\nVersion: RUI_4.0.6_RAK3172-E\r\n",reject,fixed_answer;
  std::vector<std::string> commands;
+ std::string firmware="RUI_4.3.0_RAK3172-E";
  bool stuck=false,reset_recovers=true,dead=false,noise=false,events_only=false;
  bool sleep=false,begin_called=false,buffer_ok=true,paced_recovers=false,paced=false;int mode=0,mode_switches=0,ends=0;size_t buffer=256;
  size_t offset=0;uint32_t ready=0;
@@ -76,7 +78,8 @@ public:
  bool cad_ok_=false,probe_ok_=false,initialized_=false;
  unsigned queued=3,discarded=0,cleared=0;
  static constexpr uint32_t kResetSettleMs=2000;
- void queryVersion(){}
+ char fw_version_[48]={};
+ void queryVersion(){strncpy(fw_version_,uart.firmware.c_str(),sizeof(fw_version_)-1);}
  void clearFaults(){++cleared;}
  void discardTxQueue(){discarded+=queued;queued=0;}
  bool begin(HardwareSerial&,int8_t,int8_t,unsigned long,uint8_t,uint16_t,uint8_t,uint8_t,uint8_t,uint8_t,uint8_t);
@@ -90,7 +93,11 @@ CASES = r'''
 bool boot(LoraP2P& radio){return radio.begin(uart,19,22,869525000,7,125,0,10,1,2,6);}
 int main(int argc,char** argv){
  assert(argc==2);std::string test=argv[1];LoraP2P radio;
- if(test=="warm_boot"){
+ if(test=="newer_unvalidated"){
+  uart.firmware="RUI_4.4.0_RAK3172-E";assert(!boot(radio));
+  assert(!radio.initialized_ && uart.count("AT+NWM=0")==0 && uart.count("AT+PRECV=65533")==0);
+  assert(diag::has("state=newer_unvalidated"));
+ }else if(test=="warm_boot"){
   uart.command="AT+PSEND=012345";uart.sleep=true;
   assert(boot(radio));assert(radio.initialized_ && radio.probe_ok_ && radio.cad_ok_);
   assert(uart.count("ATZ")==0 && uart.count("AT+NWM=0")==0);
@@ -169,6 +176,7 @@ int main(int argc,char** argv){
 class RadioStartupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        subprocess.run(["python3", str(SRC.parent / "tools/generate_rak_policy.py")], check=True)
         source = (SRC / "lora.cpp").read_text()
         begin = source[source.index("bool LoraP2P::begin("):source.index("\nbool LoraP2P::radioCommand")]
         bodies = begin + "\n".join(function(source, signature) for signature in (
@@ -183,13 +191,13 @@ class RadioStartupTests(unittest.TestCase):
         (path / "test.cpp").write_text(HARNESS + bodies + CASES)
         cls.binary = path / "test"
         subprocess.run(["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                        str(path / "test.cpp"), "-o", str(cls.binary)], check=True)
+                        "-I", str(SRC), str(path / "test.cpp"), "-o", str(cls.binary)], check=True)
 
     def check_case(self, name):
         subprocess.run([str(self.binary), name], check=True, timeout=10)
 
 
-for case in ("warm_boot", "cold_boot", "banner_without_ready", "silent_then_retry",
+for case in ("newer_unvalidated", "warm_boot", "cold_boot", "banner_without_ready", "silent_then_retry",
              "banner_only_for_reset", "reset_without_banner", "prepare_ota",
              "prepare_ota_unconfirmed", "prepare_ota_idle_rejected", "reset_single_attempt",
              "noise_bounded", "receive_rejected", "mode_unknown", "buffer_failure", "repeated_hot_boot", "reset_fallback", "paced_boot", "unknown_command_rejected"):

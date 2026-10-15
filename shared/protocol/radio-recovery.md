@@ -16,6 +16,8 @@ La instalación OTA comprueba primero tamaño, hash y estado de la imagen. Despu
 
 ## Actualización interna del RAK por USB
 
+Desde ModuLinkr 0.0.85 el alta normal utiliza el mantenimiento incluido en `atom-lite`, descrito en [`rak-onboarding.md`](rak-onboarding.md). La actualización integrada se ha comprobado en el supernodo de RUI 4.0.6 a 4.3.0. El procedimiento siguiente conserva el puente como herramienta manual de mantenimiento y documenta la intervención anterior en el nodo 1.
+
 El entorno `rak-bridge` conecta el USB del Atom con los GPIO 19 y 22 ya utilizados por el RAK. No accede a NVS ni a LittleFS y no incorpora hardware adicional. Se utiliza temporalmente; después debe restaurarse el entorno normal `atom-lite`. El puente de mantenimiento requiere acceso USB y no constituye un mecanismo de actualización remota del RAK.
 
 El cargador verifica el SHA-256 y la variante E antes de entrar en el cargador de arranque. Comprueba también los vectores STM32 de la imagen. Se utiliza el transporte YMODEM del paquete oficial RAK, verificando su código y manteniendo una única apertura del puerto. Las respuestas `OK` se aceptan como líneas completas, también cuando no llevan una línea vacía anterior. La transferencia termina solo después de consultar y confirmar la versión instalada.

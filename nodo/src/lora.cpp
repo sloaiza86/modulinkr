@@ -1,6 +1,7 @@
 // ModuLinkr, driver LoRa P2P (implementación)
 
 #include "lora.h"
+#include "rak_version.h"
 #include "route_trace.h"
 
 #include <Arduino.h>
@@ -43,6 +44,8 @@ bool LoraP2P::begin(HardwareSerial& uart,
                     uint8_t node_id,
                     uint8_t ttl) {
     initialized_ = false;
+    strncpy(fw_version_, "no response", sizeof(fw_version_) - 1);
+    fw_version_[sizeof(fw_version_) - 1] = '\0';
     uart_        = &uart;
     rx_pin_      = rx_pin;
     tx_pin_      = tx_pin;
@@ -160,6 +163,13 @@ bool LoraP2P::applyRadioConfig() {
     cad_ok_ = false;
     probe_ok_ = synchronizeModule();
     if (!probe_ok_ && !softReset()) return false;
+    queryVersion();
+    const auto firmware_state = rakversion::classify(fw_version_);
+    if (firmware_state != rakversion::State::APPROVED) {
+        diag::log("ERROR", "node.radio", "radio.firmware_unapproved", "version=%s state=%s onboarding_required=true",
+                  fw_version_, rakversion::stateName(firmware_state));
+        return false;
+    }
     if (!radioCommand("mode_query", "AT+NWM=?", 1500) || work_mode_ < 0) return false;
     if (work_mode_ != 0) {
         if (!radioCommand("p2p_mode", "AT+NWM=0", 1500)) return false;
@@ -174,7 +184,6 @@ bool LoraP2P::applyRadioConfig() {
     snprintf(command, sizeof(command), "AT+P2P=%lu:%u:%u:%u:%u:%u",
              freq_hz_, sf_, bw_khz_, cr_index_, kPreambleSymbols, tx_dbm_);
     if (!radioCommand("parameters", command, 1500)) return false;
-    queryVersion();
     cad_ok_ = radioCommand("cad", "AT+CAD=1", 1500, false);
     return radioCommand("receive", "AT+PRECV=65533", 1500);
 }

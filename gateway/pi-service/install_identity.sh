@@ -12,6 +12,7 @@ test "$(realpath "$ml_service/..")" = "$(realpath "$ml_web/..")"
 ml_files=(
   pi-service/nodo.bin pi-service/nodo.bin.version pi-service/nodo-app.bin pi-service/nodo-app.bin.sha256
   pi-service/identity.py pi-service/buffer.py pi-service/protocol.py pi-service/firmware_images.py pi-service/flash_nodo.sh
+  pi-service/rak_policy.json pi-service/rak_firmware.py pi-service/rak_commission.py
   pi-service/gateway_service.py pi-service/mqtt_publisher.py pi-service/heltec_rx_parser.py
   pi-service/node_commands.py pi-service/node_maintenance.py pi-service/modbus_command.py
   pi-web/identityapi.py pi-web/web_service.py pi-web/configapi.py
@@ -19,6 +20,7 @@ ml_files=(
   pi-web/systemapi.py pi-web/supervision.py pi-web/commandapi.py
   pi-web/dataapi.py pi-web/maintenanceapi.py
   pi-web/static/index.html pi-web/static/style.css pi-web/static/app.js pi-web/static/identity.js pi-web/static/quarantine.js
+  pi-web/static/rak-onboarding.js
 )
 if [ "$ml_runtime_only" -eq 1 ]; then
   ml_runtime_files=()

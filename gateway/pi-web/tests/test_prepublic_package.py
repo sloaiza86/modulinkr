@@ -26,7 +26,11 @@ class PackageTests(unittest.TestCase):
             self.assertIn('gateway/pi-service/install_identity.sh',names)
             self.assertIn('gateway/pi-web/static/identity.js',names)
             self.assertFalse(any(Path(name).name.startswith(('nodo.bin','nodo-app.bin')) for name in names))
-            self.assertFalse(any(name.endswith(('.env','.json','.db')) for name in names))
+            self.assertIn('gateway/pi-service/rak_policy.json', names)
+            self.assertIn('gateway/pi-service/rak_commission.py', names)
+            self.assertIn('gateway/pi-web/static/rak-onboarding.js', names)
+            self.assertFalse(any(name.endswith(('.env','.json','.db')) for name in names
+                                 if name != 'gateway/pi-service/rak_policy.json'))
 
     def test_server_package_includes_current_health_parser(self):
         self.assertIn('server/consumer/health.py',package.files('server'))

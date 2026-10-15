@@ -18,7 +18,7 @@ class CoexistenceTests(unittest.TestCase):
             path = Path(folder)
             (path / "test.cpp").write_text(source)
             result = subprocess.run(["clang++", "-std=c++17", str(path / "test.cpp"),
-                                     "-o", str(path / "test")], capture_output=True, text=True)
+                                     "-I", str(ROOT / "nodo/src"), "-o", str(path / "test")], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(path / "test")], check=True)
 
@@ -96,6 +96,7 @@ struct {
 void ntpTick(){++ntp;}
 void batchTick(uint32_t){++batches;}
 namespace diag { template<class... T> void log(T...){} }
+namespace rak { void observeVersion(const char*){} void confirmOperationalVersion(){} }
 ''' + start + retry + tick + r'''
 int main(){
  clock_ms=1000;independentTick(clock_ms);assert(ntp==1 && batches==1 && attempts==0);
@@ -149,6 +150,7 @@ int main(){
 ''')
 
     def test_radio_startup_commands_accept_delays_reject_errors_and_bound_noise(self):
+        subprocess.run(["python3", str(ROOT / "nodo/tools/generate_rak_policy.py")], check=True)
         source = (ROOT / "nodo/src/lora.cpp").read_text()
         command = function(source, "bool LoraP2P::radioCommand(const char* stage, const char* command, uint32_t timeout_ms, bool required)")
         config = "\n".join(function(source, sig) for sig in (
@@ -163,6 +165,7 @@ int main(){
 #include <string>
 #include <vector>
 #include <cstdarg>
+#include "rak_version.h"
 uint32_t clock_ms=0;
 uint32_t millis(){return clock_ms;}
 void delay(uint32_t n){clock_ms+=n;}
@@ -194,6 +197,7 @@ public:
  unsigned long freq_hz_=869525000;unsigned sf_=7,bw_khz_=125,cr_index_=0,tx_dbm_=10;
  int8_t work_mode_=-1;bool reset_attempted_=false,line_discard_=false;uint32_t last_reset_ms_=0;size_t line_len_=0;
  bool cad_ok_=false,probe_ok_=false;static constexpr uint32_t kResetSettleMs=2000;
+ char fw_version_[48]="RUI_4.3.0_RAK3172-E";
  void queryVersion(){}
  bool radioCommand(const char*,const char*,uint32_t,bool=true);
  bool applyRadioConfig();bool synchronizeModule();bool stopReception(const char*);bool softReset();

@@ -8,9 +8,12 @@ POLICY_PATH = Path(__file__).with_name("rak_policy.json")
 
 
 def version_number(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}", value):
         raise ValueError("La versión del RAK no tiene un formato válido.")
-    return tuple(int(part) for part in value.split("."))
+    result = tuple(int(part) for part in value.split("."))
+    if max(result) > 65535:
+        raise ValueError("La versión del RAK excede el formato admitido.")
+    return result
 
 
 def load_policy(path=POLICY_PATH):
@@ -28,7 +31,7 @@ def load_policy(path=POLICY_PATH):
     image = policy["image"]
     if image["version"] != f"RUI_{target}_{policy['model']}":
         raise ValueError("La imagen no coincide con la política.")
-    if not re.fullmatch(r"[0-9a-f]{64}", image["sha256"]) or image["size"] != 190784:
+    if not re.fullmatch(r"[0-9a-f]{64}", image["sha256"]) or type(image["size"]) is not int or not 8 <= image["size"] <= 245760:
         raise ValueError("La identidad de la imagen no está fijada.")
     if not image["url"].startswith("https://downloads.rakwireless.com/RUI/RUI3/Image/"):
         raise ValueError("La imagen no utiliza la fuente oficial.")
@@ -43,13 +46,19 @@ def classify(raw_version, policy=None):
     model = None
     if match:
         number, model = match.groups()
+        try:
+            parsed = version_number(number)
+        except ValueError:
+            return {"model": model, "version": number, "raw_version": raw_version,
+                    "state": state, "approved": False, "can_update": False,
+                    "target_version": policy["target_version"]}
         if model != policy["model"]:
             state = "wrong_model"
         elif number in policy["approved_versions"]:
             state = "approved"
-        elif version_number(number) > version_number(policy["target_version"]):
+        elif parsed > version_number(policy["target_version"]):
             state = "newer_unvalidated"
-        elif version_number(number) >= version_number(policy["upgrade_floor"]):
+        elif parsed >= version_number(policy["upgrade_floor"]):
             state = "update_required"
         else:
             state = "unsupported"
