@@ -11,12 +11,14 @@ test -f "$ml_web/web_service.py"
 test "$(realpath "$ml_service/..")" = "$(realpath "$ml_web/..")"
 ml_files=(
   pi-service/nodo.bin pi-service/nodo.bin.version pi-service/nodo-app.bin pi-service/nodo-app.bin.sha256
-  pi-service/identity.py pi-service/buffer.py pi-service/protocol.py pi-service/firmware_images.py pi-service/flash_nodo.sh
+  pi-service/identity.py pi-service/buffer.py pi-service/protocol.py pi-service/firmware_images.py
   pi-service/rak_policy.json pi-service/rak_firmware.py pi-service/rak_commission.py
   pi-service/gateway_service.py pi-service/mqtt_publisher.py pi-service/heltec_rx_parser.py
+  pi-service/mesh_config.py pi-service/gateway_metrics.py
   pi-service/node_commands.py pi-service/node_maintenance.py pi-service/modbus_command.py
   pi-web/identityapi.py pi-web/web_service.py pi-web/configapi.py
   pi-web/otaapi.py pi-web/firmwaremeta.py pi-web/netstatus.py pi-web/mqttapi.py
+  pi-web/debugapi.py pi-web/radioapi.py
   pi-web/systemapi.py pi-web/supervision.py pi-web/commandapi.py
   pi-web/dataapi.py pi-web/maintenanceapi.py
   pi-web/static/index.html pi-web/static/style.css pi-web/static/app.js pi-web/static/identity.js pi-web/static/quarantine.js
@@ -54,6 +56,13 @@ if sys.argv[2]!='1':
 for path in root.glob('gateway/*/*.py'):
     ast.parse(path.read_text(), filename=str(path))
     print('Sintaxis:', path.name)
+PY
+
+"$ml_web/.venv/bin/python" -B -I - "$ml_stage/gateway/pi-web" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import configapi
+print('Importación comprobada: configapi, rak_commission y rak_firmware', flush=True)
 PY
 
 ml_db="$(sudo python3 - <<'PY'
@@ -134,7 +143,10 @@ def ready(timeout=60):
     deadline = time.monotonic() + timeout
     previous = None
     successes = 0
+    attempts = 0
+    print('Comprobando visor: plazo=' + str(timeout) + ' s, respuestas estables=3', flush=True)
     while time.monotonic() < deadline:
+        attempts += 1
         pid = subprocess.check_output(['systemctl', 'show', 'modulinkr-web.service',
                                       '--property=MainPID', '--value'], text=True).strip()
         try:
@@ -150,16 +162,19 @@ def ready(timeout=60):
                     raise ValueError('Respuesta HTTP no válida')
             successes = successes + 1 if pid == previous else 1
             previous = pid
+            print('Visor HTTP 200: PID=' + pid + ', respuestas=' + str(successes) + '/3', flush=True)
             if successes >= 3:
                 print('Visor comprobado:', url, 'PID:', pid)
                 return True
-        except (OSError, ValueError):
+        except (OSError, ValueError) as error:
+            print('Visor pendiente: intento=' + str(attempts) + ', PID=' + pid + ', error=' + str(error), flush=True)
             previous = None
             successes = 0
         time.sleep(2)
     return False
 
 if not ready():
+    subprocess.run(['journalctl', '-u', 'modulinkr-web.service', '-n', '40', '--no-pager'], check=False)
     raise SystemExit('El visor no respondió de forma estable dentro de 60 segundos.')
 PY
 sudo systemctl is-active --quiet modulinkr-gateway.service

@@ -14,8 +14,9 @@ function section(start, end) {
 }
 
 function setup() {
-  const elements = Object.fromEntries(["f-fuente", "f-radio-aviso", "f-leer", "f-enviar"]
+  const elements = Object.fromEntries(["f-fuente", "f-radio-aviso", "f-leer", "f-enviar", "f-lora-nodo"]
     .map(id => [id, { value: "lora", disabled: false, hidden: true, textContent: "" }]));
+  elements["f-lora-nodo"].value="1";
   const context = vm.createContext({
     document: { getElementById: id => elements[id] },
     formRadioEstado: null, formLecturaLoraEnCurso: false, formDestinoListo: true,
@@ -28,7 +29,7 @@ function setup() {
   return { context, elements };
 }
 
-const online = { service_online: true, lora_link: true };
+const online = { service_online: true, lora_link: true, nodes:[{origin:1,lora_route_online:true}] };
 
 test("los códigos preservan los dos mensajes acordados", () => {
   const { context: c } = setup();
@@ -52,13 +53,29 @@ test("fetchApi conserva la causa que devuelve la API", async () => {
   assert.equal(data.error, "El nodo no responde por LoRa. Comprueba su alimentación y conexión.");
 });
 
+test("el rechazo diferencia catálogo pendiente de una ruta caducada", () => {
+  const {context:c} = setup();
+  assert.match(c.mensajeApi(409, "", "catalog_pending"), /catálogo actualizado/);
+  assert.match(c.mensajeApi(409, "", "mesh_no_route"), /ruta reciente/);
+  assert.doesNotMatch(c.mensajeApi(409, "", "catalog_pending"), /estado actual/);
+});
+
+test("el formulario explica el catálogo pendiente y se habilita al recibirlo", () => {
+  const {context:c,elements:e}=setup();
+  c.formRadioActualizar({...online,nodes:[{origin:1}],identity:{incidents:[{origin:1,kind:"catalog_missing"}]}});
+  assert.match(e["f-radio-aviso"].textContent,/catálogo actualizado/);
+  assert.equal(e["f-enviar"].disabled,true);
+  c.formRadioActualizar(online);
+  assert.equal(e["f-enviar"].disabled,false);
+});
+
 test("desconectar bloquea y reconectar habilita importar y enviar", () => {
   const { context: c, elements: e } = setup();
-  c.formRadioActualizar({ ...online, lora_link: false });
+  c.formRadioActualizar({ ...online, lora_link: false, nodes:[] });
   assert.equal(e["f-leer"].disabled, true);
   assert.equal(e["f-enviar"].disabled, true);
   assert.equal(e["f-radio-aviso"].hidden, false);
-  assert.match(e["f-radio-aviso"].textContent, /conexión USB/);
+  assert.match(e["f-radio-aviso"].textContent, /Sin ruta disponible/);
   c.formRadioActualizar(online);
   assert.equal(e["f-leer"].disabled, false);
   assert.equal(e["f-enviar"].disabled, false);
@@ -87,7 +104,7 @@ test("estado desconocido y servicio caído no se confunden con el USB", () => {
   const { context: c, elements: e } = setup();
   c.formRadioActualizar(null);
   assert.equal(e["f-leer"].disabled, true);
-  assert.match(e["f-radio-aviso"].textContent, /No se pudo comprobar/);
+  assert.match(e["f-radio-aviso"].textContent, /servicio del gateway/);
   c.formRadioActualizar({ service_online: false, lora_link: false });
   assert.match(e["f-radio-aviso"].textContent, /servicio del gateway/);
   assert.doesNotMatch(e["f-radio-aviso"].textContent, /USB/);
@@ -95,7 +112,7 @@ test("estado desconocido y servicio caído no se confunden con el USB", () => {
 
 test("cambiar a USB elimina el bloqueo de LoRa", () => {
   const { context: c, elements: e } = setup();
-  c.formRadioActualizar({ ...online, lora_link: false });
+  c.formRadioActualizar({ ...online, lora_link: false, nodes:[] });
   e["f-fuente"].value = "usb";
   c.formRadioPintar();
   assert.equal(e["f-leer"].disabled, false);

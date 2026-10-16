@@ -48,7 +48,7 @@ def check_operations(include_commands=True):
         'net_migration': "state IN ('programada','saltada')",
         'config_read': "state IN ('pending','asking','reading','receiving')",
         'node_maintenance': "state IN ('queued','sent','accepted') AND created > strftime('%s','now') - 180",
-        'config_push': "state IN ('pending','sending')",
+        'config_push': "state IN ('pending','sending','committing')",
     }
     if include_commands:
         checks['modbus_commands'] = "state IN ('queued','sent','accepted') AND expires+30>strftime('%s','now')"

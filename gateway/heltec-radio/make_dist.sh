@@ -2,7 +2,7 @@
 # make_dist.sh
 # Empaqueta el firmware del Heltec (ESP32-S3) en un binario ÚNICO flasheable
 # desde la dirección 0x0, para que el Pi pueda subirlo por USB con esptool
-# (flash_heltec.sh del pi-service).
+# La imagen se programa por USB desde el navegador.
 #
 # Flujo: compilar primero en VS Code (PlatformIO) y ejecutar este script.
 # Toma los artefactos de .pio/build/, los funde con el merge_bin del esptool

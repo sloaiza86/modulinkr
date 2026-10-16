@@ -1,4 +1,5 @@
-#define MODULINKR_FIRMWARE_VERSION "0.0.85"
+#define MODULINKR_FIRMWARE_VERSION "0.0.90"
+#include "catalog_transport.h"
 #include "status_led.h"
 #include "../../shared/diagnostic_log.h"
 #include "../../shared/firmware_identity.h"
@@ -297,6 +298,10 @@ uint8_t  g_reg_frag_total  = 1;
 uint8_t  g_reg_frag_next   = 0;
 uint32_t g_reg_next_ms     = 0;
 uint32_t g_reg_backoff_ms  = kRegBackoffMinMs;
+catalogtransport::Sender g_catalog_sender;
+void catalogRelayTick(uint32_t now);
+void catalogSenderTick(uint32_t now);
+void handleCatalogRoute(const LoraP2P::RxFrame& f);
 
 // v2.3: cerrojo de muestreo. El nodo no toma medidas Modbus hasta
 // completar el registro en la red LoRa (primer WELCOME). Latch: una vez
@@ -1013,13 +1018,48 @@ void handleSnOffer(const LoraP2P::RxFrame& f) {
     (void)f;
 }
 
+uint8_t g_config_path[16] = {}, g_config_path_count = 0;
+uint32_t g_config_route_until = 0, g_config_route_token = 0, g_config_reply_ticket = 0;
+bool g_config_cellular_dispatch = false;
+
+bool configCellularActive() {
+    return g_config_path_count && int32_t(g_config_route_until - millis()) > 0;
+}
+
+bool configCellularReply(uint8_t type, const uint8_t* body, size_t length) {
+    if (!configCellularActive() || length + 2 + g_config_path_count > protocol::kMaxPayloadSecure) return false;
+    if (g_config_path_count == 1) {
+        JsonDocument doc;
+        uint8_t root[6]; if (!deviceid::gateway(root)) return false;
+        char deployment[13]; deviceid::text(root,6,deployment);
+        doc["schema_version"]="4.0"; doc["deployment_id"]=deployment;
+        doc["kind"]="config"; doc["origin"]=g_cfg.node_id; doc["frame_type"]=type;
+        char own_uid[13]; deviceid::text(deviceid::own().uid,6,own_uid);
+        doc["device_uid"]=own_uid; doc["publisher_uid"]=own_uid;
+        char hex[2*protocol::kMaxPayload+1];
+        for (size_t i=0;i<length;++i) snprintf(hex+2*i,3,"%02x",body[i]);
+        doc["body"]=hex;
+        char json[640], topic[96]; serializeJson(doc,json,sizeof(json));
+        snprintf(topic,sizeof(topic),"modulinkr/v2/%s/%u/cmd/response",deployment,g_cfg.node_id);
+        return nbsvc.publishMessage(topic,json,&g_config_reply_ticket);
+    }
+    uint8_t payload[protocol::kMaxPayloadSecure]; payload[0]=g_config_path_count;
+    for (uint8_t i=0;i<g_config_path_count;++i) payload[1+i]=g_config_path[g_config_path_count-1-i];
+    payload[1+g_config_path_count]=type;
+    memcpy(payload+2+g_config_path_count,body,length);
+    nextSeq();
+    return lora.sendRoute(payload[2],payload[g_config_path_count],g_lora_seq,
+        protocol::kFrameConfigRouteResult,payload,length+2+g_config_path_count,g_config_path_count)==LoraP2P::Status::OK;
+}
+
 // ----- Canal de configuración remota (frame-format.md §17) -----
 
 // Un fragmento del config nuevo. Se acumula y se confirma con el mapa de lo
 // recibido, para que el emisor sepa de una sola trama qué le falta reenviar.
 void handleConfigPush(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-push"); return; }
-    if (f.payload_length < 9) return;   // 8 de cabecera + al menos 1 de datos
+    if (f.payload_length < 9) return;
+    if (!g_config_cellular_dispatch && configCellularActive()) return;
 
     uint32_t xfer;
     uint16_t offset;
@@ -1036,9 +1076,14 @@ void handleConfigPush(const LoraP2P::RxFrame& f) {
 
     diag::log("DEBUG", "node.config", "config.fragment_received", "fragment=%u/%u bytes=%u offset=%u bitmap=%08lX\n", idx, total, len, offset, static_cast<unsigned long>(cfgota::receivedMask()));
 
-    nextSeq();
-    lora.sendConfigAck(g_lora_seq, mesh.parentId(), xfer, total,
-                       cfgota::receivedMask());
+    if (configCellularActive()) {
+        uint8_t reply[9]; memcpy(reply,&xfer,4); reply[4]=total;
+        uint32_t mask=cfgota::receivedMask(); memcpy(reply+5,&mask,4);
+        configCellularReply(protocol::kFrameConfigAck,reply,sizeof(reply));
+    } else {
+        nextSeq();
+        lora.sendConfigAck(g_lora_seq, mesh.parentId(), xfer, total, cfgota::receivedMask());
+    }
 }
 
 // Orden de aplicar lo reensamblado. Se verifica la integridad, se valida el
@@ -1069,6 +1114,7 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-commit"); return; }
     // La hora de aplicación es obligatoria; cero representa aplicar ahora.
     if (f.payload_length != 42) return;
+    if (!g_config_cellular_dispatch && configCellularActive()) return;
 
     uint32_t xfer;
     uint16_t total_len;
@@ -1094,8 +1140,16 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
         } else {
             char err[96];
             bool ok = cfg::load(texto, *tmp, err, sizeof(err));
-            if (ok && (tmp->node_id!=g_cfg.node_id || strcmp(tmp->deployment_id,g_cfg.deployment_id))) {
-                ok=false; snprintf(err,sizeof(err),"physical identity changes require USB");
+            if (ok) {
+                // La asociación aprendida se conserva en NVS aunque falte en el JSON.
+                uint8_t root[6] = {};
+                char deployment[13] = {};
+                const bool known = deviceid::gateway(root);
+                if (known) deviceid::text(root, sizeof(root), deployment);
+                if (tmp->node_id != g_cfg.node_id || !known ||
+                    strcmp(tmp->deployment_id, deployment)) {
+                    ok=false; snprintf(err,sizeof(err),"physical identity changes require USB");
+                }
             }
             delete tmp;
             if (!ok) {
@@ -1140,9 +1194,14 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
 
     // El veredicto sale ANTES de reiniciar, y se le da tiempo al aire: si el
     // nodo se reiniciara de inmediato, el emisor no sabría nunca si lo aplicó.
-    nextSeq();
-    lora.sendConfigResult(g_lora_seq, mesh.parentId(), xfer,
-                          static_cast<uint8_t>(r), detalle);
+    if (configCellularActive()) {
+        uint8_t reply[69]; memcpy(reply,&xfer,4); reply[4]=static_cast<uint8_t>(r);
+        size_t n=strnlen(detalle,64); memcpy(reply+5,detalle,n);
+        configCellularReply(protocol::kFrameConfigResult,reply,5+n);
+    } else {
+        nextSeq();
+        lora.sendConfigResult(g_lora_seq, mesh.parentId(), xfer, static_cast<uint8_t>(r), detalle);
+    }
 
     cfgota::reset();
     if (r != cfgota::Result::APPLIED) return;
@@ -1154,7 +1213,10 @@ void handleConfigCommit(const LoraP2P::RxFrame& f) {
     if (apply_at != 0) return;
 
     Serial.flush();
-    delay(1500);
+    if (configCellularActive() && g_config_path_count==1 && g_config_reply_ticket) {
+        const uint32_t until=millis()+30000;
+        while (nbsvc.lastMessagePublished()<g_config_reply_ticket && int32_t(until-millis())>0) delay(20);
+    } else delay(1500);
     ESP.restart();
 }
 
@@ -1239,6 +1301,7 @@ void cfgReadRelease() {
 void handleConfigGet(const LoraP2P::RxFrame& f) {
     if (f.dest_id != g_cfg.node_id) { relayDownlink(f, "cfg-get"); return; }
     if (f.payload_length != 8) return;
+    if (!g_config_cellular_dispatch && configCellularActive()) return;
 
     uint32_t req, pedido;
     std::memcpy(&req,    &f.payload[0], sizeof(req));
@@ -1256,11 +1319,18 @@ void handleConfigGet(const LoraP2P::RxFrame& f) {
             diag::log("ERROR", "node.config", "config.config_get_failed", "reason=config_missing");
             return;
         }
+        const size_t fragment_bytes=configCellularActive() ? 144 : kCfgReadFragBytes;
+        if (len>32*fragment_bytes) {
+            uint8_t reply[5]; memcpy(reply,&req,4); reply[4]=static_cast<uint8_t>(cfgota::Result::TOO_BIG);
+            if(configCellularActive()) configCellularReply(protocol::kFrameConfigResult,reply,sizeof(reply));
+            else { nextSeq(); lora.sendConfigResult(g_lora_seq,mesh.parentId(),req,reply[4],"configuration exceeds 32 fragments"); }
+            free(texto); g_config_path_count=0; return;
+        }
         g_cfgread_buf   = texto;
         g_cfgread_len   = len;
         g_cfgread_req   = req;
         g_cfgread_total = static_cast<uint8_t>(
-            (len + kCfgReadFragBytes - 1) / kCfgReadFragBytes);
+            (len + fragment_bytes - 1) / fragment_bytes);
         diag::log("INFO", "node.config", "config.config_get", "request_id=%08lX bytes=%u fragments=%u\n", static_cast<unsigned long>(req), static_cast<unsigned>(len), g_cfgread_total);
     }
 
@@ -1276,7 +1346,7 @@ void handleConfigGet(const LoraP2P::RxFrame& f) {
 // también tiene límite de banda y ocho tramas seguidas se lo comerían.
 void cfgReadTick(uint32_t now) {
     if (g_cfgread_req == 0 || g_cfgread_mask == 0) return;
-    if (!g_lora_ready || !mesh.hasParent()) return;
+    if (!configCellularActive() && (!g_lora_ready || !mesh.hasParent())) return;
     if (g_cfgread_next_ms != 0 &&
         static_cast<int32_t>(now - g_cfgread_next_ms) < 0) {
         return;
@@ -1286,26 +1356,32 @@ void cfgReadTick(uint32_t now) {
     while (idx < g_cfgread_total && !((g_cfgread_mask >> idx) & 1UL)) idx++;
     if (idx >= g_cfgread_total) { cfgReadRelease(); return; }
 
-    const size_t off = static_cast<size_t>(idx) * kCfgReadFragBytes;
+    const size_t fragment_bytes=configCellularActive() ? 144 : kCfgReadFragBytes;
+    const size_t off = static_cast<size_t>(idx) * fragment_bytes;
     size_t len = g_cfgread_len - off;
-    if (len > kCfgReadFragBytes) len = kCfgReadFragBytes;
+    if (len > fragment_bytes) len = fragment_bytes;
 
-    nextSeq();
-    if (lora.sendConfigData(g_lora_seq, mesh.parentId(), g_cfgread_req,
-                            idx, g_cfgread_total, static_cast<uint16_t>(off),
-                            reinterpret_cast<const uint8_t*>(g_cfgread_buf + off),
-                            static_cast<uint8_t>(len)) != LoraP2P::Status::OK) {
-        return;   // cola llena o radio ocupada: se reintenta en el próximo tick
+    if (configCellularActive()) {
+        uint8_t reply[8+kCfgReadFragBytes]; memcpy(reply,&g_cfgread_req,4);
+        reply[4]=idx; reply[5]=g_cfgread_total; uint16_t offset=off; memcpy(reply+6,&offset,2);
+        memcpy(reply+8,g_cfgread_buf+off,len);
+        if (!configCellularReply(protocol::kFrameConfigData,reply,8+len)) return;
+    } else {
+        nextSeq();
+        if (lora.sendConfigData(g_lora_seq, mesh.parentId(), g_cfgread_req,
+                idx,g_cfgread_total,static_cast<uint16_t>(off),
+                reinterpret_cast<const uint8_t*>(g_cfgread_buf+off),len) != LoraP2P::Status::OK) return;
     }
 
     g_cfgread_mask &= ~(1UL << idx);
     // Diez veces el aire de la trama deja la banda al 10 %, el mismo criterio
     // que usa el gateway para espaciar los suyos.
-    g_cfgread_next_ms = now + 10 * lora.lastFrameAirtimeMs();
+    g_cfgread_next_ms = now + (configCellularActive() && g_config_path_count==1 ? 1000 : 10 * lora.lastFrameAirtimeMs());
     diag::log("DEBUG", "node.config", "config.config_data", "fragment=%u/%u bytes=%u sent=true\n", idx, g_cfgread_total, static_cast<unsigned>(len));
 
     if (g_cfgread_mask == 0) {
         diag::log("INFO", "node.config", "config.config_upload_complete", "waiting_for_confirmation=true");
+        if (configCellularActive()) { g_config_path_count=0; cfgReadRelease(); }
     }
 }
 
@@ -1544,6 +1620,105 @@ void handleFwBcastPoll(const LoraP2P::RxFrame& f) {
     diag::log("DEBUG", "node.firmware_broadcast", "firmware_broadcast.map_sent", "missing=%u total=%u\n", static_cast<unsigned>(fwbcast::missing()), static_cast<unsigned>(fwbcast::totalFrags()));
 }
 
+void dispatchCellularConfig(uint8_t type, const uint8_t* body, size_t length,
+                            const uint8_t* path, uint8_t n) {
+    if (!n || n>16 || length<4 || length>protocol::kMaxPayloadSecure ||
+        (type!=protocol::kFrameConfigPush && type!=protocol::kFrameConfigCommit && type!=protocol::kFrameConfigGet)) return;
+    uint32_t token; memcpy(&token,body,4);
+    if (!token || (configCellularActive() && (token!=g_config_route_token || n!=g_config_path_count || memcmp(path,g_config_path,n)))) return;
+    if (!configCellularActive() && (bajandoFirmware() || cfgota::active() || g_cfgread_mask ||
+        g_write.active || g_maintenance_restart_ms || g_trial_active || g_fw_trial_active || configstore::pendingAt())) {
+        diag::log("WARNING","node.config","config.request_rejected","reason=busy frame=%u",type);
+        return;
+    }
+    memcpy(g_config_path,path,n); g_config_path_count=n;
+    g_config_route_token=token; g_config_route_until=millis()+600000;
+    LoraP2P::RxFrame inner{}; inner.dest_id=g_cfg.node_id;
+    inner.origin_id=protocol::kAddrGateway; inner.payload_length=length;
+    memcpy(inner.payload,body,length);
+    g_config_cellular_dispatch=true;
+    if(type==protocol::kFrameConfigPush) handleConfigPush(inner);
+    else if(type==protocol::kFrameConfigCommit) handleConfigCommit(inner);
+    else handleConfigGet(inner);
+    g_config_cellular_dispatch=false;
+}
+
+void handleConfigRoute(const LoraP2P::RxFrame& f) {
+    if(f.hop_dst!=g_cfg.node_id || f.payload_length<7) return;
+    uint8_t n=f.payload[0]; const uint8_t* path=f.payload+1;
+    if(n>16 || f.payload_length<=n+2 || !writecmd::pathValid(path,n) ||
+       path[0]!=f.origin_id || path[n-1]!=f.dest_id) return;
+    int pos=-1; for(uint8_t i=0;i<n;++i) if(path[i]==g_cfg.node_id) pos=i;
+    if(pos<=0 || path[pos-1]!=f.hop_src) return;
+    if(pos<n-1) { if(g_cfg.relay_enabled && f.ttl) lora.forwardFrame(f,path[pos+1]); return; }
+    uint8_t type=path[n]; const uint8_t* body=path+n+1; size_t length=f.payload_length-n-2;
+    diag::log("INFO","node.config","config.route_received","origin=%u frame=%u bytes=%u response=%s",
+        f.origin_id,type,static_cast<unsigned>(length),f.frame_type==protocol::kFrameConfigRouteResult ? "true" : "false");
+    if(f.frame_type==protocol::kFrameConfigRoute) dispatchCellularConfig(type,body,length,path,n);
+    else if(g_cfg.super_node && nbsvc.ready() &&
+        (type==protocol::kFrameConfigAck || type==protocol::kFrameConfigData || type==protocol::kFrameConfigResult)) {
+        uint8_t root[6]; if(!deviceid::gateway(root)) return;
+        char deployment[13]; deviceid::text(root,6,deployment);
+        JsonDocument doc; doc["schema_version"]="4.0"; doc["deployment_id"]=deployment;
+        doc["kind"]="config"; doc["origin"]=f.origin_id; doc["frame_type"]=type;
+        char target_uid[13],publisher_uid[13]; deviceid::text(f.identity.uid,6,target_uid);
+        deviceid::text(deviceid::own().uid,6,publisher_uid);
+        doc["device_uid"]=target_uid; doc["publisher_uid"]=publisher_uid;
+        char hex[2*protocol::kMaxPayload+1]; for(size_t i=0;i<length;++i) snprintf(hex+2*i,3,"%02x",body[i]);
+        doc["body"]=hex; char json[640],topic[96]; serializeJson(doc,json,sizeof(json));
+        snprintf(topic,sizeof(topic),"modulinkr/v2/%s/%u/cmd/response",deployment,g_cfg.node_id);
+        const bool queued=nbsvc.publishMessage(topic,json);
+        diag::log(queued ? "INFO" : "WARNING","node.config",
+            queued ? "config.response_queued" : "config.response_rejected",
+            "origin=%u frame=%u bytes=%u",f.origin_id,type,static_cast<unsigned>(length));
+    }
+}
+
+bool incomingCellularConfig(JsonDocument& doc) {
+    if(strcmp(doc["kind"]|"","config")) return false;
+    auto rejected=[](const char* reason) {
+        diag::log("WARNING","node.config","config.command_rejected","reason=%s",reason);
+        return true;
+    };
+    uint8_t root[6],uid[6]; const auto own=deviceid::own();
+    if(!deviceid::gateway(root) || deviceid::blocked(g_cfg.node_id) ||
+       !deviceid::parse(doc["destination_uid"]|"",6,uid) || memcmp(uid,own.uid,6)) return rejected("destination_identity");
+    char deployment[13]; deviceid::text(root,6,deployment);
+    if(strcmp(doc["deployment_id"]|"",deployment)) return rejected("deployment");
+    if(!nodeclock::synced()) return rejected("clock_unsynchronized");
+    uint32_t expires=doc["expires"]|0U;
+    if(expires<nodeclock::epochNow() || expires-nodeclock::epochNow()>600) return rejected("expiry");
+    JsonArrayConst route=doc["path"].as<JsonArrayConst>();
+    if(!route.size() || route.size()>16) return rejected("path_length");
+    uint8_t path[16],n=route.size();
+    for(uint8_t i=0;i<n;++i) { if(!route[i].is<unsigned>() || route[i].as<unsigned>()>254) return rejected("path_address"); path[i]=route[i].as<uint8_t>(); }
+    if(!writecmd::pathValid(path,n) || path[0]!=g_cfg.node_id) return rejected("path");
+    deviceid::Stamp target=own;
+    if(path[n-1]!=g_cfg.node_id && !deviceid::peer(path[n-1],target)) return rejected("target_unknown");
+    if(!deviceid::parse(doc["target_uid"]|"",6,uid) || memcmp(uid,target.uid,6)) return rejected("target_identity");
+    const char* hex=doc["body"]|""; size_t chars=strlen(hex);
+    if(chars%2 || chars<8 || chars/2+2+n>protocol::kMaxPayloadSecure) return rejected("body_length");
+    uint8_t payload[protocol::kMaxPayloadSecure]; payload[0]=n; memcpy(payload+1,path,n);
+    if(!doc["frame_type"].is<unsigned>()) return rejected("frame_type");
+    unsigned type=doc["frame_type"].as<unsigned>();
+    if(type!=0x13 && type!=0x15 && type!=0x17) return rejected("frame_type");
+    payload[n+1]=type;
+    auto digit=[](char c)->int { if(c>='0'&&c<='9') return c-'0'; if(c>='a'&&c<='f') return c-'a'+10; return -1; };
+    for(size_t i=0;i<chars/2;++i) { int a=digit(hex[2*i]),b=digit(hex[2*i+1]); if(a<0||b<0) return rejected("body_encoding"); payload[n+2+i]=16*a+b; }
+    diag::log("INFO","node.config","config.command_received","target=%u frame=%u bytes=%u path_nodes=%u",
+        path[n-1],type,static_cast<unsigned>(chars/2),n);
+    if(n==1) dispatchCellularConfig(type,payload+n+2,chars/2,path,n);
+    else if(g_lora_ready && g_cfg.relay_enabled) {
+        nextSeq();
+        const auto status=lora.sendRoute(path[1],path[n-1],g_lora_seq,protocol::kFrameConfigRoute,payload,n+2+chars/2,n);
+        const bool queued=status==LoraP2P::Status::OK;
+        diag::log(queued ? "INFO" : "WARNING","node.config",
+            queued ? "config.route_queued" : "config.route_rejected",
+            "target=%u next_hop=%u frame=%u status=%u",path[n-1],path[1],type,static_cast<unsigned>(status));
+    } else return rejected(g_lora_ready ? "relay_disabled" : "radio_unavailable");
+    return true;
+}
+
 void publishWriteResult(uint8_t origin,const writecmd::Result& result) {
     JsonDocument doc; doc["origin"]=origin;
     doc["id"]=result.id; doc["fingerprint"]=result.fingerprint; doc["status"]=result.state;
@@ -1597,8 +1772,16 @@ void incomingCellularWrites() {
     if(!g_cfg.super_node) return;
     char json[768];
     if(!nbsvc.receiveCommand(json,sizeof(json))) return;
-    JsonDocument doc; if(deserializeJson(doc,json)) return;
-    if(strcmp(doc["schema_version"]|"","4.0")!=0) return;
+    JsonDocument doc;
+    if(deserializeJson(doc,json)) {
+        diag::log("WARNING","node.command","command.rejected","reason=invalid_json");
+        return;
+    }
+    if(strcmp(doc["schema_version"]|"","4.0")!=0) {
+        diag::log("WARNING","node.command","command.rejected","reason=schema_version");
+        return;
+    }
+    if(incomingCellularConfig(doc)) return;
     const char* hex=doc["body"]|""; const size_t size=strlen(hex);
     if(size%2 || size<48 || size>2*writecmd::kMaxBody) return;
     uint8_t body[writecmd::kMaxBody];
@@ -1958,6 +2141,8 @@ void processLoraRx() {
         mesh.notePeerAlive(f.hop_src, millis());
 
         switch (f.frame_type) {
+            case protocol::kFrameCatalogRoute:
+            case protocol::kFrameCatalogRouteAck: handleCatalogRoute(f); break;
             case protocol::kFrameTelemetryRoute: handleRouteTelemetry(f); break;
             case protocol::kFrameSnRouteRequest: handleRouteRequest(f); break;
             case protocol::kFrameSnRouteOffer: handleRouteOffer(f); break;
@@ -2012,6 +2197,10 @@ void processLoraRx() {
                 break;
             case protocol::kFrameFwBcastPoll:
                 handleFwBcastPoll(f);
+                break;
+            case protocol::kFrameConfigRoute:
+            case protocol::kFrameConfigRouteResult:
+                handleConfigRoute(f);
                 break;
             case protocol::kFrameModbusWrite:
             case protocol::kFrameModbusWriteResult:
@@ -2225,6 +2414,7 @@ void snClientTick(uint32_t now) {
                 diag::log("INFO", "node.supernode", "supernode.gateway_route_recovered", "custody_cancelled=true");
                 break;
             }
+            catalogSenderTick(now);
             if (outbox.count() > 0 && !g_outbox_inflight) {
                 Outbox::Entry* e = outbox.oldest(g_cfg.node_id);
                 if (e == nullptr) break;
@@ -2468,7 +2658,7 @@ void radioHealthTick(uint32_t now) {
 void trialTick(uint32_t now) {
     if (!g_trial_active) return;
 
-    if (g_registered) {
+    if (g_registered || (g_cfg.super_node && nbsvc.lastPublishedBatchId()>0) || g_led_custody.confirmed) {
         g_trial_active = false;
         configstore::clearTrial();
         diag::log("INFO", "node.config", "config.trial_confirmed", "network_reachable_s=%lu\n", static_cast<unsigned long>((now - g_trial_start_ms) / 1000));
@@ -3055,8 +3245,11 @@ void loop() {
         return;
     }
 
+    if(configCellularActive()) cfgReadTick(millis());
+    else if(g_config_path_count) { g_config_path_count=0; cfgReadRelease(); cfgota::reset(); }
     independentTick(millis());
     writeTick();
+    catalogRelayTick(millis());
 
     static uint32_t last_lora_ms = 0;
     static bool     first_loop   = true;
@@ -3119,7 +3312,7 @@ void loop() {
             if (cfgota::expireIfIdle(tnow)) {
                 diag::log("INFO", "node.config", "config.transfer_abandoned", "reason=inactivity");
             }
-            cfgReadTick(tnow);
+            if(!configCellularActive()) cfgReadTick(tnow);
             quietTick(tnow);
             fwbcast::expireIfIdle(tnow);
             fwResultTick(tnow);
@@ -3145,4 +3338,8 @@ void loop() {
 
     statusLedTick(millis());
     delay(20);
+}
+
+namespace {
+#include "catalog_relay.h"
 }

@@ -6,7 +6,7 @@
 <title>ModuLinkr</title>
 <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
 <link rel="stylesheet" href="/static/vendor/webawesome-3.11.0/dist-cdn/styles/themes/default.css">
-  <link rel="stylesheet" href="/static/style.css?v=rak-onboarding-20261015b">
+  <link rel="stylesheet" href="/static/style.css?v=mesh-recovery-20261015a">
 </head>
 <body>
 
@@ -183,6 +183,7 @@
               <span><i class="grafico-trazo" aria-hidden="true"></i>LoRa</span>
               <span><i class="grafico-trazo nbiot" aria-hidden="true"></i>NB-IoT</span>
             </div>
+            <div id="grafico-conexiones" class="grafico-vias" aria-label="Métodos de conexión" hidden></div>
             <div class="grafico-contenido">
             <div id="grafico"></div>
             <div id="datos-vacio" class="datos-vacio" role="status">
@@ -452,17 +453,7 @@
             </div>
             <div class="ai-texto">
               <div class="ai-titulo">Actualizar firmware de nodos</div>
-              <div class="ai-sub">Instalar una actualización por cable o LoRa</div>
-            </div>
-            <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
-          </a>
-          <a class="ajuste-item" href="#/configuracion/nodo/usb">
-            <div class="ai-icono">
-              <modulinkr-icon name="mdi:usb"></modulinkr-icon>
-            </div>
-            <div class="ai-texto">
-              <div class="ai-titulo">Archivo de configuración</div>
-              <div class="ai-sub">Importar, editar o exportar la configuración por USB</div>
+              <div class="ai-sub">Instalar una actualización por USB o Red Mesh</div>
             </div>
             <modulinkr-icon class="ai-chevron" name="mdi:chevron-right"></modulinkr-icon>
           </a>
@@ -489,27 +480,12 @@
         </div>
 
         <div class="fw-modos" role="group" aria-label="Medio de actualización">
-          <button id="fw-modo-lora" aria-pressed="true">Por LoRa</button>
-          <button id="fw-modo-usb" aria-pressed="false">Por USB</button>
+          <button id="fw-modo-lora" aria-pressed="true">Red Mesh</button>
+          <button id="fw-modo-usb" aria-pressed="false">USB</button>
         </div>
         <div class="card cfg-card" id="fw-usb-card" hidden>
           <h2>Actualizar por USB</h2>
           <p class="texto-ayuda">Conecta e identifica el nodo para comprobar si hay una actualización. Su configuración se conservará.</p>
-          <div class="cfg-fila">
-            <label class="cfg-campo"><span>USB conectado a</span>
-              <select id="fw-fuente">
-                <option value="local">Este equipo</option>
-                <option value="gateway">Gateway</option>
-              </select>
-            </label>
-          </div>
-          <div id="fw-gateway" hidden>
-            <div class="cfg-fila cfg-herramientas">
-              <button id="fw-buscar">Identificar nodo</button>
-              <select id="fw-puertos" aria-label="Nodo conectado" hidden></select>
-            </div>
-            <p id="fw-busqueda-aviso" class="mensaje-slot" role="status"></p>
-          </div>
           <div id="fw-local">
             <div class="cfg-fila"><button id="fw-local-buscar">Identificar nodo</button></div>
             <p id="fw-local-aviso" class="mensaje-slot" role="status"></p>
@@ -526,7 +502,6 @@
           <p id="fw-bin-info" class="mensaje-slot" role="status"></p>
           <details id="fw-notas" class="fw-notas" hidden><summary>Ver cambios</summary><ul></ul></details>
           <div class="cfg-fila cfg-acciones">
-            <button id="fw-flash" class="btn-primario" hidden>Actualizar nodo</button>
             <button id="fw-local-flash" class="btn-primario" hidden>Actualizar nodo</button>
             <button id="fw-rak-prepare" hidden>Comprobar y preparar radio RAK</button>
           </div>
@@ -534,8 +509,8 @@
         </div>
 
         <div class="card cfg-card" id="bc-card">
-          <h2>Actualizar por LoRa</h2>
-          <p class="texto-ayuda">Selecciona los nodos que quieres actualizar. El gateway enviará el firmware a cada nodo por separado y continuará aunque cierres esta página. Puedes instalar después o activar la instalación automática.</p>
+          <h2>Actualizar por Red Mesh</h2>
+          <p class="texto-ayuda">Actualmente solo se pueden actualizar nodos conectados directamente por LoRa al gateway. Selecciona los nodos que quieres actualizar. El gateway enviará el firmware a cada nodo por separado y continuará aunque cierres esta página. Puedes instalar después o activar la instalación automática.</p>
           <details id="bc-notas" class="fw-notas" hidden><summary>Ver cambios</summary><ul></ul></details>
           <p id="bc-radio-aviso" class="mensaje mensaje-info" hidden>No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.</p>
           <div id="bc-panel" hidden>
@@ -544,62 +519,19 @@
             <div class="tabla-scroll" role="region" tabindex="0"
                  aria-label="Progreso de actualización de los nodos">
               <table class="tabla" id="bc-tabla">
-                <thead><tr><th scope="col">Nodo</th><th scope="col">En ejecución</th><th scope="col">Disponible en el gateway</th><th scope="col">Actualización por LoRa</th><th scope="col">Acción</th></tr></thead>
+                <thead><tr><th scope="col">Nodo</th><th scope="col">En ejecución</th><th scope="col">Disponible en el gateway</th><th scope="col">Actualización por Red Mesh</th><th scope="col">Acción</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
           </div>
           <div class="cfg-fila cfg-acciones">
+            <div class="ota-auto"><label><input type="checkbox" id="bc-duty-override" aria-describedby="bc-duty-help"> Permitir sobrepasar el límite de duty cycle</label>
+              <p id="bc-duty-help" class="texto-ayuda">Permite superar el 10 % durante este envío. Desactivado, el envío espera cuando agota el presupuesto de radio. Solo afecta a los nodos seleccionados.</p></div>
             <div class="ota-auto"><label><input type="checkbox" id="bc-auto-install" aria-describedby="bc-auto-help"> Instalar automáticamente al completar la recepción</label>
               <p id="bc-auto-help" class="texto-ayuda">Cada nodo se instalará y reiniciará tras confirmar la recepción completa y la verificación, antes de enviar al siguiente nodo. Se aplica a los nodos seleccionados para este envío.</p></div>
             <button id="bc-lanzar" class="btn-primario" disabled>Selecciona los nodos</button>
             <button id="bc-cancelar" class="peligro-borde" hidden>Cancelar envíos pendientes</button>
             <span id="bc-aviso" class="mensaje-slot" role="status"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Nivel 3: carga del config.json por USB -->
-      <div class="ajustes ajustes-amplios" id="cfg-usb" hidden>
-        <div class="ajustes-cabecera">
-          <a class="volver" href="#/configuracion/nodo" title="Volver">
-            <modulinkr-icon name="mdi:arrow-left"></modulinkr-icon>
-          </a>
-          <h2>Archivo de configuración</h2>
-        </div>
-
-        <div class="card cfg-card">
-          <h2>Nodo conectado por USB</h2>
-          <p class="texto-ayuda">Selecciona dónde está conectado el nodo.</p>
-          <div class="cfg-fila">
-            <label class="cfg-campo"><span>Conexión del nodo</span>
-              <select id="cfg-fuente">
-                <option value="gateway">USB en el gateway</option>
-                <option value="local">USB en este equipo</option>
-              </select>
-            </label>
-          </div>
-          <div class="cfg-fila cfg-herramientas">
-            <button id="cfg-buscar">Buscar nodo</button>
-            <select id="cfg-puertos" aria-label="Nodo conectado" hidden></select>
-            <span id="cfg-busqueda-aviso" class="aviso"></span>
-          </div>
-          <div id="cfg-nodo" class="cfg-nodo" aria-live="polite" hidden></div>
-        </div>
-
-        <div class="card cfg-card" id="cfg-editor" hidden>
-          <h2>Editar configuración</h2>
-          <div class="cfg-fila cfg-herramientas">
-            <button id="cfg-leer">Importar del nodo</button>
-            <button id="cfg-archivo-btn">Importar archivo</button>
-            <input type="file" id="cfg-archivo" accept=".json,application/json" hidden>
-          </div>
-          <textarea id="cfg-texto" aria-label="Configuración del nodo" spellcheck="false"
-                    placeholder="Pega o importa aquí la configuración"></textarea>
-          <div class="cfg-fila cfg-acciones">
-            <button id="cfg-enviar" class="btn-primario">Guardar en el nodo</button>
-            <button id="cfg-borrar" class="peligro-borde">Eliminar configuración</button>
-            <span id="cfg-resultado" class="aviso"></span>
           </div>
         </div>
       </div>
@@ -632,7 +564,7 @@
 
         <div class="card cfg-card">
           <h2>Actualización</h2>
-          <p class="texto-ayuda">Método: USB en el gateway.</p>
+          <p class="texto-ayuda">Conecta la radio al USB de este equipo para actualizarla. La red LoRa quedará sin radio durante la operación.</p>
           <div class="fw-versiones">
             <div><span>Firmware instalado</span><strong id="radio-version-instalada">Sin comprobar</strong></div>
             <div><span>Disponible en el gateway</span><strong id="radio-version-disponible">Sin comprobar</strong></div>
@@ -1000,11 +932,6 @@
 
           <div id="dbg-panel" role="tabpanel" aria-labelledby="dbg-tab-gateway">
           <div class="cfg-fila dbg-controles">
-            <select id="dbg-fuente" aria-label="Conexión del nodo" hidden>
-              <option value="gateway">USB en el gateway</option>
-              <option value="local">USB en este equipo</option>
-            </select>
-            <select id="dbg-puerto" aria-label="Nodo USB" hidden></select>
             <select id="dbg-nodo" aria-label="Nodo Modbus" hidden></select>
             <button id="dbg-toggle" class="btn-primario">Iniciar seguimiento</button>
             <button id="dbg-limpiar" class="btn-tranquilo">Limpiar</button>
@@ -1059,14 +986,12 @@
           <div class="cfg-fila cfg-herramientas">
             <label class="cfg-campo"><span>Conexión del nodo</span>
               <select id="f-fuente">
-                <option value="gateway">USB en el gateway</option>
-                <option value="local">USB en este equipo</option>
-                <option value="lora">LoRa</option>
+                <option value="local">USB</option>
+                <option value="lora">Red Mesh</option>
               </select>
             </label>
-            <select id="f-lora-nodo" aria-label="Nodo LoRa" hidden></select>
+            <select id="f-lora-nodo" aria-label="Nodo de Red Mesh" hidden></select>
             <button id="f-leer">Importar configuración</button>
-            <select id="f-leer-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="f-leer-aviso" class="aviso"></span>
           </div>
           <p id="f-radio-aviso" class="aviso ambar" hidden></p>
@@ -1197,7 +1122,6 @@
           </section>
           <div class="cfg-fila cfg-herramientas">
             <button id="f-buscar" disabled>Buscar nodo</button>
-            <select id="f-puertos" aria-label="Nodo conectado" hidden></select>
             <span id="f-busqueda-aviso" class="aviso"></span>
           </div>
           <p class="aviso" id="f-fw-estado" hidden></p>
@@ -1270,6 +1194,7 @@
               <span><i class="grafico-trazo" aria-hidden="true"></i>LoRa</span>
               <span><i class="grafico-trazo nbiot" aria-hidden="true"></i>NB-IoT</span>
   </div>
+  <div id="modal-conexiones" class="grafico-vias" aria-label="Métodos de conexión" hidden></div>
   <div id="modal-grafico"></div>
   <div class="modal-acciones">
     <a id="modal-ver-datos" href="#/datos">
@@ -1453,7 +1378,7 @@
 <script type="module" src="/static/vendor/cally-0.9.2/dist/cally.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree-item/tree-item.js"></script>
 <script type="module" src="/static/vendor/webawesome-3.11.0/dist-cdn/components/tree/tree.js"></script>
-<script src="/static/components.js?v=rak-onboarding-20261015b"></script>
+<script src="/static/components.js?v=mesh-recovery-20261015a"></script>
 <script src="/static/network-state.js?v=prepublic-20261014"></script>
 <script src="/static/quarantine.js?v=prepublic-20261014"></script>
 <dialog id="notificaciones-panel" aria-labelledby="notificaciones-titulo">
@@ -1479,6 +1404,6 @@
 <script src="/static/supervision.js?v=prepublic-20261014"></script>
 <script src="/static/identity.js?v=prepublic-20261014"></script>
 <script src="/static/rak-onboarding.js?v=rak-onboarding-20261015b"></script>
-<script src="/static/app.js?v=rak-onboarding-20261015b"></script>
+<script src="/static/app.js?v=mesh-recovery-20261015a"></script>
 </body>
 </html>

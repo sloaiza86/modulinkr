@@ -4,7 +4,7 @@ El directorio contiene el firmware común de los dispositivos de campo ModuLinkr
 
 ## Estado actual
 
-La versión declarada en `src/main.cpp` es `0.0.85`. El firmware exige identidad física, protocolo LoRa 4.0, configuración 3.3 y una versión del RAK aprobada explícitamente. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`. ModuLinkr permanece antes de su primera publicación; los formatos internos previos no constituyen versiones desplegadas en clientes.
+La versión declarada en `src/main.cpp` es `0.0.86`. El firmware exige identidad física, protocolo LoRa 4.0, configuración 3.3 y una versión del RAK aprobada explícitamente. Las configuraciones de banco `configs/nodo1.json` y `configs/nodo2.json` usan `3.3`. ModuLinkr permanece antes de su primera publicación; los formatos internos previos no constituyen versiones desplegadas en clientes.
 
 El rol no se decide al compilar. `node.type` y los demás campos de `/config.json` determinan si el equipo opera como nodo o supernodo, qué dispositivo Modbus lee y qué parámetros de red utiliza.
 
@@ -110,3 +110,8 @@ Desde 0.0.81, el catálogo relaciona cada operación con sus lecturas y admite p
 ## Identidad física y despliegues
 
 El código del nodo 0.0.83 utiliza la radio 4.0, catálogos por huella y muestras vinculadas a equipo y sesión. El gateway bloquea identificadores repetidos y el consumidor separa los despliegues. El contrato actual, la conservación interna del banco y el procedimiento de despliegue se describen en [`identity-safety.md`](../shared/protocol/identity-safety.md). El banco debe utilizar nodos y relays del contrato de radio 4.0; las versiones internas previas no representan clientes publicados.
+
+
+## Configuración mediante NB-IoT
+
+La configuración remota admite la salida celular del supernodo y sus relés mediante un recorrido explícito. Se reutilizan la comprobación SHA-256, la validación de configuración, el respaldo y la ventana de prueba. La confirmación puede viajar por el recorrido inverso hasta el supernodo y MQTT. Un lote celular confirmado o una custodia aceptada después del arranque permite confirmar la conectividad de la configuración nueva. Se requiere 0.0.86 en todos los nodos y relés del recorrido. La compilación y la validación en hardware de esta ampliación permanecen pendientes.

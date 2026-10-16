@@ -47,6 +47,8 @@ def comparison(installed, available):
 
 def release_notes(component, version):
     notes = {
+        ('node', (0, 0, 86)): ['Configuración por Red Mesh mediante NB-IoT y relés con recorrido de vuelta.',
+                              'Confirmación celular antes de reiniciar al aplicar la configuración.'],
         ('node', (0, 0, 85)): ['Mantenimiento del RAK3172-E incluido en el firmware común.',
                               'Comprobación y preparación de la radio durante el alta por USB.',
                               'Versiones posteriores desconocidas bloqueadas sin downgrade automático.'],

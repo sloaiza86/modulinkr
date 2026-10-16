@@ -57,6 +57,7 @@ FREERTOS = r'''
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cassert>
 using TaskHandle_t = void*;
 using QueueHandle_t = void*;
 using BaseType_t = int;
@@ -66,7 +67,7 @@ inline void vTaskDelay(uint32_t) {}
 inline int xTaskCreatePinnedToCore(void (*)(void*), const char*, int, void*, int,
                                    TaskHandle_t*, int) { return pdPASS; }
 inline QueueHandle_t xQueueCreate(size_t, size_t) { return reinterpret_cast<void*>(1); }
-inline int xQueueReceive(QueueHandle_t, void*, uint32_t) { return 0; }
+inline int xQueueReceive(QueueHandle_t, void*, uint32_t timeout) { assert(timeout == 0); return 0; }
 inline int xQueueSend(QueueHandle_t, const void*, uint32_t) { return pdTRUE; }
 '''
 

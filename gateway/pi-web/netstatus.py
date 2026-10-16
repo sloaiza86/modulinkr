@@ -441,8 +441,16 @@ def network_state() -> dict:
             identities['incidents']=[dict(kind=r[0],origin=r[1],detail=r[2]) for r in c.execute('SELECT kind,origin,detail FROM identity_incidents WHERE active=1')]
         except sqlite3.OperationalError:
             pass
-    return {"identity":identities,"deployment_id":root[1] if root else None,"nodes": nodes, "generated_at": now,
-            "gateway_duty_1h": duty.get(GATEWAY_ID),
+    metrics = None
+    with _conn() as c:
+        try:
+            row = c.execute('SELECT ts,duty_pct,online_lora,online_nbiot,online_total FROM gateway_metrics ORDER BY id DESC LIMIT 1').fetchone()
+            if row:
+                metrics = dict(zip(('ts','duty_pct','online_lora','online_nbiot','online_total'),row))
+        except sqlite3.OperationalError:
+            pass
+    return {"gateway_metrics":metrics, "identity":identities,"deployment_id":root[1] if root else None,"nodes": nodes, "generated_at": now,
+            "gateway_duty_1h": metrics["duty_pct"]/100 if metrics else duty.get(GATEWAY_ID),
             "gateway_online": None if gw_ago is None else gw_ago <= ONLINE_S,
             "gateway_ago_s": gw_ago,
             **link}

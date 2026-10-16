@@ -84,7 +84,7 @@ def tick(service, now=None):
             continue
         if hasattr(service,'_clock_ok') and not service._clock_ok():
             continue
-        if any(getattr(service,key,None) for key in ('mig','bcast','quiet','cfg_tx','cfg_rx')):
+        if any(getattr(service,key,None) for key in ('mig','bcast','quiet','cfg_tx','cfg_rx','_cellular_config')):
             continue
         lora=route(c,origin,'lora',now) if service.ser is not None and getattr(service,'mig_mundo','nuevo')=='nuevo' else None
         use_lora=transport!='nbiot' and lora and attempts<LORA_ATTEMPTS

@@ -141,7 +141,8 @@ public:
     // batch_id del último batch publicado con éxito por MQTT (0 = ninguno).
     // El loop lo usa para liberar del outbox solo lo confirmado.
     bool receiveCommand(char* out, size_t capacity);
-    bool publishMessage(const char* topic, const char* json);
+    bool publishMessage(const char* topic, const char* json, uint32_t* ticket = nullptr);
+    uint32_t lastMessagePublished() const { return last_message_published_; }
 
     uint32_t lastPublishedBatchId() const { return last_published_batch_id_; }
 
@@ -163,6 +164,7 @@ private:
         char*    json;
         uint32_t batch_id;
         char topic[80]={};
+        uint32_t ticket=0;
     };
 
     static void messageReceived(const char* topic, const char* json, void* context);
@@ -200,6 +202,8 @@ private:
     volatile bool     ntp_pending_     = false;
     volatile uint32_t ntp_last_try_ms_ = 0;
 
+    uint32_t next_message_ticket_ = 0;
+    volatile uint32_t last_message_published_ = 0;
     uint32_t register_start_ms_ = 0;
     uint32_t last_csq_ms_       = 0;
 };

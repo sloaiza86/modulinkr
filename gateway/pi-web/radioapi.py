@@ -1,19 +1,7 @@
-"""ModuLinkr, API de la radio LoRa del gateway (visor web).
+"""Estado y conexión operativa de la radio LoRa del gateway.
 
-Router de la página "Configurar radio LoRa": estado de la radio, cambio
-del puerto serie del Heltec y actualización de su firmware. Las dos
-acciones privilegiadas (set_lora_port.sh y flash_heltec.sh, en el árbol
-pi-service junto a este) se ejecutan con `sudo -n` bajo la regla acotada
-que deja el instalador en /etc/sudoers.d/modulinkr-web; sin esa regla
-responden 501 con el aviso correspondiente.
-
-Endpoints (auth de sesión aplicada al incluir el router):
-  GET  /api/radio/estado    puerto actual, servicio, binario y candidatos
-  POST /api/radio/puerto    fija el puerto del Heltec y reinicia el gateway
-  POST /api/radio/flash     flashea heltec-radio.bin en la radio
-
-Comparte el lock serie de configapi: flashear y comisionar a la vez se
-pisarían el bus USB.
+La imagen se distribuye al navegador para programar la radio por Web Serial.
+El cambio del puerto operativo se aplica con set_lora_port.sh.
 """
 
 from __future__ import annotations
@@ -26,7 +14,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import configapi
 import netstatus
@@ -38,10 +26,8 @@ LOG = logging.getLogger("modulinkr.web.radio")
 # El árbol pi-service viaja junto a pi-web (mismo scp a la home del Pi).
 SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
 SET_PORT_SH = SERVICE_DIR / "set_lora_port.sh"
-FLASH_SH    = SERVICE_DIR / "flash_heltec.sh"
 RADIO_BIN   = SERVICE_DIR / "heltec-radio.bin"
 
-FLASH_TIMEOUT_S = 300   # esptool a 460800 tarda ~1 min; margen amplio
 
 router = APIRouter(prefix="/api/radio")
 
@@ -139,41 +125,11 @@ async def puerto(request: Request):
         configapi._serial_lock.release()
 
 
-@router.post("/flash")
-async def flash(request: Request):
-    """Flashea heltec-radio.bin en la radio (para el servicio, escribe la
-    imagen y lo rearranca; lo hace flash_heltec.sh)."""
-    if not FLASH_SH.is_file():
-        return _err(501, "flash_heltec.sh no está junto a pi-service")
-    if not RADIO_BIN.is_file():
-        return _err(409, "no hay heltec-radio.bin en pi-service (generarlo "
-                         "con make_dist.sh y copiarlo)")
-    if not configapi.GATEWAY_PORT or not os.path.exists(configapi.GATEWAY_PORT):
-        return _err(409, "el puerto del Heltec no está presente")
 
-    if not configapi._serial_lock.acquire(blocking=False):
-        return _err(409, "otra operación serie está en curso; reintentar")
-    try:
-        status = _firmware_status()
-        try:
-            body = json.loads((await request.body()) or b"{}")
-        except (ValueError, TypeError):
-            return _err(400, "Petición no válida.")
-        if not isinstance(body, dict) or body.get('expected_version') != status['available_version']:
-            return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
-        recovery = body.get('recovery') is True
-        if not status['available_version']:
-            return _err(409, "No hay firmware disponible para la radio.")
-        if not recovery and (status['comparison'] != 'different' or not status['connected']):
-            return _err(409, "No hay una actualización aplicable. Vuelve a comprobar la versión de la radio.")
-        LOG.info("event=radio.flash_started")
-        ok, out = _sudo([str(FLASH_SH)], timeout_s=FLASH_TIMEOUT_S)
-        # Solo el tramo final: esptool imprime barras de progreso largas.
-        cola = "\n".join(out.splitlines()[-15:])
-        if not ok:
-            LOG.warning("event=radio.flash_failed detail=%s", cola)
-            return _err(502, cola)
-        LOG.info("event=radio.flash_completed")
-        return {"ok": True, "output": cola}
-    finally:
-        configapi._serial_lock.release()
+@router.get('/firmware-bin')
+def firmware_bin():
+    version=firmwaremeta.image_version(RADIO_BIN)
+    if not RADIO_BIN.is_file() or not version:
+        return _err(409,'No hay una imagen de radio identificada.')
+    return FileResponse(RADIO_BIN,media_type='application/octet-stream',
+                        headers={'X-Modulinkr-Firmware-Version':version})

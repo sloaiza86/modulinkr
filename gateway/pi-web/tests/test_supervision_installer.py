@@ -11,9 +11,11 @@ INSTALLER = Path(__file__).resolve().parents[2] / 'pi-service/install_supervisio
 
 
 class ReadinessTests(unittest.TestCase):
+    installer = INSTALLER
+
     def setUp(self):
-        script = INSTALLER.read_text()
-        source = script.split("sudo python3 - <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        script = self.installer.read_text()
+        source = script.rsplit("sudo python3 - <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
         self.namespace = {'__name__': 'installer_test'}
         exec(source.split('\nif not ready():', 1)[0], self.namespace)
 
@@ -48,6 +50,17 @@ class ReadinessTests(unittest.TestCase):
     def test_refused_connection_fails_readiness(self):
         ok, _ = self.run_probe(['12'] * 4, [OSError('refused')] * 4)
         self.assertFalse(ok)
+
+
+class MeshReadinessTests(ReadinessTests):
+    installer = INSTALLER.with_name('install_identity.sh')
+
+    def test_failed_probe_reports_the_error_and_process(self):
+        with patch('builtins.print') as output:
+            self.run_probe(['12'] * 4, [OSError('refused')] * 4)
+        messages = ' '.join(str(call) for call in output.call_args_list)
+        self.assertIn('PID=12', messages)
+        self.assertIn('refused', messages)
 
 
 class InstallerRecoveryTests(unittest.TestCase):

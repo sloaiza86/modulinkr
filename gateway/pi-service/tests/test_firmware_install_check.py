@@ -253,6 +253,20 @@ class InstallTests(unittest.TestCase):
         detail = self.buf.conn.execute('SELECT detail FROM fw_bcast WHERE id=1').fetchone()[0]
         self.assertEqual(detail, 'Envío en curso')
 
+    def test_explicit_permission_bypasses_budget_for_this_operation_only(self):
+        self.gw._fw_en_ventana=lambda op:True
+        self.gw.aire_libre=self.gw.eco_libre_ms=0
+        self.gw.duty=types.SimpleNamespace(limit_ms=10000,fits=lambda *a,**k:False)
+        self.gw._bcast_payload=lambda i:bytes(160)
+        self.gw.bcast={"op":{"id":1,"state":"sending","pass_no":1,"xfer":123,"total_len":480,"allow_duty_override":True},
+            "cola":[0,1,2],"n_orig":3,"next_ms":0,"toa_ms":364,"gap_s":0.8,"dest":1,"hop":1}
+        self.gw.bcast_tick(10)
+        self.assertEqual(len(self.sent),1)
+        self.gw.bcast['op']['allow_duty_override']=False
+        self.gw.bcast['next_ms']=0
+        self.gw.bcast_tick(20)
+        self.assertEqual(len(self.sent),1)
+
     def test_running_version_does_not_replace_explicit_boot_confirmation(self):
         requested = time.time()-700
         self.buf.conn.execute("UPDATE fw_bcast SET state='installing',updated_ts=? WHERE id=1",(requested,))

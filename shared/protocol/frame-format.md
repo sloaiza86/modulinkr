@@ -1746,3 +1746,18 @@ Las confirmaciones de telemetría incluyen secuencia, resultado, sesión de orig
 HEARTBEAT exige cuatro bytes de aire acumulado o seis cuando incluye el estado celular. NODE_HEALTH exige 29 bytes. CONFIG_COMMIT exige 42 bytes, incluido `apply_at`, que vale cero para aplicación inmediata. El catálogo declara formato 3.3, clase A o C, descriptores de escrituras y operaciones, ID de nodo y descriptores semánticos de medidas. La ausencia de esos campos invalida el registro.
 
 FW_REPORT conserva la transferencia, SHA-256, fase y causa durante el reinicio y se repite hasta recibir FW_REPORT_ACK. FW_RESULT se utiliza solo para un rechazo inmediato de instalación, vinculado a la transferencia exacta. No confirma un arranque ni se admite una transferencia cero como sustituto de la esperada. Los avisos repetidos para gateways de versiones internas previas se retiran.
+
+
+## 28. Configuración mediante salida celular, 2026-10-15
+
+`CONFIG_ROUTE` (0x2E) y `CONFIG_ROUTE_RESULT` (0x2F) transportan las operaciones de configuración entre un supernodo y el nodo destino con recorrido explícito. La envoltura contiene `path_count` (uint8), `path` (1-16 direcciones únicas), `frame_type` de configuración (uint8) y su payload. El origen y el destino exteriores coinciden con los extremos del recorrido. Cada relé comprueba el salto anterior, su propia posición y TTL antes de reenviar. La respuesta invierte el recorrido y conserva la identidad física del nodo que la genera.
+
+El salto celular utiliza el topic `cmd` existente del supernodo, con `kind=config`, `frame_type`, payload hexadecimal, `path`, `expires`, `deployment_id`, `destination_uid` y `target_uid`. El supernodo valida despliegue, identidad y plazo antes de ejecutar o reenviar. La respuesta utiliza `cmd/response`, `kind=config`, `origin`, `frame_type`, `body`, `device_uid` y `publisher_uid`. El gateway exige coincidencia con el equipo y el publicador encolados. El detalle operativo está en [`mesh-configuration.md`](mesh-configuration.md).
+
+## 29. Catálogo mediante supernodo, 2026-10-15
+
+`CATALOG_ROUTE` (0x30) transporta el catálogo del nodo por el recorrido de custodia descubierto, incluso sin padre hacia el gateway. El payload contiene el número de direcciones (1 byte), el recorrido completo (2-16 direcciones), el índice y el total de fragmentos (1 byte cada uno) y hasta 160 bytes de catálogo. Se admiten trece fragmentos y 2048 bytes. Salvo el último, cada fragmento ocupa 160 bytes. Cada relé verifica extremos, posición, salto anterior y TTL. La identidad exterior conserva UID, sesión y huella del nodo propietario.
+
+El supernodo publica cada fragmento en `modulinkr/v2/<deployment_id>/<origin>/register/<catalog_tag>/<índice>`. En los temas de registro, `origin` identifica al propietario del catálogo, como en la republicación del gateway; el sobre añade `publisher`, `publisher_uid`, `publisher_boot` y `path` para identificar al portador celular. El gateway y el consumidor reensamblan por UID y huella, comprueban SHA-256 y exigen que el ID incluido en el catálogo coincida con el propietario.
+
+`CATALOG_ROUTE_ACK` (0x31) devuelve el recorrido invertido, seguido de la huella confirmada (8 bytes), la sesión original (uint32 LE), el índice y el total (1 byte cada uno). El supernodo emite el acuse después de confirmar la publicación MQTT del fragmento y lo omite si ha ocurrido un error de publicación. Este acuse acredita recepción en el broker, no aceptación del catálogo en el gateway. El origen reintenta el mismo fragmento cada 20 segundos y repite el catálogo completo cada diez minutos, también después de cambiar de supernodo. La pérdida del fragmento o del acuse conserva el mismo índice. Una cola llena no genera un acuse.

@@ -52,7 +52,7 @@ class SourcesTests(unittest.TestCase):
         tree=ast.parse((Path(__file__).resolve().parents[1]/'dataapi.py').read_text())
         funcs=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in
                ('_parse_channels','_parse_range','_catalog_date','_unify_channels',
-                '_resolve_channels','nodos','series','export_csv')]
+                '_resolve_channels','_gateway_channels','_gateway_series','nodos','series','export_csv')]
         for f in funcs: f.decorator_list=[]
         self.env=dict(Query=lambda x:x,HTTPException=HttpError,datetime=datetime,timezone=timezone,
                       MAX_POINTS_CAP=2000,CSV_MAX_ROWS=500000,csv=csv,io=io,
@@ -67,6 +67,8 @@ class SourcesTests(unittest.TestCase):
         INSERT INTO channels VALUES(1,'temperature','C',2,0,'Temperatura','1970-01-01T00:00:00+00:00',NULL);
         INSERT INTO samples VALUES(1,1767225610,2,'lora'),(2,1767225620,2,'nbiot'),(3,1767225630,2,'lora');
         INSERT INTO sample_values VALUES(1,1,20),(2,1,22),(3,1,24);''')
+        import dataapi
+        self.env['GATEWAY_CHANNELS']=dataapi.GATEWAY_CHANNELS
         self.env['_conn']=lambda:Conn(self.db)
         self.args=dict(channels='1',desde='2026-01-01T00:00:00Z',hasta='2026-01-01T01:00:00Z')
 
@@ -107,9 +109,9 @@ class SourcesTests(unittest.TestCase):
     def test_catalog_default_only_current_and_optional_previous(self):
         self.add_previous()
         current = self.env['nodos']()
-        self.assertEqual([c['channel_id'] for n in current for c in n['channels']], [1])
+        self.assertEqual([c['channel_id'] for n in current if n['node_id']!=255 for c in n['channels']], [1])
         full = self.env['nodos'](incluir_anteriores=True)
-        self.assertEqual([c['channel_id'] for n in full for c in n['channels']], [1,2,3])
+        self.assertEqual([c['channel_id'] for n in full if n['node_id']!=255 for c in n['channels']], [1,2,3])
         self.assertEqual(full[0]['channels'][1]['name'], 'Temperatura anterior')
         self.assertEqual(full[0]['channels'][1]['active_to'], '2026-10-12T20:40:00+00:00')
         self.assertTrue(full[1]['previous'])
@@ -143,7 +145,7 @@ class SourcesTests(unittest.TestCase):
     def test_logical_catalog_has_one_entry_with_previous_members(self):
         self.compatible_versions()
         nodes = self.env['nodos'](unificar=True)
-        self.assertEqual(len(nodes),1)
+        self.assertEqual(len([n for n in nodes if n['node_id']!=255]),1)
         self.assertEqual(len(nodes[0]['channels']),1)
         channel = nodes[0]['channels'][0]
         self.assertEqual(channel['channel_id'],1)
@@ -189,7 +191,7 @@ class SourcesTests(unittest.TestCase):
         current = self.env['nodos'](unificar=True)[0]['channels'][0]
         self.assertEqual(set(current['channel_ids']),{1,2})
         self.db.execute("UPDATE channels SET active_to='2026-10-13T00:00:00+00:00' WHERE channel_id=1")
-        self.assertEqual(self.env['nodos'](unificar=True),[])
+        self.assertEqual([n for n in self.env['nodos'](unificar=True) if n['node_id']!=255],[])
         old = self.env['nodos'](incluir_anteriores=True,unificar=True)[0]['channels'][0]
         self.assertEqual(old['channel_id'],1)
         self.assertEqual(set(old['channel_ids']),{1,2})

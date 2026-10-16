@@ -58,6 +58,8 @@ PROBE_ESPERA_S     = 7.0
 
 
 CONFIG_ERRORS = {
+    "catalog_pending": "Falta recibir el catálogo actualizado del nodo. Su registro a través del supernodo todavía no ha terminado.",
+    "mesh_no_route": "No hay una ruta reciente al nodo por LoRa ni por NB-IoT a través de un supernodo.",
     "lora_radio_unavailable": "No hay conexión con la radio LoRa del gateway. Comprueba su conexión USB.",
     "gateway_service_unavailable": "El servicio del gateway no está disponible. Comprueba su estado.",
     "lora_status_unknown": "No se pudo comprobar la conexión de la radio LoRa del gateway.",
@@ -84,6 +86,12 @@ def _radio_error() -> str:
 def _config_error(code: str, **extra) -> JSONResponse:
     return JSONResponse(status_code=409,
                         content={"code": code, "error": CONFIG_ERRORS[code], **extra})
+
+
+def _mesh_unavailable(origin: int) -> JSONResponse:
+    with _conn() as c:
+        missing = c.execute("SELECT 1 FROM identity_incidents WHERE origin=? AND kind='catalog_missing' AND active=1", (origin,)).fetchone()
+    return _config_error('catalog_pending' if missing else 'mesh_no_route')
 
 
 def _disponible(origin: int, para_que: int) -> tuple:
@@ -199,11 +207,36 @@ def _toa_ms(length: int) -> float:
     return (8 + 4.25 + nsym) * (float(1 << sf) / bw)
 
 router = APIRouter(prefix="/api/config/lora")
+mesh_router = APIRouter(prefix="/api/config/mesh")
+
+
+def _mesh_route(origin, prefer_cellular=False):
+    import node_commands
+    with _conn() as c:
+        identityapi.require(c, origin)
+        link = netstatus.gateway_link_state()
+        if not prefer_cellular and link.get('lora_link') and node_commands.route(c, origin, 'lora', time.time()):
+            return 'lora', None, None
+        cellular = node_commands.route(c, origin, 'nbiot', time.time())
+        if link.get('mqtt_connected') and cellular:
+            path, publisher = cellular
+            return 'nbiot', path, publisher
+    return None, None, None
+
+
+@mesh_router.post('/enviar')
+def mesh_enviar(body: dict = Body(...)):
+    return enviar(body, mesh=True)
+
+
+@mesh_router.post('/leer')
+def mesh_leer(body: dict = Body(...)):
+    return leer(body, mesh=True)
 
 # Tope del config que se acepta enviar. El canal trocea en fragmentos de
 # 213 B con un máximo de 32, así que por encima de esto el gateway lo
 # rechazaría igualmente; mejor decirlo aquí que después de encolarlo.
-MAX_CONFIG_BYTES = 32 * 213
+MAX_CONFIG_BYTES = 4096
 
 
 def _conn() -> sqlite3.Connection:
@@ -211,7 +244,7 @@ def _conn() -> sqlite3.Connection:
 
 
 @router.post("/enviar")
-def enviar(body: dict = Body(...)):
+def enviar(body: dict = Body(...), mesh: bool = False):
     """Encola un envío de configuración por LoRa hacia un nodo."""
     origin = body.get("origin")
     config = body.get("config")
@@ -250,26 +283,41 @@ def enviar(body: dict = Body(...)):
             status_code=400,
             content={"error": f"config de {len(data)} B, máximo {MAX_CONFIG_BYTES}"})
 
-    puede, porque = _disponible(origin, PROBE_CONFIG_WRITE)
-    if not puede:
-        return _config_error(porque)
-
-    radio_error = _radio_error()
-    if radio_error:
-        return _config_error(radio_error)
+    transport, path, publisher = _mesh_route(origin) if mesh else ('lora', None, None)
+    if transport is None:
+        return _mesh_unavailable(origin)
+    if transport == 'lora':
+        puede, porque = _disponible(origin, PROBE_CONFIG_WRITE)
+        if not puede and mesh and porque in ('node_no_response','lora_radio_unavailable','lora_status_unknown'):
+            transport,path,publisher=_mesh_route(origin,prefer_cellular=True)
+            if transport!='nbiot':
+                return _config_error(porque)
+        elif not puede:
+            return _config_error(porque)
+        radio_error = _radio_error() if transport=='lora' else ''
+        if radio_error:
+            return _config_error(radio_error)
 
     try:
         with _conn() as c:
             c.execute('BEGIN IMMEDIATE')
             identityapi.require(c,origin)
+            if c.execute("SELECT id FROM config_read WHERE origin=? AND state IN ('pending','reading','asking','receiving') LIMIT 1",(origin,)).fetchone():
+                return _config_error('config_write_busy')
             bound=c.execute('SELECT uid FROM identity_bindings WHERE origin=?',(origin,)).fetchone()[0]
             assigned=json.loads(config)
+            if not isinstance(assigned,dict) or not isinstance(assigned.get('node'),dict):
+                return JSONResponse(status_code=400,content={'error':'La configuración requiere el objeto node.'})
             if assigned.get('node',{}).get('id')!=origin:
                 return JSONResponse(status_code=409,content={'error':'Para cambiar el identificador utiliza USB; las órdenes remotas conservan la asignación.'})
             if assigned['node'].get('deployment_id') not in (None,'',identityapi.deployment(c)):
                 return JSONResponse(status_code=409,content={'error':'La configuración pertenece a otro despliegue.'})
             assigned['node']['deployment_id']=identityapi.deployment(c)
             config=json.dumps(assigned,ensure_ascii=False,separators=(',',':'))
+            limit=MAX_CONFIG_BYTES
+            data=config.encode('utf-8')
+            if len(data)>limit:
+                return JSONResponse(status_code=400,content={'error':f'La configuración ocupa {len(data)} B; esta ruta admite {limit} B.'})
             # Una transferencia a la vez por nodo: encolar otra mientras hay
             # una en vuelo dejaría dos configs compitiendo por el mismo nodo.
             fila = c.execute(
@@ -281,9 +329,9 @@ def enviar(body: dict = Body(...)):
 
             cur = c.execute(
                 """INSERT INTO config_push (origin, config, created_ts, state,
-                                            apply_at)
-                   VALUES (?, ?, ?, 'pending', ?)""",
-                (origin, config, time.time(), apply_at))
+                                            apply_at, transport, route_json, publisher)
+                   VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)""",
+                (origin, config, time.time(), apply_at, transport, json.dumps(path), publisher))
             c.commit()
             push_id = cur.lastrowid
     except sqlite3.Error as e:
@@ -294,11 +342,11 @@ def enviar(body: dict = Body(...)):
     LOG.info("event=config_push.enqueued id=%d origin=%d bytes=%d apply_at_epoch=%d",
              push_id, origin, len(data), apply_at)
     return {"id": push_id, "bytes": len(data),
-            "fragmentos": -(-len(data) // 213)}
+            "fragmentos": -(-len(config.encode("utf-8")) // (144 if transport == "nbiot" else 176)), "transport": transport}
 
 
 @router.post("/leer")
-def leer(body: dict = Body(...)):
+def leer(body: dict = Body(...), mesh: bool = False):
     """Encola una lectura del config.json de un nodo por LoRa (§17.6).
 
     Existe porque el catálogo del registro NO es la configuración: lleva el
@@ -312,15 +360,26 @@ def leer(body: dict = Body(...)):
     if not isinstance(origin, int) or not 1 <= origin <= 254:
         return JSONResponse(status_code=400,
                             content={"error": "origin fuera de 1-254"})
-    puede, porque = _disponible(origin, PROBE_CONFIG_READ)
-    if not puede:
-        return _config_error(porque)
-
-    radio_error = _radio_error()
-    if radio_error:
-        return _config_error(radio_error)
+    transport, path, publisher = _mesh_route(origin) if mesh else ('lora', None, None)
+    if transport is None:
+        return _mesh_unavailable(origin)
+    if transport == 'lora':
+        puede, porque = _disponible(origin, PROBE_CONFIG_READ)
+        if not puede and mesh and porque in ('node_no_response','lora_radio_unavailable','lora_status_unknown'):
+            transport,path,publisher=_mesh_route(origin,prefer_cellular=True)
+            if transport!='nbiot':
+                return _config_error(porque)
+        elif not puede:
+            return _config_error(porque)
+        radio_error = _radio_error() if transport=='lora' else ''
+        if radio_error:
+            return _config_error(radio_error)
     try:
         with _conn() as c:
+            c.execute('BEGIN IMMEDIATE')
+            identityapi.require(c,origin)
+            if c.execute("SELECT id FROM config_push WHERE origin=? AND state IN ('pending','sending','committing') LIMIT 1",(origin,)).fetchone():
+                return _config_error('config_read_busy')
             fila = c.execute(
                 """SELECT id FROM config_read
                     WHERE origin = ? AND state IN ('pending','reading')
@@ -328,8 +387,8 @@ def leer(body: dict = Body(...)):
             if fila is not None:
                 return _config_error("config_read_busy", id=fila[0])
             cur = c.execute(
-                """INSERT INTO config_read (origin, created_ts, state)
-                   VALUES (?, ?, 'pending')""", (origin, time.time()))
+                """INSERT INTO config_read (origin, created_ts, state, transport, route_json, publisher)
+                   VALUES (?, ?, 'pending', ?, ?, ?)""", (origin, time.time(), transport, json.dumps(path), publisher))
             c.commit()
             read_id = cur.lastrowid
     except sqlite3.Error as e:
@@ -346,7 +405,7 @@ def leer_estado(id: int):
     try:
         with _conn() as c:
             fila = c.execute(
-                """SELECT origin, state, config, detail, created_ts
+                """SELECT origin, state, config, detail, created_ts, transport, updated_ts
                      FROM config_read WHERE id = ?""", (id,)).fetchone()
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
@@ -354,9 +413,11 @@ def leer_estado(id: int):
     if fila is None:
         return JSONResponse(status_code=404,
                             content={"error": "lectura no encontrada"})
-    origin, state, config, detail, created = fila
+    origin, state, config, detail, created, transport, updated = fila
     return {"id": id, "origin": origin, "state": state, "config": config,
-            "detail": detail, "elapsed_s": round(time.time() - created, 1)}
+            "detail": detail, "elapsed_s": round(time.time() - created, 1),
+            "transport": transport,
+            "last_response_ago_s": max(0, round(time.time()-updated, 1)) if transport=='nbiot' and updated is not None else None}
 
 
 # ----- Actualización de firmware por LoRa (frame-format.md §18) -----
@@ -403,6 +464,9 @@ def _firmware_guard(origin, available):
     error = _radio_error()
     if error:
         return _config_error(error)
+    node = next((n for n in _firmware_nodes(available) if n['node_id']==origin),None)
+    if not node or not node['online'] or not node['direct']:
+        return JSONResponse(status_code=409,content={'error':'La actualización por Red Mesh requiere conexión LoRa directa al gateway.'})
     with _conn() as c:
         if any(target == origin for _,target in _firmware_install_status(c)):
             return JSONResponse(status_code=409, content={'error': 'Este nodo aún está pendiente de confirmar su instalación.'})
@@ -826,6 +890,9 @@ def firmware_difundir(body: dict = Body(default={})):
 
 @router.post("/firmware/seleccion")
 def firmware_seleccion(body: dict = Body(...)):
+    allow_duty_override = body.get('allow_duty_override', False)
+    if type(allow_duty_override) is not bool:
+        return JSONResponse(status_code=400, content={'error': 'El permiso de duty cycle debe ser booleano.'})
     auto_install = body.get('auto_install', False)
     if type(auto_install) is not bool:
         return JSONResponse(status_code=400, content={'error':'La instalación automática debe ser activada o desactivada.'})
@@ -842,7 +909,7 @@ def firmware_seleccion(body: dict = Body(...)):
         return _config_error(error)
     if body.get('expected_version') != info['version']:
         return JSONResponse(status_code=409, content={'error': 'El firmware disponible ha cambiado. Recarga la página y comprueba la versión.'})
-    eligible = {n['node_id'] for n in info['nodes'] if n['online'] and n['comparison'] == 'different' and not n.get('identity_blocked')}
+    eligible = {n['node_id'] for n in info['nodes'] if n['online'] and n['direct'] and n['comparison'] == 'different' and not n.get('identity_blocked')}
     if not set(origins) <= eligible:
         return JSONResponse(status_code=409, content={'error': 'La selección ha cambiado: comprueba la conexión y la versión de los nodos.'})
     try:
@@ -863,9 +930,9 @@ def firmware_seleccion(body: dict = Body(...)):
                     c.rollback()
                     return guard
                 cur = c.execute("""INSERT INTO fw_bcast
-                    (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target,auto_install)
-                    VALUES (?,?,?,?,?,128,10,'offering',?,?,?)""",
-                    (xfer, str(APP_BIN), info['version'], info['bytes'], info['sha256'], time.time(), origin, int(auto_install)))
+                    (xfer,path,version,total_len,sha256,block_k,block_r,state,created_ts,target,auto_install,allow_duty_override)
+                    VALUES (?,?,?,?,?,128,10,'offering',?,?,?,?)""",
+                    (xfer, str(APP_BIN), info['version'], info['bytes'], info['sha256'], time.time(), origin, int(auto_install), int(allow_duty_override)))
                 ids.append(cur.lastrowid)
             c.commit()
     except (OSError, sqlite3.Error) as error:
@@ -949,7 +1016,7 @@ def _ota_project_node(c, node, job, report, active, busy_install):
         node['can_check'] = bool(eligible and not (verification and not verified) and state in ('ready','failed','cancelled') and node['comparison']=='different')
         node['can_disable_auto'] = bool(job['auto_install'] and job['state'] not in ('install_req','installing','done','failed','cancelled'))
         node['operation'] = {'id':job['id'], 'version':job['version'], 'state':state,
-            'auto_install':bool(job['auto_install']), 'created_at':job['created_ts'],
+            'auto_install':bool(job['auto_install']), 'allow_duty_override':bool(job['allow_duty_override']), 'created_at':job['created_ts'],
             'updated_at':job['updated_ts'], 'detail':node.get('detail'),
             'last_result':check['detail'] if check and (check['updated_ts'] or 0) > (job['updated_ts'] or job['created_ts'])
                 and state not in ('installing','done') else node.get('detail'),
@@ -960,7 +1027,10 @@ def _ota_project_node(c, node, job, report, active, busy_install):
                 'Confirmación de arranque pendiente' if state=='installing' else
                 'Comprobación previa en curso' if state in ('pending','install_req') else
                 'Sin confirmación de instalación; ver detalle' if state=='failed' else 'No solicitada')}
-    if not node['online']:
+    if not node['direct']:
+        node['can_send']=node['can_install']=node['can_check']=False
+        node['blocked_reason']='La actualización por Red Mesh requiere conexión LoRa directa al gateway.'
+    elif not node['online']:
         node['blocked_reason'] = 'El nodo no está conectado. Se conserva la última información recibida.'
     elif active and (not job or active['id'] != job['id']):
         node['blocked_reason'] = 'Hay un envío en curso; espera a que termine.'
@@ -1124,7 +1194,7 @@ def estado(id: int):
     try:
         with _conn() as c:
             fila = c.execute(
-                """SELECT origin, state, detail, created_ts, updated_ts
+                """SELECT origin, state, detail, created_ts, updated_ts, transport
                      FROM config_push WHERE id = ?""", (id,)).fetchone()
     except sqlite3.Error as e:
         return JSONResponse(status_code=503,
@@ -1133,9 +1203,11 @@ def estado(id: int):
     if fila is None:
         return JSONResponse(status_code=404, content={"error": "envío no encontrado"})
 
-    origin, state, detail, created, updated = fila
+    origin, state, detail, created, updated, transport = fila
     return {"id": id, "origin": origin, "state": state, "detail": detail,
             "created_ts": created, "updated_ts": updated,
+            "transport": transport,
+            "last_response_ago_s": max(0, round(time.time()-updated, 1)) if transport=='nbiot' and updated is not None else None,
             "elapsed_s": round(time.time() - created, 1)}
 
 

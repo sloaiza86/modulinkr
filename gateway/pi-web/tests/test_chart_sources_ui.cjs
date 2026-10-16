@@ -7,6 +7,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname,'../static/ap
 const c=vm.createContext({colorDeCanal:()=> 'blue', etiquetaCanal:id=>'channel '+id,
   graficoEsCompacto:()=>false, seriesOcultas:new Set(), COLOR:{}, EJE_X:{}, EJE_Y:{axisLabel:{}},
   FUENTE_GRAFICO:'system-ui',unidad:x=>x,tooltipGrafico:()=>''});
+vm.runInContext(source.slice(source.indexOf('function conexionGateway('),source.indexOf('function actualizarLeyendasHistorico(')),c);
 vm.runInContext(source.slice(source.indexOf('function lineasDeCanal('),source.indexOf('let solicitudGrafico')),c);
 const series={channel_id:1,unit:'C',bucket_s:10,points:[],source_points:{
   lora:[[10,20,1,0],[20,21,1,0],[30,null,0,0],[40,null,0,0],[100,25,1,0]],
@@ -68,4 +69,16 @@ test('el tooltip del modal identifica ambas vías y omite valores ausentes',()=>
   assert.match(result,/20 C/);assert.match(result,/23 C/);
   assert.match(result,/LoRa/);assert.match(result,/NB-IoT/);
   assert.equal(tooltip([{value:[1000,null,0,0]}]),'');
+});
+
+test('el modal del recuento muestra tres series enteras sin inventar vías de recepción',()=>{
+ const series=[-4,-2,-3].map(channel_id=>({channel_id,unit:'nodos',interpolation:'step',source_points:{gateway:[[10,2,0,0],[100,1,0,0]]}}));
+ const options=c.opcionesModal(series,'nodos');
+ assert.equal(options.series.length,3);
+ assert.deepEqual(Array.from(options.series,s=>s.name),['Total','LoRa','NB-IoT']);
+ assert.deepEqual(Array.from(options.series,s=>s.lineStyle.type),['solid','dashed','dotted']);
+ assert(options.series.every(s=>s.step==='end'));
+ assert.equal(options.yAxis.minInterval,1);
+ const result=options.tooltip.formatter([{seriesName:'Total',value:[1000,2,0,0]}]);
+ assert.match(result,/Total/);assert(!result.includes('Vía'));
 });

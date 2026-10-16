@@ -1,65 +1,32 @@
-"""ModuLinkr, API de comisionamiento de nodos por USB.
-
-Router del visor (web_service.py) que habla el protocolo CFG.* del
-firmware del nodo (nodo/src/commission.h) con un Atom conectado por USB
-al Pi. Permite identificar el nodo, leer su config actual y subirle uno
-nuevo desde la sección de configuración de la web, sin recompilar.
-
-Endpoints (auth de sesión aplicada al incluir el router):
-  GET  /api/config/puertos    puertos serie candidatos (sin sondear)
-  POST /api/config/detectar   sondea con CFG.HELLO y devuelve la identidad
-  GET  /api/config/nodo       config actual del nodo (CFG.GET)
-  POST /api/config/subir      valida y sube un config (CFG.PUT)
-  POST /api/config/borrar     borra el config del nodo (CFG.DEL)
-
-El puerto del Heltec del gateway queda excluido siempre: abrirlo
-resetearía la radio por el auto-reset DTR/RTS. El instalador deja su ruta
-en MODULINKR_GATEWAY_PORT (web.env); sin esa variable, la detección exige
-elegir puerto explícitamente cuando hay más de un candidato.
-
-Las operaciones serie van bajo un lock global: el puerto es un recurso
-único y dos peticiones simultáneas se pisarían. La segunda recibe 409.
-"""
+"""Imágenes de firmware y parámetros de red para el comisionamiento USB."""
 
 from __future__ import annotations
 
-import hashlib
-import base64
 import glob
 import json
 import logging
 import firmwaremeta
-import identityapi
 import os
 import subprocess
+import sys
 import threading
 import time
-import uuid
 from pathlib import Path
+
+SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
+sys.path.insert(0, str(SERVICE_DIR))
 import rak_commission
 from rak_firmware import load_policy
 
-import serial
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from fastapi.responses import FileResponse, JSONResponse
 
 LOG = logging.getLogger("modulinkr.web.config")
 
 GATEWAY_PORT = os.environ.get("MODULINKR_GATEWAY_PORT", "")
 
-BAUD = 115200
-RESP_TIMEOUT_S = 10.0   # espera de una respuesta CFG: (= timeout del nodo)
-HELLO_RETRY_S = 0.5     # cadencia del sondeo CFG.HELLO tras abrir
-HELLO_TIMEOUT_S = 12.0  # techo del sondeo (cubre un boot completo)
-MAX_CONFIG_LEN = 16384
-
-# Flasheo del firmware del nodo (Atom, ESP32) por USB. El árbol pi-service
-# viaja junto a pi-web; nodo.bin lo genera nodo/make_dist.sh y se copia allí.
-SERVICE_DIR = Path(__file__).resolve().parent.parent / "pi-service"
-FLASH_NODO_SH = SERVICE_DIR / "flash_nodo.sh"
 GET_NET_SH = SERVICE_DIR / "get_net.sh"
 NODO_BIN = SERVICE_DIR / "nodo.bin"
-FLASH_TIMEOUT_S = 180   # esptool a 460800 sobre ESP32 clásico: margen amplio
 
 # Firmware que el nodo anuncia en CFG.HELLO (main.cpp kFirmwareName): sirve
 # para distinguir un Atom con firmware ModuLinkr de uno virgen o ajeno.
@@ -72,12 +39,11 @@ LORA_REGION = os.environ.get("MODULINKR_LORA_REGION", "EU868")
 LORA_FREQ_HZ = int(os.environ.get("MODULINKR_LORA_FREQ_HZ", "869525000"))
 
 _serial_lock = threading.Lock()
-_rak_jobs = {}
 
 router = APIRouter(prefix="/api/config")
 
 
-# ----- Cliente del protocolo CFG.* (lado Pi de commission.h) -----
+# Detección de la conexión operativa de la radio del gateway.
 
 def _gateway_port_real() -> str:
     return os.path.realpath(GATEWAY_PORT) if GATEWAY_PORT else ""
@@ -99,255 +65,14 @@ def _candidate_ports() -> list[dict]:
     return ports
 
 
-def _open(port: str) -> serial.Serial:
-    ser = serial.Serial()
-    ser.port = port
-    ser.baudrate = BAUD
-    ser.timeout = 0.2
-    ser.dtr = False
-    ser.rts = False
-    ser.open()
-    ser.reset_input_buffer()
-    return ser
-
-
-def _read_response(ser: serial.Serial, want: str,
-                   timeout_s: float = RESP_TIMEOUT_S) -> str:
-    """Primera línea CFG: del tipo esperado (o un CFG:ERR) dentro del
-    plazo. Los logs del nodo y las líneas CFG: rezagadas de otro tipo
-    (HELLOs duplicados del sondeo de _hello) se descartan. TimeoutError
-    si no llega."""
-    deadline = time.monotonic() + timeout_s
-    buf = b""
-    while time.monotonic() < deadline:
-        chunk = ser.read(256)
-        if chunk:
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                text = line.decode("utf-8", errors="replace").strip()
-                if text.startswith(want) or text.startswith("CFG:ERR"):
-                    return text
-        else:
-            time.sleep(0.02)
-    raise TimeoutError("el dispositivo no respondió al protocolo CFG")
-
-
-def _send(ser: serial.Serial, line: str) -> None:
-    ser.write((line + "\n").encode("ascii"))
-    ser.flush()
-
-
-def _hello(ser: serial.Serial) -> dict:
-    """Identifica el nodo por sondeo: CFG.HELLO cada medio segundo hasta
-    la respuesta. Un nodo que el open no reseteó responde al primer
-    intento (detección inmediata); uno reseteado responde en cuanto su
-    arranque termina, sin esperas fijas de por medio."""
-    deadline = time.monotonic() + HELLO_TIMEOUT_S
-    buf = b""
-    while time.monotonic() < deadline:
-        _send(ser, "CFG.HELLO")
-        slot = time.monotonic() + HELLO_RETRY_S
-        while time.monotonic() < slot:
-            chunk = ser.read(256)
-            if not chunk:
-                continue
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                text = line.decode("utf-8", errors="replace").strip()
-                if text.startswith("CFG:HELLO "):
-                    return json.loads(text[len("CFG:HELLO "):])
-    raise TimeoutError("el dispositivo no respondió al protocolo CFG")
-
-
 def _err(status: int, msg: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": msg})
 
 
-def _node_msg(resp: str) -> str:
-    """Texto de una respuesta CFG: sin los prefijos del protocolo."""
-    for pre in ("CFG:ERR ", "CFG:"):
-        if resp.startswith(pre):
-            return resp[len(pre):].strip()
-    return resp
-
-
-def _busy() -> JSONResponse:
-    return _err(409, "otra operación serie está en curso; reintentar")
-
-
-def _port_allowed(port: str) -> bool:
-    """El puerto pedido debe ser un candidato no excluido: evita que un
-    body manipulado apunte al Heltec o a una ruta arbitraria."""
-    for p in _candidate_ports():
-        if p["port"] == port:
-            return not p["gateway"]
-    return False
-
-
 # ----- Endpoints -----
 
-@router.get("/puertos")
-def puertos():
-    return {"ports": _candidate_ports(),
-            "gateway_known": bool(GATEWAY_PORT)}
 
-
-@router.post("/detectar")
-async def detectar(request: Request):
-    """Identifica el Atom. Con `port` en el body sondea ese puerto; sin
-    él, sondea el único candidato no excluido (con varios, pide elegir)."""
-    body = {}
-    try:
-        body = json.loads((await request.body()) or b"{}")
-    except json.JSONDecodeError:
-        return _err(400, "body JSON inválido")
-
-    port = body.get("port", "")
-    if port:
-        if not _port_allowed(port):
-            return _err(400, "puerto no admitido (no es un candidato o es "
-                             "el del gateway)")
-        targets = [port]
-    else:
-        cands = [p["port"] for p in _candidate_ports() if not p["gateway"]]
-        if not cands:
-            return _err(404, "sin puertos candidatos: ¿está el nodo "
-                             "conectado por USB?")
-        if len(cands) > 1:
-            return JSONResponse(status_code=300, content={
-                "need_port": True, "ports": cands,
-                "error": "varios puertos candidatos; elegir uno"})
-        targets = cands
-
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    try:
-        target = targets[0]
-        with _open(target) as ser:
-            ident = _hello(ser)
-        LOG.info("event=node.detected port=%s identity=%s", target, ident)
-        return {"port": target, "node": ident}
-    except (serial.SerialException, TimeoutError, ValueError,
-            json.JSONDecodeError) as e:
-        LOG.warning("event=node.detection_failed error=%s", e)
-        return _err(502, str(e))
-    finally:
-        _serial_lock.release()
-
-
-@router.get("/nodo")
-def leer_nodo(port: str):
-    """Config actual del nodo (CFG.GET), como texto JSON."""
-    if not _port_allowed(port):
-        return _err(400, "puerto no admitido")
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    try:
-        with _open(port) as ser:
-            ident = _hello(ser)
-            _send(ser, "CFG.GET")
-            resp = _read_response(ser, "CFG:DATA ")
-        if not resp.startswith("CFG:DATA "):
-            return _err(502, _node_msg(resp))
-        text = base64.b64decode(resp[len("CFG:DATA "):]).decode("utf-8")
-        return {"port": port, "node": ident, "config": text}
-    except (serial.SerialException, TimeoutError, ValueError) as e:
-        return _err(502, str(e))
-    finally:
-        _serial_lock.release()
-
-
-@router.post("/borrar")
-async def borrar(request: Request):
-    """Borra el config del nodo (CFG.DEL): queda sin configurar, con el
-    LED rojo, esperando un config nuevo."""
-    try:
-        body = json.loads((await request.body()) or b"{}")
-    except json.JSONDecodeError:
-        return _err(400, "body JSON inválido")
-    port = body.get("port", "")
-    if not port or not _port_allowed(port):
-        return _err(400, "puerto no admitido")
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    try:
-        with _open(port) as ser:
-            ident = _hello(ser)
-            _send(ser, "CFG.DEL")
-            resp = _read_response(ser, "CFG:OK")
-        if resp.startswith("CFG:OK"):
-            LOG.info("event=node_config.deleted port=%s origin=%s", port,
-                     ident.get("node_id", "?"))
-            return {"ok": True, "port": port, "node": ident,
-                    "detail": _node_msg(resp)}
-        return _err(502, _node_msg(resp))
-    except (serial.SerialException, TimeoutError, ValueError) as e:
-        return _err(502, str(e))
-    finally:
-        _serial_lock.release()
-
-
-@router.post("/subir")
-async def subir(request: Request):
-    """Sube un config al nodo (CFG.PUT). El veredicto es el del nodo: el
-    firmware valida con sus reglas y solo graba si pasa."""
-    try:
-        body = json.loads((await request.body()) or b"{}")
-    except json.JSONDecodeError:
-        return _err(400, "body JSON inválido")
-
-    port = body.get("port", "")
-    config_text = body.get("config", "")
-    if not port or not config_text:
-        return _err(400, "faltan port o config")
-    if not _port_allowed(port):
-        return _err(400, "puerto no admitido")
-
-    # Criba previa en el Pi: que sea JSON parseable y de tamaño admisible.
-    # La validación de reglas es del firmware (única fuente de verdad).
-    try:
-        json.loads(config_text)
-    except json.JSONDecodeError as e:
-        return _err(400, f"el config no es JSON válido: {e}")
-    payload = config_text.encode("utf-8")
-    if len(payload) > MAX_CONFIG_LEN:
-        return _err(400, f"config demasiado grande ({len(payload)} B, "
-                         f"máximo {MAX_CONFIG_LEN})")
-
-    digest = hashlib.sha256(payload).hexdigest()
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    try:
-        with _open(port) as ser:
-            ident = _hello(ser)
-            config_text=identityapi.prepare(config_text,ident.get('device_uid'))
-            rak_commission.require_identity(ident, ident.get('device_uid'))
-            rak_commission.require_approved(rak_commission.Client(ser).inspect())
-            payload=config_text.encode('utf-8')
-            if len(payload)>MAX_CONFIG_LEN: return _err(400,'Configuración demasiado grande.')
-            digest=hashlib.sha256(payload).hexdigest()
-            _send(ser, f"CFG.PUT {len(payload)} {digest}")
-            resp = _read_response(ser, "CFG:READY")
-            if resp != "CFG:READY":
-                return _err(502, _node_msg(resp))
-            ser.write(payload)
-            ser.flush()
-            resp = _read_response(ser, "CFG:OK")
-        if resp.startswith("CFG:OK"):
-            LOG.info("event=node_config.uploaded port=%s origin=%s bytes=%d", port,
-                     ident.get("node_id", "?"), len(payload))
-            return {"ok": True, "port": port, "node": ident,
-                    "detail": _node_msg(resp)}
-        return _err(422, _node_msg(resp))
-    except (serial.SerialException, TimeoutError, ValueError) as e:
-        return _err(502, str(e))
-    finally:
-        _serial_lock.release()
-
-
-# ----- Flasheo del firmware del nodo (Atom, ESP32) por USB -----
+# Imágenes para programación desde el navegador.
 
 @router.get("/rak")
 def rak_policy():
@@ -363,84 +88,6 @@ def rak_image():
     except (OSError, ValueError) as error:
         return _err(502, str(error))
 
-
-@router.post("/rak/info")
-async def rak_info(request: Request):
-    try:
-        body = json.loads(await request.body())
-        port = body.get("port", "")
-        if not _port_allowed(port):
-            return _err(400, "Puerto USB no admitido.")
-        if not _serial_lock.acquire(blocking=False):
-            return _busy()
-        try:
-            with _open(port) as ser:
-                ident = _hello(ser)
-                rak_commission.require_identity(ident, body.get("device_uid"))
-                report = rak_commission.Client(ser).inspect()
-                return {"node": ident, "rak": report}
-        finally:
-            _serial_lock.release()
-    except (OSError, ValueError, TimeoutError) as error:
-        return _err(502, str(error))
-
-
-def _rak_update_job(job, port, uid):
-    try:
-        job.update(phase="downloading")
-        with _open(port) as ser:
-            ident = _hello(ser)
-            rak_commission.require_identity(ident, uid)
-            client = rak_commission.Client(ser)
-            current = client.inspect()
-            if current.get("approved"):
-                rak_commission.require_approved(current)
-                job.update(rak=current, phase="complete")
-            else:
-                state = rak_commission.classify(current.get("version"))
-                if not rak_commission.can_prepare(current):
-                    raise ValueError(rak_commission.block_reason(state["state"]))
-                data = rak_commission.cached_image().read_bytes()
-                result = client.update(data, lambda value: job.update(
-                    {key: item for key, item in value.items() if key != "state"}, rak_state=value.get("state")))
-                job.update(rak=result, phase="complete")
-            time.sleep(1)
-            after = _hello(ser)
-            rak_commission.require_identity(after, uid)
-            rak_commission.require_approved(after.get("rak", {}))
-            job.update(node=after)
-        job.update(state="complete")
-    except Exception as error:
-        LOG.warning("event=rak.maintenance_failed error=%s", error)
-        job.update(state="failed", error=str(error))
-    finally:
-        _serial_lock.release()
-
-
-@router.post("/rak/prepare")
-async def rak_prepare(request: Request):
-    try:
-        body = json.loads(await request.body())
-    except ValueError:
-        return _err(400, "Solicitud JSON no válida.")
-    port, uid = body.get("port", ""), body.get("device_uid")
-    if not _port_allowed(port) or not isinstance(uid, str):
-        return _err(400, "Identifica el nodo USB antes de preparar el RAK.")
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    # Solo se conserva la operación más reciente; el lock impide solapamientos.
-    _rak_jobs.clear()
-    job_id = uuid.uuid4().hex
-    job = {"id": job_id, "state": "running", "phase": "checking", "done": 0}
-    _rak_jobs[job_id] = job
-    threading.Thread(target=_rak_update_job, args=(job, port, uid), daemon=True).start()
-    return {"id": job_id}
-
-
-@router.get("/rak/jobs/{job_id}")
-def rak_job(job_id: str):
-    job = _rak_jobs.get(job_id)
-    return dict(job) if job else _err(404, "No consta esa operación de mantenimiento RAK.")
 
 def _sudo(cmd: list[str], timeout_s: float) -> tuple[bool, str]:
     """Acción privilegiada con sudo no interactivo (regla acotada del
@@ -471,7 +118,7 @@ def firmware_info():
     return {"bin": info, "version": firmwaremeta.image_version(NODO_BIN),
             "release_notes": firmwaremeta.release_notes("node", firmwaremeta.image_version(NODO_BIN)),
             "fw_name": NODE_FW_NAME,
-            "flash_ready": FLASH_NODO_SH.is_file()}
+            "flash_ready": NODO_BIN.is_file()}
 
 
 @router.get("/red")
@@ -548,56 +195,3 @@ def nodo_bin():
                             "Cache-Control": "no-store"})
 
 
-@router.post("/flash")
-async def flash(request: Request):
-    """Flashea nodo.bin en el Atom conectado al puerto indicado (esptool,
-    ESP32). El puerto debe ser un candidato no excluido (el del gateway
-    queda fuera). Bajo el lock serie: no se puede flashear y comisionar a
-    la vez."""
-    try:
-        body = json.loads((await request.body()) or b"{}")
-    except json.JSONDecodeError:
-        return _err(400, "body JSON inválido")
-    port = body.get("port", "")
-    if not port or not _port_allowed(port):
-        return _err(400, "puerto no admitido (no es un candidato o es el "
-                         "del gateway)")
-    if not FLASH_NODO_SH.is_file():
-        return _err(501, "flash_nodo.sh no está junto a pi-service")
-    if not NODO_BIN.is_file():
-        return _err(409, "no hay nodo.bin en pi-service (generarlo con "
-                         "nodo/make_dist.sh y copiarlo)")
-
-    if not _serial_lock.acquire(blocking=False):
-        return _busy()
-    try:
-        available = firmwaremeta.image_version(NODO_BIN)
-        if not available:
-            return _err(409, "No se puede identificar el firmware disponible. Vuelve a empaquetarlo.")
-        if (firmwaremeta.release_number(available) or (0,0,0))<(0,0,82):
-            return _err(409,'La imagen no admite la identidad física. Compila y empaqueta 0.0.82 o posterior.')
-        if body.get('expected_version') != available:
-            return _err(409, "El firmware disponible ha cambiado. Recarga la página y comprueba la versión.")
-        try:
-            with _open(port) as ser:
-                identity = _hello(ser)
-                installed = identity.get('version')
-                if body.get('device_uid') and identity.get('device_uid') != body['device_uid']:
-                    return _err(409, "El nodo conectado ha cambiado. Vuelve a identificarlo.")
-        except TimeoutError:
-            installed = None
-        initial = installed is None and body.get('initial_install') is True and not body.get('device_uid')
-        if initial and firmwaremeta.release_number(available) < (0, 0, 85):
-            return _err(409, "La imagen disponible no incorpora mantenimiento RAK para el alta inicial.")
-        if not initial and firmwaremeta.comparison(installed, available) != 'different':
-            return _err(409, "No hay una actualización aplicable. Vuelve a comprobar la versión del nodo.")
-        LOG.info("event=node.flash_started port=%s", port)
-        ok, out = _sudo([str(FLASH_NODO_SH), port], timeout_s=FLASH_TIMEOUT_S)
-        cola = "\n".join(out.splitlines()[-15:])   # esptool imprime mucho
-        if not ok:
-            LOG.warning("event=node.flash_failed detail=%s", cola)
-            return _err(502, cola)
-        LOG.info("event=node.flash_completed")
-        return {"ok": True, "port": port, "output": cola}
-    finally:
-        _serial_lock.release()

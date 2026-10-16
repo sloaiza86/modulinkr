@@ -87,3 +87,8 @@ La migración `005_system_health.sql` y `modulinkr-monitor.service` incorporan l
 ## Estado previo a la publicación
 
 Se utiliza exclusivamente el consumidor de identidad física 4.0 y el espacio MQTT `modulinkr/v2`. Los módulos de ingesta del formato interno anterior se retiran del código. Las migraciones numeradas y las tablas de prueba se conservan para reproducir y recuperar el banco; no se ofrecen como histórico de clientes. La definición actual se encuentra en [`db-schema.md`](../shared/protocol/db-schema.md).
+
+
+## Métricas históricas del gateway
+
+La migración `007_gateway_metrics.sql` y `gateway_metrics_ingest.py` conservan los cambios de duty cycle y conectividad por despliegue. La ingesta y las consultas se verifican con PostgreSQL temporal. La migración operativa, los permisos y la entrega por el broker desplegado permanecen pendientes. `install_mesh_metrics.sh` utiliza las credenciales operativas y conserva un volcado antes de instalar.

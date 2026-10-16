@@ -28,6 +28,10 @@ constexpr uint8_t kAddrBroadcast = 0x00;
 constexpr uint8_t kAddrGateway   = 0xFF;
 
 // Tipos de trama (frame-format.md §1.6).
+constexpr uint8_t kFrameCatalogRoute = 0x30;
+constexpr uint8_t kFrameCatalogRouteAck = 0x31;
+constexpr uint8_t kFrameConfigRoute = 0x2E;
+constexpr uint8_t kFrameConfigRouteResult = 0x2F;
 constexpr uint8_t kFrameModbusWrite = 0x2C;
 constexpr uint8_t kFrameModbusWriteResult = 0x2D;
 constexpr uint8_t kFrameFwReport = 0x2A;

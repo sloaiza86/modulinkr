@@ -9,7 +9,7 @@ function setup() {
   const elements = {};
   const document = {getElementById(id) {return elements[id] ||= {dataset:{},hidden:false,disabled:false,textContent:'',className:'',innerHTML:'',querySelectorAll:()=>[],setAttribute(){},querySelector(){return this;}};},querySelector:()=>document.getElementById('table')};
   const c=vm.createContext({document,console});
-  vm.runInContext(section('function fwNumero(', 'let fwPuerto = null;') + section('let bcSeleccion =', 'async function bcInstalar('), c);
+  vm.runInContext(section('function fwNumero(', 'async function fwCargar(') + section('let bcSeleccion =', 'async function bcInstalar('), c);
   vm.runInContext(section('function htmlSeguro(', '\nfunction '), c);
   c.migDato = (a,b) => a + ':' + b;
   c.migDuracion = n => n+'s';
@@ -61,7 +61,7 @@ test('una operación LoRa antigua se identifica como historial y conserva la ver
   n.operation={...n.operation,version:'0.0.78',state:'done',updated_at:1700000000};
   const {e}=render(n);
   assert.match(e.table.innerHTML,/<td>0.0.85<br>/);
-  assert.match(e.table.innerHTML,/Última instalación por LoRa.*Versión 0.0.78/);
+  assert.match(e.table.innerHTML,/Última instalación por Red Mesh.*Versión 0.0.78/);
   assert.match(e.table.innerHTML,/Último cambio:/);
   assert.doesNotMatch(e.table.innerHTML,/Actualización por LoRa en curso/);
 });

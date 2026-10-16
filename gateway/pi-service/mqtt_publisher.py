@@ -200,6 +200,8 @@ class MqttPublisher:
                 import protocol
                 cat=protocol.parse_catalog(blob)
                 if 'error' in cat: raise ValueError(cat['error'])
+                if cat.get('catalog_node') != origin:
+                    raise ValueError('El catálogo corresponde a otro identificador.')
                 cat.update(device_uid=catalog_payload['device_uid'],catalog_tag=catalog_payload['catalog_tag'])
                 self.buf.catalog_upsert(origin,cat)
             except (KeyError,ValueError) as exc:
@@ -236,6 +238,8 @@ class MqttPublisher:
         self.poll_publications()
         self._drain_catalogs()
         self._drain_health()
+        import gateway_metrics
+        gateway_metrics.publish(self)
         return self._drain_telemetry()
 
     def _drain_catalogs(self) -> int:
@@ -423,4 +427,8 @@ class MqttPublisher:
         import node_commands
         while self._command_q:
             publisher,result=self._command_q.popleft()
-            node_commands.receive(service,result['origin'],result,'nbiot',publisher)
+            if result.get('kind') == 'config':
+                import mesh_config
+                mesh_config.receive(service, publisher, result)
+            else:
+                node_commands.receive(service,result['origin'],result,'nbiot',publisher)

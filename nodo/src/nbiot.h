@@ -123,13 +123,12 @@ public:
 
     // NTP sobre la sesión de datos NB-IoT (batch-format.md §6, último
     // recurso cuando no hay hora del gateway). Devuelve epoch Unix UTC o
-    // 0 si falló. Bloqueante (hasta ~15 s); llamar solo desde la tarea
+    // 0 si falló. Bloqueante; llamar solo desde la tarea
     // del servicio NB-IoT, nunca desde el loop.
     //
-    // Usa AT+CNTP (SIM7028 §8.2.1). POR VALIDAR EN BANCO el <cid> correcto
-    // (0 ó 1, según el contexto de datos activo); si el módulo no resuelve,
-    // falla limpio y devuelve 0 (v3.0: sin hora no se muestrea, así que
-    // el reintento con backoff corre a cargo de ntpTick en main.cpp).
+    // Usa AT+CNTP con zona UTC y exige +CNTP: 0 (SIM7028 §8.2.1)
+    // antes de consultar el RTC. Sin esa confirmación devuelve 0 y
+    // ntpTick conserva el reintento sin dar la hora por sincronizada.
     uint32_t ntpSync(const char* server = "pool.ntp.org");
 
     bool sendAT(const char* cmd,

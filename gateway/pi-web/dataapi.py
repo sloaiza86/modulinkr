@@ -410,6 +410,45 @@ def _resolve_channels(cur, ids, unify):
     return result
 
 
+GATEWAY_CHANNELS = (
+    (-1, 'duty_pct', 'Duty cycle del gateway, última hora', '%'),
+    (-2, 'online_lora', 'Nodos en línea por LoRa', 'nodos'),
+    (-3, 'online_nbiot', 'Nodos en línea por NB-IoT', 'nodos'),
+    (-4, 'online_total', 'Nodos en línea, total', 'nodos'),
+)
+
+
+def _gateway_channels():
+    return [dict(channel_id=cid,channel_ids=[cid],node_id=255,read_id=rid,
+                 name=name,unit=unit,active_from=None,active_to=None,previous=False,
+                 interpolation='step') for cid,rid,name,unit in GATEWAY_CHANNELS]
+
+
+def _gateway_series(cur, ids, t0, t1, carry=True):
+    selected = [c for c in _gateway_channels() if c['channel_id'] in ids]
+    if len(selected)!=len(set(ids)):
+        raise HTTPException(404,'Métrica de gateway desconocida')
+    if carry:
+        # El estado previo fija el valor al inicio; cada cambio conserva su instante.
+        cur.execute("""SELECT extract(epoch FROM ts),duty_pct,online_lora,online_nbiot,online_total
+            FROM gateway_metrics WHERE ts >= %s AND ts < %s
+            UNION ALL
+            (SELECT extract(epoch FROM ts),duty_pct,online_lora,online_nbiot,online_total
+             FROM gateway_metrics WHERE ts < %s ORDER BY ts DESC,event_id DESC LIMIT 1)
+            ORDER BY 1""",(t0,t1,t0))
+    else:
+        cur.execute("SELECT extract(epoch FROM ts),duty_pct,online_lora,online_nbiot,online_total FROM gateway_metrics WHERE ts >= %s AND ts < %s ORDER BY ts,event_id",(t0,t1))
+    rows=cur.fetchall()
+    result=[]
+    for channel in selected:
+        index=-channel['channel_id']
+        points=[[max(t0.timestamp(),float(row[0])),float(row[index]),0,0] for row in rows]
+        if points and carry:
+            points.append([min(t1.timestamp(),time.time()),points[-1][1],0,0])
+        result.append(dict(channel,bucket_s=0,points=points,source_points={'gateway':points}))
+    return result
+
+
 @router.get("/nodos")
 def nodos(incluir_anteriores: bool = False, unificar: bool = False):
     """Catálogo almacenado, con fechas para distinguir series anteriores."""
@@ -438,7 +477,7 @@ def nodos(incluir_anteriores: bool = False, unificar: bool = False):
                 if not incluir_anteriores:
                     node["channels"] = [c for c in node["channels"] if not c["previous"]]
             node["previous"] = all(c["previous"] for c in node["channels"])
-        return [n for n in out.values() if n["channels"]]
+        return [n for n in out.values() if n["channels"]] + [dict(node_id=255,name="Gateway",channels=_gateway_channels(),previous=False)]
 
 
 @router.get("/series")
@@ -456,7 +495,11 @@ def series(channels: str = Query(...), desde: str = Query(...),
 
     result = []
     with _conn() as conn, conn.cursor() as cur:
-        for meta in _resolve_channels(cur, ids, unificar):
+        metric_ids=[cid for cid in ids if cid<0]
+        if metric_ids:
+            result.extend(_gateway_series(cur,metric_ids,t0,t1))
+        node_ids=[cid for cid in ids if cid>0]
+        for meta in (_resolve_channels(cur, node_ids, unificar) if node_ids else []):
             cid = meta["channel_id"]
             cur.execute(
                 """SELECT floor(extract(epoch FROM s.ts) / %s) * %s AS t,
@@ -501,7 +544,9 @@ def export_csv(channels: str = Query(...), desde: str = Query(...),
     catalog_conn = _conn()
     try:
         with catalog_conn.cursor() as cur:
-            groups = _resolve_channels(cur, ids, unificar)
+            groups = _resolve_channels(cur, [cid for cid in ids if cid>0], unificar) if any(cid>0 for cid in ids) else []
+            metric_ids=[cid for cid in ids if cid<0]
+            metrics=_gateway_series(cur,metric_ids,t0,t1,carry=False) if metric_ids else []
             resolved = list(dict.fromkeys(cid for group in groups for cid in group["channel_ids"]))
     finally:
         catalog_conn.close()
@@ -526,6 +571,9 @@ def export_csv(channels: str = Query(...), desde: str = Query(...),
                 w = csv.writer(buf)
                 w.writerow(["ts", "node", "read_id", "unit", "value", "via",
                             "channel_id", "measure", "active_from", "active_to"])
+                for metric in metrics:
+                    for ts,value,_,_ in metric['points']:
+                        w.writerow([datetime.fromtimestamp(ts,timezone.utc).isoformat(),255,metric['read_id'],metric['unit'],value,'gateway',metric['channel_id'],metric['name'],'',''])
                 n = 0
                 for ts, origin, rid, unit, value, source, cid, name, start, end in cur:
                     w.writerow([ts.isoformat(), origin, rid, unit or "",

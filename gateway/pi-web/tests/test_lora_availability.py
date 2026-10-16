@@ -69,9 +69,9 @@ class AvailabilityTests(unittest.TestCase):
                 CREATE TABLE node_probe(id INTEGER PRIMARY KEY, origin INTEGER,
                     para_que INTEGER, created_ts REAL, state TEXT, listo INTEGER, detail TEXT);
                 CREATE TABLE config_read(id INTEGER PRIMARY KEY, origin INTEGER,
-                    created_ts REAL, state TEXT);
+                    created_ts REAL, state TEXT, transport TEXT, route_json TEXT, publisher INTEGER);
                 CREATE TABLE config_push(id INTEGER PRIMARY KEY, origin INTEGER,
-                    config TEXT, created_ts REAL, state TEXT, apply_at INTEGER);
+                    config TEXT, created_ts REAL, state TEXT, apply_at INTEGER, transport TEXT, route_json TEXT, publisher INTEGER);
             """)
 
     def sleep(self, seconds):
@@ -150,6 +150,9 @@ class AvailabilityTests(unittest.TestCase):
         for write, table in ((False, "config_read"), (True, "config_push")):
             self.assertIn("id", self.request(write))
             self.assertEqual(self.count(table), 1)
+            with sqlite3.connect(self.db) as c:
+                c.execute("UPDATE config_read SET state='done'")
+                c.execute("UPDATE config_push SET state='done'")
 
     def test_existing_transfers_have_specific_errors(self):
         for write, table, code in (

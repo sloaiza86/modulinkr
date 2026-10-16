@@ -808,6 +808,8 @@ modulinkr-chart-legend {
   padding: 9px 16px 3px; color: var(--dim); font-size: 11px; flex: none;
 }
 .grafico-vias > span { display: inline-flex; align-items: center; gap: 6px; }
+.grafico-vias > .grafico-conexion-series { flex-wrap: wrap; gap: 6px 14px; }
+.grafico-conexion-series > span { display: inline-flex; align-items: center; gap: 6px; }
 .grafico-trazo { width: 24px; border-top: 2px solid var(--dim); }
 .grafico-trazo.nbiot { border-top-style: dotted; }
 .grafico-vias-titulo { font-weight: 500; }
@@ -827,8 +829,8 @@ modulinkr-chart-legend {
   color: var(--text); font-size: 12px; line-height: 1.5;
   box-shadow: 0 4px 16px rgba(15, 30, 45, 0.12);
 }
-#modal-vias { padding: 0 24px; gap: 6px 14px; }
-#modal-vias .grafico-vias-ayuda { margin-left: -10px; }
+#modal-vias, #modal-conexiones { padding: 0 24px; gap: 6px 14px; }
+#modal-vias .grafico-vias-ayuda, #modal-conexiones .grafico-vias-ayuda { margin-left: -10px; }
 .grafico-contenido { position: relative; flex: 1; display: flex; min-height: 0; }
 #grafico { flex: 1 1 auto; width: 100%; height: auto; min-height: 0; }
 .datos-vacio {
@@ -1839,9 +1841,9 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
 #fw-lora-barra { margin-top: 28px; }
 @media (max-width: 640px) { .fw-versiones { grid-template-columns: 1fr; } }
 
-#cfg-fw .cfg-acciones:not(:has(button:not([hidden]))):not(:has(.aviso:not(:empty))), #cfg-radio .cfg-acciones:not(:has(button:not([hidden]))) { display: none; }
+#cfg-fw .cfg-acciones:not(:has(.ota-auto)):not(:has(button:not([hidden]))):not(:has(.aviso:not(:empty))), #cfg-radio .cfg-acciones:not(:has(button:not([hidden]))) { display: none; }
 
-#fw-local-aviso:not(:empty), #fw-busqueda-aviso:not(:empty), #fw-resultado:not(:empty) { margin-top: 16px; }
+#fw-local-aviso:not(:empty), #fw-resultado:not(:empty) { margin-top: 16px; }
 
 
 .mantenimiento-card { padding: 0; overflow: hidden; }
@@ -1886,7 +1888,8 @@ body.mantenimiento-reiniciando #red-observacion { display: none; }
 .ota-history { padding-left: 1.2rem; max-height: 20rem; overflow-y: auto; }
 .ota-history li { margin-bottom: .8rem; }
 .ota-auto { flex-basis: 100%; text-align: left; }
-.ota-auto label { display: flex; align-items: center; gap: .6rem; }
+.ota-auto label { display: flex; align-items: flex-start; gap: .6rem; }
+.ota-auto input { flex: 0 0 auto; margin-top: .3rem; }
 .ota-auto p { margin-top: .35rem; }
 
 .ota-button:focus-visible, .ota-detail summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
@@ -2024,3 +2027,5 @@ body.en-configuracion #clock { display: none; }
 .identidad-dialogo label { display: grid; gap: 0.4rem; }
 .identidad-dialogo select, .identidad-dialogo textarea { width: 100%; }
 .identidad-dialogo::backdrop { background: #0008; }
+
+.tarjeta-gw .texto-ayuda { grid-column: 1 / -1; margin: 6px 8px; font-size: 12px; }

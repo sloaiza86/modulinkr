@@ -181,3 +181,8 @@ La aceptación por el broker no confirma la ejecución. El resultado se correlac
 ## Identidad física y despliegues
 
 El código del nodo 0.0.83 utiliza la radio 4.0, catálogos por huella y muestras vinculadas a equipo y sesión. El gateway bloquea identificadores repetidos y el consumidor separa los despliegues. El contrato actual, la conservación interna del banco y el procedimiento de despliegue se describen en [`identity-safety.md`](../../shared/protocol/identity-safety.md). El banco debe utilizar nodos y relays del contrato de radio 4.0; las versiones internas previas no representan clientes publicados.
+
+
+## Configuración Mesh y métricas del gateway
+
+El servicio incorpora configuración mediante NB-IoT con recorrido explícito y un histórico local de duty cycle y conectividad. El comportamiento, la persistencia y los límites de validación se describen en [`mesh-configuration.md`](../../shared/protocol/mesh-configuration.md). La programación USB del gateway se retira; se conserva la conexión serie operativa de su radio.

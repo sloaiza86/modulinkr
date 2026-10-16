@@ -41,6 +41,7 @@ struct Cellular {
 } nbsvc;
 struct PendingWrite{bool active=false;uint8_t body[39]={},length=0,path[16]={},path_count=0;}g_write;
 namespace writecmd {Result execute(const uint8_t* body,size_t len,const cfg::Config&,ModbusRTU&,uint32_t,bool){++executions;Request q;assert(decode(body,len,q));Result r;r.id=q.id;r.fingerprint=hash(body,len);r.state=CONFIRMED;return r;}}
+bool incomingCellularConfig(JsonDocument&){return false;}
 // HANDLERS
 int main(){
  g_cfg.node_id=1;g_cfg.n_devices=1;

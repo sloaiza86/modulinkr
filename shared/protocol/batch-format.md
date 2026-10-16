@@ -91,7 +91,9 @@ Un ID ocupado por otro UID genera conflicto, salvo resolución explícita del ga
 
 ### 10.4 Catálogo celular fragmentado
 
-El nodo publica fragmentos retenidos de hasta 160 bytes en `register/<catalog_tag>/<índice>`. El sobre incluye `frag_idx`, `frag_total` y `catalog_fragment` hexadecimal, junto con despliegue, ID, UID y huella. El consumidor admite hasta trece fragmentos y 2048 bytes, reensambla, verifica SHA-256 e ID de nodo y obtiene los descriptores de medidas. No se utiliza la variante interna anterior `raw_catalog` en base64.
+El nodo publica fragmentos de hasta 160 bytes en `register/<catalog_tag>/<índice>`. El sobre incluye `frag_idx`, `frag_total` y `catalog_fragment` hexadecimal, junto con despliegue, ID, UID y huella. El consumidor admite hasta trece fragmentos y 2048 bytes, reensambla, verifica SHA-256 e ID de nodo y obtiene los descriptores de medidas. Los fragmentos celulares utilizan QoS 1 sin retención y se repiten cada diez minutos; el catálogo completo republicado por el gateway se retiene según §10.2.
+
+Un nodo sin módem puede enviar esos fragmentos al supernodo por el recorrido de custodia de [`frame-format.md`](frame-format.md) §29. El tema de registro conserva el ID del propietario del catálogo; no se sustituye por el del portador celular. El sobre añade la identidad del portador y el recorrido. El acuse por LoRa confirma publicación en el broker, mientras que la disponibilidad de la ruta del nodo exige que el gateway haya aceptado su catálogo y recibido una muestra reciente.
 
 ## 11. Documentos relacionados
 

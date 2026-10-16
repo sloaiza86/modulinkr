@@ -93,6 +93,28 @@ test("no se consulta con la pestaña oculta ni se acepta una respuesta cancelada
   assert.equal(c.redSnapshot,null);
 });
 
+test("ocultar y volver antes de resolver la cancelación conserva la observación anterior", async () => {
+  const {c,notifications} = pollingContext();
+  c.redSnapshot=fixture();c.redConectada=true;
+  const previous=c.redSnapshot;
+  let visibility;
+  c.document.addEventListener=(name,callback)=>{assert.equal(name,"visibilitychange");visibility=callback;};
+  vm.runInContext(section('document.addEventListener("visibilitychange",', 'function actualizarReloj('),c);
+  c.fetchApi=(_, {signal})=>new Promise((resolve,reject)=>signal.addEventListener("abort",()=>reject(signal.reason)));
+  const pending=c.refrescarRed();
+  c.document.hidden=true;visibility();
+  c.document.hidden=false;
+  await pending;
+  assert.equal(c.redConectada,true);
+  assert.equal(c.redSnapshot,previous);
+  assert.deepEqual(notifications,[]);
+  assert.equal(c.redPeticion,null);
+  c.fetchApi=async()=>({ok:true,json:async()=>fixture()});
+  await c.refrescarRed();
+  assert.equal(c.redConectada,true);
+  assert.notEqual(c.redSnapshot,previous);
+});
+
 test("los segundos no cambian la firma de las tarjetas", () => {
   const c=vm.createContext({});
   vm.runInContext(section("function firmaSinEdades(", "function proyectarRed("), c);

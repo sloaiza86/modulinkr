@@ -54,11 +54,11 @@ from consumer_status import ConsumerStatus
 
 LOG = logging.getLogger("modulinkr.consumer")
 
-TOPIC_RE = re.compile(r"^modulinkr/v2/([0-9a-f]{12})/(\d{1,3})/(telemetry|register|health)(?:/[0-9a-f]{16}(?:/\d{1,2})?)?$")
+TOPIC_RE = re.compile(r"^modulinkr/v2/([0-9a-f]{12})/(\d{1,3})/(telemetry|register|health|metrics)(?:/[0-9a-f]{16}(?:/\d{1,2})?)?$")
 
 # Contador de descarte por tipo de topic, para que un payload ilegible no se
 # contabilice siempre como register.
-_BAD_KEY = {"telemetry": "msg_bad", "register": "reg_bad", "health": "hlt_bad"}
+_BAD_KEY = {"telemetry": "msg_bad", "register": "reg_bad", "health": "hlt_bad", "metrics": "msg_bad"}
 
 STATS_KEYS = ("msg_tel", "msg_bad", "msg_test", "inserted", "dup",
               "quarantined", "sample_bad", "reg_ok", "reg_synced",
@@ -127,7 +127,7 @@ class Consumer:
         # La suscripción se (re)emite en cada conexión: con sesión
         # persistente es redundante pero inocua, y cubre el primer
         # arranque y los brokers reiniciados sin estado.
-        client.subscribe([("modulinkr/v2/+/+/telemetry",1),("modulinkr/v2/+/+/register/#",1),("modulinkr/v2/+/+/health",1)])
+        client.subscribe([("modulinkr/v2/+/+/telemetry",1),("modulinkr/v2/+/+/register/#",1),("modulinkr/v2/+/+/health",1),("modulinkr/v2/+/255/metrics",1)])
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         self.status.update(mqtt_connected=False)
@@ -142,7 +142,7 @@ class Consumer:
             return
         deployment=m.group(1)
         publisher, kind = int(m.group(2)), m.group(3)
-        if not identity_ingest.valid_uid(deployment) or not 1<=publisher<=255 or (kind!='telemetry' and publisher==255):
+        if not identity_ingest.valid_uid(deployment) or not 1<=publisher<=255 or (kind not in ('telemetry','metrics') and publisher==255) or (kind=='metrics' and publisher!=255):
             self.stats[_BAD_KEY[kind]]+=1
             LOG.warning('event=mqtt.topic_identity_rejected topic=%s',msg.topic)
             client.ack(msg.mid,msg.qos)
@@ -167,7 +167,18 @@ class Consumer:
         before = {key: self.stats[key] for key in ('inserted', 'quarantined', 'dup',
                                                   'reg_ok', 'reg_synced', 'materialized', 'hlt_ok', 'hlt_dup')}
         try:
-            if kind=='register': identity_ingest.register(self.db,publisher,payload,self.stats)
+            if kind=='metrics':
+                import gateway_metrics_ingest
+                try:
+                    gateway_metrics_ingest.process(self.db,payload)
+                except ValueError as error:
+                    self.stats['msg_bad']+=1
+                    self.db.rollback()
+                    LOG.warning('event=gateway_metrics.rejected error=%s',error)
+                    client.ack(msg.mid,msg.qos)
+                    return
+                self.status.update(write_error=False,last_saved=time.time())
+            elif kind=='register': identity_ingest.register(self.db,publisher,payload,self.stats)
             elif kind=='telemetry':
                 self.stats['msg_tel']+=1
                 identity_ingest.telemetry(self.db,publisher,payload,self.stats)

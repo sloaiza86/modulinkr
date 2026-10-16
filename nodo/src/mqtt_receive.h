@@ -8,6 +8,8 @@ class MqttReceive {
 public:
     using Callback=void(*)(const char*,const char*,void*);
     Callback callback=nullptr; void* context=nullptr;
+    // Una UART reinicializada no conserva fragmentos de la sesión anterior.
+    void reset() { active=false; valid=false; remaining=0; topic_used=payload_used=0; used=0; line[0]=0; }
     bool feed(char c,uint32_t now) {
         if(active && uint32_t(now-at)>10000) reset();
         at=now;
@@ -50,5 +52,4 @@ private:
     size_t used=0,topic_used=0,payload_used=0;
     uint32_t at=0; int remaining=0,total_topic=0,total_payload=0,chunk=0;
     bool active=false,valid=false;
-    void reset() { active=false; valid=false; remaining=0; topic_used=payload_used=0; used=0; line[0]=0; }
 };

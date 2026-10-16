@@ -391,6 +391,17 @@ class GatewayBuffer:
         )""")
         self._migrate_fw_bcast_target()
         self._migrate_ota_operations()
+        for table in ('config_push', 'config_read'):
+            cols = {r[1] for r in self.conn.execute(f'PRAGMA table_info({table})')}
+            for name, declaration in (('transport', "TEXT NOT NULL DEFAULT 'lora'"),
+                                      ('route_json', 'TEXT'), ('publisher', 'INTEGER')):
+                if name not in cols:
+                    self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
+        cols = {r[1] for r in self.conn.execute('PRAGMA table_info(fw_bcast)')}
+        if 'allow_duty_override' not in cols:
+            self.conn.execute('ALTER TABLE fw_bcast ADD COLUMN allow_duty_override INTEGER NOT NULL DEFAULT 0')
+        import gateway_metrics
+        gateway_metrics.initialize(self.conn)
         self._migrate_node_status_nbiot()
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(node_status)")}
         if 'hl_counters_since' not in cols:
@@ -725,7 +736,7 @@ class GatewayBuffer:
         """
         cur = self.conn.execute(
             """SELECT id, origin, config, apply_at FROM config_push
-                WHERE state IN ('pending', 'sending') ORDER BY id LIMIT 1""")
+                WHERE transport='lora' AND state IN ('pending', 'sending') ORDER BY id LIMIT 1""")
         row = cur.fetchone()
         if row is None:
             return None
@@ -808,7 +819,7 @@ class GatewayBuffer:
         cur = self.conn.execute(
             """SELECT id, xfer, path, version, total_len, sha256, block_k,
                       block_r, state, pass_no, detail, target,
-                      hour_from, hour_to
+                      hour_from, hour_to, allow_duty_override
                  FROM fw_bcast
                 WHERE state NOT IN ('ready', 'install_req', 'installing',
                                     'done', 'failed', 'cancelled')
@@ -818,7 +829,7 @@ class GatewayBuffer:
             return None
         campos = ("id", "xfer", "path", "version", "total_len", "sha256",
                   "block_k", "block_r", "state", "pass_no", "detail", "target",
-                  "hour_from", "hour_to")
+                  "hour_from", "hour_to", "allow_duty_override")
         return dict(zip(campos, row))
 
     def bcast_state(self, bcast_id: int, state: str,
@@ -1008,7 +1019,7 @@ class GatewayBuffer:
         """Siguiente lectura pendiente, o None."""
         cur = self.conn.execute(
             """SELECT id, origin FROM config_read
-                WHERE state = 'pending' ORDER BY id LIMIT 1""")
+                WHERE transport='lora' AND state = 'pending' ORDER BY id LIMIT 1""")
         row = cur.fetchone()
         return None if row is None else {"id": row[0], "origin": row[1]}
 

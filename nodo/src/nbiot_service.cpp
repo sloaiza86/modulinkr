@@ -199,7 +199,8 @@ bool NbiotService::step() {
             }
             // Publicaciones pendientes.
             PubItem item{nullptr, 0};
-            if (xQueueReceive(queue_, &item, pdMS_TO_TICKS(500)) == pdTRUE) {
+            // La cadencia de la tarea conserva la recepción UART entre publicaciones.
+            if (xQueueReceive(queue_, &item, 0) == pdTRUE) {
                 bool ok = modem_.mqttPublish(item.topic[0] ? item.topic : cfg_.topic_batch, item.json, 1);
                 String publish_response = modem_.lastResponse();
                 if (!ok) {
@@ -229,6 +230,7 @@ bool NbiotService::step() {
                 if (ok) {
                     mqtt_state_ = Nbiot::MqttState::CONNECTED;
                     published_ok_ = published_ok_ + 1;
+                    if (item.ticket) last_message_published_ = item.ticket;
                     // Confirmación: el loop (núcleo 1) libera del outbox las
                     // muestras de los batches con id <= este (v2.3).
                     if(item.batch_id) last_published_batch_id_ = item.batch_id;
@@ -312,16 +314,21 @@ void NbiotService::messageReceived(const char* topic,const char* json,void* cont
     strcpy(message,json);
     if(xQueueSend(service.commands_,message,0)!=pdTRUE)
         diag::log("WARNING","node.command","command.queue_full","capacity=4");
+    else
+        diag::log("INFO","node.command","command.received","bytes=%u",static_cast<unsigned>(strlen(json)));
 }
 bool NbiotService::receiveCommand(char* out,size_t capacity) {
     if(!commands_ || capacity<768) return false;
     return xQueueReceive(commands_,out,0)==pdTRUE;
 }
-bool NbiotService::publishMessage(const char* topic,const char* json) {
+bool NbiotService::publishMessage(const char* topic,const char* json,uint32_t* ticket) {
     if(!queue_ || !topic || !*topic || strlen(topic)>=80 || !json) return false;
     char* copy=strdup(json); if(!copy) return false;
     PubItem item{copy,0}; strcpy(item.topic,topic);
+    item.ticket=++next_message_ticket_;
+    if(!item.ticket) item.ticket=++next_message_ticket_;
     if(xQueueSend(queue_,&item,0)!=pdTRUE) { free(copy); return false; }
+    if(ticket) *ticket=item.ticket;
     return true;
 }
 

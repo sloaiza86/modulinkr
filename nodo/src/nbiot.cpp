@@ -46,7 +46,19 @@ bool Nbiot::begin(HardwareSerial& uart,
     online_ = false;
     uart_   = &uart;
 
+    // Un comando MQTT completo supera los 256 bytes de la UART por defecto.
+    // Se configura antes de begin, también al recuperar una sesión fallida.
+    uart_->end();
+    receive_.reset();
+    const size_t rx_buffer = uart_->setRxBufferSize(2048);
+    if (rx_buffer < 2048) {
+        diag::log("ERROR", "node.nbiot", "nbiot.uart_buffer_failed",
+                  "requested_bytes=2048 actual_bytes=%u", static_cast<unsigned>(rx_buffer));
+        return false;
+    }
     uart_->begin(baudrate, SERIAL_8N1, rx_pin, tx_pin);
+    diag::log("INFO", "node.nbiot", "nbiot.uart_ready",
+              "rx_buffer_bytes=%u baud=%lu", static_cast<unsigned>(rx_buffer), static_cast<unsigned long>(baudrate));
 
     delay(800);
     pollMessages();
@@ -520,7 +532,9 @@ uint32_t Nbiot::readClock() {
     // primer attach el módulo reporta la época GSM (año 80 / 1980): cualquier
     // año fuera de 2020-2079 se trata como hora no válida.
     const int year = (yy < 100) ? (2000 + yy) : yy;
-    if (year < 2020 || year > 2079 || mo < 1 || mo > 12 || dd < 1 || dd > 31) {
+    if (year < 2020 || year > 2079 || mo < 1 || mo > 12 || dd < 1 || dd > 31 ||
+        hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59 ||
+        (sign != '+' && sign != '-') || tz < 0 || tz > 96) {
         return 0;
     }
 
@@ -537,7 +551,13 @@ uint32_t Nbiot::readClock() {
 
     // A UTC: restar el desfase local (o sumarlo si es negativo).
     const uint32_t tz_s = static_cast<uint32_t>(tz) * 15u * 60u;
-    return (sign == '-') ? epoch_local + tz_s : epoch_local - tz_s;
+    const uint32_t epoch_utc = (sign == '-') ? epoch_local + tz_s : epoch_local - tz_s;
+    diag::log("INFO", "node.nbiot", "nbiot.clock_read",
+              "rtc=%04d/%02d/%02d,%02d:%02d:%02d%c%02d offset_s=%ld epoch_utc=%lu",
+              year, mo, dd, hh, mi, ss, sign, tz,
+              static_cast<long>(sign == '-' ? -static_cast<int32_t>(tz_s) : static_cast<int32_t>(tz_s)),
+              static_cast<unsigned long>(epoch_utc));
+    return epoch_utc;
 }
 
 uint32_t Nbiot::ntpSync(const char* server) {
@@ -557,7 +577,7 @@ uint32_t Nbiot::ntpSync(const char* server) {
         return 0;  // configuración rechazada (ver last_response_)
     }
 
-    // Ejecuta la sincronización: emite la URC +CNTP: <r>[,<time>] (r=1 OK).
+    // El SIM7028 confirma la sincronización con +CNTP: 0 (§8.2.1).
     // Puede tardar segundos en contactar el servidor NTP.
     if (verbose_) diag::log("DEBUG", "node.at", "at.command", "data=AT+CNTP");
     pollMessages();
@@ -569,8 +589,18 @@ uint32_t Nbiot::ntpSync(const char* server) {
         diag::log("DEBUG", "node.at", "at.response", "data=%s\n", t.c_str());
     }
 
-    // Tras una sincronización correcta el RTC del módem tiene la hora real
-    // y CCLK? ya no devuelve la época GSM.
+    int result = -1;
+    char extra = 0;
+    const int pos = r.indexOf("+CNTP:");
+    const bool valid = pos >= 0 &&
+        sscanf(r.c_str() + pos, "+CNTP: %d %c", &result, &extra) == 1;
+    const bool accepted = valid && result == 0;
+    diag::log(accepted ? "INFO" : "WARNING", "node.nbiot", "nbiot.ntp_result",
+              "code=%d accepted=%s requested_timezone_quarters=0",
+              valid ? result : -1, accepted ? "true" : "false");
+    if (!accepted) return 0;
+
+    // Un RTC con fecha plausible no acredita que el intento NTP haya funcionado.
     return readClock();
 }
 

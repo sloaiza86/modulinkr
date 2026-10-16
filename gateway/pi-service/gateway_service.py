@@ -66,6 +66,8 @@ from __future__ import annotations
 
 import node_maintenance
 import node_commands
+import mesh_config
+import gateway_metrics
 import collections
 import hashlib
 import json
@@ -616,6 +618,7 @@ class GatewayService:
         toa = protocol.toa_ms(len(frame), self.sf, self.bw_khz)
         self.gw_tx_ms += toa
         self.duty.add(time.monotonic(), toa)
+        gateway_metrics.record(self, toa)
         # Órdenes escritas al Heltec. Frente al total que el Heltec dice haber
         # emitido de verdad, es la única forma de saber si el cuello de botella
         # está en el enlace serie o en el aire: el ciclo de trabajo se apunta
@@ -958,6 +961,7 @@ class GatewayService:
         if self.buf is None:
             return
         if self.cfg_tx is None:
+            if getattr(self,"_cellular_config",None): return
             self._config_veredicto_caducado(now)
             pend = self.buf.config_push_next()
             if pend is not None:
@@ -1098,6 +1102,7 @@ class GatewayService:
         if self.buf is None:
             return
         if self.cfg_rx is None:
+            if getattr(self,"_cellular_config",None): return
             pend = self.buf.config_read_next()
             if pend is not None:
                 self.config_read_start(pend["id"], pend["origin"])
@@ -1442,6 +1447,7 @@ class GatewayService:
         return b["par"][pi]
 
     def bcast_tick(self, now: float) -> None:
+        if getattr(self,"_cellular_config",None): return
         if self.buf is None:
             return
         self._identity_operations_blocked()
@@ -1580,7 +1586,7 @@ class GatewayService:
             # Reserva de presupuesto igual que la subida individual: la
             # difusión es tráfico a granel y cede ante beacon, ACK y WELCOME.
             reserva = self.duty.limit_ms * FW_RESERVE_PCT
-            if not self.duty.fits(now, b["toa_ms"], headroom_ms=reserva):
+            if not op.get("allow_duty_override") and not self.duty.fits(now, b["toa_ms"], headroom_ms=reserva):
                 b["budget_waiting"] = True
                 if now >= b.get("budget_status_at", 0):
                     self.buf.bcast_state(op["id"], est,
@@ -2276,6 +2282,10 @@ class GatewayService:
 
     def config_on_result(self, parsed: dict) -> None:
         """Veredicto del nodo. Cierra la transferencia en los dos sentidos."""
+        read=self.cfg_rx
+        if read and parsed['origin_id']==read['origin'] and parsed['cfg_xfer']==read['req'] and parsed['cfg_status']!=0:
+            self.config_read_finish('failed',parsed['cfg_status_name']+': '+parsed['cfg_detail'])
+            return
         t = self.cfg_tx
         if t is None or parsed["cfg_xfer"] != t["xfer"]:
             return
@@ -2847,6 +2857,7 @@ class GatewayService:
         mqtt_en = bool(self.mqtt and self.mqtt.enabled)
         mqtt_up = bool(self.mqtt and self.mqtt.connected)
         self.buf.status_heartbeat(lora_link, mqtt_en, mqtt_up)
+        gateway_metrics.record(self)
 
     # ----- Estado hacia la pantalla OLED del Heltec -----
 
@@ -3269,6 +3280,9 @@ class GatewayService:
     def run(self) -> int:
         self.buf = GatewayBuffer(self.db_path, self.buf_max)
         self.identity = WireIdentity(self.buf.conn)
+        epoch_now, monotonic_now = time.time(), time.monotonic()
+        for ts,toa in self.buf.conn.execute('SELECT ts,toa_ms FROM gateway_airtime WHERE ts>? ORDER BY ts',(epoch_now-3600,)):
+            self.duty.add(monotonic_now-(epoch_now-ts),toa)
 
         # Modo de depuración Modbus por nodo, para etiquetar cada línea de
         # modbus-debug sin consultar la base de datos por trama. Se siembra
@@ -3318,6 +3332,7 @@ class GatewayService:
                         # es cuando los nodos entregan por failover.
                         self.mqtt.drain_nbiot()
                         self.mqtt.drain_commands(self)
+                        mesh_config.tick(self)
                         node_commands.tick(self)
                         if now - last_drain >= self.drain_s:
                             last_drain = now
@@ -3339,6 +3354,7 @@ class GatewayService:
                     now = time.monotonic()
                     self.mqtt.drain_nbiot()
                     self.mqtt.drain_commands(self)
+                    mesh_config.tick(self)
                     node_commands.tick(self)
                     # El beacon espera a que el aire quede libre. No se toca
                     # `last_beacon`, así que se reintenta en la vuelta
